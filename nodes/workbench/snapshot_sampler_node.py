@@ -8,7 +8,7 @@ import queue
 import http.server
 import socketserver
 import webbrowser
-from ...libs.client_host import open_ui
+from ...libs.client_host import open_ui, is_open_with_app, set_open_with_app
 import time
 import base64
 from urllib.parse import parse_qs, urlparse
@@ -363,6 +363,88 @@ def _workbench_file(name):
                                    or os.path.getmtime(legacy) > os.path.getmtime(target)):
         shutil.move(legacy, target)
     return target
+
+
+# 布局档案（Layout 那一格）：用户存下来的几种**摆法**，外加一份「默认」。
+#
+# 它落盘，不能只活在浏览器的 localStorage 里：这个页面的宿主是
+# `http://localhost:<8700..8799>/sampler_node.html`，端口是 `start_servers` 一个一个试出来的
+# （8700 被占就 8701，以此类推）。换一个端口就是换一个 origin，浏览器里那份存档当场看不见 ——
+# 用户看到的就是"我存的布局下次打开就没了"。盘上的文件跟端口无关，端口怎么变都是同一份。
+_LAYOUTS_LOCK = threading.Lock()
+_LAYOUTS_MAX = 40
+
+
+def _layouts_read():
+    """读档案。形状不认识就当成空的 —— 一份坏档案不该让页面打不开。"""
+    try:
+        with open(_workbench_file('dock_layouts.json'), 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return {'v': 1, 'default': None, 'items': []}
+    items = []
+    if isinstance(data, dict):
+        for it in (data.get('items') or []):
+            # 一份档案要能装回去，至少得有名字和一棵树；其余的字段（时间戳）缺了也不碍事。
+            if not isinstance(it, dict) or not isinstance(it.get('name'), str):
+                continue
+            dock = it.get('dock')
+            if not isinstance(dock, dict) or not isinstance(dock.get('tree'), dict):
+                continue
+            at = it.get('at')
+            items.append({'name': it['name'][:64],
+                          'at': at if isinstance(at, (int, float)) else 0,
+                          'dock': dock})
+    names = [i['name'] for i in items]
+    default = data.get('default') if isinstance(data, dict) else None
+    if not isinstance(default, str) or default not in names:
+        default = None
+    return {'v': 1, 'default': default, 'items': items}
+
+
+def _layouts_write(store):
+    """先写临时文件再换名：写到一半断电/被杀，磁盘上还是上一份完整的档案。"""
+    path = _workbench_file('dock_layouts.json')
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(store, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _layouts_apply(action, name, dock=None):
+    """改档案：save / delete / default。返回 (store, error)，error 是 (http_code, message) 或 None。
+
+    逻辑放在这里而不是路由里，是为了能在 ComfyUI 之外单测这一套（路由只剩下读 body / 回 JSON）。
+    """
+    name = (name or '')[:64]
+    with _LAYOUTS_LOCK:
+        store = _layouts_read()
+        items = store['items']
+        default = store['default']
+        if action == 'save':
+            if not name:
+                return None, (400, 'name required')
+            if not isinstance(dock, dict) or not isinstance(dock.get('tree'), dict):
+                return None, (400, 'dock must hold a tree')
+            entry = {'name': name, 'at': time.time() * 1000, 'dock': dock}
+            # 同名 = 同一个槽位更新（不是多一份）；最近存的排最前，超过上限把最老的挤掉。
+            items = [entry] + [i for i in items if i['name'] != name]
+            items = items[:_LAYOUTS_MAX]
+            if default and default not in [i['name'] for i in items]:
+                default = None
+        elif action == 'delete':
+            items = [i for i in items if i['name'] != name]
+            if default == name:
+                default = None
+        elif action == 'default':
+            if name and name not in [i['name'] for i in items]:
+                return None, (404, 'no such layout')
+            default = name or None
+        else:
+            return None, (400, 'unknown action %r' % action)
+        store = {'v': 1, 'default': default, 'items': items}
+        _layouts_write(store)
+    return store, None
 
 
 class DocumentIo:
@@ -1563,6 +1645,10 @@ class SnapshotDetailerSamplerServer:
         if 'interface_meta' in data:
             self.interface_meta = self._normalize_interface_meta(data['interface_meta'])
             self._save_interface_meta_file()
+        # Open With Application（Settings tab 的 user preference）：写共享偏好文件，
+        # 各节点执行时的 open_ui 从那里读 —— 不挂在某个节点实例上。
+        if 'open_with_app' in data:
+            set_open_with_app(bool(data['open_with_app']))
 
     def _set_blocks(self, blocks):
         """Adopt a flat block chain as the active one.
@@ -1850,6 +1936,10 @@ class SnapshotDetailerSamplerServer:
                     'arch_settings': getattr(inst, 'arch_settings', {'rules': []}) if inst else {'rules': []},
                     'interface_meta': getattr(inst, 'interface_meta', {}) if inst else {},
                     'loaded_pipeline_name': getattr(inst, 'loaded_pipeline_name', '') if inst else '',
+                    # User preference（Settings tab 的 Application 条目）：执行到节点时打开方式 ——
+                    # 开 = KolidUI 不在就把 Kolid Desktop.exe 拉起来再注入；关 = 原逻辑（在就注入，
+                    # 不在退浏览器）。真源在 libs.client_host 的共享偏好文件里，跨节点生效。
+                    'open_with_app': is_open_with_app(),
                     # Prompt tab 的 LoRA 灰名单跟着哪一代 regex 拉的 —— 宿主页拿它判断要不要重拉。
                     'pipeline_lora_epoch': getattr(inst, 'pipeline_lora_epoch', 0) if inst else 0,
                 })
@@ -2145,6 +2235,15 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'presets': inst._load_prompt_presets() if inst else []})
                 return
 
+            # 布局档案：Layout 那一格读的就是这一份（见 _layouts_read 上面那段说明 —— 它必须落盘，
+            # 因为同一个页面会落在 8700..8799 里某个端口上，而 localStorage 是 per-origin 的）。
+            if self.path == '/api/layouts':
+                with _LAYOUTS_LOCK:
+                    store = _layouts_read()
+                self._send_json({'ok': True, 'kind': 'layouts',
+                                 'default': store['default'], 'items': store['items']})
+                return
+
             # ---- 文档 IO：前端问一次能力，之后就只按 token 读文件 ----
             if self.path == '/api/io_caps':
                 self._send_json({'pick': doc_io.available()})
@@ -2283,6 +2382,26 @@ class SnapshotDetailerSamplerServer:
                             self._send_json({'ok': False, 'error': 'preset not found'}, 404)
                     else:
                         self._send_json({'ok': False, 'error': f'unknown action {action!r}'}, 400)
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
+                return
+
+            # 布局档案的写口。action:
+            #   save    —— `{name, dock}`：同名覆盖（同一个槽位更新），新的排最前，最多 40 份；
+            #   delete  —— `{name}`：只删档案，屏幕上那份布局不动；删掉的若是默认，默认一起清掉；
+            #   default —— `{name}`：把这一份设成默认（空 = 取消默认）。页面每次打开从这里起手。
+            # 回的还是**整份**档案，前端拿它当唯一真相：不用自己猜"刚才那次写到底成没成"。
+            if self.path == '/api/layouts':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    store, err = _layouts_apply(str(body.get('action') or 'save'),
+                                                str(body.get('name') or ''), body.get('dock'))
+                    if err:
+                        self._send_json({'ok': False, 'error': err[1]}, err[0])
+                        return
+                    self._send_json({'ok': True, 'kind': 'layouts',
+                                     'default': store['default'], 'items': store['items']})
                 except Exception as e:
                     self._send_json({'ok': False, 'error': str(e)}, 500)
                 return

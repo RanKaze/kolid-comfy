@@ -33,6 +33,9 @@ export interface ServerConfig {
   arch_settings?: ArchSettings;
   /** Interface tab 的持久化配置：端口改名 / 模式开关 / block 端口绑定（按包名索引） */
   interface_meta?: InterfaceMeta;
+  /** Settings tab 的 user preference：执行到节点时的打开方式。开 = KolidUI 不在就把
+   *  Kolid Desktop.exe 拉起来再注入；关 = 原逻辑（在就注入，不在退浏览器）。 */
+  open_with_app?: boolean;
   /** 此刻真正加载在节点上的那条 pipeline 名字（'' = 节点输入口那条，从未切换过） */
   loaded_pipeline_name?: string;
   /** lora_regex 换过几代（只有真变了才 +1）。Prompt tab 那张 LoRA 卡的灰名单跟着它走。 */

@@ -1,6 +1,7 @@
 import React from 'react';
 import { useBlendUi } from './store';
 import { LayerListView, StackHead, type AddEntry } from './layerRow';
+import { MaskRow } from './mask';
 import type { WorkbenchUnit, WorkbenchUnitProps } from './registry';
 
 // Guidances 这一格 = 页面 #guidanceDock 那颗头部按钮组 + #guidanceList 那一摞行。行本身与 Layers
@@ -28,7 +29,15 @@ const GUIDANCE_ENTRIES: AddEntry[] = [
 
 const GuidancesBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
   const ui = useBlendUi();
-  return <LayerListView stack="guidance" rows={ui.stacks.guidances} send={send} />;
+  // Mask 不再是自己的窗口（用户拍板）：一整扇窗只装一行，剩下的全是空白，空间利用率太差。
+  // 它现在是这一格里的**第一行**，钉在列表顶上（`MaskRow` 自己 sticky）—— 它不是 guidance 那一摞
+  // 的一员（不参与拖拽/排序，也不进那个 stack），只是借这一格的位置站着。
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minHeight: 0 }}>
+      <MaskRow send={send} />
+      <LayerListView stack="guidance" rows={ui.stacks.guidances} send={send} />
+    </div>
+  );
 };
 
 // 与 Layers 同一排：Clear All / Add 住进 dock 的动作条（正文下面、滚动条之外）。

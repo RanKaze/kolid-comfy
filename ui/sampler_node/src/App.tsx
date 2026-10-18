@@ -309,6 +309,9 @@ const App: React.FC = () => {
   const [pipelineSettings, setPipelineSettings] = useState<PipelineSettings>(EMPTY_PIPELINE_SETTINGS);
   /** Interface tab 给每个 interface 配置的持久化标注：端口改名 / 模式开关 / block 端口绑定 */
   const [interfaceMeta, setInterfaceMeta] = useState<InterfaceMeta>({});
+  /** Settings tab 的 user preference：执行到节点时的打开方式。开 = KolidUI 不在就把
+   *  Kolid Desktop.exe 拉起来再注入；关 = 原逻辑（在就注入，不在退浏览器）。 */
+  const [openWithApp, setOpenWithApp] = useState(false);
   /** 此刻真正加载在节点上的 pipeline 名字（'' = 节点输入口那条 = [Default]） */
   const [loadedPipelineName, setLoadedPipelineName] = useState('');
   // Processor 运行（工作台 Tools → Processor 发起，现在也是 interface 唯一的执行入口）：
@@ -488,6 +491,7 @@ const App: React.FC = () => {
         setArchitecture(data.architecture ?? null);
         setPipelineSettings(data.pipeline_settings ?? EMPTY_PIPELINE_SETTINGS);
         setInterfaceMeta(data.interface_meta ?? {});
+        setOpenWithApp(!!data.open_with_app);
         setLoadedPipelineName(data.loaded_pipeline_name ?? '');
         // Prompt iframe 此刻才被挂上（src 就是这一份 config 里的 prompt_url），它拉的就是这一代
         // 的 lora_regex —— 两枚代数从这里同时起步。
@@ -1565,6 +1569,17 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, []);
 
+  // Open With Application（Settings tab 的 user preference）：同一写路径，后端把它落进
+  // libs.client_host 的共享偏好文件 —— 各节点执行时的 open_ui 从那里读，跨节点生效。
+  const handleOpenWithAppChange = useCallback((v: boolean) => {
+    setOpenWithApp(v);
+    fetch('/api/update_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ open_with_app: v }),
+    }).catch(() => {});
+  }, []);
+
   const handleAddArchRule = useCallback(() => {
     const rule: ArchRule = { id: 'arch-' + archRuleIdCounter.current++, architecture: '', overrides: {} };
     handleArchSettingsChange({ rules: [...archSettings.rules, rule] });
@@ -1739,6 +1754,8 @@ const App: React.FC = () => {
         interfaces={interfaces}
         interfaceMeta={interfaceMeta}
         onChangeInterfaceMeta={handleChangeInterfaceMeta}
+        openWithApp={openWithApp}
+        onOpenWithAppChange={handleOpenWithAppChange}
         pipelinePackages={pipelinePackages}
         pipelineSettings={pipelineSettings}
         loadedPipelineName={loadedPipelineName}

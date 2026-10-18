@@ -3,11 +3,13 @@ import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockP
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
-import { type DockMode, type DockRules, type UnitId, type Dock, docUnit, docUidOf, loadDock, setBlockMode, syncDocUnits } from '../dock/model';
+import { type DockMode, type DockRules, type UnitId, type Dock, docUnit, docUidOf, fitLayout, loadDock, revealDoc, setBlockMode, setToolbarDock, setToolbarDirDock, syncDocUnits } from '../dock/model';
+import { fetchLayouts } from '../dock/layoutStore';
 import { type DockDrag, type DockOver, DockPanel } from '../dock/DockView';
 import { registerProbe, note } from '../debug/probe';
 import { onGlobalKey, keyIs } from '../hotkeys';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
+import { unitIcon } from '../workbench/icons';
 
 // The rename field of a preset row.
 const tabInputStyle: React.CSSProperties = {
@@ -56,7 +58,9 @@ const DOC_POP_W = 760, DOC_POP_H = 560;
 const PANEL_BLOCK_W = 340, PANEL_BLOCK_H = 320, DOC_BLOCK_W = 620, DOC_BLOCK_H = 460;
 // What the dock knows about the page, rebuilt whenever the workbench announces a different set of
 // documents: the panels — the host's five and every workbench unit lifted out of the page — are fixed,
-// a document unit (`doc:<uid>`) is known only while that .cud is open. A document window is the same
+// and a document unit (`doc:<uid>`) is known BY SHAPE — open right now, or a reserved slot from the
+// archive waiting for its project (刷新后播报没到、或这一趟压根没有工程重开：窗口照画，正文先空着).
+// A document window is the same
 // KIND of thing as a settings unit — it splits sideways, tabs beside another window, pops out over
 // them — so it wears the canvas skin (its content owns the box), takes a share of its split instead of
 // collapsing to a content height it does not have, and is hidden with display:none rather than
@@ -72,12 +76,22 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
   return {
     store: DOCK_STORE,
     panels: PANEL_IDS,
-    known: (id: UnitId) => PANEL_IDS.includes(id) || isDoc(id),
+    known: (id: UnitId) => PANEL_IDS.includes(id) || isDocUnit(id),
     // The trailing dot is the unsaved mark: a window has to say whether what is on screen is what is
     // on disk, and the tab strip shows the same string as the single-unit title bar.
     title: (id: UnitId) => {
       const d = byUnit.get(id);
-      return d ? d.name + (d.dirty ? ' ●' : '') : UNIT_TITLES[id] ?? id;
+      if (d) return d.name + (d.dirty ? ' ●' : '');
+      // 没人认领的文档格（刷新后、工程重开前）：窗口留着，标题先挂个占位名 —— 等真的文档进来，
+      // 这一格原地改姓。写 "doc:1" 这种内部 id 会让用户以为界面坏了。
+      if (isDocUnit(id)) return 'Untitled';
+      return UNIT_TITLES[id] ?? id;
+    },
+    // toolbar 条上一格一颗的记号。页面才知道"这一格是什么"，所以图和标题一样由这里给：
+    // 工作台的二十格、宿主的五格、以及一枚文档（doc:*）都在 workbench/icons 那一张表里。
+    icon: (id: UnitId) => {
+      const Icon = unitIcon(id);
+      return <Icon size={15} />;
     },
     keepMounted: isDocUnit,
     // A document window never folds: its fold would be stored under a uid the workbench re-issues from
@@ -396,6 +410,10 @@ interface EditPhaseProps {
   onDuplicateArchRule: (id: string) => void;
   onRemoveArchRule: (id: string) => void;
   onReorderArchRules: (from: number, to: number) => void;
+  /** Settings tab 的 user preference：执行到节点时的打开方式。开 = KolidUI 不在就拉起
+   *  Kolid Desktop.exe 再注入；关 = 原逻辑（在就注入，不在退浏览器）。 */
+  openWithApp: boolean;
+  onOpenWithAppChange: (v: boolean) => void;
   /** 最近 32 条行为记录（工作台每次 setStatus + 宿主自身动作）。画布上那颗常显状态药丸撤掉后，
    *  反馈就攒在这里，由 Context 标题行的 Log 按钮按需展开。 */
   actionLog: ActionLogEntry[];
@@ -426,6 +444,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   interfaces, interfaceMeta, onChangeInterfaceMeta,
   pipelinePackages, pipelineSettings, loadedPipelineName, onSwitchPipeline, onPipelineSettingsChange, onSetPresetPipeline,
   archSettings, onArchSettingsChange, onAddArchRule, onDuplicateArchRule, onRemoveArchRule, onReorderArchRules,
+  openWithApp, onOpenWithAppChange,
   actionLog, blendDocs, docStills, onDocCommand, onBlendUiCommand,
   stageUpload, stageRemove,
 }) => {
@@ -473,10 +492,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // Where each unit sits — stacked, side by side, tabbed together, or popped out over the workbench —
   // is the user's layout call and lives in its own key; which are collapsed is a separate one.
   const dockRules = useMemo(() => dockRulesFor(blendDocs.docs), [blendDocs]);
-  // 工作台那几格能碰到的宿主事实：图池镜像、画布合成预览、图池的两个后端写口。正文与动作条共用同一份。
-  const wbHost = useMemo(() => ({ staging, blendPreview, guidanceCard, stageUpload, stageRemove }),
-    [staging, blendPreview, guidanceCard, stageUpload, stageRemove]);
   const [dock, setDockState] = useState<Dock>(() => loadDock(dockRulesFor([])));
+  // 「此刻的布局」的 ref：开机那一次写档要用它（见下面 `?nolayout` 那一支），而它不该成为那个
+  // effect 的依赖 —— 那会让它每次动一下布局就跑一遍。
+  const dockRef = useRef(dock);
+  dockRef.current = dock;
   const applyDock = useCallback((next: Dock, persist = true) => {
     setDockState(next);
     if (persist) { try { localStorage.setItem(DOCK_STORE, JSON.stringify(next)); } catch { /* in-memory only */ } }
@@ -486,10 +506,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // The workbench is the only thing that knows which projects exist, so this is where that knowledge
   // enters the layout — the dock model itself never learns what a .cud is.
   const openDocUnits = useMemo(() => blendDocs.docs.map(d => docUnit(d.uid)), [blendDocs]);
+  // 工作台那几格能碰到的宿主事实：图池镜像、画布合成预览、图池的两个后端写口。正文与动作条共用同一份。
+  // `layout` 是 Layout 那一格要的两样 —— 现在的布局（存下去的就是它）和写口（载入就是把它交回来）、
+  // 外加校验口径 `rules` 与此刻开着的文档（载入的布局要按它收一遍）。
+  const wbHost = useMemo(() => ({
+    staging, blendPreview, guidanceCard, stageUpload, stageRemove,
+    layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock },
+  }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
   // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
   // 所以：**空列表在启动期是歧义的**，要等它至少说过一次"我有文档"，此后再说空才算关闭。
   const settledDocs = useRef(false);
+  // 上一轮播报的文档集：这一轮多出来的就是"新开的工程"（Load / New / 重开）—— 它们要当场露脸。
+  const prevDocs = useRef<readonly UnitId[]>([]);
   useEffect(() => {
     // 播报前（它自己也刚加载），开文档集是"未知"而不是"空"。此刻按空集会先把存档里画布窗口的位置
     // 剪掉，等播报到来只能按新文档安放 —— 画布每次刷新都跳回默认位置，而其它面板本来就留得住（加载
@@ -499,13 +528,70 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const sawDoc = openDocUnits.length > 0;
     if (!sawDoc && !settledDocs.current) return;
     settledDocs.current = true;
-    const next = syncDocUnits(dock, openDocUnits);
+    const prev = prevDocs.current;
+    prevDocs.current = openDocUnits;
+    // 新到的文档：选中项拨过去（revealDoc），并让工作台把它当活跃工程画 —— 不然 Load 完一份
+    // .cud，屏幕上还停在上一份（tab 条不动、画布也不换人）。
+    const fresh = openDocUnits.filter(u => !prev.includes(u));
+    let next = syncDocUnits(dock, openDocUnits);
+    if (fresh.length) {
+      next = fresh.reduce(revealDoc, next);
+      for (const u of fresh) {
+        const uid = docUidOf(u);
+        if (uid !== null) onDocCommand('activate', Number(uid));
+      }
+    }
     if (next !== dock) applyDock(next);
   }, [dock, openDocUnits, applyDock, blendDocs.announced]);
+  // 默认布局：Layout 那一格标了 ★ 的那一份，是页面**每次打开**的起手式。它住在盘上（`/api/layouts`），
+  // 不在浏览器里 —— 宿主端口是 8700..8799 里试出来的，换个端口就是换个 origin，localStorage 里那份
+  // 当场看不见（这正是"我存的布局下次打开就没了"的由来）。
+  //
+  // 时机：等文档播报到位再摆。布局里的画布格要按"现在开着的文档"收一遍，摆早了就会把画布剪掉，
+  // 等播报来了只能按新文档安放 —— 那还不如不摆。工作台一直不播报（iframe 起不来）就 4 秒后照样摆。
+  const bootLayoutDone = useRef(false);
+  const bootRef = useRef({ rules: dockRules, docs: openDocUnits });
+  bootRef.current = { rules: dockRules, docs: openDocUnits };
+  useEffect(() => {
+    if (bootLayoutDone.current) return;
+    const run = () => {
+      if (bootLayoutDone.current) return;
+      bootLayoutDone.current = true;
+      // `?nolayout=1`：这一次打开**不**按默认布局摆。默认布局是用户私人的起手式（他标了 ★ 的那一份），
+      // 而探针要的是一个已知的、可复现的起点（`defaultDock`）—— 否则用户随手存一份默认，整套界面
+      // 探针都会跟着变形状，测的就不再是代码而是他的页面。
+      //
+      // 顺手把这一份写进 `sampler.drawDock`：平时这一笔是 boot 那次 `applyDock` 顺手留下的，跳过
+      // 它之后探针（和其它读档的一侧）读到的就是 null —— "页面此刻的布局"应当一直有答案。
+      if (new URLSearchParams(location.search).has('nolayout')) {
+        try { localStorage.setItem(DOCK_STORE, JSON.stringify(dockRef.current)); } catch { /* in-memory only */ }
+        return;
+      }
+      fetchLayouts().then(store => {
+        if (!store || !store.default) return;
+        const item = store.items.find(i => i.name === store.default);
+        if (!item) return;
+        const fit = fitLayout(bootRef.current.rules, item.dock);
+        if (!fit) return;
+        // 第三个参数是 `keepSlots`：**现在还没有工程打开**（页面不自带 Untitled，工作台也没有自动
+        // 恢复什么），这份布局里的画布格此刻无人认领 —— 而"无人认领"不等于"关掉了"。按空表剪一遍，
+        // 画布格连同它所在的那条横排一起塌掉，用户真开工程时它只能落到工作区末尾：表现就是
+        // "关掉 ComfyUI 再打开，画布那扇窗莫名其妙跑到别处去了"。先留着，等播报说有文档了再对账。
+        applyDock(syncDocUnits(fit.dock, bootRef.current.docs, true));
+        note('boot-layout', { name: item.name, dropped: fit.dropped.length, added: fit.added.length });
+      }).catch(() => { /* 没有后端：就用存档里记着的那份摆法 */ });
+    };
+    if (blendDocs.announced) { run(); return; }
+    const t = setTimeout(run, 4000);
+    return () => clearTimeout(t);
+  }, [blendDocs.announced, applyDock]);
   // dataTransfer payloads are not readable during dragover, so the unit being dragged and the box
   // being hovered are mirrored in state — that is what the landing bands and the iframe shield key off.
   const [dockDrag, setDockDrag] = useState<DockDrag | null>(null);
   const [dockOver, setDockOver] = useState<DockOver | null>(null);
+  // 现在开着的那一格 toolbar 小窗（整页同时只有一个，由条子自己上报）。它只影响两件事：
+  // 别的条子据此收起自己那一扇，以及活的工作台那一层要不要提到浮层之上。
+  const [tbPopover, setTbPopover] = useState<UnitId | null>(null);
   // ── BLOCK 编辑模式 ── Alt+P 是**切换**，不是按住：按一下开、再按一下（或 Esc）关。
   // 模式控件平时完全不在页面上（一块怎么排是装修，不是日常操作，Alt+P 就是那道暗门），
   // 而暗门一旦打开就得站得住：装修一趟要连着点几个模式按钮、拖几条分界线，按住一个键是做不完的。
@@ -608,15 +694,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       ? <img src={still} alt={d.name} style={styles.docStill} />
       : <div style={styles.docVoid} />;
   }
-  // A window closes from its own title bar — one entry, and the workbench is the only thing that knows
-  // whether the project on screen still owes a save.
-  const docHeads: Record<UnitId, React.ReactNode> = {};
+  // 关掉一份工程的那颗 ✕ **跟着它自己的名字走**（DockCtx.tabOps）：一扇窗的标题条是"窗"的，那条
+  // 栏上的键对整扇窗说话（折叠 / 浮出 / 收成条）；而"关掉这一份"是一个 tab 的事 —— 所以它站在那
+  // 颗 tab 的右边；窗口里只有一份时，它就贴在名字右边，不飘到整条栏的最右端去。
+  // 工作台仍是唯一知道"这一份值不值得先存一下"的地方，所以它只给入口，动作照旧交回去。
+  const docTabOps: Record<UnitId, React.ReactNode> = {};
   for (const d of blendDocs.docs) {
-    docHeads[docUnit(d.uid)] = (
-      <button style={styles.docClose} title={'Close 「' + d.name + '」'}
-        onClick={() => onDocCommand('close', d.uid)}>
-        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor"
-          strokeWidth="1.6" strokeLinecap="round"><path d="M3 3l6 6M9 3l-6 6" /></svg>
+    docTabOps[docUnit(d.uid)] = (
+      <button style={styles.docCloseTab} data-dock-doc-close={d.uid} title={'Close 「' + d.name + '」'}
+        onClick={e => { e.stopPropagation(); onDocCommand('close', d.uid); }}>
+        <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+          strokeWidth="1.7" strokeLinecap="round"><path d="M3 3l6 6M9 3l-6 6" /></svg>
       </button>
     );
   }
@@ -1157,6 +1245,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 rules: dockRules,
                 isOpen: (id: UnitId) => openSections[id] !== false, fold: setFold,
                 edit: blockEdit, setMode,
+                // toolbar 模式的三个写口：收成条 / 放回窗 / 条子上的横竖。开关存在 dock 树里（容器
+                // 是每格一位、default 块与浮窗在节点上），所以刷新之后还是那个形状。
+                setToolbar: (id: UnitId, on: boolean, dir?: 'h' | 'v') => applyDock(setToolbarDock(dock, id, on, dir)),
+                setToolbarDir: (id: UnitId, dir: 'h' | 'v') => applyDock(setToolbarDirDock(dock, id, dir)),
+                tbPopover, onToolbarPopover: setTbPopover,
                 dock, setDock: applyDock,
                 drag: dockDrag, setDrag: setDockDrag,
                 over: dockOver, setOver: setDockOver,
@@ -1174,10 +1267,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 bodyRef: (id: UnitId, el: HTMLDivElement | null) => {
                   if (el) frameBodyEls.current.set(id, el); else frameBodyEls.current.delete(id);
                 },
+                // 文档的 ✕ 不在这条栏上 —— 它跟着 tab 走（见 docTabOps / tabOps）。
+                tabOps: (u: UnitId) => docTabOps[u] ?? null,
                 heads: {
-                  // A window closes from its own title bar — one entry, and the workbench is the only
-                  // thing that knows whether the project on screen is worth saving first.
-                  ...docHeads,
                   context: (<>
                     {/* Log：画布上那颗常显状态药丸撤掉后，工作台的每一句反馈都攒在这里
                         （工作台 setStatus + 宿主自身动作，最近 32 条）。 */}
@@ -1911,7 +2003,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             ...styles.frameLayer,
             left: frameRect?.x ?? -12000, top: frameRect?.y ?? -12000,
             width: frameRect?.w ?? 900, height: frameRect?.h ?? 640,
-            zIndex: activeIsWindow ? 61 : 5,
+            // toolbar 小窗里那一格要是活的那份文档，画布这一层就得压在小窗之上：小窗是 75，
+            // 画布这一层因此提到 76 —— 否则小窗里只能看见一块深色底（活的工作台被盖在下面）。
+            zIndex: tbPopover && tbPopover === activeUnit ? 76 : activeIsWindow ? 61 : 5,
             opacity: frameRect && !dockDrag ? 1 : 0,
             pointerEvents: dockDrag ? 'none' : undefined,
           }}>
@@ -1958,6 +2052,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             onDuplicateArchRule={onDuplicateArchRule}
             onRemoveArchRule={onRemoveArchRule}
             onReorderArchRules={onReorderArchRules}
+            openWithApp={openWithApp}
+            onOpenWithAppChange={onOpenWithAppChange}
           />
         )}
       </div>
@@ -2239,9 +2335,13 @@ const SettingsTab: React.FC<{
   onDuplicateArchRule: (id: string) => void;
   onRemoveArchRule: (id: string) => void;
   onReorderArchRules: (from: number, to: number) => void;
+  /** Application 条目的 user preference：开 = 执行到节点时 KolidUI 不在就拉起 Kolid Desktop.exe。 */
+  openWithApp: boolean;
+  onOpenWithAppChange: (v: boolean) => void;
 }> = ({
   values, onDefaultParamChange,
   archSettings, onArchSettingsChange, onAddArchRule, onDuplicateArchRule, onRemoveArchRule, onReorderArchRules,
+  openWithApp, onOpenWithAppChange,
 }) => {
   const [ruleMenu, setRuleMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [ui, setUi] = useState<SettingsUI>(loadSettingsUI);
@@ -2306,6 +2406,24 @@ const SettingsTab: React.FC<{
             </div>
           </React.Fragment>
         ))}
+
+        {/* APPLICATION — user preference，不是数值旋钮：执行到节点时页面从哪儿弹出来。
+            开 = KolidUI 不在就把 Kolid Desktop.exe 拉起来再注入；关 = 原逻辑
+            （客户端在就注入标签页，不在退系统浏览器）。 */}
+        {ui.screen === 'default' && (
+          <>
+            <div style={styles.iosGroupTitle}>Application</div>
+            <div style={styles.iosCard}>
+              <div style={styles.iosRow}
+                title={'When a node opens its UI during a run: ON — launch Kolid Desktop and inject the page '
+                  + 'as its tab when the client is not running. OFF — original behavior (inject if the client '
+                  + 'is running, otherwise the system browser).'}>
+                <span style={styles.iosLabel}>Open With Application</span>
+                <IOSToggle checked={openWithApp} onChange={onOpenWithAppChange} />
+              </div>
+            </div>
+          </>
+        )}
 
         {/* ARCHITECTURE — 一张卡一条规则：卡头是把手 + 正则 + 徽章 + 折叠箭头，九排在收起时不画。 */}
         {ui.screen === 'arch' && (<>
@@ -2767,6 +2885,8 @@ const styles: Record<string, React.CSSProperties> = {
   docVoid: { flex: 1, minHeight: 0, background: '#0d0d0d' },
   activeDot: { width: 7, height: 7, borderRadius: 999, background: '#30d158', flexShrink: 0, display: 'inline-block', marginRight: 5, verticalAlign: 'middle', boxShadow: '0 0 6px rgba(48,209,88,0.6)' },
   docClose: { flexShrink: 0, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 5, color: 'rgba(255,255,255,0.55)', cursor: 'pointer', padding: 0 },
+  // tab 里那一颗：小一号、更淡一点，紧贴着名字 —— 它说的是"这一份"，不是"这一窗"。
+  docCloseTab: { flexShrink: 0, width: 14, height: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 4, color: 'rgba(255,255,255,0.42)', cursor: 'pointer', padding: 0, marginLeft: 1 },
   // The toolbar unit is a row of the File actions — the same pill vocabulary as the sibling units'
   // head buttons, laid out left to right instead of hanging off a title.
   fileBar: { display: 'flex', alignItems: 'center', gap: 5, padding: '5px 6px', flexWrap: 'wrap' },

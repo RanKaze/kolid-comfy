@@ -10173,6 +10173,10 @@ function setCurrentDocument(handle, name) {
 let documents = [];
 let docSeq = 0;
 let activeDoc = null;         // the entry whose state the globals currently hold
+// 开机那一趟：页面不再自带一个 Untitled（见文件尾），所以"第一次激活"是用户真去开的第一个工程。
+// 这一枚只回答一个问题 —— 这次激活要不要继承后端当下那份池（开机页面的池是宿主镜像进来的）。
+// 它在页面站起来时就被消费掉：即便一个工程都没开，后面 Load 进来的那一份也是正常换池。
+let bootSwapArmed = true;
 // 开机落脚的那一枚 Untitled（见文件尾部 adoptDocument）。桌面双击流导入成功后由它确认
 // 「起始页还没被动过、可以收掉」——只认这一枚 uid，用户自己 New 出来的空白项目不在列。
 let bootDocument = null;
@@ -10260,7 +10264,8 @@ function activateDocument(entry) {
     // 开机那趟没有「上一份池」可捕获，也不该向宿主上传任何东西：boot 文档就继承后端
     // 当下这份池（宿主随后会镜像过来）。判别只在这一刻成立 —— 关掉最后一个 tab 的
     // 兜底新建同样 activeDoc===null，但那时池易主已经发生过了（stagingPoolOwner 非空）。
-    const bootSwap = activeDoc === null && stagingPoolOwner === null;
+    const bootSwap = bootSwapArmed;
+    bootSwapArmed = false;
     if (activeDoc) { activeDoc.ctx = captureContext(); activeDoc.staging = stagingItems; stashHistory(activeDoc); }
     // Keep what the outgoing project last showed before its viewport is repainted with the new one —
     // that frame is all its window can show until the engine is per document rather than per page.
@@ -10335,11 +10340,19 @@ function dropDocument(entry) {
     documents.splice(at, 1);
     if (wasActive) activeDoc = null;
     else { syncDocList(); setStatus(`Closed ${entry.name}`); return; }
-    // The workbench never runs out of somewhere to draw: the neighbour takes over, and closing the
-    // last tab leaves a blank project standing.
+    // 关掉一份，邻座接手。**关掉最后一份就是真的空了** —— 不再替你补一个 Untitled：那个项目不是
+    // 你开的，它只是页面的落脚点，而落脚点不该每次都多出一份要收拾的东西。空下来之后，File 那一排
+    // 的 New / Load 仍是原地可用的入口。
     const next = documents[Math.min(at, documents.length - 1)];
     if (next) switchDocument(next.uid);
-    else createDocument('Untitled', null, blankContext(), true);
+    else {
+        undoStack = []; redoStack = []; lastActionKey = null;
+        restoreState(blankContext(), { document: true });
+        resetHistory();
+        refreshLayerPanels();
+        updateCanvasReadout();
+        syncDocList();
+    }
     setStatus(`Closed ${entry.name}`);
 }
 
@@ -12949,9 +12962,13 @@ updateCanvasReadout();
 render();
 updateStagingPanel();
 resetHistory();          // the empty canvas is step 0; everything from here on is undoable
-// The page opens on exactly one project: what the globals already hold becomes the first tab, so the
-// workbench is never in the state of "drawing with nowhere to put it".
-bootDocument = adoptDocument(createDocument('Untitled', null, captureContext(), false));
+// 页面**不**自带一个 Untitled 项目。以前它开在这一格，是为了让"画布永远有地方落笔"；代价是每次
+// 打开页面、每次双击一个 .cud，都要先收掉一个不是用户开的项目。现在没有工程就是没有工程 ——
+// 工作台那一格不出来（宿主按播报的文档集放窗口），File 那一排的 New / Load 就是入口。
+// `bootDocument` 留给桌面双击流（它只认这一枚 uid），这里没有就是 null，dropPristine 自然不做事。
+bootDocument = null;
+bootSwapArmed = false;
+syncDocList();
 // 字体库是异步的: 先让页面完整起来, 装好之后再作废一次文字缓冲 (缺了这一步, .cud 里存着自定义字体
 // 名的图层会一直顶着回落脸)。
 loadTextFontLibrary();

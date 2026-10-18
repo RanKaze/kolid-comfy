@@ -1,5 +1,5 @@
 import React from 'react';
-import type { UnitId } from '../dock/model';
+import type { Dock, DockRules, UnitId } from '../dock/model';
 import type { BlendUiSend, StagingItem } from '../types';
 import { brushUnit } from './brush';
 import { bucketUnit } from './bucket';
@@ -10,7 +10,7 @@ import { fxParamsUnit } from './fxParams';
 import { guidancesUnit } from './guidances';
 import { historyUnit } from './history';
 import { layersUnit } from './layers';
-import { maskUnit } from './mask';
+import { layoutUnit } from './layout';
 import { selectionUnit } from './selection';
 import { transformUnit } from './transform';
 import { viewUnit } from './view';
@@ -33,6 +33,10 @@ export type WorkbenchHostCtx = {
   guidanceCard: string | null;
   stageUpload: (images: string[], names: string[]) => void;
   stageRemove: (id: string) => void;
+  /** Layout 那一格要的两样：**现在**的布局（存下去的就是它）和一个写口（载入就是把它交给 `apply`）。
+   *  `rules` 是校验的同一套口径 —— 一份旧布局里谁还认得、谁不认得，跟页面自己读档时一模一样；
+   *  `openDocs` 是此刻开着的那几份文档窗口，载入时按它收一遍（关掉的剪走、新开的补进来）。 */
+  layout: { dock: Dock; rules: DockRules; openDocs: UnitId[]; apply: (next: Dock) => void };
 };
 
 /** 每一格正文拿到的出口：`send` 泛型把动作键和它的载荷绑死（见 types 的 BlendUiPayloads），
@@ -51,19 +55,26 @@ export type WorkbenchUnit = {
 };
 
 // 图层 / 工具 / 属性面板一块一个文件，这张表只负责点名和排序（序 = 工作台原来那一列的序：
-// Canvas、Transform，然后 Mask，再 Color、Brush / Bucket / Eraser，Selection 与 View 原本就压在这列的最末）。
+// Canvas、Transform，然后 Color、Brush / Bucket / Eraser，Selection 与 View 原本就压在这列的最末）。
+// Mask 曾经排在 Transform 与 Color 中间，现在**不在这张表里**：它不再是独立的 dock window，
+// 而是 Guidances 那一格的第一行（见 mask.tsx 的 MaskRow 与 guidances.tsx）。少一扇窗，也就少一格
+// 标题条和一圈空白 —— 这一列的高度是尺子量出来的，省一格是一格。
 // Guidances 与 Layers 是这一列的倒数第二对 —— 页面上就是这两格压在工具列尾巴上，且 Guidances 在上。
 // History 排在 Layers 之后（拍板 24.a：右栏、紧贴 Layers 下面）。
 // Effect Parameters 压在最末：它说的是链里被点开的那一步，读的是快照 `fx.open`，没点开就是一句空态。
 // 搬完一块就往后加一行，页面那一侧同时删掉它自己那一格。
+// Layout 是唯一一格**没有正文对象**的：它摆的是别的窗口，读的是 dock 树，所以它要的是宿主那把
+// 写口（`host.layout`），而不是页面播报过来的快照。
 export const WORKBENCH_UNITS: WorkbenchUnit[] = [
   // Staging 那一格：画布底部原来那条工作区（Extra Prompt + Blend/Tag + 图池条 + Cancel / 进度）整条
   // 搬进宿主后合成的一格，排在最前 —— 它是画布的底栏，最常伸手。
   stagingUnit,
-  canvasUnit, transformUnit, maskUnit, colorUnit, brushUnit, bucketUnit, eraserUnit, selectionUnit, viewUnit,
+  canvasUnit, transformUnit, colorUnit, brushUnit, bucketUnit, eraserUnit, selectionUnit, viewUnit,
   // 侧栏那六格工具小窗：Text、Geometry、3D、Pose、Detector、Processor（序 = 页面那一列的序）。
   textUnit, geometryUnit, scene3dUnit, poseUnit, detectorUnit, processorUnit,
   guidancesUnit, layersUnit, historyUnit, fxParamsUnit,
+  // Layout 压在最末：它不画页面上的任何东西，只记别人怎么摆 —— 摆法用不上时它就该在最不碍事的地方。
+  layoutUnit,
 ];
 
 export const WORKBENCH_PANEL_IDS: UnitId[] = WORKBENCH_UNITS.map(u => u.id);

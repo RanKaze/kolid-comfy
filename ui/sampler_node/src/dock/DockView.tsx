@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   type Dock, type DockBlock, type DockFit, type DockFloat, type DockMode, type DockNode, type DockRules, type UnitId, type Zone,
   type ZonePoint, type ZoneRect,
   DOCK_GROW_MIN_H, DOCK_MIN_SZ, DOCK_SPLIT, FLOAT_MIN_H, FLOAT_MIN_W,
   defaultDock, dead, clampSz, dockBackDock, dockFloor, docUidOf, dragOutUnits, dragSplit, dropUnits, flexOf, floorPct, freezeAt, nodeAt, popOutDock,
-  rewriteHolder, setFloatDock, sizeAt, mergeIntoMember, insertCellAt, pullOutAt, cellsOf, zoneAxis, zoneOf, zonePoly, zoneRect,
+  rewriteHolder, setFloatDock, sizeAt, mergeIntoMember, insertCellAt, pullOutAt, cellsOf, cellTbs, shapeOf, zoneAxis, zoneOf, zonePoly, zoneRect,
 } from './model';
 // 探针的轨迹钩子。这里只发"发生了什么"，不做判断、不读布局 —— 判断留在探针那边，
 // 免得把排查规则散进渲染层（那才是第二份真相）。
@@ -17,6 +18,38 @@ import { note } from '../debug/probe';
 // 决定，内容永远撑不动它。块与块之间那条 8px 的缝就是把手 —— 拖它改大小，没有第二个 resize 手势。
 // 一个块里装什么由它的 mode 决定：`default` = 一个 dock window（多单元＝一行可换行的 tab），
 // `v`/`h` = 容器，一个单元一个窗口地叠着排，按内容占高、块不够就滚、成员可以折叠。
+
+// toolbar 条的厚度：一颗 26px 的图标按钮 + 两侧 3px 内衬。竖条限宽、横条限高都用这一颗数 ——
+// "一条 bar 那么厚"在这里只说一次。
+const TB_SZ = 34;
+// toolbar 小窗的开口尺寸：够放下 Color / Brush 那一类卡片，又不至于盖掉半页。
+const TB_POP_W = 300, TB_POP_H = 380;
+
+// 一块某个方向上是不是"就一条 bar 那么厚"。
+//
+// 这个问题以前只问了 `default` 块（`node.tb`），于是**容器**成了缺口：一格一格的窗口都收成条子之后，
+// 容器自己仍旧按抽屉里那份 `sz` 占着一整列的宽度；而且更隐蔽的一层是**装着这些块的 split** ——
+// 两个 34px 的竖条住在一个 `1 1 0` 的自由 split 里，那个 split 会把父行剩下的地方全吃掉，屏幕上就是
+// "两条细 bar 浮在一大片深色空白里"（用户截图报的就是这个）。所以判定要能对任何一种节点说，
+// 条子的方向只有两种：竖条窄、横条矮。
+const barThin = (node: DockNode, dim: 'w' | 'h'): boolean => {
+  if (node.t !== 'b') return false;
+  if (node.mode === 'default') return !!node.tb && (node.tbDir ?? 'h') === (dim === 'w' ? 'v' : 'h');
+  // 容器的轴就是条子的方向（见容器渲染处 `tbDir: dir`）：竖着摞 ⇒ 每格是竖条 ⇒ 只有宽度是薄的。
+  const flags = cellTbs(node);
+  if (!flags.length || !flags.every(f => f === 1)) return false;
+  return (node.mode === 'v' ? 'w' : 'h') === dim;
+};
+
+// ── 一个节点在某一维上**有没有尺寸可谈** ──────────────────────────────────────────────────────
+// 一条 34px 的条子没有：它的厚度是形状说的，拖它写进去的尺寸它显示不出来（`min=max=34`），它也不吸
+// 余量（`flex: 0 0 auto`）。而一个**装着条子的 split** 同样没有：它的那一维由孩子定（竖排看最宽的
+// 那个，横排看最高的那个），所以它自己也缩不到内容以外去。判定因此要递归下去 —— 只有这一层问到
+// 块、下一层是"两条 bar 竖着摞"时停手，缝的选择就会错一位（拖它等于什么都没写，或者松开手留下一片
+// 没人认领的空洞：那正是用户报的"只能拖一边、另一边拖不动"）。
+const noSize = (node: DockNode, dim: 'w' | 'h'): boolean =>
+  node.t === 'b' ? barThin(node, dim) : node.ks.length > 0 && node.ks.every(k => noSize(k, dim));
+
 const dockStyles: Record<string, React.CSSProperties> = {
   // border-box on purpose: the card's border is part of the size the frame hands it, so a block pinned
   // at N px is EXACTLY N px on screen. Under content-box the 0.5px border sits outside the flex size,
@@ -56,6 +89,39 @@ const dockStyles: Record<string, React.CSSProperties> = {
   // A unit's own actions live in a positioned slot so an absolute child (a menu) has something tight
   // to hang from rather than the whole box.
   dockHeadSlot: { position: 'relative', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 },
+
+  // ── toolbar 模式：一扇窗收成一条图标条 ──
+  // 厚度（TB_SZ）只在一处说话：竖条限宽、横条限高，两边都是"一条 bar 那么厚"。
+  // 条子本身是**抓处**：六点在最前，空白处也拖着走（和标题栏同一个口径）。
+  tbStripV: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, padding: '3px 0',
+    width: TB_SZ, minWidth: TB_SZ, maxWidth: TB_SZ, height: '100%', minHeight: 0,
+    boxSizing: 'border-box', background: '#232325' },
+  tbStripH: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 3, padding: '0 3px',
+    height: TB_SZ, minHeight: TB_SZ, maxHeight: TB_SZ, width: '100%', minWidth: 0,
+    boxSizing: 'border-box', background: '#232325' },
+  // 帧级那几颗（切回窗口 / 浮出 / 横竖）挤在条子的一头，和单元图标之间有一条发丝线。
+  tbActsV: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 },
+  tbActsH: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 2, flexShrink: 0 },
+  tbDividerV: { flexShrink: 0, width: 18, height: '0.5px', background: 'rgba(84,84,88,0.75)', margin: '1px 0' },
+  tbDividerH: { flexShrink: 0, height: 18, width: '0.5px', background: 'rgba(84,84,88,0.75)', margin: '0 1px' },
+  // 单元图标：一颗按钮 = 一个 tab。选中（小窗开着的那一格）用强调色框起来，和 tab 条的选中同一个语言。
+  tbUnitsV: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flex: '1 1 auto',
+    minHeight: 0, overflowY: 'auto', overflowX: 'hidden', paddingBottom: 2 },
+  tbUnitsH: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 2, flex: '1 1 auto',
+    minWidth: 0, overflowX: 'auto', overflowY: 'hidden', paddingRight: 2 },
+  tbUnit: { flexShrink: 0, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'none', border: '0.5px solid transparent', borderRadius: 6, padding: 0,
+    color: 'rgba(255,255,255,0.6)', cursor: 'pointer' },
+  tbUnitOn: { background: 'rgba(10,132,255,0.24)', borderColor: 'rgba(10,132,255,0.9)', color: '#fff' },
+  // 小窗：贴在条子边上的一层浮层（viewport 坐标，走 portal —— 块的 scroller 会剪掉绝对定位的子节点）。
+  tbPop: { position: 'fixed', zIndex: 75, display: 'flex', flexDirection: 'column', boxSizing: 'border-box',
+    background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.16)', borderRadius: 10,
+    boxShadow: '0 16px 44px rgba(0,0,0,0.66)', overflow: 'hidden' },
+  tbPopHead: { display: 'flex', alignItems: 'center', gap: 6, padding: '4px 6px 4px 9px', flexShrink: 0,
+    background: '#232325', borderBottom: '0.5px solid rgba(84,84,88,0.55)' },
+  tbPopName: { flex: 1, minWidth: 0, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em',
+    textTransform: 'uppercase', color: '#c9c9ce', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  tbPopIcon: { flexShrink: 0, display: 'flex', color: 'rgba(255,255,255,0.55)' },
 };
 
 // What the pointer is carrying. The dock has exactly TWO drag gestures on a window, and the only thing
@@ -87,6 +153,10 @@ export type DockCtx = {
   // long list. Keyed by unit, drawn by the frame, so a unit still owns what it puts there.
   foots?: Partial<Record<UnitId, React.ReactNode>>;
   heads: Partial<Record<UnitId, React.ReactNode>>;
+  // 一格**自己的**动作，跟着它自己的名字走：窗口标题条是"窗"的，那上面的键对整扇窗说话（折叠 /
+  // 浮出 / 收成条）；而"关掉这份工程"说的是一个 tab 的事 —— 所以它站在这颗 tab 的右边，单窗时
+  // 站在名字右边，不在标题条的最右端。没有 tab 的单元（面板）不返回东西。
+  tabOps?: (id: UnitId) => React.ReactNode;
   // Collapsed or not is the user's call, so a unit the page has no stored choice for is open. Only a
   // member of a container is ever asked: a window that fills its block has nothing to fold away from.
   isOpen: (id: UnitId) => boolean;
@@ -95,6 +165,15 @@ export type DockCtx = {
   edit: boolean;
   // The mode of the block owning this unit — the only write Alt+P makes.
   setMode: (id: UnitId, mode: DockMode) => void;
+  // toolbar 模式：把这个窗口收成一条图标条 / 放回整扇窗。`dir` 只在 default 块与浮窗上有意义
+  // （容器里的方向由块的轴说），所以它可以不传。
+  setToolbar: (id: UnitId, on: boolean, dir?: 'h' | 'v') => void;
+  // 条子上那颗很小的横竖键：只管 default 块与浮窗（容器没有这一手）。
+  setToolbarDir: (id: UnitId, dir: 'h' | 'v') => void;
+  // 现在开着的那一格 toolbar 小窗（整页同时只有一个）：一条条子开了，别的一条就收起自己的。
+  // 页面用它把"活的工作台"这层 iframe 提到浮层之上 —— 文档那一格的小窗里要看得见画布。
+  tbPopover: UnitId | null;
+  onToolbarPopover: (id: UnitId | null) => void;
   dock: Dock;
   // persist=false while a pointer drag is still running — the layout lands in localStorage when the
   // pointer comes up, not once per mousemove.
@@ -227,12 +306,19 @@ const ZoneArrow: React.FC<{ zone: Zone }> = ({ zone }) => {
 
 // A tab's landing band: an edge lights up the half it would split off, the centre says the unit joins
 // this block.
+// 一颗 tab 是**一格**的标题：名字（省略号在它身上）+ 这一格自己的动作（文档的关闭）。
+// 所以它是 inline-flex 的容器而不是一个 button —— 名字和那枚 ✕ 得是两个各管各的可点区域。
 const dockTabStyle = (on: boolean): React.CSSProperties => ({
+  display: 'inline-flex', alignItems: 'center', gap: 2, maxWidth: 168,
   border: 'none', background: on ? 'rgba(255,255,255,0.10)' : 'transparent',
-  color: on ? '#fff' : '#8e8e93', fontSize: 10, fontWeight: 700, padding: '2px 7px',
-  borderRadius: 6, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden',
-  textOverflow: 'ellipsis', maxWidth: 148, flexShrink: 0,
+  color: on ? '#fff' : '#8e8e93', fontSize: 10, fontWeight: 700, padding: '2px 3px 2px 7px',
+  borderRadius: 6, cursor: 'pointer', flexShrink: 0, minWidth: 0,
 });
+const dockTabName: React.CSSProperties = {
+  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, maxWidth: 140,
+};
+// 单单元窗口的名字那一行：名字自己吃省略号，右边的 ✕ 永远露着（所以省略号不能在整行上）。
+const dockNameRow: React.CSSProperties = { flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 3 };
 
 // 落点预览 —— 位置来自 `zoneRect`，**形状**来自 `zonePoly`，判定用的 `zoneOf` 是同一套规则，
 // 所以"亮在哪就落在哪"，连面积的边角都对得上。
@@ -322,6 +408,176 @@ const stackStyle = (mode: 'v' | 'h'): React.CSSProperties => ({
   overflowX: mode === 'h' ? 'auto' : 'hidden',
 });
 
+// ── toolbar 条 ─────────────────────────────────────────────────────────────────────────────
+// 一扇窗收成一条 bar：没有正文，也没有下挂的容器。条上每一颗图标就是一个 tab（一格里可能是好几个
+// 单元，那就并排几颗）；点一颗，在条子边上展开一个小窗显示那一格的正文，再点一次收起。
+//
+// 小窗走 portal + viewport 坐标：块的 scroller 和 dock 根的 overflow 都会剪掉绝对定位的子节点，
+// 而小窗必须能盖到隔壁块上。整页同时只开一扇 —— `ctx.tbPopover` 记着现在是谁，别的条子看到它
+// 换了人就收起自己的那一扇。
+const ToolbarStrip: React.FC<{
+  ids: readonly UnitId[]; ctx: DockCtx; dir: 'h' | 'v'; float?: DockFloat;
+  canDir: boolean; onDir: () => void; onUnshrink: () => void; onPick: (i: number) => void;
+  bar?: {
+    onPointerDown: React.PointerEventHandler<HTMLDivElement>;
+    onPointerMove: React.PointerEventHandler<HTMLDivElement>;
+    onPointerUp: React.PointerEventHandler<HTMLDivElement>;
+    onPointerCancel: React.PointerEventHandler<HTMLDivElement>;
+  };
+}> = ({ ids, ctx, dir, float, canDir, onDir, onUnshrink, onPick, bar }) => {
+  const [open, setOpen] = useState<UnitId | null>(null);
+  const [anchor, setAnchor] = useState<{ x: number; y: number; right: number; bottom: number } | null>(null);
+  // 收起小窗的判据：点**条子**（换一颗图标、切回窗口、浮出）不算"点外面" —— 那正是这个控件自己的
+  // 地盘。用一层全屏遮罩会把这个区分吃掉：遮罩盖住条子，换图标的第一下只关了窗，第二下才落在图标上。
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (popRef.current?.contains(t) || stripRef.current?.contains(t)) return;
+      setOpen(null);
+    };
+    // capture：赶在条子上那些按钮自己的 onClick 之前判，但不拦它们（只决定要不要关小窗）。
+    document.addEventListener('mousedown', onDown, true);
+    return () => document.removeEventListener('mousedown', onDown, true);
+  }, [open]);
+  // 上报"这一条现在开着哪一格"：页面拿它把活的工作台那一层提到浮层之上（DockCtx.tbPopover）。
+  // 回调走 ref，effect 只跟 `open` 走 —— ctx 每渲染一次都是新对象，写进依赖就会每渲染跑一遍。
+  const report = useRef(ctx.onToolbarPopover);
+  report.current = ctx.onToolbarPopover;
+  useEffect(() => { report.current?.(open); return () => { report.current?.(null); }; }, [open]);
+  // 别的条子开了一扇：这一扇收起。依赖**只跟 ctx.tbPopover**，不跟 `open` —— 跟了就有时序坑：
+  // 刚点开的那一帧，自己的上报还没变成 ctx 的值，effect 会把刚开的那扇当成"别人开的"立刻关掉。
+  useEffect(() => {
+    if (open && ctx.tbPopover && ctx.tbPopover !== open) setOpen(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx.tbPopover]);
+  const V = dir === 'v';
+  const close = () => setOpen(null);
+  const pick = (u: UnitId, i: number, el: HTMLElement) => {
+    if (open === u) { setOpen(null); return; }
+    const r = el.getBoundingClientRect();
+    setAnchor({ x: r.left, y: r.top, right: r.right, bottom: r.bottom });
+    setOpen(u);
+    // 顺手把这一格"正在显示谁"也换过去：从小窗退回整扇窗时，看见的还是刚才那一格。
+    onPick(i);
+  };
+  // 小窗贴在哪边：竖条开在右边（右边放不下就翻到左边），横条开在下面（下面放不下就翻到上面）。
+  // 每次渲染都重算，窗口一变它自己就跟上了。
+  const pop = (() => {
+    if (!open || !anchor) return null;
+    const W = Math.min(TB_POP_W, window.innerWidth - 16);
+    const H = Math.min(TB_POP_H, window.innerHeight - 16);
+    if (V) {
+      const x = anchor.right + 6 + W <= window.innerWidth - 6 ? anchor.right + 6 : Math.max(6, anchor.x - 6 - W);
+      return { x, y: Math.min(Math.max(6, anchor.y), window.innerHeight - H - 6), w: W, h: H };
+    }
+    const y = anchor.bottom + 6 + H <= window.innerHeight - 6 ? anchor.bottom + 6 : Math.max(6, anchor.y - 6 - H);
+    return { x: Math.min(Math.max(6, anchor.x), window.innerWidth - W - 6), y, w: W, h: H };
+  })();
+  const act = dockStyles.tbAct;
+  return (
+    <>
+      <div data-dock-toolbar={dir} ref={stripRef} style={V ? dockStyles.tbStripV : dockStyles.tbStripH}
+        {...(float ? {} : grabBar(ctx, ids))}
+        {...(bar ?? {})}>
+        {/* 六点在最前：条子也是窗的把手，抓着它拖 = 搬这扇窗（和标题条同一个口径）。 */}
+        <span className="dock-h" data-dock-grip {...grab(ctx, ids)}
+          title={'Drag to move this window.\nAn edge splits a new block off, the centre puts it in that block.\nDropped on the seam between two members of its own block = take that slot instead.'}
+          style={{ ...dockStyles.dockGrip, padding: V ? '1px 0' : '0 1px' }}><GripDots /></span>
+        <div style={V ? dockStyles.tbActsV : dockStyles.tbActsH}>
+          {/* 回到整扇窗：这颗就是标题条上那颗"收成 toolbar"的回程票。 */}
+          <button className="dock-h" data-dock-tb-toggle="" style={act}
+            title="Back to a full window — same place in the layout, body and all"
+            onClick={e => { e.stopPropagation(); close(); onUnshrink(); }}>
+            <WindowIcon />
+          </button>
+          {/* 浮出 / 收回：与标题条上那颗一字不差，条子上也留一份。 */}
+          <button className="dock-h" data-dock-tb-popout="" style={act}
+            title={float ? 'Dock this window back into the layout' : 'Pop this window out as a floating window'}
+            onClick={e => {
+              e.stopPropagation();
+              close();
+              if (float) ctx.setDock(dockBackDock(ctx.dock, ids[0])); else popOut(ctx, ids[0]);
+            }}>
+            {float ? <DockBackIcon /> : <PopIcon />}
+          </button>
+          {/* 横 / 竖：只有 default 块和浮窗有这一手 —— 容器里的方向由块的轴说。 */}
+          {canDir && (
+            <button className="dock-h" data-dock-tb-dir="" style={act}
+              title={V ? 'Lay this toolbar out horizontally (a row)' : 'Lay this toolbar out vertically (a column)'}
+              onClick={e => { e.stopPropagation(); onDir(); }}>
+              <DirIcon dir={V ? 'h' : 'v'} />
+            </button>
+          )}
+        </div>
+        <span style={V ? dockStyles.tbDividerV : dockStyles.tbDividerH} />
+        <div style={V ? dockStyles.tbUnitsV : dockStyles.tbUnitsH}>
+          {ids.map((u, i) => (
+            <button key={u} data-dock-tb-icon={u} style={{ ...dockStyles.tbUnit, ...(open === u ? dockStyles.tbUnitOn : null) }}
+              title={ctx.rules.title(u) + ' — click for its panel beside this strip'}
+              onClick={e => { e.stopPropagation(); pick(u, i, e.currentTarget); }}>
+              {ctx.rules.icon(u)}
+            </button>
+          ))}
+        </div>
+      </div>
+      {open && pop && createPortal(
+        <>
+          <div data-dock-tb-pop={open} ref={popRef} style={{ ...dockStyles.tbPop, left: pop.x, top: pop.y, width: pop.w, height: pop.h }}>
+            <div style={dockStyles.tbPopHead}>
+              <span style={dockStyles.tbPopIcon}>{ctx.rules.icon(open)}</span>
+              <span style={dockStyles.tbPopName} title={ctx.hint?.(open)}>{ctx.rules.title(open)}</span>
+              {ctx.tabOps?.(open)}
+              {ctx.heads[open] && <span style={dockStyles.dockHeadSlot}>{ctx.heads[open]}</span>}
+              <button style={dockStyles.dockAct} title="Tuck this panel away" onClick={close}>
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+                  strokeWidth="1.7" strokeLinecap="round"><path d="M3 3l6 6M9 3l-6 6" /></svg>
+              </button>
+            </div>
+            {/* 正文和窗口里那一份是同一种画法（fullBleed 的那几格没有内衬、没有 dock 的 scroller），
+                并且把元素交回给页面：文档那一格的小窗里，画布要正好铺在这个盒子上。 */}
+            <div ref={el => ctx.bodyRef?.(open, el)} className="dark-scroll"
+              style={{ ...bodyStyle(open, ctx.rules), overflow: 'auto' }}>
+              {ctx.bodies[open] ?? null}
+            </div>
+            {ctx.foots?.[open] && <div style={dockStyles.dockFoot}>{ctx.foots[open]}</div>}
+          </div>
+        </>,
+        document.body,
+      )}
+    </>
+  );
+};
+
+// 收成一条 / 回到整扇窗：条子上那两颗（标题条上那颗"收"用的是前一个）。
+const ToToolbarGlyph: React.FC = () => (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5}
+    strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+    <rect x="1.9" y="5" width="12.2" height="6" rx="1.4" />
+    <circle cx="5.1" cy="8" r="0.95" fill="currentColor" stroke="none" />
+    <circle cx="8" cy="8" r="0.95" fill="currentColor" stroke="none" />
+    <circle cx="10.9" cy="8" r="0.95" fill="currentColor" stroke="none" />
+  </svg>
+);
+const WindowIcon: React.FC = () => (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5}
+    strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+    <rect x="2" y="2.9" width="12" height="10.2" rx="1.5" />
+    <path d="M2 6.1h12" />
+  </svg>
+);
+// 横 / 竖：画的不是"现在的样子"，是"按下去会变成的样子"。
+const DirIcon: React.FC<{ dir: 'h' | 'v' }> = ({ dir }) => (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5}
+    strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+    {dir === 'h'
+      ? <><rect x="2" y="4.4" width="12" height="4.2" rx="1.2" /><path d="M2 11.8h12" strokeDasharray="1.5 1.6" strokeWidth={1.2} /></>
+      : <><rect x="4.4" y="2" width="4.2" height="12" rx="1.2" /><path d="M11.8 2v12" strokeDasharray="1.5 1.6" strokeWidth={1.2} /></>}
+  </svg>
+);
+
 // ONE DOCK WINDOW — a title bar, a body, and the unit's action row under it. A block in `default` mode
 // IS this window (and hands it its own card); a block in `v`/`h` mode is a stack of them, each drawing
 // its own card. A floated unit is one of these too, pinned to the viewport.
@@ -345,6 +601,14 @@ const DockWindow: React.FC<{
   // size to their content and a block taller than that content would sit half empty — the space the
   // departed windows used to fill, reading as "they never left". One window left alone owns the block.
   const grow = !!solo || ids.some(u => ctx.rules.grows(u));
+  // 收起来的那一格：只剩一条标题条。`open` 对不是容器成员的窗口恒为 true，所以这一句只在容器里生效。
+  const folded = !open;
+  // toolbar 模式：这一格现在是不是一条图标条，以及条子朝哪边。
+  //   * 容器里的格 → 方向就是块的轴（竖排块的一格 = 竖条 = 限宽；横排块 = 横条 = 限高），
+  //     `tbDir` 是容器渲染这一格时写进来的，不是用户选的，所以条上没有方向键；
+  //   * `default` 块 / 浮窗 → 方向存在节点上（`tbDir`），用户用条上那颗很小的小键改。
+  const tb = !!node.tb;
+  const tbDir: 'h' | 'v' = node.tbDir ?? 'h';
   // Dragging a window by its title bar moves it; the grip beside it still means "move this unit".
   // The bar's own click folds, so a move has to suppress the click that follows it.
   const winDrag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
@@ -424,18 +688,23 @@ const DockWindow: React.FC<{
         title={'Drag to move this whole window.\nAn edge splits a new block off, the centre puts it in that block.\nDropped on the seam between two members of its own block = take that slot instead.'}
         onClick={e => e.stopPropagation()}
         style={dockStyles.dockGrip}><GripDots /></span>
-      {ids.length > 1 ? (
+      {/* cud tab 只有一份时也走 tab 条（用户要求的口径一致）：✕ 跟着 tab 走、点 tab 就是激活，
+          和多份工程那一扇窗完全同一种长相与手势。普通面板没有 tab 这回事，孤单位仍是光杆名字。 */}
+      {ids.length > 1 || docUidOf(ids[0]) !== null ? (
         <div style={dockStyles.dockTabs}>
           {/* 播报前存档的 doc:* 还没验证：不出现在 tab 条上（它此刻的标题只是内部 id）。下标仍按
               `ids` 算，pick 用的还是原下标。 */}
           {ids.map((u, i) => ({ u, i })).filter(({ u }) => ctx.rules.known(u)).map(({ u, i }) => (
-            <button key={u} data-dock-unit={u} style={dockTabStyle(u === id)}
+            <span key={u} data-dock-unit={u} style={dockTabStyle(u === id)}
               title={'Show ' + ctx.rules.title(u) + ' in this block — drag the title to pull just this one out into a window of its own'}
               {...grab(ctx, [u])} onClick={() => pick(i)}>
               {/* Each tab carries its own mark: in a strip of documents, the dot is the only thing that
                   can say which one the workbench is actually running on. */}
-              {ctx.badge?.(u)}{ctx.rules.title(u)}
-            </button>
+              <span style={dockTabName}>{ctx.badge?.(u)}{ctx.rules.title(u)}</span>
+              {/* 关掉这一份工程的那颗 ✕ 站在**它这一格**的右边 —— 关的是哪一份，按钮就在哪一份
+                  旁边，不飘到整扇窗的右端去。 */}
+              {ctx.tabOps?.(u)}
+            </span>
           ))}
         </div>
       ) : (
@@ -443,11 +712,21 @@ const DockWindow: React.FC<{
         // handle above already moves it, and moving it moves the whole window, because it IS the whole
         // window. Leaving the name inert also keeps a FLOAT's bar draggable as a bar (a float is one
         // unit, and pressing anywhere on its bar has to move the window, not start an HTML5 drag).
-        <span style={dockStyles.dockName} title={ctx.hint?.(id)}>{ctx.badge?.(id)}{ctx.rules.title(id)}</span>
+        <span style={dockNameRow}>
+          <span style={dockStyles.dockName} title={ctx.hint?.(id)}>{ctx.badge?.(id)}{ctx.rules.title(id)}</span>
+          {ctx.tabOps?.(id)}
+        </span>
       )}
       {/* A unit's own actions are part of its body, not of its frame: a collapsed unit must not keep
           an action that works on what the user just hid (Log, Debug, Add +). */}
       {open && ctx.heads[id] && <span style={dockStyles.dockHeadSlot}>{ctx.heads[id]}</span>}
+      {/* 收成一条 toolbar：位置就在浮出键的左边（用户点的是"换个形状"，不是"换个地方"）。
+          条子上的回程票是同一颗按钮的反向（见 ToolbarStrip）。 */}
+      <button className="dock-h" data-dock-tb-toggle="" style={dockStyles.dockAct}
+        title="Shrink this window to a toolbar — one icon per unit; click an icon and its panel opens beside the strip"
+        onClick={e => { e.stopPropagation(); ctx.setToolbar(id, true, tbDir); }}>
+        <ToToolbarGlyph />
+      </button>
       <button className="dock-h" style={dockStyles.dockAct}
         title={float ? 'Dock this window back into the layout' : 'Pop this unit out as a floating window'}
         onClick={() => { if (float) ctx.setDock(dockBackDock(ctx.dock, id)); else popOut(ctx, id); }}>
@@ -463,7 +742,17 @@ const DockWindow: React.FC<{
       )}
     </div>
   );
-  const inner = (
+  const inner = tb ? (
+    // toolbar 模式：整扇窗就是一条图标条，没有标题条、没有正文、也没有下挂的容器。
+    <ToolbarStrip ids={ids} ctx={ctx} dir={tbDir} float={float}
+      canDir={!stacked}
+      onDir={() => ctx.setToolbarDir(id, tbDir === 'h' ? 'v' : 'h')}
+      onUnshrink={() => ctx.setToolbar(id, false)}
+      onPick={pick}
+      bar={float
+        ? { onPointerDown: barDown, onPointerMove: barMove, onPointerUp: barUp, onPointerCancel: barUp }
+        : undefined} />
+  ) : (
     <>
       {head}
       {showBody(id, open || ctx.rules.keepMounted(id), open)}
@@ -474,13 +763,21 @@ const DockWindow: React.FC<{
           put no matter how long the list gets. */}
       {open && ctx.foots?.[id] && <div style={dockStyles.dockFoot}>{ctx.foots[id]}</div>}
       {/* A float is in no split, so it has no block boundary to drag: it keeps its own corner. */}
-      {float && <FloatCorner id={id} ctx={ctx} />}
+      {float && createPortal(
+        <FloatCorner id={id} ctx={ctx} spot={{ x: float.x, y: float.y, w: float.w, h: float.h }} />,
+        document.body,
+      )}
     </>
   );
   // A floated window is a card pinned to the viewport: the one place a window still decides its own size.
+  // 收成 toolbar 之后那条边由条子说了算：横条压到 TB_SZ 高、竖条压到 TB_SZ 宽，另一头还归用户。
   if (float) {
     return (
-      <div style={{ ...dockStyles.dockFloatBox, position: 'fixed', left: float.x, top: float.y, width: float.w, height: float.h, zIndex: 60 }}>
+      <div data-dock-float={float.id} style={{
+        ...dockStyles.dockFloatBox, position: 'fixed', left: float.x, top: float.y, zIndex: 60,
+        width: tb && tbDir === 'v' ? TB_SZ : float.w,
+        height: tb && tbDir === 'h' ? TB_SZ : float.h,
+      }}>
         {inner}
       </div>
     );
@@ -501,12 +798,22 @@ const DockWindow: React.FC<{
   // split, never from content — but the inspector and the drag tests find members by it.
   if (stacked) {
     const share = floorPct(ids.length);
+    // 收成 toolbar 的一格：主轴不再吃份额（条子有多长就多长），横轴压到 TB_SZ —— 这就是
+    // "竖排块里的格限宽、横排块里的格限高"。`tbDir` 与块的轴同向，所以压的总是横轴。
+    const cross: React.CSSProperties | null = !tb ? null
+      : tbDir === 'v' ? { width: TB_SZ, minWidth: TB_SZ, maxWidth: TB_SZ }
+        : { height: TB_SZ, minHeight: TB_SZ, maxHeight: TB_SZ };
     return (
       <div data-dock-member={node.ids[0]} style={{
         ...dockStyles.dockBox,
-        flex: grow ? '1 1 0' : '0 0 auto',
-        minHeight: grow && axis === 'v' ? `min(${DOCK_GROW_MIN_H}px, ${share}%)` : 0,
-        minWidth: axis === 'h' && grow ? `min(200px, ${share}%)` : 0,
+        // 收起（折叠）的格**不再吃份额**，否则它收起来也还是那么高 —— 那正是 "Guidances / Layers
+        // 收不起来"：这两格是这一列里唯一两个 `grows` 的单元，份额（`1 1 0` + 地板）压在它们身上，
+        // 正文没了空地还在，读作"折了跟没折一样"。收起 = 只剩一条标题条，所以这里退回内容高度。
+        flex: tb || folded ? '0 0 auto' : grow ? '1 1 0' : '0 0 auto',
+        minHeight: tb ? (tbDir === 'h' ? TB_SZ : 0)
+          : folded ? 0 : grow && axis === 'v' ? `min(${DOCK_GROW_MIN_H}px, ${share}%)` : 0,
+        minWidth: tb ? (tbDir === 'v' ? TB_SZ : 0) : folded ? 0 : axis === 'h' && grow ? `min(200px, ${share}%)` : 0,
+        ...cross,
       }}>{inner}</div>
     );
   }
@@ -516,13 +823,18 @@ const DockWindow: React.FC<{
 
 // The corner of a float. Not a dock handle — a float lives outside the tiling, so nothing else in the
 // frame can size it.
-const FloatCorner: React.FC<{ id: UnitId; ctx: DockCtx }> = ({ id, ctx }) => {
+//
+// 它**挂在 body 上**（portal），不挂在卡片里：活画布那一层（EditPhase 的 frameLayer）在 `61`，浮窗卡片
+// 是 `60` —— 卡片里的任何子节点都被那一层盖住，于是"窗口化之后没有把手可拖"。挂到 body 上、写死
+// `70`，它就压在那层之上（小窗是 75，仍在它上面）。位置自己算：浮窗是 fixed 的，x/y/w/h 模型里就有，
+// 父组件每次改尺寸都会重渲染，所以这只角永远贴着右下角。
+const FloatCorner: React.FC<{ id: UnitId; ctx: DockCtx; spot: { x: number; y: number; w: number; h: number } }> =
+  ({ id, ctx, spot }) => {
   const start = useRef<{ px: number; py: number; w: number; h: number } | null>(null);
   const down = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     e.preventDefault(); e.stopPropagation();
-    const box = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
-    start.current = { px: e.clientX, py: e.clientY, w: box.width, h: box.height };
+    start.current = { px: e.clientX, py: e.clientY, w: spot.w, h: spot.h };
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* fall back to bubbling events */ }
   };
   const move = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -534,8 +846,10 @@ const FloatCorner: React.FC<{ id: UnitId; ctx: DockCtx }> = ({ id, ctx }) => {
     }), false);
   };
   const up = () => { if (!start.current) return; start.current = null; ctx.setDock(ctx.dock); };
-  return <div className="dock-corner" title="Drag to resize this window"
-    style={dockStyles.dockCorner} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} />;
+  return <div className="dock-corner" data-dock-float-corner={id} title="Drag to resize this window"
+    style={{ ...dockStyles.dockCorner, position: 'fixed', right: 'auto', bottom: 'auto',
+      left: spot.x + spot.w - 13, top: spot.y + spot.h - 13, zIndex: 70 }}
+    onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} />;
 };
 
 // Alt+P 里每块角上的那一颗：三种模式，点一下就换。它就是**整个**编辑模式 —— 布局的其余部分照旧。
@@ -613,7 +927,7 @@ const shownSel = (b: DockBlock, cell: readonly UnitId[]): number => {
   return i < 0 ? 0 : i;
 };
 
-const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count: number }> = ({ node, ctx, axis, count }) => {
+const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count: number; fill?: boolean }> = ({ node, ctx, axis, count, fill }) => {
   const container = node.mode !== 'default';
   const target = node.ids[0];
   // 成员盒子的参照：Alt 合并要按格量尺寸（炸开容器时原样写下去），块内重排要按格算位置。
@@ -729,8 +1043,21 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
       e.stopPropagation();
       if (hit && !ids.includes(hit.id) && (e.altKey || mine.length) && ids.every(i => ctx.rules.known(i))) {
         e.preventDefault();
-        note('merge', { ids: ids.join(','), into: hit.id, block: target, cells: cellsOf(node).length });
-        ctx.setDock(mergeIntoMember(ctx.dock, ids, hit.id));
+        // 一格只有一种形状，而 tab 条是**格**的东西：一条 toolbar 与一扇窗口合成不了同一条 tab 条 ——
+        // 合成哪一边，另一边就"解体"了。用户报的正是这个：把 toolbar 拖进一个垂直块，它变回普通窗。
+        //
+        // 所以形状不同就不合并，改成**在旁边插一格**：拖来的是什么形状，落下来还是什么形状，两边都保住。
+        // （形状相同照旧合并：两扇窗口并成 tab，两条 toolbar 并成一排图标 —— 那是同一格能表达的东西。）
+        const arrive = shapeOf(ctx.dock, ids).tb ? 1 : 0;
+        const there = cells.findIndex(c => c.includes(hit.id));
+        const bit = there < 0 ? 0 : cellTbs(node)[there];
+        if (arrive !== bit) {
+          note('merge', { ids: ids.join(','), into: hit.id, block: target, cells: cells.length, shape: 'split' });
+          ctx.setDock(insertCellAt(ctx.dock, ids, target, there + 1));
+        } else {
+          note('merge', { ids: ids.join(','), into: hit.id, block: target, cells: cells.length });
+          ctx.setDock(mergeIntoMember(ctx.dock, ids, hit.id));
+        }
       } else if (mine.length && gap && (gap.partial || gap.to !== gap.from) && ids.every(i => ctx.rules.known(i))) {
         // 松手在缝上 = 排到那一位去（和拖动把手那条蓝线同一个落点、同一个动作）。
         // 格子才论"并 tab 组"，缝只论"排第几" —— 一次拖拽里两种目标各占一块地，互不抢。
@@ -871,11 +1198,28 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
   // can get under, which reads as a block that will not shrink at a size that is a large share of the
   // window. Expressed as a length the browser resolves against the split itself, so the frame never has
   // to measure to know what it can afford.
+  //
+  // 收成 toolbar 的块是这条规矩的例外，而且是**必须**的例外：它要的厚度就是条子的厚度（`TB_SZ`），
+  // 96 的地板会把它撑成一个"厚 96 的深色卡片里贴着一条 34 的条子"——那正是用户说的"没有刚好容下
+  // toolbar"。所以地板跟着形状走：条子块的地板是 TB_SZ，窗口块的地板还是 DOCK_MIN_SZ。
+  //
+  // 判定按**形状**问（`barThin`），不按 `node.tb`：容器也可能整块都是条子（每一格都收成条子了），
+  // 那时它的厚度、地板与 `flex` 跟一条 bar 没有任何区别 —— 否则就是"一格一格的条子住在一个 96 起
+  // 步、还按老 `sz` 撑着的大盒子里"。
+  const thinW = barThin(node, 'w');
+  const thinH = barThin(node, 'h');
   const pinned = typeof node.sz === 'number' && node.sz > 0;
+  const minSz = (axis === 'h' ? thinW : thinH) ? TB_SZ : DOCK_MIN_SZ;
   const floor: React.CSSProperties = pinned ? {}
-    : axis === 'v' ? { minHeight: `min(${DOCK_MIN_SZ}px, ${floorPct(count)}%)` }
-      : { minWidth: `min(${DOCK_MIN_SZ}px, ${floorPct(count)}%)` };
-  const chrome: React.CSSProperties = { flex: flexOf(node.sz), position: 'relative', ...floor };
+    : axis === 'v' ? { minHeight: `min(${minSz}px, ${floorPct(count)}%)` }
+      : { minWidth: `min(${minSz}px, ${floorPct(count)}%)` };
+  // 压的是**厚度**那一维，另一维照旧归 split —— 所以只有厚度正好落在 split 的主轴上（竖排里的
+  // 横条、横排里的竖条）才把 `flex` 也让出去（`0 0 auto`），否则那一维的份额必须原样留着，
+  // 抢过来会把同一行/列里兄弟块的位置一起挪了。
+  const bar: React.CSSProperties | null = !thinW && !thinH ? null
+    : thinW ? { width: TB_SZ, minWidth: TB_SZ, maxWidth: TB_SZ, ...(axis === 'h' ? { flex: '0 0 auto' } : null) }
+      : { height: TB_SZ, minHeight: TB_SZ, maxHeight: TB_SZ, ...(axis === 'v' ? { flex: '0 0 auto' } : null) };
+  const chrome: React.CSSProperties = { flex: flexOf(node.sz), ...(fill ? { flexGrow: 1 } : null), position: 'relative', ...floor };
   const edit: React.CSSProperties | undefined = ctx.edit
     ? { outline: '1px dashed rgba(10,132,255,0.75)', outlineOffset: -1 }
     : undefined;
@@ -891,8 +1235,12 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     // The block wears `data-dock-block` in BOTH branches: a container is found by it in the DOM, and a
     // `default` block is found by nothing else — the picker, the inspector and the drag tests all want
     // to name a block without walking the tree.
+    //
+    // 收成 toolbar 的 `default` 块：**块盒自己**就是那条 bar 的框。容器里的格有一层 `cross` 替它
+    // 限厚，`default` 块没有那一层 —— 只把条子写死 34 宽，外面那张 236 宽的卡片还在，看上去就是
+    // "一条很宽的深色卡片里塞着一条竖条"。所以厚度压在这儿：横条压高、竖条压宽（`bar` 在上面算好）。
     return (
-      <div data-dock-block={target} style={{ ...dockStyles.dockBox, ...chrome, ...edit }}
+      <div data-dock-block={target} style={{ ...dockStyles.dockBox, ...chrome, ...bar, ...edit }}
         onDragEnterCapture={onDragIn} onDragOverCapture={onDragOver} onDropCapture={onDrop}>
         <DockWindow node={node} ctx={ctx} axis={axis} />
         {picker}
@@ -900,14 +1248,22 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     );
   }
   // 容器真正的成员是**格**，不是单元：一格可能挂着一条 tab 条（Alt 合并，见 mergeIntoMember）。
-  // 一格一个时它和 ids 一一对应，和老行为完全一致。
+  // 一格一个时它和 ids 一一对应，和老行为完全一致。每一格把"自己是不是一条 toolbar"带在身上 ——
+  // 容器只提供轴（方向），开关是这一格自己的。
+  //
+  // `bar` 在这一支同样要戴：每一格都收成条子之后，容器自己就是一条 bar 的框 —— 它不能再按抽屉里
+  // 那份 `sz` 占着整列（用户截图里那两条"过大的宽度"，一条来自块、一条来自外面那个自由 split）。
+  const flags = cellTbs(node);
   return (
     <div className="dark-scroll" data-dock-block={target} ref={boxRef}
-      style={{ ...stackStyle(dir), ...chrome, ...edit }}
+      style={{ ...stackStyle(dir), ...chrome, ...bar, ...edit }}
       onDragEnterCapture={onDragIn} onDragOverCapture={onDragOver} onDragLeaveCapture={onDragLeaveCapture} onDropCapture={onDrop}>
-      {cells.map(cell => (
+      {cells.map((cell, i) => (
         <DockWindow key={cell[0]} ctx={ctx} axis={dir} stacked solo={cells.length === 1}
-          node={{ t: 'b', ids: cell, sel: shownSel(node, cell), mode: 'default' }} />
+          node={{
+            t: 'b', ids: cell, sel: shownSel(node, cell), mode: 'default',
+            tb: flags[i] === 1, tbDir: dir,
+          }} />
       ))}
       {/* 插入线画在 dock 的**根**坐标系里（fixed + 视口坐标），不画在块里：块自己是滚动容器，
           绝对定位的子节点会被 scrollTop 顶着走，线就会落在错误的两个人之间。
@@ -938,8 +1294,38 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
 // before it, frees the one after (see dragSplit), and pins every OTHER child of the split to what it is
 // already showing — so the pointer's change lands on the two boxes it is between and on nothing else.
 // Addressed by PATH, not by unit: the empty work area holds no unit to be named by.
-const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; next: number[]; count: number }> = ({ ctx, axis, prev, next, count }) => {
-  const start = useRef<{ p: number; a: number; b: number; floor: number; froze: { path: number[]; sz?: number }[]; tree0: Dock['tree']; tree: Dock['tree']; touched: boolean; d: number; dMax: number; want: number; commits: number; noops: number } | null>(null);
+const SplitHandle: React.FC<{
+  ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; next: number[]; count: number;
+  /** 这一层 split 里画出来的孩子（按树的次序），缝**两侧**真正参与改尺寸的是其中哪两个要看它。 */
+  live: { k: DockNode; i: number }[];
+}> = ({ ctx, axis, prev, next, count, live }) => {
+  const start = useRef<{ p: number; a: number; b: number; floor: number; froze: { path: number[]; sz?: number }[]; tree0: Dock['tree']; tree: Dock['tree']; touched: boolean; d: number; dMax: number; want: number; commits: number; noops: number; prev: number[]; next: number[]; solo: boolean; free: number } | null>(null);
+  // ── 条子不参与分尺寸 ────────────────────────────────────────────────────────────────
+  // 一条 34px 的 toolbar 是**固定厚度**的：它写不进更大的尺寸（min=max=34），也吸不了余量
+  // （`flex: 0 0 auto`）。于是挨着它的那条缝两头都死的：
+  //   • 条子在左边（被拖的那一侧）→ 写进去的尺寸它显示不出来，边界纹丝不动；
+  //   • 条子在右边（"吃掉剩下的"那一侧）→ 余量没人接，松开手屏幕上就留下一片空洞 —— 而空洞没有边，
+  //     下一回想拖它也没有把手了（用户报的"只能拖一边，另一边拖不动"就是这串东西）。
+  // 所以一条缝真正 steer 的是它两侧**最近的、有尺寸的**那两块：中间的条子只是跟着挪位置。两端全是
+  // 条子就没什么可改的，那条缝照旧占 8px（块之间要留缝），但不再接指针。
+  const axisBar = (n: DockNode) => noSize(n, axis === 'h' ? 'w' : 'h');
+  const posIn = (p: readonly number[]) => live.findIndex(x => x.i === p[p.length - 1]);
+  const leftPos = (from: number) => { let k = from; while (k >= 0 && axisBar(live[k].k)) k--; return k; };
+  const rightPos = (from: number) => { let k = from; while (k < live.length && axisBar(live[k].k)) k++; return k; };
+  const lp0 = leftPos(posIn(prev)), rp0 = rightPos(posIn(next));
+  // ── 这条缝到底能改谁 ────────────────────────────────────────────────────────────────────
+  // 只有两种答案，都是**本地**的，绝不借道祖先：
+  //   • 两侧都有尺寸可改 → 常规的一对（钉住左边，右边吃掉剩下的）；
+  //   • 右边是一排条子 → 只改左边那扇窗（`solo`）。条子是固定厚度，它不接余量也不让出地方，
+  //     所以空出来的那点地方就**留在这一排的末梢**（画布变窄、条子列跟着挪，页最右那条边界不动）。
+  // 左边是条子（缝贴着条子那一侧的外沿）→ 没有尺寸可谈：这一排里唯一能变的窗在右边，而它的左边界
+  // 钉在那排条子上，缝自己动不了。两侧都是条子同理。
+  //
+  // 曾经这里还有一条"交给祖先"的退路：往上找第一个同方向的 split，改那一层那个节点。它在
+  // `[画布][一排条子]` 这种两块的页面上看着还行，可用户这份布局里**隔了三层** —— 抓住画布右边那条缝
+  // 往左拖，动的是工作区与最右 color 列之间那条边界（工作区变窄、color 列变宽），用户的原话是
+  // "我拖左边的，为什么反而移动的右边的"。远处那条边界不是他抓的东西，就不该跟着动。
+  const steerable = lp0 >= 0;
   const along = (el: Element | null): number => {
     if (!el) return 0;
     const r = el.getBoundingClientRect();
@@ -952,10 +1338,10 @@ const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; nex
   // dockFloor). Measured from the split's own children rather than from a constant, so `hi` never
   // claims the neighbour will keep 96 in a box that has no 96 left to give — the boundary would then be
   // frozen while the pointer kept moving, and the block would look like one that cannot be resized.
-  const floorOf = (el: HTMLElement): number => {
-    const kids = drawnKids(el.parentElement);
-    const box = kids.reduce((t, k) => t + along(k), 0) + DOCK_SPLIT * Math.max(0, kids.length - 1);
-    return dockFloor(box, kids.length || count);
+  const floorOf = (container: HTMLElement | null): number => {
+    const kids = drawnKids(container);
+    const size = kids.reduce((t, k) => t + along(k), 0) + DOCK_SPLIT * Math.max(0, kids.length - 1);
+    return dockFloor(size, kids.length || count);
   };
   // Everything the drag is NOT steering holds the size it is showing while the pointer is down.
   //
@@ -973,12 +1359,13 @@ const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; nex
   // inside it moves. Sizes are read off the DOM because a size nothing ever wrote down exists nowhere
   // else — and only the DRAWN children are read, which is what lines them up with the live children of
   // the tree (a folded-away nest is not drawn, so it is not one of them).
-  const freezeList = (el: HTMLElement): { path: number[]; sz?: number }[] => {
+  const freezeList = (box: HTMLElement | null, p0: readonly number[], n0: readonly number[]): { path: number[]; sz?: number }[] => {
     const out: { path: number[]; sz?: number }[] = [];
-    const parent = el.parentElement;
-    const prefix = prev.slice(0, -1);
+    // `box` 是被拖的那一层 split 自己的盒子（装孩子的那个 flex 容器）。往常它就是这条缝的父元素；
+    // 缝挨着条子、把这一拖交给上一层时，它是上一层的盒子 —— 孩子总长与"钉住谁"都得按那一层算。
+    const prefix = p0.slice(0, -1);
     const startNode = nodeAt(ctx.dock.tree, prefix);
-    if (!parent || !startNode || startNode.t !== 's') return out;
+    if (!box || !startNode || startNode.t !== 's') return out;
     const start = startNode;
     const liveKids = (n: DockNode) =>
       n.t === 's' ? n.ks.map((k, i) => ({ k, i })).filter(({ k }) => !dead(k, ctx.rules.known)) : [];
@@ -1010,33 +1397,67 @@ const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; nex
       if (f.k.t === 's' && f.k.d === node.d) step(f.k, drawn[focus], [...path, f.i], facing);
     };
     const live = liveKids(start);
-    const drawn = drawnKids(parent);
-    const at = live.findIndex(x => x.i === prev[prev.length - 1]);
-    if (at < 0 || at + 1 >= live.length) return out;
+    const drawn = drawnKids(box);
+    // 这两块**不一定是相邻的两个孩子**：中间可能夹着条子（条子不参与分尺寸，见 axisBar）。
+    const at = live.findIndex(x => x.i === p0[p0.length - 1]);
+    const bt = live.findIndex(x => x.i === n0[n0.length - 1]);
+    if (at < 0 || bt < 0 || at >= bt) return out;
     // This split: the two children the handle sits between are the drag's business, the rest are not.
     live.forEach(({ i }, j) => {
-      if (j === at || j === at + 1 || sized(start, i)) return;
+      if (j === at || j === bt || sized(start, i)) return;
       const w = along(drawn[j]);
       if (w > 0) out.push({ path: [...prefix, i], sz: w });
     });
     // …and both of those two DO change size, so each one's children get the same treatment, entered
     // from the side that faces this boundary.
-    const p = live[at], n = live[at + 1];
+    const p = live[at], n = live[bt];
     if (p.k.t === 's' && p.k.d === start.d) step(p.k, drawn[at], [...prefix, p.i], 'last');
-    if (n.k.t === 's' && n.k.d === start.d) step(n.k, drawn[at + 1], [...prefix, n.i], 'first');
+    if (n.k.t === 's' && n.k.d === start.d) step(n.k, drawn[bt], [...prefix, n.i], 'first');
     return out;
   };
   const down = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     e.preventDefault(); e.stopPropagation();
     const el = e.currentTarget;
+    // 缝两侧真正参与改尺寸的那两块（跳过条子）。左边没有就是"这一排从条子开始"，见下。
+    const drawn = drawnKids(el.parentElement);
+    const prefix = prev.slice(0, -1);
+    const box: HTMLElement | null = el.parentElement;   // 被拖的那一层 split 的盒子
+    let prevPath: number[], nextPath: number[] = [], a: number, b = 0;
+    let solo = false, free = 0;
+    if (rp0 < live.length) {
+      prevPath = [...prefix, live[lp0].i];
+      nextPath = [...prefix, live[rp0].i];
+      a = along(drawn[lp0]); b = along(drawn[rp0]);
+    } else {
+      // ── 右边是一排条子：只改左边那扇窗 ────────────────────────────────────────────────────
+      // 条子的厚度是 34（形状给的），它既不吃余量也不让出地方，所以这一拖只能落在左边那扇窗的 `sz`
+      // 上：往左拖它缩、往右拖它长。条子列紧跟在它后面，于是整体跟着挪；这一排末梢空出来的那点地方
+      // 就留白 —— 页最右那条边界（工作区与 color 列之间）**不动**，那是另一条缝的事。
+      // `free` 是这一排此刻还有多少没人认领的长度：已经满的时候只可能缩，缩过一次之后才长得回去。
+      solo = true;
+      prevPath = [...prefix, live[lp0].i];
+      a = along(drawn[lp0]);
+      const kids = drawn.reduce((t, k) => t + along(k), 0) + DOCK_SPLIT * Math.max(0, drawn.length - 1);
+      free = Math.max(0, (box ? along(box) : kids) - kids);
+    }
+    // 钉住这一层其余"有尺寸可谈"的孩子：这一拖只该改一个数字，别的块保持它此刻的样子。
+    const froze: { path: number[]; sz?: number }[] = solo
+      ? live.reduce<{ path: number[]; sz?: number }[]>((acc, { k, i }, j) => {
+        if (j === lp0 || axisBar(k)) return acc;
+        const w = along(drawn[j]);
+        if (w > 0) acc.push({ path: [...prefix, i], sz: w });
+        return acc;
+      }, [])
+      : freezeList(box, prevPath, nextPath);
     start.current = {
       p: axis === 'v' ? e.clientY : e.clientX,
-      a: along(el.previousElementSibling), b: along(el.nextElementSibling),
+      a, b, solo, free,
+      prev: prevPath, next: nextPath,
       // Everything the drag is not steering is measured ONCE, before the first move: the sizes are read
       // off a frame the drag has not disturbed yet, so pinning them changes nothing on the screen.
-      floor: floorOf(el),
-      froze: freezeList(el),
+      floor: floorOf(box),
+      froze,
       // The tree as it stood before this drag touched it, so a drag that ends up going nowhere can put
       // it back exactly (see `move`).
       tree0: ctx.dock.tree,
@@ -1049,9 +1470,9 @@ const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; nex
     };
     try { el.setPointerCapture(e.pointerId); } catch { /* fall back to bubbling events */ }
     note('drag.down', {
-      axis, prev: prev.join('.'), next: next.join('.'),
-      a: Math.round(start.current.a), b: Math.round(start.current.b),
-      floor: start.current.floor, froze: start.current.froze.length,
+      axis, prev: prevPath.join('.'), next: solo ? '-' : nextPath.join('.'),
+      a: Math.round(start.current.a), b: Math.round(b), solo,
+      floor: start.current.floor, free: Math.round(free), froze: froze.length,
     });
   };
   const move = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1075,8 +1496,17 @@ const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; nex
     // capping under the current size would drag the boundary BACKWARDS while the pointer moves forward.
     // Both numbers come from the floor the SPLIT can afford (see floorOf), so what the drag promises is
     // what the box can keep.
-    const lo = Math.min(s.floor, s.a);
-    const hi = Math.max(s.a, s.a + s.b - s.floor);
+    // 一地板两句话：块是窗口时是 DOCK_MIN_SZ，块收成 toolbar 时是 TB_SZ —— 不认形状的话，
+    // 一条 34 的条子旁边那道分界线永远拖不过 96，"刚好容下 toolbar"就成了拖不出来的布局。
+    // 只认**这一侧那个块**的形状：分界线两侧可能一边是条子一边是窗口，两个地板本来就不一样。
+    const floorAt = (path: readonly number[]): number => {
+      const n = nodeAt(s.tree, path);
+      return n && n.t === 'b' && n.tb ? Math.min(TB_SZ, s.floor) : s.floor;
+    };
+    const lo = Math.min(floorAt(s.prev), s.a);
+    // 只有一侧能改（右边是一排条子）时，上限就是这一排还没人认领的那点地方：`free === 0` 说明
+    // 这一排已经满了，那就只能缩、不能长 —— 缩过一次之后 `free` 就有了，长得回去。
+    const hi = s.solo ? Math.max(s.a, s.a + s.free) : Math.max(s.a, s.a + s.b - floorAt(s.next));
     const want = Math.max(lo, Math.min(s.a + d, hi));
     // A drag that cannot move the boundary leaves the layout ALONE, and it has to: the neighbour is
     // already on its floor, so `hi` IS where the boundary already stands and the clamp pins the pointer
@@ -1098,7 +1528,7 @@ const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; nex
     // A drag that reports success and changes nothing is the evidence LYING, which is worse than no
     // evidence, because it sends whoever reads it looking for the bug somewhere else. So: the ceiling
     // is the box (`hi`), and a frame whose applied size equals the declared one is a noop, not a commit.
-    const was = nodeAt(s.tree, prev);
+    const was = nodeAt(s.tree, s.prev);
     const held = was && typeof was.sz === 'number' ? was.sz : undefined;
     const applied = clampSz(want, held, hi);
     if (applied === held) {
@@ -1126,7 +1556,10 @@ const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; nex
       tree = f.sz === undefined ? sizeAt(tree, f.path, undefined) : freezeAt(tree, f.path, f.sz);
     }
     // persist=false while the pointer is down: a drag re-renders, it does not hammer localStorage.
-    const next_ = dragSplit({ ...ctx.dock, tree }, prev, next, applied, hi);
+    // `solo` 没有"吃剩下的"那一侧，所以只写被拖那一个数字（条子本来就是固定厚度，它跟着走）。
+    const next_ = s.solo
+      ? { ...ctx.dock, tree: sizeAt(tree, s.prev, applied, hi) }
+      : dragSplit({ ...ctx.dock, tree }, s.prev, s.next, applied, hi);
     s.tree = next_.tree;
     ctx.setDock(next_, false);
   };
@@ -1138,9 +1571,10 @@ const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; nex
     const s = start.current;
     if (!s) return;
     note('drag', {
-      axis, prev: prev.join('.'), next: next.join('.'),
+      axis, prev: prev.join('.'), next: s.solo ? '-' : next.join('.'),
       a: Math.round(s.a), b: Math.round(s.b), floor: s.floor, froze: s.froze.length,
-      lo: Math.round(Math.min(s.floor, s.a)), hi: Math.round(Math.max(s.a, s.a + s.b - s.floor)),
+      lo: Math.round(Math.min(s.floor, s.a)),
+      hi: Math.round(s.solo ? s.a + s.free : Math.max(s.a, s.a + s.b - s.floor)),
       pointer: Math.round(s.d), pointerMax: Math.round(s.dMax),
       moved: s.touched ? Math.round(s.want - s.a) : 0,
       commits: s.commits, noops: s.noops,
@@ -1153,15 +1587,22 @@ const SplitHandle: React.FC<{ ctx: DockCtx; axis: 'v' | 'h'; prev: number[]; nex
   };
   return (
     <div className={ctx.edit ? 'dock-split dock-split-edit' : 'dock-split'}
-      title={ctx.edit ? 'Drag to resize these two blocks (Alt+P)' : 'Drag to resize'}
-      style={{ flex: `0 0 ${DOCK_SPLIT}px`, cursor: axis === 'v' ? 'row-resize' : 'col-resize', flexShrink: 0, borderRadius: 3 }}
-      onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} />
+      title={steerable ? (ctx.edit ? 'Drag to resize these two blocks (Alt+P)' : 'Drag to resize') : undefined}
+      style={{ flex: `0 0 ${DOCK_SPLIT}px`, flexShrink: 0, borderRadius: 3,
+        // 两侧都是条子（或一侧到底全是条子）：没有可改尺寸的邻居，这条缝只负责留出那 8px。
+        // 仍然占位，但不接指针 —— 一条拖不动的把手比没有把手更让人以为界面坏了。
+        cursor: steerable ? (axis === 'v' ? 'row-resize' : 'col-resize') : 'default' }}
+      onPointerDown={steerable ? down : undefined} onPointerMove={steerable ? move : undefined}
+      onPointerUp={steerable ? up : undefined} onPointerCancel={steerable ? up : undefined} />
   );
 };
 
-const DockBranch: React.FC<{ node: DockNode; ctx: DockCtx; axis: 'v' | 'h'; path: number[]; root?: boolean; count?: number }> =
-  ({ node, ctx, axis, path, root, count = 1 }) => {
-    if (node.t === 'b') return <BlockBox node={node} ctx={ctx} axis={axis} count={count} />;
+const DockBranch: React.FC<{
+  node: DockNode; ctx: DockCtx; axis: 'v' | 'h'; path: number[]; root?: boolean; count?: number;
+  /** 这一块负责接住父 split 里没人认领的余量（见 DockBranch 里的 fillAt）。 */
+  fill?: boolean;
+}> = ({ node, ctx, axis, path, root, count = 1, fill }) => {
+    if (node.t === 'b') return <BlockBox node={node} ctx={ctx} axis={axis} count={count} fill={fill} />;
     // A hole in the model is not a hole on the screen — unless this branch IS the page.
     // `known` 一起传下去：播报前只剩未验证文档的那条分支也算空洞，不占屏幕。
     if (!root && dead(node, ctx.rules.known)) return null;
@@ -1172,27 +1613,55 @@ const DockBranch: React.FC<{ node: DockNode; ctx: DockCtx; axis: 'v' | 'h'; path
     // invisible box — the two live blocks simply become neighbours, and the boundary the user grabs
     // is the one they can see. Paths still address the model, so a drag lands on the right nodes.
     const live = node.ks.map((k, i) => ({ k, i })).filter(({ k }) => !dead(k, ctx.rules.known));
+    // ── 全是条子的 split 不该再吃"剩下的地方" ───────────────────────────────────────────────
+    // 一个自由 split 的份额是 `1 1 0`：父行剩下的宽度全归它。里面装窗口时这正是想要的（画布吃掉
+    // 中间那片），可装条子时就荒唐了 —— 两根 34px 的竖条住在一个 681px 的容器里，屏幕上看到的是
+    // "两条细 bar 浮在一大片深色空白里"（用户报的就是这个）。所以按**形状**决定要不要贪：
+    // 孩子都在某一维上是条子，这个 split 在那一维上就该缩到内容大小。
+    //   • `hugMain`：那一维是父 split 的主轴 → 让出 `flex`（`0 0 auto`），尺寸由内容定；
+    //   • `hugCross`：那一维是父 split 的横轴 → 不拉伸（`alignSelf: flex-start`）。
+    // 用户亲手拖过尺寸的 split（`sz`）不在此列：那是他明确给的大小，不该被内容反驳。
+    const hugW = live.length > 0 && live.every(({ k }) => noSize(k, 'w'));
+    const hugH = live.length > 0 && live.every(({ k }) => noSize(k, 'h'));
+    const hugMain = !root && !pinned && (axis === 'h' ? hugW : hugH);
+    const hugCross = !root && (axis === 'h' ? hugH : hugW);
+    // ── 谁来接"剩下的地方" ───────────────────────────────────────────────────────────────
+    // 一个 split 里只要有一个自由的孩子（没有 `sz`，即 `1 1 0`），余量就有人接。可一个孩子都不自由时
+    // （都拖过、都被钉住了），余量**没人接** —— 屏幕上那一片深色不是哪一扇窗，是一片空洞，而且它没有
+    // 边可以抓（把手只长在两块之间）。用户看到的"拖不动另一侧"就是它。所以在"都钉死"的那种布局里
+    // 指定一个能长的孩子接住余量：最后一个有尺寸的块（条子不算，它长不了）。
+    // 有余量时它才真的长，所以正常布局一分不动；这条只在过量收缩 / 存档里数字凑不满盒子时才说话。
+    const anyFree = live.some(({ k }) => !(typeof k.sz === 'number' && k.sz > 0));
+    const fillAt = (root || hugMain || anyFree) ? -1 : (() => {
+      const dim: 'w' | 'h' = axis === 'h' ? 'w' : 'h';
+      for (let j = live.length - 1; j >= 0; j--) if (!noSize(live[j].k, dim)) return j;
+      return -1;
+    })();
     return (
       // `data-dock-root` 挂在**根 split 自己**这一层，而不是外面那层框：界面探针要把声明树逐层对齐到
       // DOM，而模型里没有"框"这一层 —— 锚点多一层，第一行就会错位（整棵树从根上差一格）。
-      <div data-dock-root={root ? '' : undefined} style={{
+      <div data-dock-root={root ? '' : undefined} data-dock-split-dim={`${hugW ? 'w' : ''}${hugH ? 'h' : ''}`}
+        style={{
         display: 'flex', flexDirection: d === 'v' ? 'column' : 'row',
         minHeight: 0, minWidth: 0, overflow: 'hidden',
         // The root split IS the page, so it takes the whole area rather than sizing to its content.
         // Every other split is measured by whatever its own parent says — a nest has no box of its own.
-        flex: root ? '1 1 auto' : flexOf(node.sz),
+        flex: root ? '1 1 auto' : hugMain ? '0 0 auto' : flexOf(node.sz),
+        ...(fill ? { flexGrow: 1 } : null),
+        ...(hugCross ? { alignSelf: 'flex-start' } : null),
         // A free nest carries the same frame floor a free block does, for the same reason: a boundary
         // between two nests has to be able to promise the neighbour its floor too (see SplitHandle) —
         // and it is the same `min(DOCK_MIN_SZ, this%)` slice, so the floors of a split's children can
-        // never add up past the split they are in.
-        ...(root || pinned ? {}
+        // never add up past the split they are in. 缩到内容的 split 没有份额可保，也就没有地板：
+        // 一条 34px 的条子旁边那道 96 的地板，正是"它永远缩不下来"的第二个原因。
+        ...(root || pinned || hugMain ? {}
           : axis === 'v' ? { minHeight: `min(${DOCK_MIN_SZ}px, ${floorPct(count)}%)` }
             : { minWidth: `min(${DOCK_MIN_SZ}px, ${floorPct(count)}%)` }),
       }}>
         {live.map(({ k, i }, j) => (
           <React.Fragment key={i}>
-            {j > 0 && <SplitHandle ctx={ctx} axis={d} prev={[...path, live[j - 1].i]} next={[...path, i]} count={live.length} />}
-            <DockBranch node={k} ctx={ctx} axis={d} path={[...path, i]} count={live.length} />
+            {j > 0 && <SplitHandle ctx={ctx} axis={d} prev={[...path, live[j - 1].i]} next={[...path, i]} count={live.length} live={live} />}
+            <DockBranch node={k} ctx={ctx} axis={d} path={[...path, i]} count={live.length} fill={j === fillAt} />
           </React.Fragment>
         ))}
       </div>
@@ -1267,7 +1736,10 @@ export const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
       onDragEnter={onDragOver} onDragOver={onDragOver} onDrop={onDrop}>
       <DockBranch node={ctx.dock.tree} ctx={ctx} axis="v" path={[]} root />
       {ctx.dock.floats.map(f => (
-        <DockWindow key={f.id} ctx={ctx} axis="v" float={f} node={{ t: 'b', ids: [f.id], sel: 0, mode: 'default' }} />
+        // 浮窗的 toolbar 开关存在 float 上（它不在树里），所以这里把它带进合成节点 —— 浮窗就是
+        // 一个 default 块的一扇窗，形状的口径与块里那扇一模一样。
+        <DockWindow key={f.id} ctx={ctx} axis="v" float={f}
+          node={{ t: 'b', ids: [f.id], sel: 0, mode: 'default', tb: f.tb, tbDir: f.tbDir }} />
       ))}
       {/* 落点预览：整页只有这一块。它按**视口坐标**画（见 DockOver），所以块的滚动、裁剪、圆角
           都影响不到它 —— 用户看到的形状，就是松手后会出现的那块地方。 */}

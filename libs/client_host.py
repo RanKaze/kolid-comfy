@@ -80,13 +80,74 @@ def _try_client(url: str, title: str) -> bool:
         return False
 
 
+# 用户偏好（前端 Settings tab 的 user preference）。存仓库 data/sampler/ 下的一份共享文件 ——
+# open_ui 被每个节点的服务器调用，这个偏好必须跨节点可见，不能挂在某个节点实例的配置上。
+PREFS_FILE = Path(__file__).resolve().parents[1] / 'data' / 'sampler' / 'ui_prefs.json'
+# 打包好的桌面客户端（client/build_exe.bat 的产物，仓库根）。"Open With Application" 打开时，
+# KolidUI 没在跑就把这份 exe 拉起来再注入，而不是退回系统浏览器。
+DESKTOP_EXE = Path(__file__).resolve().parents[1] / 'Kolid Desktop.exe'
+
+
+def _load_prefs() -> dict:
+    try:
+        data = json.loads(PREFS_FILE.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def is_open_with_app() -> bool:
+    """Open With Application 偏好的唯一真源（后端侧）。读不到/坏了都按关处理。"""
+    return bool(_load_prefs().get('open_with_app'))
+
+
+def set_open_with_app(on: bool) -> None:
+    try:
+        prefs = _load_prefs()
+        if bool(prefs.get('open_with_app')) == bool(on):
+            return
+        prefs['open_with_app'] = bool(on)
+        PREFS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PREFS_FILE.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception as e:
+        print(f'[kolid] saving ui_prefs failed: {e}', file=sys.stderr)
+
+
+def _launch_desktop() -> bool:
+    """拉起 Kolid Desktop.exe（fire-and-forget）。exe 在不在/起不起得来都不抛错。"""
+    if not DESKTOP_EXE.exists():
+        print(f'[kolid] Kolid Desktop.exe not found: {DESKTOP_EXE}', file=sys.stderr)
+        return False
+    try:
+        if os.name == 'nt':
+            os.startfile(str(DESKTOP_EXE))  # noqa: S606 — 用户明确要求的打开方式
+            return True
+        import subprocess
+        subprocess.Popen([str(DESKTOP_EXE)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception as e:
+        print(f'[kolid] launching Kolid Desktop failed: {e}', file=sys.stderr)
+        return False
+
+
 def open_ui(url: str, title: str = None) -> None:
-    """打开节点 UI:Kolid Client 在跑就注入其标签页,否则用系统浏览器。永不抛错。"""
+    """打开节点 UI。原逻辑：Kolid Client 在跑就注入其标签页，否则用系统浏览器。
+    Open With Application 偏好打开时：客户端不在就把 Kolid Desktop.exe 拉起来（打包的
+    解释器要几秒初始化，轮询发现文件最多 8s），等它起不来再退回浏览器。永不抛错。"""
     title = title or _guess_title(url)
     started = time.time()
     if _try_client(url, title):
         print(f'[kolid] {title} injected into KolidUI ({time.time() - started:.2f}s)')
         return
+    if is_open_with_app() and _launch_desktop():
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            time.sleep(0.4)
+            if _try_client(url, title):
+                print(f'[kolid] {title} injected into KolidUI after launch '
+                      f'({time.time() - started:.2f}s)')
+                return
+        print('[kolid] Kolid Desktop did not come up in time, falling back to browser')
     print(f'[kolid] KolidUI not found, opening in browser: {url}')
     try:
         webbrowser.open(url)
