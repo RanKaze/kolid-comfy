@@ -39,12 +39,14 @@ function defineAttrType(spec) {
 // 与标签之外没有第二种规矩。
 const ATTR_KINDS = {
     surface: {
-        init: () => ({ surface: null }),
+        // frameTrack = 这一枚面在视频模式下改从**哪条视频轨的当前帧**取 ('' = 就用画好的这张)。
+        // 它是记录自己的财富,所以跟面一起进快照/存档/复制 —— 读不到轨道时按"没有帧"处理,不改这张面。
+        init: () => ({ surface: null, frameTrack: '' }),
         // 老字段有面才立记录 (见上面"有 attribute 才有数据")。
         fromLegacy: raw => (raw ? { surface: raw } : null),
-        snap: r => ({ surface: r.surface }),
-        load: raw => ({ surface: raw.surface || null }),
-        clone: (r, dup) => ({ surface: dup(r.surface) }),
+        snap: r => (r.frameTrack ? { surface: r.surface, frameTrack: r.frameTrack } : { surface: r.surface }),
+        load: raw => ({ surface: raw.surface || null, frameTrack: typeof raw.frameTrack === 'string' ? raw.frameTrack : '' }),
+        clone: (r, dup) => ({ surface: dup(r.surface), frameTrack: r.frameTrack || '' }),
         // chip = 条带上那颗缩略图。它只负责**画**,节点本身由 blend_node 的那颗 chip 造好交进来 ——
         // 因为"有没有这颗 chip"归条带管,"这颗 chip 上摆什么"才归 attribute 管。
         // 蒙版与贴片画的是同一件事 (把自己那张面按图层网格的比例摆进这块小画布),规矩只有一处不同:
@@ -303,7 +305,7 @@ function remapAttrFaces(l, fn) {
         const shared = layers.some(o => o !== l && attrRefList(o).indexOf(r.id) >= 0)
             || !!(cb && attrRefList(cb).indexOf(r.id) >= 0);
         if (shared) {
-            const own = newAttrRecord(r.type, { surface: next });
+            const own = newAttrRecord(r.type, { surface: next, frameTrack: r.frameTrack || '' });
             refs[i] = own.id;
             done.set(r.id, own.id);
             markAttrPainted(own);

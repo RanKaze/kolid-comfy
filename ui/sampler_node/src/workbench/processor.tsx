@@ -81,7 +81,14 @@ const ProcessorBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
         <label style={wbStyles.ctrlLabel}>Interface</label>
         <select style={wbStyles.select} value={none ? '' : String(p.choice)} disabled={none}
           title="Which processor-mode interface to run — the list is every interface with Processor mode on in the Interface tab"
-          onChange={e => send('processor-interface', Number(e.target.value) || 0)}>
+          onChange={e => {
+            const i = Number(e.target.value);
+            if (!Number.isFinite(i) || i < 0 || i >= p.names.length) return;
+            // 发身份而不是位置：位置随开关 Processor 模式的接口增删会漂，名字会撞，包下标不会。
+            const index = p.indices[i];
+            send('processor-interface',
+              Number.isFinite(index) && index >= 0 ? { index, name: p.names[i] } : i);
+          }}>
           {none
             ? <option value="">— none —</option>
             : p.names.map((name, i) => (

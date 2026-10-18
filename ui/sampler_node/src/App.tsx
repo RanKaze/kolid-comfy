@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import EditPhase from './components/EditPhase';
 import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendUiPayloads, BlendUiSend, BlendPen } from './types';
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
-import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
+import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendAttrOpen, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUi, setBlendUi } from './workbench/store';
 import { ProbePanel } from './debug';
 
@@ -106,6 +106,17 @@ const fxOpenOf = (v: unknown): BlendFxOpenStep | null => {
   };
 };
 
+/** 面 attribute 的参数面：坐标两样落不齐就当"笔尖没落在面上"，那一格照旧摆空态 —— 一块没有主人的
+ *  下拉比一块不摆的下拉更糟。`trackId` 缺字段回 ''（= 用画好的面），这是页面那份记录的默认。 */
+const attrOpenOf = (v: unknown): BlendAttrOpen | null => {
+  if (!v || typeof v !== 'object') return null;
+  const x = v as Record<string, unknown>;
+  const layerId = fxNum(x.layerId);
+  const attrId = fxStr(x.attrId);
+  if (!layerId || !attrId) return null;
+  return { layerId, attrId, type: fxStr(x.type), label: fxStr(x.label), trackId: fxStr(x.trackId) };
+};
+
 /** Processor 那一格的描述符：一行一行读回来，读不出形状的行就丢掉 —— 摆一行找不到落点的控件比少一行更糟。
  *  候选（来源 / 落位 / 参数枚举）同样逐枚读：值和短名缺一样就丢那一枚，别摆一条点了什么都不发生的按钮。 */
 const procChoicesOf = (v: unknown): BlendProcChoice[] => {
@@ -120,10 +131,24 @@ const procChoicesOf = (v: unknown): BlendProcChoice[] => {
   });
 };
 const procUiOf = (v: unknown): BlendProcessorUi => {
-  if (!v || typeof v !== 'object') return { names: [], choice: -1, inputs: [], params: [], outputs: [] };
+  if (!v || typeof v !== 'object') return { names: [], indices: [], choice: -1, inputs: [], params: [], outputs: [] };
   const x = v as Record<string, unknown>;
-  const names = (Array.isArray(x.names) ? x.names : []).filter((n): n is string => typeof n === 'string');
-  const choice = typeof x.choice === 'number' && Number.isFinite(x.choice) ? Math.round(x.choice) : -1;
+  // names / indices 平行读：名字挡掉非字符串，下标就跟着名字走，绝不各自 filter（错位比缺一枚更糟）。
+  const rawNames = Array.isArray(x.names) ? x.names : [];
+  const rawIndices = Array.isArray(x.indices) ? x.indices : [];
+  const names: string[] = [];
+  const indices: number[] = [];
+  rawNames.forEach((n, i) => {
+    if (typeof n !== 'string') return;
+    names.push(n);
+    const idx = rawIndices[i];
+    indices.push(typeof idx === 'number' && Number.isFinite(idx) ? Math.round(idx) : -1);
+  });
+  // 页面给的 choice 是这份列表里的位置；空表恒为 -1，越界就落回第一枚 —— 受控 select 的 value
+  // 指向不存在的 option 时浏览器显示空白，比落回第一枚更像"切换失败"。
+  let choice = typeof x.choice === 'number' && Number.isFinite(x.choice) ? Math.round(x.choice) : -1;
+  if (!names.length) choice = -1;
+  else if (choice < 0 || choice >= names.length) choice = 0;
   const inputs: BlendProcInRow[] = (Array.isArray(x.inputs) ? x.inputs : []).flatMap((r: unknown) => {
     if (!r || typeof r !== 'object') return [];
     const o = r as Record<string, unknown>;
@@ -171,7 +196,7 @@ const procUiOf = (v: unknown): BlendProcessorUi => {
       options, cur: typeof o.cur === 'string' ? o.cur : '',
     }];
   });
-  return { names, choice, inputs, params, outputs };
+  return { names, indices, choice, inputs, params, outputs };
 };
 
 /** Geometry 那一格的快照：一枚记录的世界形状 + 舞台参考图。位置 / 四元数 / 颜色三样里缺一样就把
@@ -1265,6 +1290,8 @@ const App: React.FC = () => {
           // 绑没绑，判据全在页面），这一侧只按 kind 画控件。读不出坐标就当没摊开 —— 头部那颗按钮不该
           // 亮着，而一块没有主人的面板比一块不摆的面板更糟。
           fx: { bypass: ui.fx?.bypass === true, wand: str(ui.fx?.wand), open: fxOpenOf(ui.fx?.open) },
+          // 笔尖落在面 attribute 上时的参数面（Frame source）：坐标落不齐就当没落在面上。
+          attrOpen: attrOpenOf(ui.attrOpen),
           // Add 菜单里那条 raster 偏好的勾：同一句读法 —— 缺字段就是没翻开过，不是翻开。
           rasterDrop: ui.rasterDrop === true,
           // `+` 那口菜单的条目表：读不出数组就是空表（那一格菜单一条都不摆），条目里少了名字或那句说明

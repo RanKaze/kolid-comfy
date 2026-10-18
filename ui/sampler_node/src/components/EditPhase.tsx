@@ -831,6 +831,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       onBlendUiCommand('layer-set', { key: '' });
     }
   }, [vidMode, vidLayerKey, onBlendUiCommand]);
+  // 逐帧合成那条边界：取帧结果（ImageBitmap）转交给工作台页面，回图同样只认这一个 window。
+  const blendWindow = useCallback(() => blendIframeRef.current?.contentWindow ?? null, [blendIframeRef]);
+  const blendPost = useCallback((msg: unknown, transfer?: Transferable[]) => {
+    const win = blendIframeRef.current?.contentWindow;
+    if (!win) return false;
+    win.postMessage(msg, '*', transfer);
+    return true;
+  }, [blendIframeRef]);
   const vidCtl: VidController = useMemo(() => ({
     project: vidProject, transport: vidTransport, playing: vidPlaying, pps: vidPps,
     staging, update: vidUpdate, seek: vidSeek, setPlaying: setVidPlaying, setPps: setVidPps,
@@ -841,7 +849,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       setVidLayerKey(key);
       onBlendUiCommand('layer-set', { key });
     },
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, onBlendUiCommand]);
+    blendPost, blendWindow,
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, onBlendUiCommand, blendPost, blendWindow]);
   // 页面存档照旧跟活跃文档的那份走（刷新后的起手工程；.cud 才是随文档走的正身）。
   useEffect(() => {
     const t = setTimeout(() => saveVidProject(vidProject), 400);
@@ -874,12 +883,18 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const setVidFps = useCallback((v: number) => {
     vidUpdate(proj => (proj.fps === clampFps(v) ? proj : { ...proj, fps: clampFps(v) }), 'Set frame rate');
   }, [vidUpdate]);
+  // 面 attribute 的 Frame source 下拉要挑轨道：只列视频轨（音频轨没有帧可取）。轨道数组的顺序就是
+  // 时间线的上下序，所以照原样递过去 —— 下拉里的次序与时间线看见的是同一个。
+  const vidTrackList = useMemo(
+    () => vidProject.tracks.filter(t => t.kind === 'video').map(t => ({ id: t.id, name: t.name })),
+    [vidProject.tracks],
+  );
   const wbHost = useMemo(() => ({
     staging, blendPreview, guidanceCard, stageUpload, stageRemove,
     layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock },
-    video: { mode: vidMode, fps: vidProject.fps, setFps: setVidFps },
+    video: { mode: vidMode, fps: vidProject.fps, setFps: setVidFps, tracks: vidTrackList },
   }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock,
-    vidMode, vidProject.fps, setVidFps]);
+    vidMode, vidProject.fps, setVidFps, vidTrackList]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
   // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
   // 所以：**空列表在启动期是歧义的**，要等它至少说过一次"我有文档"，此后再说空才算关闭。

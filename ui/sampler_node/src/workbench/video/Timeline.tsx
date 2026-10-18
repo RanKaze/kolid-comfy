@@ -238,7 +238,9 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
       vid.update(proj => splitClip(proj, clip.id, timeAt(e.clientX), !e.altKey), 'Split clip');
       return;
     }
-    if (mode === 'move') { setSel(clip.id); vid.focusClip(clip); }
+    // 点主体或拉边都算"动这一段"：选中它，并把 Layers 窗切到它那一套（视频段 = 回到主图层集）。
+    setSel(clip.id);
+    vid.focusClip(clip);
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 指针已失活/合成事件：不挡手势 */ }
     dragRef.current = { mode, id: clip.id, x0: e.clientX, start0: clip.start };
   };
@@ -710,6 +712,9 @@ const Clip: React.FC<{
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      // 片段上按下已经选中它了；click / dblclick 别冒泡到 lane —— 那里"点空白"会清选中、双击会再造一段。
+      onClick={e => e.stopPropagation()}
+      onDoubleClick={e => e.stopPropagation()}
       title={`${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}`}
       style={{
         position: 'absolute', left: c.start * pps, width: Math.max(8, c.duration * pps), top: 3, bottom: 3,

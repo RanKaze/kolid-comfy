@@ -141,6 +141,11 @@ export type VidController = {
   seek: (t: number) => void;
   setPlaying: (v: boolean) => void;
   setPps: (v: number) => void;
+  /** 给 Blend 页发消息（逐帧合成的取帧/回图都走这条边界，转交的是 ImageBitmap）。
+   *  返回 false = 那个 window 此刻不在（消息没发出去，调用方得自己收掉 transferable）。 */
+  blendPost: (msg: unknown, transfer?: Transferable[]) => boolean;
+  /** Blend 页的 window —— 回图只认它，别处的同名消息一概不收。 */
+  blendWindow: () => Window | null;
 };
 
 const MIN_CLIP = 0.05;   // 片段/裁剪的最短寿命（s）
@@ -200,16 +205,19 @@ export const trimClip = (p: VidProject, id: string, edge: 'l' | 'r', t: number, 
     ...p,
     clips: p.clips.map(c => {
       if (!ids.has(c.id)) return c;
+      // Layer 段没有源文件：两条边都不受"源长"限制（它的 srcDuration 只是造段时的默认 5s），
+      // 只受时间线 0 与 MIN_CLIP 约束 —— 否则永远拉不过 5 秒。
+      const timeless = c.kind === 'layer';
       if (edge === 'l') {
         // 左边：start 最多退到 start-offset（源的开头），最多进到 start+duration-MIN。
-        const lo = Math.max(0, c.start - c.offset);
+        const lo = timeless ? 0 : Math.max(0, c.start - c.offset);
         const hi = c.start + c.duration - MIN_CLIP;
         const ns = Math.min(hi, Math.max(lo, t));
         const d = ns - c.start;
-        return { ...c, start: ns, duration: c.duration - d, offset: Math.max(0, c.offset + d) };
+        return { ...c, start: ns, duration: c.duration - d, offset: timeless ? 0 : Math.max(0, c.offset + d) };
       }
       // 右边：end 最多到源的结尾（offset + srcDuration），最短 MIN_CLIP。
-      const maxEnd = c.start + (c.srcDuration - c.offset);
+      const maxEnd = timeless ? Infinity : c.start + (c.srcDuration - c.offset);
       const ne = Math.min(Math.max(c.start + MIN_CLIP, t), maxEnd);
       return { ...c, duration: Math.max(MIN_CLIP, ne - c.start) };
     }),

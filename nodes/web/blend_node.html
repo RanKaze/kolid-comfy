@@ -329,6 +329,14 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 </style>
 </head>
 <body>
+<!-- 逐帧合成用：面 attribute 的 Frame source 指到一条视频轨时，那一帧当蒙版用 —— 亮度搬进 alpha
+     （白 = 覆盖），颜色本身不参与（蒙版只读 alpha）。走 SVG filter 而不是逐像素 getImageData：
+     后者每帧要读回一整张画布，主线程扛不住。 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <filter id="vidFrameLumaAlpha" color-interpolation-filters="sRGB">
+        <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.299 0.587 0.114 0 0"/>
+    </filter>
+</svg>
 <div id="mainArea">
     <div id="canvasColumn">
         <input type="file" id="importFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg,.psd,video/*,.mp4,.m4v,.mov,.webm,.mkv,.avi,audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" multiple hidden>
@@ -2245,6 +2253,10 @@ const blendUiState = {
     // `wand` 是这颗按钮的画法和条带上那枚链 chip 同一个作者（fxWandSvg 是 fx 那一侧的图标库）：
     // 一次赋值就不再变，所以 queueBlendUi 的等值去重只会把它送出去一回。
     fx: { bypass: false, wand: '', open: null },
+    // 笔尖此刻落在那一枚**面** attribute 上（decal / mask）。链那一步展开时 `fx.open` 先占参数面；
+    // 没有链步骤展开时，Effect Parameters 那一格摆的就是这一枚的 Frame source 下拉。
+    // `trackId` 是记录自己的 `frameTrack`（'' = 用画好的面），轨道列表归宿主（它在管 Video 工程）。
+    attrOpen: null,
     // Add 菜单里那颗「往后的图是 raster 还是 smart object」的持久偏好读数。它是页面自己的变量，
     // syncRasterToggleUI 是唯一 mirror 它的地方 —— 宿主菜单里那条勾亮的就是这一句。
     rasterDrop: false,
@@ -2282,27 +2294,38 @@ const blendUiState = {
 };
 let blendUiFrame = 0;
 let blendUiSent = '';
+function sendBlendUiNow() {
+    // 这两格是唯一需要像素的面：先把"要不要重编那几张"问过一遍，再去重。
+    // 历史那几张要先编（它们只在进栈那一趟编一次，编法见 syncHistoryThumbs），再让面通道按
+    // 可见区与预算决定这一帧发哪几张。
+    syncHistoryThumbs();
+    syncMaskStill();
+    syncStackFaces();
+    // Alt+悬浮那一张是在闸门外现编的（syncStackFaces 每帧先把增量清空、再按可见区与预算重算），
+    // 所以合并排在它之后 —— 否则这一帧刚要发的那张放大图会被自己清掉。
+    if (hoverPending) { blendUiState.faces[hoverPending.key] = hoverPending.url; hoverPending = null; }
+    const json = JSON.stringify(blendUiState);
+    if (json === blendUiSent) return;
+    blendUiSent = json;
+    window.parent.postMessage({ type: 'blend-ui', ...blendUiState }, '*');
+    // `faces` 是增量：这一帧给出去的那几张，下一帧的快照里不该再有 —— 留着就是把同一批 PNG
+    // 每帧重送一遍。宿主按键合并，所以清掉的只是这一份待发快照，不是两边任何一份真相。
+    for (const k in blendUiState.faces) delete blendUiState.faces[k];
+}
 function queueBlendUi() {
     if (blendUiFrame || window.parent === window) return;
     blendUiFrame = requestAnimationFrame(() => {
         blendUiFrame = 0;
-        // 这两格是唯一需要像素的面：先把"要不要重编那几张"问过一遍，再去重。
-        // 历史那几张要先编（它们只在进栈那一趟编一次，编法见 syncHistoryThumbs），再让面通道按
-        // 可见区与预算决定这一帧发哪几张。
-        syncHistoryThumbs();
-        syncMaskStill();
-        syncStackFaces();
-        // Alt+悬浮那一张是在闸门外现编的（syncStackFaces 每帧先把增量清空、再按可见区与预算重算），
-        // 所以合并排在它之后 —— 否则这一帧刚要发的那张放大图会被自己清掉。
-        if (hoverPending) { blendUiState.faces[hoverPending.key] = hoverPending.url; hoverPending = null; }
-        const json = JSON.stringify(blendUiState);
-        if (json === blendUiSent) return;
-        blendUiSent = json;
-        window.parent.postMessage({ type: 'blend-ui', ...blendUiState }, '*');
-        // `faces` 是增量：这一帧给出去的那几张，下一帧的快照里不该再有 —— 留着就是把同一批 PNG
-        // 每帧重送一遍。宿主按键合并，所以清掉的只是这一份待发快照，不是两边任何一份真相。
-        for (const k in blendUiState.faces) delete blendUiState.faces[k];
+        sendBlendUiNow();
     });
+}
+// 动作回执不等下一帧。宿主那几颗受控控件（尤其 Processor 的 interface 枚举）的值只认这份快照：
+// 平时 rAF 一帧后就到，可 iframe 一被节流/不绘制，回调就压着不跑，控件于是一直停在旧值上 ——
+// 用户看到的就是"选了又弹回去 / 切不过去"。动作改完状态就立刻播，别把回执挂在渲染帧上。
+function flushBlendUi() {
+    if (window.parent === window) return;
+    if (blendUiFrame) { cancelAnimationFrame(blendUiFrame); blendUiFrame = 0; }
+    sendBlendUiNow();
 }
 
 // A readout only takes up sidebar space while it has something to say — 现在这句判断交给 React。
@@ -3949,6 +3972,174 @@ function render() {
     drawOverlay();
     schedulePreview();
     scheduleGuidanceCard();
+    // 图层像素变了，监视器上那一帧也要跟着变 —— 宿主只有在播放头动的时候才会发新包，
+    // 暂停着画图的时候（最常见）这里就是唯一的更新口。
+    scheduleVidFrameComposite();
+}
+
+// ==================== Video 逐帧合成 ====================
+// Layer 段压在最上层的那几帧，监视器的画面不再是任何一条视频轨：它是
+//   「下方第一条视频轨的当前帧 + 这一段的图层集」合成出来的图。
+// 分两半：宿主取帧（它才摸得到 <video>），这一页合成（图层与特效链都在这儿）。一来一回两包：
+// 宿主发 { t, layerKey, baseTrackId, sources:[{trackId, bitmap}] }，这一页回一张 ImageBitmap。
+// 帧的替换只发生在**折叠那一趟**里：面 attribute 的 surface 临时换成该轨当前帧（decal 按 contain
+// 铺满自己的网格；mask 把亮度搬进 alpha），折完原样放回 —— 缓存/特效链/Stash 的读法一个字不改。
+const VID_FRAME_LUMA_FILTER = 'url(#vidFrameLumaAlpha)';
+let vidFramePacket = null;          // { reqId, t, layerKey, baseTrackId, sources:Map, bitmaps:[] }
+let vidFrameRaf = 0;
+let vidFrameCanvas = null;
+let vidFrameCtx = null;
+const vidFrameSurfaces = new Map(); // 记录 id -> 临时面（同一枚共享记录只换一次）
+
+// 这一包说的图层集：就是当前这套（globals）或者 Map 里那一套（还没切过去的那一段）。
+function vidFrameWorkLayers(key) {
+    if (!key || key === activeLayerSet) return stackLayers(WORK_STACK);
+    const s = layerSets.get(key);
+    if (!s) return [];
+    return (s.layers || []).filter(l => stackOf(l) === WORK_STACK);
+}
+
+function vidFrameSource(sources, trackId) {
+    return trackId ? (sources.get(trackId) || null) : null;
+}
+
+// 一帧铺进目标画布：contain（短边贴满，多出来的两边透明）—— 与监视器上 object-fit:contain
+// 同一读法，也与"底图就是这一帧"的直觉一致。
+function drawVidFrameContain(ctx, src, w, h) {
+    const sw = src.width || 0, sh = src.height || 0;
+    if (!sw || !sh) return;
+    const s = Math.min(w / sw, h / sh);
+    const dw = Math.max(1, sw * s), dh = Math.max(1, sh * s);
+    ctx.drawImage(src, (w - dw) / 2, (h - dh) / 2, dw, dh);
+}
+
+function vidFrameSurfaceFor(rec, w, h) {
+    let cv = vidFrameSurfaces.get(rec.id);
+    if (!cv || cv.width !== w || cv.height !== h) {
+        cv = document.createElement('canvas');
+        cv.width = Math.max(1, w);
+        cv.height = Math.max(1, h);
+        vidFrameSurfaces.set(rec.id, cv);
+    }
+    return cv;
+}
+
+function composeVidFrame(packet) {
+    if (!packet || packet !== vidFramePacket) return;
+    if (!canvasW || !canvasH) { replyVidFrame(packet.reqId, null); return; }
+    if (!vidFrameCanvas) {
+        vidFrameCanvas = document.createElement('canvas');
+        vidFrameCtx = vidFrameCanvas.getContext('2d');
+    }
+    if (!vidFrameCtx) { replyVidFrame(packet.reqId, null); return; }
+    if (vidFrameCanvas.width !== canvasW || vidFrameCanvas.height !== canvasH) {
+        vidFrameCanvas.width = canvasW;
+        vidFrameCanvas.height = canvasH;
+    }
+    const out = vidFrameCtx;
+    resetCtx(out);
+    out.clearRect(0, 0, canvasW, canvasH);
+    // 底图：脚下第一条视频轨的当前帧。没有就是透明（图层自己落在虚空上）。
+    const base = vidFrameSource(packet.sources, packet.baseTrackId);
+    if (base) drawVidFrameContain(out, base, canvasW, canvasH);
+
+    const stack = vidFrameWorkLayers(packet.layerKey);
+    const touched = [];
+    const used = new Set();
+    for (const l of stack) {
+        if (!l || !l.visible || !l.img) continue;
+        const nat = nativeSize(l.img);
+        for (const r of attrRecordsOf(l)) {
+            if (!r || r.chain || !r.frameTrack || !attrEnabled(r)) continue;
+            const spec = ATTR_TYPES[r.type];
+            if (!spec || spec.kind !== 'surface') continue;
+            if (used.has(r.id)) continue;
+            used.add(r.id);
+            const gw = (r.surface && r.surface.width) ? r.surface.width : nat.w;
+            const gh = (r.surface && r.surface.height) ? r.surface.height : nat.h;
+            const cv = vidFrameSurfaceFor(r, gw, gh);
+            const g = cv.getContext('2d');
+            resetCtx(g);
+            g.clearRect(0, 0, cv.width, cv.height);
+            const src = vidFrameSource(packet.sources, r.frameTrack);
+            if (src) {
+                if (r.type === 'mask') g.filter = VID_FRAME_LUMA_FILTER;
+                drawVidFrameContain(g, src, cv.width, cv.height);
+                if (r.type === 'mask') g.filter = 'none';
+            }
+            touched.push({ r, had: Object.prototype.hasOwnProperty.call(r, 'surface'), was: r.surface });
+            // 取不到帧 = 这一枚这一趟什么都不出（蒙版也不裁）：与"停用一步"同一个结果。
+            r.surface = src ? cv : null;
+        }
+    }
+    // 帧像素换了 ⇒ 折叠缓存必须重算。
+    for (const t of touched) markAttrPainted(t.r);
+    try {
+        // 从最下面那层往上画；guidances 不进监视器（它们只属于 Guidance 卡）。
+        for (let i = stack.length - 1; i >= 0; i--) drawLayer(stack[i], out);
+    } finally {
+        // 原样放回，并再 +1 代次：折叠缓存里此刻留的是**临时面**的身份，下一次正片重算
+        // 必须认得出那份结果不能复用。
+        for (const t of touched) {
+            if (t.had) t.r.surface = t.was; else delete t.r.surface;
+            markAttrPainted(t.r);
+        }
+    }
+    replyVidFrame(packet.reqId, vidFrameCanvas);
+}
+
+function replyVidFrame(reqId, canvas) {
+    if (!canvas) {
+        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null }, '*');
+        return;
+    }
+    createImageBitmap(canvas).then(bmp => {
+        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: bmp }, '*', [bmp]);
+    }, () => {
+        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null }, '*');
+    });
+}
+
+// 一帧最多合成一次：播放时包按 fps 来，重绘（画笔/参数）又会在同一帧里喊一次 —— 都并到这一口。
+function scheduleVidFrameComposite() {
+    if (!vidFramePacket || vidFrameRaf) return;
+    vidFrameRaf = requestAnimationFrame(() => {
+        vidFrameRaf = 0;
+        composeVidFrame(vidFramePacket);
+    });
+}
+
+function handleVidFrameMessage(d) {
+    const prev = vidFramePacket;
+    const sources = new Map();
+    const bitmaps = [];
+    const list = Array.isArray(d.sources) ? d.sources : [];
+    for (const s of list) {
+        if (!s || !s.trackId || !s.bitmap) continue;
+        if (!s.bitmap.width || !s.bitmap.height) continue;
+        sources.set(String(s.trackId), s.bitmap);
+        bitmaps.push(s.bitmap);
+    }
+    // 上一包的源帧到这里就没用了（临时面已经把像素抄进自己的画布）。
+    if (prev) for (const b of prev.bitmaps) { try { b.close(); } catch (e) { /* gone */ } }
+    vidFramePacket = {
+        reqId: d.reqId | 0,
+        t: +d.t || 0,
+        layerKey: typeof d.layerKey === 'string' ? d.layerKey : '',
+        baseTrackId: typeof d.baseTrackId === 'string' ? d.baseTrackId : null,
+        sources,
+        bitmaps,
+    };
+    scheduleVidFrameComposite();
+}
+
+function vidFrameOff() {
+    const prev = vidFramePacket;
+    vidFramePacket = null;
+    if (vidFrameRaf) { cancelAnimationFrame(vidFrameRaf); vidFrameRaf = 0; }
+    if (prev) for (const b of prev.bitmaps) { try { b.close(); } catch (e) { /* gone */ } }
+    vidFrameSurfaces.clear();
+    if (vidFrameCanvas) { vidFrameCanvas.width = 0; vidFrameCanvas.height = 0; }
 }
 
 // ==================== The Guidance card ====================
@@ -4653,6 +4844,17 @@ function attrKindsOf() {
     });
 }
 
+// 笔尖名下那一枚面 attribute 的参数描述符。只认选中的这一层 + 当前点名的那一枚（paintRef），
+// 与画笔的落点是同一份真值源；没有面、或者笔落在 Mask 层上，就没有参数可摊。
+function attrOpenModel() {
+    const l = getSelected();
+    const r = l ? paintRecordOf(l) : null;
+    if (!l || !r || attrRefList(l).indexOf(r.id) < 0) return null;
+    const spec = ATTR_TYPES[r.type];
+    if (!spec || spec.kind !== 'surface') return null;
+    return { layerId: l.id, attrId: r.id, type: r.type, label: spec.label, trackId: r.frameTrack || '' };
+}
+
 function syncStackRows() {
     blendUiState.stacks.layers = stackLayers(WORK_STACK).map(l => layerRowModel(l));
     blendUiState.stacks.guidances = stackLayers(GUIDANCE_STACK).map(l => layerRowModel(l));
@@ -4668,6 +4870,9 @@ function syncStackRows() {
     // 一趟最多一步展开（fxOpenId 那一个变量），所以这一格永远是一句描述符而不是一摞 —— 快照里因此
     // 不会同时躺着九家的行，只有当前那一步的。
     blendUiState.fx.open = fxOpenStepModel();
+    // 链没有展开时，参数面换成当前笔尖那一枚面的参数（Frame source）。每次 syncStackRows 都重问一遍：
+    // 换层、换 chip、换轨道都走同一条播报口。
+    blendUiState.attrOpen = attrOpenModel();
 }
 
 // ---- 面（像素）通道 ----
@@ -10939,6 +11144,7 @@ async function buildCudBlob() {
     const attrTable = [];
     const attrSeen = new Map();          // 记录 guid -> 入档那条 (空面记成 null = 不入档)
     // 没有像素的面不入档:空蒙版与"没装蒙版"按规矩是同一件事,写进去就等于往文件里塞一枚幽灵 attribute。
+    // 例外是绑了 Frame source 的那一枚:它的内容来自视频轨,面本身空着也是有意义的 (整枚步骤真的存在)。
     const cudAttrs = l => {
         const out = [];
         for (const r of attrRecordsOf(l)) {
@@ -10965,11 +11171,13 @@ async function buildCudBlob() {
                             box: r.box ? Object.assign({}, r.box) : null, ownsGrid: !!r.ownsGrid } : null;
                     }
                 }
-                else if (r.surface && r.surface.width && r.surface.height)
+                else if ((r.surface && r.surface.width && r.surface.height) || r.frameTrack)
                     e = { id: r.id, type: r.type,
-                        surface: addAsset(r.type, r.surface, r.surface.width, r.surface.height) };
+                        surface: (r.surface && r.surface.width && r.surface.height)
+                            ? addAsset(r.type, r.surface, r.surface.width, r.surface.height) : null };
                 // 停用的那一步要在文件里说得出"停用":稀疏字段,与 snapshotAttrs 同一读法 (缺席=开着)。
                 // 不落这一句的话,重开时折叠会把每一步都跑一遍 —— 关掉的那枚在屏幕上回来。
+                if (e && r.frameTrack) e.frameTrack = r.frameTrack;
                 if (e && !attrEnabled(r)) e.enabled = false;
                 attrSeen.set(r.id, e);
                 if (e) attrTable.push(e);
@@ -11495,8 +11703,11 @@ async function resolveRecAttrs(rec, blobs, cache, mapKeys) {
             if (blob) e.surface = await blobToCanvas(blob);
         } else {
             const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
-            if (blob) {
-                e = { id: key, type: a.type, surface: await blobToCanvas(blob) };
+            const frameTrack = typeof a.frameTrack === 'string' ? a.frameTrack : '';
+            // 绑了 Frame source 的那一枚即使没有面也要立记录 —— 它的画面来自轨道,不是文件里的像素。
+            if (blob || frameTrack) {
+                e = { id: key, type: a.type, surface: blob ? await blobToCanvas(blob) : null };
+                if (frameTrack) e.frameTrack = frameTrack;
                 // 3d 的 ownsGrid 随档走 (老文件没有这个字段 = 老宿主的 true);mask/decal 不认它。
                 if (a.ownsGrid !== undefined) e.ownsGrid = a.ownsGrid !== false;
             }
@@ -12201,7 +12412,30 @@ const UI_COMMANDS = {
     // ---- 条带上每一枚 chip ----
     // 普通点击 = 这一枚 attribute 自己的开法：mask/decal 把笔交给它、effects 开那口链、文字进原位编辑、
     // 方向/姿态钉它的目标、3D 开它的场景 tab。分流住在各类型的 spec.open 里，这一句不替它们决定。
-    'attr-open': v => { const p = uiAttr(v); if (p) ATTR_TYPES[p[1].type].open(p[0], p[1]); },
+    // 面那一类还要把链步骤的参数面收起来：FX Params 一格同一时刻只摆一份参数，笔尖点到面上了，
+    // 那一格就该换成这一枚的 Frame source（attrOpen），而不是继续挂着上一次打开的链步骤。
+    'attr-open': v => {
+        const p = uiAttr(v);
+        if (!p) return;
+        if (ATTR_TYPES[p[1].type].kind === 'surface') fxOpenId = null;
+        ATTR_TYPES[p[1].type].open(p[0], p[1]);
+    },
+    // decal / mask 的 Frame source。`trackId: ''` = 取消绑定（回到画好的那张面）。
+    // 绑定只写记录自己的字段：帧的取用发生在视频模式逐帧合成那一趟，图片/页面两侧都不在这里取帧。
+    'attr-frame-source': v => {
+        const o = uiRow(v);
+        const l = getLayer(Number(o.layerId));
+        const r = l ? attrRecord(String(o.attrId)) : null;
+        if (!l || !r || attrRefList(l).indexOf(r.id) < 0) return;
+        if (ATTR_TYPES[r.type].kind !== 'surface') return;
+        const track = String(o.trackId || '');
+        if ((r.frameTrack || '') === track) return;
+        r.frameTrack = track;
+        markAttrPainted(r);            // 折叠缓存认面身份+代次：绑定换了，这一层要重折
+        refreshLayerPanels();
+        render();
+        pushHistory(null, track ? 'Frame source bound' : 'Frame source cleared');
+    },
     'attr-toggle': v => { const p = uiAttr(v); if (p) toggleAttrStep(p[0], p[1]); },
     'attr-remove': v => { const p = uiAttr(v); if (p) removeAttrFromLayer(p[0], p[1]); },
     'attr-duplicate': v => { const p = uiAttr(v); if (p) shallowDuplicateAttr(p[0], p[1]); },
@@ -12383,12 +12617,30 @@ const UI_COMMANDS = {
     // Processor：换 interface / 挑来源落位 / 挑工作区条目 / 拧一口参数。每一句都落回页面那三样真值源，
     // 再重拼一次描述符播出去 —— 换源可能带出或收起 staging 子行，所以每一次都要重拼。
     'processor-interface': v => {
-        const n = Number(v);
-        if (Number.isFinite(n) && n >= 0 && n < processorList.length) {
-            processorChoice = n;
-            processorChoiceName = processorList[n].name;   // 名字才是真值，序号只是这一版列表的派生
-            syncProcessorUI();
+        // 宿主发的是这枚接口的身份：package 下标（processorList[].index，稳定）+ 名字。以前只发
+        // "这份列表里的第几项"—— 列表成员随 Processor 开关增删，位置就漂了：宿主手里那份旧列表的
+        // 第 2 项落到这一页新列表的第 2 项上，正好是另一枚接口，于是"选了 A 却跑 B"。名字单独也能
+        // 认回（换过包、下标变了）；两个都对不上（那枚已被摘掉）就保持原选，再重播一次让宿主对齐。
+        const o = v && typeof v === 'object' ? v : { pos: Number(v) };
+        let n = -1;
+        if (typeof o.index === 'number' && Number.isFinite(o.index)) {
+            n = processorList.findIndex(p => p.index === o.index
+                && (typeof o.name !== 'string' || !o.name || p.name === o.name));
         }
+        if (n < 0 && typeof o.name === 'string' && o.name) {
+            n = processorList.findIndex(p => p.name === o.name);
+        }
+        if (n < 0 && Number.isFinite(o.pos)) {
+            const pos = Number(o.pos);
+            if (pos >= 0 && pos < processorList.length) n = pos;
+        }
+        if (n >= 0) {
+            processorChoice = n;
+            processorChoiceName = processorList[n].name;
+            processorChoiceIndex = processorList[n].index;
+        }
+        syncProcessorUI();
+        flushBlendUi();      // 回执立刻走：宿主那颗 select 不该等下一帧
     },
     'processor-pick': v => {
         const p = processorCurrent(); if (!p) return;
@@ -12556,9 +12808,13 @@ function addStagingAsLayer(id, stack) {
 // 宿主（sampler App）。
 let processorList = [];            // [{name, index, start_ports, end_ports}] —— 宿主推送
 let processorChoice = -1;          // processorList 下标（派生值），-1 = 还没有可选的
-// 选中项**按名字记**：这份列表的成员会随 Interface 页的 Processor 开关随时增删，
-// 按序号记的话成员一变下标就漂到别的接口上 —— 用户看到的就是"选了这个却跑那个 / 切不过去"。
+// 选中项按**身份**记（package 下标 + 名字）：这份列表的成员会随 Interface 页的 Processor 开关
+// 随时增删，按这份列表的序号记的话成员一变位置就漂到别的接口上 —— 用户看到的就是"选了这个却
+// 跑那个 / 切不过去"。
 let processorChoiceName = '';
+// 同一条真理的第二半：package 下标（processorList[].index）。名字可能撞（两份同名接口），
+// 只按名字认回时永远落在第一份上 —— 有下标在，同名的那几枚才分得开。
+let processorChoiceIndex = -1;
 let processorSel = new Map();      // '<ifaceIndex>:in|out:<port>' -> 枚举值（跨重渲染记住）
 let processorBusy = false;         // 一次 run 在飞，blend-processor-result 收尾
 let processorRunIdx = -1;          // 在飞这次用的 interface（结果按它找目的枚举）
@@ -12657,15 +12913,24 @@ function processorCoverageUrl(surface) {
 // 落值仍是宿主发回来的动作键（见 UI_COMMANDS 那几条），真值源（processorChoice / processorSel /
 // stagingItems）一个字没动 —— 这一句只是把原来那一串 createElement 换成等价的纯数据。
 function syncProcessorUI() {
-    // interface 枚举那一段原来在 renderProcessorPick 里：空表 → -1；否则**按名字认回**选中的那枚，
-    // 名字不在了（那个接口的 Processor 模式被关掉 / 改了名）才回到第一枚。
+    // interface 枚举那一段原来在 renderProcessorPick 里：空表 → -1；否则按**身份**（package 下标 +
+    // 名字）认回选中的那枚 —— 只按名字认，两份同名接口永远落在第一份上；只按下标认，换过包就丢。
+    // 两个都认不回（那个接口已被摘掉）才回到第一枚。位置只是这份列表里的暂时坐标，随成员增删漂移。
     if (!processorList.length) {
         processorChoice = -1;
         processorChoiceName = '';
+        processorChoiceIndex = -1;
     } else {
-        const byName = processorList.findIndex(p => p.name === processorChoiceName);
-        processorChoice = byName >= 0 ? byName : 0;
-        processorChoiceName = processorList[processorChoice].name;
+        let n = -1;
+        if (Number.isFinite(processorChoiceIndex)) {
+            n = processorList.findIndex(p => p.index === processorChoiceIndex
+                && (!processorChoiceName || p.name === processorChoiceName));
+        }
+        if (n < 0 && processorChoiceName) n = processorList.findIndex(p => p.name === processorChoiceName);
+        if (n < 0) n = 0;
+        processorChoice = n;
+        processorChoiceName = processorList[n].name;
+        processorChoiceIndex = processorList[n].index;
     }
     const p = processorCurrent();
     const inputs = [], params = [], outputs = [];
@@ -12747,6 +13012,8 @@ function syncProcessorUI() {
     }
     blendUiState.processor = {
         names: processorList.map(x => x.name),
+        // 名字只是显示；下标才是宿主发回来的身份（同名接口靠它分开）。
+        indices: processorList.map(x => x.index),
         choice: processorChoice,
         inputs, params, outputs,
     };
@@ -12940,6 +13207,8 @@ window.addEventListener('message', event => {
         if (entry && !entry.dirty) { entry.dirty = true; syncDocList(); }
         return;
     }
+    if (d.type === 'blend-vid-frame') { handleVidFrameMessage(d); return; }
+    if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
     if (d.type === 'blend-guidance-republish') {
         // 宿主说图池里那张 Guidance 卡不是我们的了（被别的实例顶掉，或整池换水时被清掉）：
         // 去重的记忆清掉，立刻重发一张自己的。
@@ -12951,6 +13220,8 @@ window.addEventListener('message', event => {
         // Interface tab 的 Processor 开关变了：重填 interface 枚举与端口行。
         processorList = Array.isArray(d.processors) ? d.processors : [];
         syncProcessorUI();
+        // 清单到达也是宿主在等的一份回执：rAF 一被压住，宿主那边的枚举就停在上一份。
+        flushBlendUi();
         return;
     }
     if (d.type === 'blend-processor-result') {

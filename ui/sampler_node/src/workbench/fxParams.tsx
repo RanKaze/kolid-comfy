@@ -1,8 +1,8 @@
 import React, { useRef, useState } from 'react';
 import { useBlendUi } from './store';
 import { wbStyles } from './skin';
-import type { BlendFxCoord, BlendFxOpenStep, BlendFxRow, BlendUiSend } from '../types';
-import type { WorkbenchUnit, WorkbenchUnitProps } from './registry';
+import type { BlendAttrOpen, BlendFxCoord, BlendFxOpenStep, BlendFxRow, BlendUiSend } from '../types';
+import type { WorkbenchHostCtx, WorkbenchUnit, WorkbenchUnitProps } from './registry';
 
 // 特效参数面这一格 = 页面注册表编好的那一串行（快照 `fx.open.rows`），一个 kind 一颗控件。
 // 判据全在页面那一侧：哪几行出现（声明序 + 每行自己的 when + 折叠组的开合）、贴图槽那一行叫什么
@@ -323,13 +323,53 @@ const FxRow = ({ step, row, send }: Base & { row: BlendFxRow }) => {
   }
 };
 
-const FxParamsBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
+/** 面 attribute 的那一行：Frame source。绑了轨道 = 这一枚面的画面改从该轨当前帧取（视频模式下逐帧合成时）；
+ *  留空 = 仍用画好的那张面。绑的轨道被删掉时，下拉里留一条写着 Missing track 的选项 —— 让"绑着一条
+ *  不存在的轨"这件事看得见，而不是把下拉悄悄拨回 Painted surface、下次保存把这个绑定洗掉。 */
+const FrameSourceRow = ({ attr, video, send }: {
+  attr: BlendAttrOpen; video: WorkbenchHostCtx['video']; send: BlendUiSend;
+}) => {
+  const stale = !!attr.trackId && !video.tracks.some(t => t.id === attr.trackId);
+  return (
+    <div style={wbStyles.ctrl}>
+      <label style={wbStyles.ctrlLabel}
+        title="Use the current frame of a video track as this attribute's picture while a Layer track is composited. Painted surface keeps the picture you painted.">
+        Frame source
+      </label>
+      <select style={wbStyles.select} value={attr.trackId}
+        title={stale ? 'The bound video track no longer exists — pick another one or go back to the painted surface'
+          : 'Which video track feeds this attribute its picture'}
+        onChange={e => send('attr-frame-source', { layerId: attr.layerId, attrId: attr.attrId, trackId: e.target.value })}>
+        <option value="" style={{ background: '#1c1c1e', color: '#fff' }}>Painted surface</option>
+        {stale ? (
+          <option value={attr.trackId} style={{ background: '#1c1c1e', color: '#fff' }}>Missing track</option>
+        ) : null}
+        {video.tracks.map(t => (
+          <option key={t.id} value={t.id} style={{ background: '#1c1c1e', color: '#fff' }}>{t.name}</option>
+        ))}
+      </select>
+    </div>
+  );
+};
+
+const FxParamsBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
   const ui = useBlendUi();
   const step = ui.fx.open;
   if (!step) {
+    const attr = ui.attrOpen;
+    if (!attr) {
+      return (
+        <div style={{ padding: 4 }}>
+          <div className="layer-empty">No effect step is open — click a step in a chain to edit its parameters</div>
+        </div>
+      );
+    }
     return (
-      <div style={{ padding: 4 }}>
-        <div className="layer-empty">No effect step is open — click a step in a chain to edit its parameters</div>
+      <div className="fx-params dark-scroll" style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: 4, minWidth: 0 }}>
+        <div style={wbStyles.row} title="The attribute the brush is painting right now">
+          <span className="fx-name">{attr.label || attr.type}</span>
+        </div>
+        <FrameSourceRow attr={attr} video={host.video} send={send} />
       </div>
     );
   }

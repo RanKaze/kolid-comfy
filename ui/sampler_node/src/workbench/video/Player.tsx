@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type VidController, clipAt, fmtTime, vidDuration,
 } from './model';
+import { compositePlanAt, vidFrameAt, VidFrameGrabber, type VidCompositePlan } from './composite';
 import { decodeAudio, vidAudio } from './audio';
 import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame } from './previews';
 
@@ -27,6 +28,25 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
   const dur = vidDuration(p);
   const durRef = useRef(dur);
   durRef.current = dur;
+
+  // ── 逐帧合成（Layer 轨压在最上层的那几帧）──────────────────────────────────────────────
+  // 计划由 compositePlanAt 在 transport 每一次 tick 上现算：命中 layer 段就向工作台页面发一包
+  // 「这一帧的源帧」，页面用那一段自己的图层集合成后回一张图。画面与音频各走各的 —— 主 <video>
+  // 没有被停掉，它现在是底图的取帧器（播放时零额外 seek），声音仍然只从 VidAudio 出来。
+  // `compMode` 只在换段/进出合成那一刻走 React；每一帧的回图直改 canvas，不惊动整页。
+  const compCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const compModeRef = useRef<{ id: string; name: string } | null>(null);
+  const [compMode, setCompMode] = useState<{ id: string; name: string } | null>(null);
+  const [hasComp, setHasComp] = useState(false);
+  const grabberRef = useRef<VidFrameGrabber | null>(null);
+  const liveRef = useRef(true);
+  const vidRef = useRef(vid);
+  vidRef.current = vid;
+  const compReq = useRef({
+    seq: 0, inflight: 0, inFlight: false, key: '',
+    lastReply: 0, pending: null as { plan: VidCompositePlan; t: number } | null,
+  });
+  const requestRef = useRef<(plan: VidCompositePlan | null, t: number, force?: boolean) => void>(() => {});
 
   // 活片段：transport 的订阅者比对 id，只有换段才 setState（React 重渲染是稀罕事）。
   const [activeId, setActiveId] = useState<string | null>(() => clipAt(p, transport.get(), 'video')?.id ?? null);
@@ -76,12 +96,73 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
     vidAudio.start(id, buf, c.offset + (cur - c.start));
   }, [transport]);
 
+  // 一包源帧：逐条抓（主 <video> 优先；其余走隐藏取帧器），同一个 reqId 绑一次回图。
+  // 抓取期间来的新请求只留**最后一包**（pending）—— 中间那些帧已经过时，补发出去也只会让
+  // 监视器落后更多。回图由下面那个 message 监听按 reqId 收。
+  const sendComposite = useCallback(async (plan: VidCompositePlan, q: number) => {
+    const r = compReq.current;
+    r.inFlight = true;
+    const grabber = grabberRef.current ?? (grabberRef.current = new VidFrameGrabber());
+    const main = videoRef.current;
+    const playing = playingRef.current;
+    const sources: { trackId: string; bitmap: ImageBitmap }[] = [];
+    try {
+      for (const src of plan.sources) {
+        const bmp = await grabber.capture(src.clip, q, main, playing);
+        if (!liveRef.current) { bmp?.close(); return; }
+        if (bmp) sources.push({ trackId: src.trackId, bitmap: bmp });
+      }
+      const reqId = ++r.seq;
+      r.inflight = reqId;
+      const sent = vid.blendPost({
+        type: 'blend-vid-frame', reqId, t: q, layerKey: plan.layerKey,
+        baseTrackId: plan.baseTrackId, sources,
+      }, sources.map(s => s.bitmap));
+      if (!sent) sources.forEach(s => s.bitmap.close());
+    } finally {
+      r.inFlight = false;
+      const pend = r.pending;
+      r.pending = null;
+      if (pend && liveRef.current) requestRef.current(pend.plan, pend.t, true);
+    }
+  }, [vid]);
+
+  const requestComposite = useCallback((plan: VidCompositePlan | null, t: number, force = false) => {
+    if (!visible) return;
+    const r = compReq.current;
+    if (!plan) {
+      if (r.key) {
+        r.key = '';
+        r.pending = null;
+        vid.blendPost({ type: 'blend-vid-frame-off' });
+      }
+      return;
+    }
+    const q = vidFrameAt(projectRef.current.fps || 30, t);
+    const key = plan.layer.id + '@' + q;
+    if (!force && key === r.key) return;
+    r.key = key;
+    if (r.inFlight) { r.pending = { plan, t: q }; return; }
+    void sendComposite(plan, q);
+  }, [vid, visible, sendComposite]);
+  requestRef.current = requestComposite;
+
   // ── transport 订阅 ── 读数/scrub 条直改；活片段只在换段时走 React；暂停态的画面跟手。
   useEffect(() => {
     const onTick = (interactive?: boolean) => {
       const t = transport.get();
       if (readRef.current) readRef.current.textContent = fmtTime(t);
-      const c = clipAt(projectRef.current, t, 'video');
+      const proj = projectRef.current;
+      // 这一帧归谁：layer 段在最上 → 交给工作台合成；否则照旧。
+      const plan = compositePlanAt(proj, t);
+      const modeId = plan ? plan.layer.id : null;
+      if ((compModeRef.current?.id ?? null) !== modeId
+        || (plan && compModeRef.current?.name !== plan.layer.name)) {
+        const next = plan ? { id: plan.layer.id, name: plan.layer.name } : null;
+        compModeRef.current = next;
+        setCompMode(next);
+      }
+      const c = clipAt(proj, t, 'video');
       const cid = c?.id ?? null;
       if (cid !== activeIdRef.current) {
         activeIdRef.current = cid;
@@ -93,11 +174,15 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
         //  * 同时把真 <video> 的 currentTime 直接落过去。合流器保证一帧最多一发，
         //    且 Chrome 对"seek 在途又设新值"的处理就是中止旧的改追新的 —— 在途延迟
         //    不累积，画面是**真帧**（全分辨率），不是缩略图的粗步进。
+        // 合成帧（plan 非空）没有缩略条可用：那条条上只有视频帧，盖上去反而把图层合成
+        // 藏掉。此刻画面等页面回图，主 <video> 照样 seek —— 它现在只是底图的取帧器。
         markScrubActivity();               // 后台抽条让路：解码器此刻归主 <video>
         lastScrubAt.current = performance.now();
         const want = Math.max(0, c.offset + (t - c.start));
-        const u = stripFrame(c.src, c.srcDuration, want);
-        if (u) showStrip(u);
+        if (!plan) {
+          const u = stripFrame(c.src, c.srcDuration, want);
+          if (u) showStrip(u);
+        }
         const v = videoRef.current;
         if (v && v.dataset.clipId === c.id && v.readyState >= 1) {
           const end = c.offset + Math.max(c.duration - 0.02, 0.02);
@@ -108,6 +193,7 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
           }
         }
       }
+      requestComposite(plan, t);
     };
     // seek 落定 = 真帧已上屏：撤掉缩略条替身。两个守卫防止拖动中闪替身——
     //  * 在途 seek 的目标仍是"游标此刻该在的位置"（中途完成的旧 seek 不算数）；
@@ -133,7 +219,76 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
     onTick();
     const un = transport.subscribe(onTick);
     return () => { un(); v0?.removeEventListener('seeked', onSeeked); };
-  }, [transport, showStrip, hideStrip]);
+  }, [transport, showStrip, hideStrip, requestComposite]);
+
+  // ── 合成回图 ── 只认 Blend 页那个 window + 当前 reqId。旧包的回图（页面自己也可能在补发）
+  // 到得晚就直接扔掉：监视器永远只摆最新一帧。回图是 ImageBitmap，直接搬进 canvas 的
+  // bitmaprenderer —— 不经过 2D 上下文，也不留一张中间画布。
+  useEffect(() => {
+    const onMsg = (event: MessageEvent) => {
+      if (event.source !== vid.blendWindow()) return;
+      const d = event.data as { type?: string; reqId?: number; bitmap?: ImageBitmap | null } | null;
+      if (!d || d.type !== 'blend-vid-composite') return;
+      const r = compReq.current;
+      const bmp = d.bitmap ?? null;
+      if (typeof d.reqId !== 'number' || d.reqId !== r.inflight) { bmp?.close(); return; }
+      r.lastReply = performance.now();
+      const cv = compCanvasRef.current;
+      if (!cv) { bmp?.close(); return; }
+      if (!bmp) { setHasComp(false); return; }
+      try {
+        cv.width = bmp.width;
+        cv.height = bmp.height;
+        const bctx = cv.getContext('bitmaprenderer');
+        if (bctx) {
+          bctx.transferFromImageBitmap(bmp);
+        } else {
+          const ctx = cv.getContext('2d');
+          if (!ctx) { bmp.close(); return; }
+          ctx.clearRect(0, 0, cv.width, cv.height);
+          ctx.drawImage(bmp, 0, 0);
+          bmp.close();
+        }
+        setHasComp(true);
+      } catch { try { bmp.close(); } catch { /* gone */ } }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, [vid]);
+
+  // 进出合成模式：切走时把那一格藏起来（主 <video> 重新露脸）；切进来时先撤掉拖动替身 ——
+  // 那条条上只有视频帧，盖在合成画面上是错的。
+  useEffect(() => {
+    setHasComp(false);
+    if (compMode) hideStrip();
+  }, [compMode, hideStrip]);
+
+  // 收摊 / 藏起来：告诉页面这一包作废（它清掉缓存的源帧），取帧器也一并拆掉。
+  useEffect(() => {
+    if (visible) return;
+    compReq.current.key = '';
+    vid.blendPost({ type: 'blend-vid-frame-off' });
+  }, [visible, vid]);
+  useEffect(() => () => {
+    liveRef.current = false;
+    compReq.current.key = '';
+    vidRef.current.blendPost({ type: 'blend-vid-frame-off' });
+    grabberRef.current?.dispose();
+    grabberRef.current = null;
+  }, []);
+
+  // 看门狗：合成模式下页面还没回过任何一张图（iframe 刚挂载、消息比监听器早到），
+  // 就按当前帧再要一次。回图正常时它一个请求都不发。
+  useEffect(() => {
+    if (!visible || !compMode) return;
+    const timer = setInterval(() => {
+      const r = compReq.current;
+      if (r.inFlight || !r.key || performance.now() - r.lastReply < 1800) return;
+      const plan = compositePlanAt(projectRef.current, transport.get());
+      if (plan) requestRef.current(plan, transport.get(), true);
+    }, 800);
+    return () => clearInterval(timer);
+  }, [visible, compMode, transport]);
 
   // ── 缩略条预热 ── 当前片段一就位就后台抽条，等用户真拖起来时图已经在手上了。
   useEffect(() => {
@@ -251,19 +406,26 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
       <div data-vid-screen="" style={{ flex: 1, minHeight: 0, position: 'relative', background: '#0d0d0d', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <video ref={videoRef} muted playsInline
           style={{ width: '100%', height: '100%', objectFit: 'contain', display: active ? 'block' : 'none' }} />
+        {/* 逐帧合成的画面：Layer 段压在最上层时，这一格盖住主 <video>（它继续播底图，声音不在这儿）。
+            像素由工作台页面合成后回传，尺寸是文档画布；object-fit 让它按画布比例落在监视器里。 */}
+        <canvas ref={compCanvasRef} data-vid-composite="" aria-hidden="true"
+          style={{
+            position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain',
+            display: compMode && hasComp ? 'block' : 'none', background: '#000', pointerEvents: 'none',
+          }} />
         {/* 拖动途中的画面：缩略条上的一格，盖住 <video> —— 换索引而已，解码器不动。
             常驻节点，src/显隐由 transport 订阅者按 ref 直改（见 showStrip/hideStrip），
             停手对齐完成后撤掉，露出全分辨率的那一帧。 */}
         <img ref={stripImgRef} data-vid-strip="" alt="" decoding="async"
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none', display: 'none' }} />
-        {!active && (
+        {!active && !compMode && (
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.28)', fontSize: 12, textAlign: 'center', padding: 20 }}>
             No clip under the playhead.<br />Drop videos onto the Tracks window below.
           </div>
         )}
-        {active && (
+        {(active || compMode) && (
           <div style={{ position: 'absolute', left: 8, top: 8, padding: '2px 8px', borderRadius: 6, background: 'rgba(0,0,0,0.55)', color: 'rgba(255,255,255,0.8)', fontSize: 10, maxWidth: '70%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {active.name}
+            {compMode ? compMode.name : active?.name}
           </div>
         )}
         {inSet && (

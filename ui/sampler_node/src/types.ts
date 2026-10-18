@@ -568,6 +568,13 @@ export type BlendFxOpenStep = {
 /** 参数面上每一句回发的坐标：哪一层、哪一枚 Effects 容器、链里的第几步。三样缺一就落不到那一步上。 */
 export type BlendFxCoord = { layerId: number; attrId: string; stepId: number };
 
+/** 笔尖此刻落在那一枚**面**（decal / mask）上时，Effect Parameters 那一格摆的就是它的参数：
+ *  Frame source 的绑定与可回发的坐标。`trackId` 是记录自己的 `frameTrack`（'' = 用画好的面）；
+ *  轨道列表归宿主（它在管 Video 工程），不在这一份里。 */
+export type BlendAttrOpen = {
+  layerId: number; attrId: string; type: string; label: string; trackId: string;
+};
+
 /** ---- 工具面板（原来挂在页面侧栏那六格：Text / Geometry / 3D / Pose / Detector / Processor）----
  *  每格正文从这一份快照读、按下去发的是一条动作键 —— 与画布那几格同一套边界，只是这几格的控件比
  *  按钮多一点（滑杆 / 颜色 / 枚举 / 输入框），所以形状也照着那几样的真值源写。 */
@@ -668,11 +675,13 @@ export type BlendProcOutRow = {
   num: number; name: string; hint: string; options: BlendProcChoice[]; cur: string;
 };
 
-/** Processor 那一格的全部状态。`names` 是 interface 枚举（按声明序），`choice` 是它的下标（-1 = 一个
- *  都没有，那一格给一句空态）；三段行由页面按当前 interface 现拼 —— 段为空就不出现（与页面那三句
- *  `if (inPorts.length)` 一字不差）。行里的每一颗控件都是页面那一段 DOM 的等值物。 */
+/** Processor 那一格的全部状态。`names` 是 interface 枚举（按声明序），`indices` 与它平行 —— 每枚接口
+ *  的后端 package 下标，换 interface 时把这个下标连同名字发回去（名字会撞，位置会漂，下标不会）。
+ *  `choice` 是列表里的位置（-1 = 一个都没有，那一格给一句空态）；三段行由页面按当前 interface 现拼 ——
+ *  段为空就不出现（与页面那三句 `if (inPorts.length)` 一字不差）。行里的每一颗控件都是页面那一段 DOM
+ *  的等值物。 */
 export type BlendProcessorUi = {
-  names: string[]; choice: number;
+  names: string[]; indices: number[]; choice: number;
   inputs: BlendProcInRow[]; params: BlendProcParamRow[]; outputs: BlendProcOutRow[];
 };
 
@@ -725,6 +734,9 @@ export type BlendUi = {
    *  `wand` 是这颗按钮的画法等值：它不能由 React 自己抄一份魔棒 SVG（那是第二份真相），所以由页面把
    *  `fxWandSvg()` 的原串放进快照 —— 条带上那枚链 chip 用的是同一个作者，一次赋值就不再变。 */
   fx: { bypass: boolean; wand: string; open: BlendFxOpenStep | null };
+  /** 笔尖落在那一枚面 attribute（decal / mask）上时的参数面。链没有展开时，Effect Parameters 那一格
+   *  摆的就是这一枚的 Frame source 下拉；链展开时 `fx.open` 占位（一次只摊一块参数面）。 */
+  attrOpen: BlendAttrOpen | null;
   /** Layers 那一格 Add 菜单里那条「往后的图是 raster 还是 smart object」的勾。它是页面那一份持久偏好
    *  （`blend.rasterDrop`）的镜像 —— 宿主只管摆这条目与亮这颗勾，翻开与否落在页面那一句里。 */
   rasterDrop: boolean;
@@ -775,6 +787,8 @@ export const EMPTY_BLEND_UI: BlendUi = {
   // 第一条快照没到之前，头部那颗开关是按下与否都还没说过 —— off，魔棒还没有画法可摆（空串就是不画），
   // 参数面也没有一步摊着（open = null 就是"这一列里没人展开"）。
   fx: { bypass: false, wand: '', open: null },
+  // 第一条快照没到之前，笔尖没有落在任何一枚面上 —— 参数面与页面 boot 那一次播报同一个样子。
+  attrOpen: null,
   // 页面的初值是 off（localStorage 没有记过就是 smart object），boot 那一次 syncRasterToggleUI 会把
   // 真值补进快照 —— 在那之前这一格也不该亮着勾。
   rasterDrop: false,
@@ -791,7 +805,7 @@ export const EMPTY_BLEND_UI: BlendUi = {
   // 3D 与 Detector / Processor 一律空态：没有记录 / 没有 detector / 一个 processor interface 都没有。
   scene3d: { on: false, canOpen: false, note: '—' },
   detector: { available: false, prompt: '', threshold: 0.5, invert: false },
-  processor: { names: [], choice: -1, inputs: [], params: [], outputs: [] },
+  processor: { names: [], indices: [], choice: -1, inputs: [], params: [], outputs: [] },
   // Staging 空态：Extra Prompt 空着（占位句照页面那条 data-placeholder），没有 run 在飞、进度条不显，
   // Tagger 默认在（blend-config 那一次播报会把真值补上）。
   staging: {
@@ -828,6 +842,7 @@ export type BlendUiAction =
   | 'layer-add' | 'layer-clear' | 'raster-drop' | 'hover-face'
   | 'cud-refresh' | 'cud-relink'
   | 'attr-open' | 'attr-toggle' | 'attr-remove' | 'attr-duplicate' | 'attr-apply' | 'attr-add' | 'attr-move'
+  | 'attr-frame-source'
   | 'fx-step-toggle' | 'fx-step-remove' | 'fx-step-move' | 'fx-bypass'
   | 'fx-step-open' | 'fx-param-live' | 'fx-param-commit' | 'fx-fold-toggle'
   | 'fx-map-pick' | 'fx-map-bind' | 'fx-dir-pick' | 'fx-dir-bind' | 'fx-lattice' | 'fx-curve'
@@ -936,6 +951,8 @@ export type BlendUiPayloads = {
   'attr-duplicate': { layerId: number; attrId: string };
   'attr-apply': { layerId: number; attrId: string };
   'attr-add': { layerId: number; type: string };
+  /** 面 attribute 的 Frame source：绑到哪条视频轨（'' = 解绑，仍用画好的那张面）。 */
+  'attr-frame-source': { layerId: number; attrId: string; trackId: string };
   /** 条带上的一步换位置：`beforeAttrId` 是落点那一枚，`after` 说的是插它前面还是后面；为空 = 追加尾步。 */
   'attr-move': {
     attrId: string; fromLayerId: number; toLayerId: number;
@@ -1011,9 +1028,10 @@ export type BlendUiPayloads = {
   'detector-threshold': number;
   'detector-invert': boolean;
   'detector-run': undefined;
-  /** Processor：换 interface（下标）、挑来源/落位（`side` + 端口号 + 选中的值）、挑工作区条目、
-   *  拧一口参数（值按那一口的类型归：布尔 / 数字 / 字符串）。 */
-  'processor-interface': number;
+  /** Processor：换 interface、挑来源/落位（`side` + 端口号 + 选中的值）、挑工作区条目、
+   *  拧一口参数（值按那一口的类型归：布尔 / 数字 / 字符串）。换 interface 发的是身份（package 下标 +
+   *  名字）；只有旧页面才只认位置，所以数字那一档留着。 */
+  'processor-interface': number | { index: number; name: string };
   'processor-pick': { side: 'in' | 'out'; port: number; value: string };
   'processor-staging': { port: number; id: string };
   'processor-param': { port: number; value: number | string | boolean };
