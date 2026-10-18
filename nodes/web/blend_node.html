@@ -12764,6 +12764,8 @@ function finishProcessorRun(d) {
 // Interface 枚举与三段端口行的正文都在宿主（workbench/processor.tsx）—— 这里只把第一份描述符播出去。
 syncProcessorUI();
 
+// 会话恢复的在途标记：blend-restore-cuds 的串行重开进行中为真，再来的恢复消息直接丢。
+let cudRestoreBusy = false;
 window.addEventListener('message', event => {
     const d = event.data || {};
     if (d.type === 'blend-config') {
@@ -12840,6 +12842,20 @@ window.addEventListener('message', event => {
         // throwing a dialog at the user.
         if (!d.doc) { setStatus(d.reason || 'No recent .cud to reopen'); return; }
         reopenCudDocument(d.doc, d.drop_pristine === true);
+        return;
+    }
+    if (d.type === 'blend-restore-cuds') {
+        // 会话恢复：宿主把上一次会话开着的那批 .cud 描述符整批交回来（打开序）。逐份 await
+        // 串行重开 —— 建文档的先后与当时一致，布局里保留的 doc 格按同一顺序原地认领。只在
+        // 还没有任何文档时接（正常只在开机那一趟到）；恢复进行中再来的直接丢。
+        const restoreDocs = Array.isArray(d.docs) ? d.docs.filter(x => x && x.token) : [];
+        if (!restoreDocs.length || cudRestoreBusy || findOpenDocument({ path: restoreDocs[0].path })) return;
+        cudRestoreBusy = true;
+        void (async () => {
+            try {
+                for (const doc of restoreDocs) await reopenCudDocument(doc, false);
+            } finally { cudRestoreBusy = false; }
+        })();
         return;
     }
     if (d.type === 'blend-add-layer') {

@@ -264,10 +264,11 @@ const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
         <path d="M20 16l3 3-3 3" />
       </svg>
     );
+    // Workbench tab: the SF "wrench" glyph — a spanner with its open jaw. The tab is called
+    // Workbench now; the old photo glyph said "your pictures", this one says "your tools".
     case 'draw': return (
       <svg {...props}>
-        <path d="M12 20h9" strokeWidth={1.5} />
-        <path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
+        <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94L14.7 6.3z" />
       </svg>
     );
     case 'blend': return (
@@ -874,6 +875,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     ...(interfaces.length > 0 ? [{ id: 'interface' as Tab, icon: 'interface', color: '#bf5af2' }] : []),
     { id: 'settings', icon: 'settings', color: '#5e5ce6' },
   ];
+  // Sidebar tabs are icon-only; this is the name their tooltip shows. `draw` stays the internal
+  // id (the Tab type, stores and message channels all key on it) — only the display name changed.
+  const TAB_LABELS: Record<Tab, string> = { prompt: 'Prompt', draw: 'Workbench', interface: 'Interface', settings: 'Settings' };
 
   const updateBlockParam = (blockId: string, key: string, value: string | number | boolean | Record<string, any> | null) => {
     onBlocksChange(blocks.map(b => b.id === blockId ? { ...b, params: { ...b.params, [key]: value } as any } : b));
@@ -1205,7 +1209,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           {tabs.map(t => (
             <button
               key={t.id}
-              title={t.id}
+              title={TAB_LABELS[t.id]}
               style={{
                 ...styles.sidebarBtn,
                 color: tab === t.id ? t.color : 'rgba(255,255,255,0.35)',

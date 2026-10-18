@@ -365,6 +365,12 @@ const App: React.FC = () => {
   // the live one. The iframe owns them — this is only the mirror it re-sends whenever the list, the
   // active one or the IO lock changes.
   const [blendDocs, setBlendDocs] = useState<BlendDocs>(EMPTY_BLEND_DOCS);
+  // 会话恢复的闸门：开机对盘上活动集的那次问询结束前，播报不落盘（否则工作台的空播报
+  // 会把记录抢先覆写成空，恢复永远读到空）。写口在 blend-docs 播报处。
+  const restoreGate = useRef(false);
+  // 恢复在途的期望份数：>0 = restore 还没导完。中途播报（每导入一份就来一趟）是**部分**
+  // 活动集，写回盘上会把记录截断 —— 一次恰好落在恢复中途的刷新就只能恢复出一半。
+  const restorePending = useRef(0);
   // The last frame each document showed before it stopped being the live one. The engine is one per
   // page, so this is all a background window can show until the engine is scoped per document.
   const [docStills, setDocStills] = useState<Record<number, string>>({});
@@ -768,6 +774,26 @@ const App: React.FC = () => {
   const seedBlendCanvas = useCallback(async () => {
     const iframe = blendIframeRef.current;
     if (!iframe?.contentWindow) return;
+    // 会话恢复优先于播种：上一次会话开着的那批 .cud（宿主在每次播报后写盘，见下面的
+    // effect）整批按原打开序重开 —— 刷新后文档窗口原地认领保留位，而不是留一排 Untitled
+    // 幽灵 tab。描述符由服务端从自己写下的记录里造，页面照样说不出路径。恢复成功就不再
+    // 播种管线图：工程的图层来自 .cud 自己，再把池里的图铺一层只会污染刚恢复的工程。
+    try {
+      const r = await fetch('/api/open_cuds').then(r => r.json());
+      const docs = (r?.docs || []) as BlendDoc[];
+      if (docs.length) {
+        restorePending.current = docs.length;
+        // 兜底：某一份导入失败时播报永远到不了期望数，30s 后放行记账（之后来什么播什么）。
+        setTimeout(() => { restorePending.current = 0; }, 30000);
+        iframe.contentWindow.postMessage({ type: 'blend-restore-cuds', docs }, '*');
+        return;
+      }
+    } catch { /* no record, no backend — fall through to seeding */ }
+    finally {
+      // 恢复问询结束（无论读没读到）才允许播报落盘：工作台开机的那趟**空播报**如果抢在
+      // 前面，盘上的活动集会先被覆写成空 —— 恢复就永远读到一份空记录。
+      restoreGate.current = true;
+    }
     let full: StagingItem[] = [];
     try {
       const r = await fetch('/api/staging').then(r => r.json());
@@ -1159,6 +1185,16 @@ const App: React.FC = () => {
           // 第一份播报（哪怕是空的）说明"未知"结束了：此后开文档集说什么就是什么，布局照此对账。
           announced: true,
         });
+        // 会话记录跟着播报走：这份活动集就是下一次刷新要整批重开的那批 .cud（打开序）。
+        // 带路径的才记 —— 导入的 PNG 没有盘上文件，恢复不了，留给保留位当占位。
+        // restoreGate：开机那趟空播报要等恢复问询结束才能落盘（见 seedBlendCanvas）。
+        // restorePending：恢复在途时播报是部分活动集，不许写回（等齐了这一趟再记）。
+        if (restorePending.current > 0 && docs.length >= restorePending.current) restorePending.current = 0;
+        if (restoreGate.current && restorePending.current === 0) fetch('/api/open_cuds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: docs.map(d => d.path).filter((p): p is string => !!p) }),
+        }).catch(() => {});
         // A closed document's kept frame goes with it: the workbench hands its uids out again from 1
         // when its page reloads, and a fresh window must not open on some other project's last frame.
         setDocStills(prev => {

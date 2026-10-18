@@ -595,6 +595,48 @@ class DocumentIo:
         except Exception as e:
             return None, str(e)
 
+    # ---- 会话恢复：这次开着的那批 .cud ----
+    def remember_open_cuds(self, paths):
+        """把宿主讲报的活动文档集写成"这次会话开着这些"。宿主是唯一作者：它看到的是
+        工作台的实时播报（开关文档都会来一趟），比后端自己记账（拿不到"关了"）准。
+        写失败只记账，不影响这次运行。"""
+        clean = []
+        for p in (paths or []):
+            if isinstance(p, str) and p:
+                clean.append(os.path.abspath(p))
+        try:
+            with open(_workbench_file('open_cuds.json'), 'w', encoding='utf-8') as f:
+                json.dump({'paths': clean}, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] could not record open cuds: {e}")
+
+    def restore_open_cuds(self):
+        """把上一次会话开着的那批 .cud 重新登记成文档描述符（顺序 = 当时的打开序）。
+
+        路径只从服务端自己写下的记录里读，页面无从指定；已经不在盘上的跳过。
+        描述符与对话框同形（现 mint 的 token），前端照旧走 /api/io_read 取字节。
+        """
+        try:
+            with open(_workbench_file('open_cuds.json'), encoding='utf-8') as f:
+                recorded = json.load(f)
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] could not read open cuds: {e}")
+            return []
+        paths = (recorded or {}).get('paths') if isinstance(recorded, dict) else None
+        if not isinstance(paths, list):
+            return []
+        docs = []
+        for p in paths:
+            if not (isinstance(p, str) and p and os.path.isfile(p)):
+                continue
+            try:
+                docs.append(self._document(p, 'cud'))
+            except Exception as e:
+                print(f"[SnapshotDetailerSampler] could not mint descriptor for {p}: {e}")
+        return docs
+
     # ---- 对外三条 ----
     def pick(self, mode, kind, suggested='', multiple=False):
         """弹出原生对话框，返回选中的文档描述列表（用户取消则为空表）。
@@ -2272,6 +2314,12 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'ok': doc is not None, 'doc': doc, 'reason': reason})
                 return
 
+            # 会话恢复的读口：上一次会话开着的那批 .cud（宿主每次播报后写的活动集），
+            # 原样重开 —— 刷新后文档窗口原地认领保留位，不再留一排 Untitled 幽灵 tab。
+            if self.path == '/api/open_cuds':
+                self._send_json({'ok': True, 'docs': doc_io.restore_open_cuds()})
+                return
+
             self.send_error(404)
 
         def do_POST(self):
@@ -2350,6 +2398,18 @@ class SnapshotDetailerSamplerServer:
                 data = json.loads(self.rfile.read(length)) if length else {}
                 inst._apply_params(data)
                 self._send_json({'ok': True})
+                return
+
+            # 会话恢复的写口：宿主把工作台播报的活动文档集（.cud 路径，打开序）落盘。
+            # 下一次页面打开时 GET /api/open_cuds 从这份记录原样重开。
+            if self.path == '/api/open_cuds':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    doc_io.remember_open_cuds(body.get('paths'))
+                    self._send_json({'ok': True})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
                 return
 
             if self.path == '/api/prompt_presets':
