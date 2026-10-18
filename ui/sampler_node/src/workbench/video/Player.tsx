@@ -313,6 +313,28 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
+  // ── 输出栅格：报一次主 <video> 的原生尺寸。 ──
+  // 视频模式里没有 Canvas 窗，而图层必须落在某个栅格上（默认图层 = 画布大小）。工作台页面只在
+  // 画布还是空的时候认这个尺寸 —— Image 模式里已经排好的画布优先。主 <video> 在 Layer 段压顶时
+  // 仍然加载脚下那条视频轨的源，所以它的元数据就是"底图"的尺寸。
+  const blendPost = vid.blendPost;
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const announce = () => {
+      if (v.videoWidth && v.videoHeight) {
+        blendPost({ type: 'blend-vid-grid', width: v.videoWidth, height: v.videoHeight });
+      }
+    };
+    announce();
+    v.addEventListener('loadedmetadata', announce);
+    v.addEventListener('loadeddata', announce);
+    return () => {
+      v.removeEventListener('loadedmetadata', announce);
+      v.removeEventListener('loadeddata', announce);
+    };
+  }, [blendPost, activeId]);
+
   // ── 播 / 停 ──
   const graceRef = useRef(0);   // 纠偏宽限期（performance.now 截止）：起播/换段/纠偏后给解码器追赶的时间
   useEffect(() => {

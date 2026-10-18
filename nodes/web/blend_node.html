@@ -4013,6 +4013,35 @@ function drawVidFrameContain(ctx, src, w, h) {
     ctx.drawImage(src, (w - dw) / 2, (h - dh) / 2, dw, dh);
 }
 
+// 视频模式没有 Canvas 窗，也没有"第一张图层撑开画布"这一步：输出栅格就是下面那条视频轨的
+// 原生帧尺寸。画布还是 0 的时候第一次知道这个尺寸就认下来 —— 否则 addDefaultLayer 会拒绝，
+// 图层在 Layers 窗里根本不出现；逐帧合成也永远回空图。
+// 已经有画布就一个字都不动（Image 模式里排好的尺寸优先）。`vidGrid` 记住最近一次知道的栅格：
+// 空白文档 undo 回 0 之后再加层，还要靠它把画布重新立起来。
+let vidGrid = null;
+
+function noteVidGrid(w, h) {
+    w = Math.round(+w || 0); h = Math.round(+h || 0);
+    if (!(w >= 1 && h >= 1)) return false;
+    vidGrid = { w, h };
+    if (isSceneDoc(activeDoc)) return false;      // 3D tab 有自己的栅格，视频帧不该动它
+    if (canvasW > 0 && canvasH > 0) return false;
+    if (w > MAX_CANVAS_SIDE || h > MAX_CANVAS_SIDE || w * h > MAX_CANVAS_PIXELS) return false;
+    canvasW = w; canvasH = h;
+    canvasCustom = true;          // 视频的输出栅格：不再让第一张进来的图把它改大
+    sizeCanvasElement();
+    ensureMaskLayer();
+    layoutCanvas();
+    updateCanvasReadout();
+    setStatus(`Canvas ${w} × ${h} — the video output grid`);
+    return true;
+}
+
+function ensureVidCanvas() {
+    if ((canvasW > 0 && canvasH > 0) || !vidGrid) return;
+    noteVidGrid(vidGrid.w, vidGrid.h);
+}
+
 function vidFrameSurfaceFor(rec, w, h) {
     let cv = vidFrameSurfaces.get(rec.id);
     if (!cv || cv.width !== w || cv.height !== h) {
@@ -4120,6 +4149,10 @@ function handleVidFrameMessage(d) {
         sources.set(String(s.trackId), s.bitmap);
         bitmaps.push(s.bitmap);
     }
+    // 取帧这一趟也顺手把输出栅格立起来（宿主 <video> 的元数据那条路可能还没到）。
+    const base = vidFrameSource(sources, typeof d.baseTrackId === 'string' ? d.baseTrackId : null)
+        || sources.values().next().value || null;
+    if (base) noteVidGrid(base.width, base.height);
     // 上一包的源帧到这里就没用了（临时面已经把像素抄进自己的画布）。
     if (prev) for (const b of prev.bitmaps) { try { b.close(); } catch (e) { /* gone */ } }
     vidFramePacket = {
@@ -8122,6 +8155,7 @@ function addSurfaceLayer(opts) {
 function addDefaultLayer(stack) {
     const st = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
     const guidance = st === GUIDANCE_STACK;
+    ensureVidCanvas();
     if (!canvasW || !canvasH) {
         setStatus('Set a canvas size, or add an image, before adding a layer', 'error');
         return null;
@@ -8144,6 +8178,7 @@ function addDefaultLayer(stack) {
 // fills them — the row is built before that first copy, so it must not read "no image" (see 图层行).
 function addStashLayer(stack) {
     const st = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
+    ensureVidCanvas();
     if (!canvasW || !canvasH) {
         setStatus('Set a canvas size before adding a Stash', 'error');
         return null;
@@ -10520,6 +10555,8 @@ function switchDocument(uid) {
 // to the user mid-Load must not be refused by the very lock that Load takes.
 function activateDocument(entry) {
     if (!entry || entry === activeDoc) return false;
+    // 栅格跟着文档走：新文档的 Player 拿到 <video> 元数据后会再报一次（见 noteVidGrid）。
+    vidGrid = null;
     // 开机那趟没有「上一份池」可捕获，也不该向宿主上传任何东西：boot 文档就继承后端
     // 当下这份池（宿主随后会镜像过来）。判别只在这一刻成立 —— 关掉最后一个 tab 的
     // 兜底新建同样 activeDoc===null，但那时池易主已经发生过了（stagingPoolOwner 非空）。
@@ -13209,6 +13246,7 @@ window.addEventListener('message', event => {
     }
     if (d.type === 'blend-vid-frame') { handleVidFrameMessage(d); return; }
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
+    if (d.type === 'blend-vid-grid') { noteVidGrid(d.width, d.height); return; }
     if (d.type === 'blend-guidance-republish') {
         // 宿主说图池里那张 Guidance 卡不是我们的了（被别的实例顶掉，或整池换水时被清掉）：
         // 去重的记忆清掉，立刻重发一张自己的。
