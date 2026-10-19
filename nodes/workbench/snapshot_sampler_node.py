@@ -502,17 +502,23 @@ def _vid_ffprobe(path):
     except Exception:
         return None
     vcodec = acodec = None
+    width = height = 0
     for s in (data.get('streams') or []):
         t = s.get('codec_type')
         if t == 'video' and vcodec is None and not (s.get('disposition') or {}).get('attached_pic'):
             vcodec = s.get('codec_name') or ''
+            try:
+                width = int(s.get('width') or 0)
+                height = int(s.get('height') or 0)
+            except (TypeError, ValueError):
+                width = height = 0
         elif t == 'audio' and acodec is None:
             acodec = s.get('codec_name') or ''
     try:
         dur = float((data.get('format') or {}).get('duration') or 0)
     except (TypeError, ValueError):
         dur = 0
-    return {'duration': dur, 'vcodec': vcodec, 'acodec': acodec}
+    return {'duration': dur, 'vcodec': vcodec, 'acodec': acodec, 'width': width, 'height': height}
 
 
 def _vid_browser_ok(ext, probe):
@@ -609,6 +615,167 @@ def _vid_strip(path, n):
     if len(made) < 2:
         return None
     return ['/api/vid_media/' + os.path.basename(p) for p in outs]
+
+
+# Allow List（Processor 的视频那条路）：把一段视频按帧拆成一列 tensor，再把一列 tensor
+# 编码回一段视频。两端都走 ffmpeg 的 rawvideo 管道（不落中间文件），帧尺寸在抽取时
+# 就压到工作分辨率 —— 一列 1080p 的 float32 帧动辄几 GB，抽之前必须缩。
+_VID_FRAME_MAX_W = 720      # 帧的长边上限（只缩不放）
+_VID_FRAME_MAX_N = 150      # 一列帧的条数上限（再多内存扛不住，也让用户知道代价）
+
+
+def _vid_frames(path, ss=0.0, t=None, n=None, fps=None):
+    """从 [ss, ss+t] 里均匀抽 n 帧（或按 fps 抽），返回 [1,H,W,3] float tensor 的列表。
+
+    n 与 fps 二选一（都给了按 n）。抽不满 n 张（片子比区间短）就返回实际抽到的那些 ——
+    调用方按实际条数落位，不补帧（补出来的帧是重复内容，编码出来是卡顿）。
+    帧尺寸在抽取时就压到工作分辨率（长边 ≤ _VID_FRAME_MAX_W，只缩不放）——
+    一列全尺寸的 float32 帧动辄几 GB，抽之前必须缩。
+    返回 None = 抽不了（ffmpeg 不在 / 解不开 / 一帧都没抽到）。
+    """
+    ff = _ff_bin('ffmpeg')
+    if not ff or not os.path.isfile(path):
+        return None
+    try:
+        ss = max(0.0, float(ss or 0))
+    except (TypeError, ValueError):
+        ss = 0.0
+    probe = _vid_ffprobe(path) or {}
+    total = probe.get('duration') or 0
+    if t is None:
+        t = max(0.0, total - ss)
+    try:
+        t = max(0.05, float(t))
+    except (TypeError, ValueError):
+        return None
+    if n is None:
+        try:
+            n = int(round(float(fps or 30) * t))
+        except (TypeError, ValueError):
+            n = 30
+    n = max(1, min(_VID_FRAME_MAX_N, int(n)))
+    # 抽出来的尺寸：与下面 scale 过滤器同口径（**长边**封顶、短边按比例、取偶）。
+    # 竖屏（高 > 宽）封顶的是高，过滤器因此也按 h= 写 —— 一律 w=min(720,iw) 会把
+    # 竖屏片的宽度顶到 720、高度跟着涨到 720 以上，和这里算的字节数对不上。
+    sw, sh = int(probe.get('width') or 0), int(probe.get('height') or 0)
+    if sw > 0 and sh > 0:
+        if sw >= sh:
+            ow = min(_VID_FRAME_MAX_W, sw)
+            oh = max(2, int(round(ow * sh / sw / 2)) * 2)
+            scale = f"scale=w=min({_VID_FRAME_MAX_W}\\,iw):h=-2"
+        else:
+            oh = min(_VID_FRAME_MAX_W, sh)
+            ow = max(2, int(round(oh * sw / sh / 2)) * 2)
+            scale = f"scale=h=min({_VID_FRAME_MAX_W}\\,ih):w=-2"
+    else:
+        ow = oh = 0
+        scale = f"scale=w=min({_VID_FRAME_MAX_W}\\,iw):h=-2"
+    # fps = n/t：让 ffmpeg 自己把 n 张铺到整个区间上（首尾都给到）。
+    vf = f'fps={n / t:.4f},{scale},format=rgb24'
+    cmd = [ff, '-v', 'error', '-ss', f'{ss:.3f}', '-t', f'{t:.3f}', '-i', path,
+           '-vf', vf, '-frames:v', str(n), '-f', 'rawvideo', '-']
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=300)
+    except Exception:
+        return None
+    if r.returncode != 0 or not r.stdout:
+        return None
+    raw = r.stdout
+    if ow > 0 and oh > 0:
+        per = ow * oh * 3
+        got = len(raw) // per
+        if got <= 0:
+            return None
+        h, w = oh, ow
+    else:
+        # 量不到源尺寸（ffprobe 没给宽高）：按总字节反推最接近 n 的因子。
+        per = None
+        for guess in range(n, 0, -1):
+            if len(raw) % (guess * 3) == 0:
+                cand = len(raw) // (guess * 3)
+                sq = int(cand ** 0.5)
+                if sq * sq == cand:
+                    per, got, h, w = cand, guess, sq, sq
+                    break
+        if per is None:
+            return None
+    arr = np.frombuffer(raw[:got * per], dtype=np.uint8).reshape(got, h, w, 3)
+    frames = [torch.from_numpy(arr[i:i + 1].astype(np.float32) / 255.0) for i in range(got)]
+    print(f'[VidFrames] {os.path.basename(path)} ss={ss:.2f} t={t:.2f} → {got} frames {w}x{h}')
+    return frames
+
+
+def _vid_encode(frames, fps=30, name='proc'):
+    """把一列 [1,H,W,3]（或 [1,H,W] mask）float tensor 编码成一段 H.264 mp4。
+
+    尺寸不齐（处理器每帧吐了不同大小）时统一缩到第一帧的尺寸 —— rawvideo 管道要求
+    每帧字节数一致。mask 列走灰度（三通道同值），出来的片段在时间线上按亮度读。
+    落盘在资产媒体库（与 _vid_ingest 同一处），返回持久 URL 或 None。
+    """
+    ff = _ff_bin('ffmpeg')
+    if not ff or not frames:
+        return None
+    try:
+        fps = max(1.0, min(120.0, float(fps or 30)))
+    except (TypeError, ValueError):
+        fps = 30.0
+
+    def _hw_c(frame):
+        shp = getattr(frame, 'shape', None)
+        if shp is None or len(shp) not in (3, 4):
+            return None
+        return (int(shp[-3]), int(shp[-2])) if len(shp) == 4 else (int(shp[-2]), int(shp[-1]))
+
+    def _rgb(frame, size):
+        a = frame.detach().cpu().numpy() if hasattr(frame, 'detach') else np.asarray(frame)
+        while a.ndim > 3 and a.shape[-1] == 1:
+            a = a[..., 0]
+        if a.ndim == 2:
+            a = a[None, ..., None]
+        if a.ndim == 3:                       # [H,W,C] → 补 batch
+            a = a[None, ...]
+        a = a[0]
+        if a.shape[-1] == 1:                  # mask → 灰度三通道
+            a = np.repeat(a, 3, axis=-1)
+        elif a.shape[-1] == 4:
+            a = a[..., :3]
+        h, w = size
+        if a.shape[0] != h or a.shape[1] != w:
+            im = Image.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8)).resize((w, h), Image.LANCZOS)
+            a = np.asarray(im).astype(np.float32) / 255.0
+        return (np.clip(a, 0, 1) * 255).astype(np.uint8)
+
+    first = _hw_c(frames[0])
+    if first is None:
+        return None
+    h, w = first
+    d = _vid_media_dir()
+    os.makedirs(d, exist_ok=True)
+    stem = re.sub(r'[^\w\-. ]+', '_', str(name or 'proc'))[:60] or 'proc'
+    h16 = hashlib.sha1((stem + str(len(frames)) + str(fps)).encode('utf-8')).hexdigest()[:12]
+    out = os.path.join(d, f'{h16}_{stem}.mp4')
+    if os.path.exists(out):
+        return '/api/vid_media/' + os.path.basename(out)
+    cmd = [ff, '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+           '-s', f'{w}x{h}', '-r', f'{fps:.3f}', '-i', '-',
+           '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+           '-pix_fmt', 'yuv420p', '-movflags', '+faststart', out]
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        for fr in frames:
+            proc.stdin.write(_rgb(fr, (h, w)).tobytes())
+        proc.stdin.close()
+        if proc.wait(timeout=600) != 0 or not os.path.exists(out):
+            return None
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return None
+    print(f'[VidEncode] {len(frames)} frames {w}x{h}@{fps:.0f}fps → {os.path.basename(out)}')
+    return '/api/vid_media/' + os.path.basename(out)
 
 
 def _vid_ingest(raw, name):
@@ -1088,6 +1255,15 @@ class SnapshotDetailerSamplerServer:
         self.interface_total_steps = 0
         self.interface_current_step = 0
         self.interface_result_meta = []   # 离线 processor 执行的结果明细（key/port/type/name）
+        # 视频模式的 Pipeline Preset 跑（逐帧过 block 链 → 编码回一段视频）。与 interface_*
+        # 平行的一套状态：前端按 preset_video_status 轮询，别和 processor 抢同一组字段
+        # （两条路可能先后跑，语义混在一起排查时看不出是谁在动）。
+        self.preset_video_status = 'idle'
+        self.preset_video_error = None
+        self.preset_video_progress = 0
+        self.preset_video_current = 0
+        self.preset_video_total = 0
+        self.preset_video_meta = []
         self.finished = False
         self.finish_selected_key = None
         self.finish_selected_keys = None  # 多选 keys 列表
@@ -1763,16 +1939,20 @@ class SnapshotDetailerSamplerServer:
                             'output_targets': {<port num>: 'new_layer'|'selected_layer'|
                                                'selected_mask'|'staging'},
                             'input_sources': {<port num>: 'layers'|'selected'|'staging'|
-                                               'main_mask'|'selected_mask'|'selected_alpha'|'mask_alpha'}}}
+                                               'main_mask'|'selected_mask'|'selected_alpha'|'mask_alpha'},
+                            'allow_list': bool}}
         端口号一律收成 str（JSON 键本就是字符串），label 去空白、空 label 视为没改。
         output_targets / input_sources = image/mask 出口的默认落位与入口的默认来源（Processor
         小窗的初值），取值出枚举就丢。
+        allow_list = Allow List 开关：Processor 吃/吐整列图（视频逐帧那条路），执行时按节点
+        是不是 INPUT_IS_LIST 分流（见 InterfaceExecutor 的 list_mode）。
         """
         out = {}
         if not isinstance(raw, dict):
             return out
         dst_enum = {'new_layer', 'selected_layer', 'selected_mask', 'staging'}
-        src_enum = {'layers', 'selected', 'staging', 'main_mask', 'selected_mask', 'selected_alpha', 'mask_alpha'}
+        src_enum = {'layers', 'selected', 'staging', 'main_mask', 'selected_mask',
+                    'selected_alpha', 'mask_alpha', 'video'}
         for name, entry in raw.items():
             if not isinstance(name, str) or not name or not isinstance(entry, dict):
                 continue
@@ -1822,6 +2002,8 @@ class SnapshotDetailerSamplerServer:
                         clean_sources[str(int(num))] = src
                 if clean_sources:
                     one['input_sources'] = clean_sources
+            if 'allow_list' in entry:
+                one['allow_list'] = bool(entry.get('allow_list'))
             if one:
                 out[name] = one
         return out
@@ -2216,6 +2398,13 @@ class SnapshotDetailerSamplerServer:
                     'interface_total_steps': getattr(inst, 'interface_total_steps', 0) if inst else 0,
                     'interface_result_keys': getattr(inst, 'interface_result_keys', []) if inst else [],
                     'interface_result_meta': getattr(inst, 'interface_result_meta', []) if inst else [],
+                    # 视频模式的 preset 跑（逐帧过链 + 编码回视频），与 interface_* 平行。
+                    'preset_video_status': getattr(inst, 'preset_video_status', 'idle') if inst else 'idle',
+                    'preset_video_error': getattr(inst, 'preset_video_error', None) if inst else None,
+                    'preset_video_progress': getattr(inst, 'preset_video_progress', 0) if inst else 0,
+                    'preset_video_current': getattr(inst, 'preset_video_current', 0) if inst else 0,
+                    'preset_video_total': getattr(inst, 'preset_video_total', 0) if inst else 0,
+                    'preset_video_meta': getattr(inst, 'preset_video_meta', []) if inst else [],
                     'pending_query': inst._pending_query_view() if inst else None,
                     # 一条 preset 绑定的 pipeline 可能在这次 run 里被现加载（见 run_detailer）：
                     # 名字与架构都跟着变，前端轮询时顺手同步，不用重拉 config。
@@ -2441,6 +2630,8 @@ class SnapshotDetailerSamplerServer:
                         # image/mask 出口的默认落位与入口的默认来源（Processor 小窗的初值），没有就是空表。
                         'output_targets': meta.get('output_targets') or {},
                         'input_sources': meta.get('input_sources') or {},
+                        # Allow List：Processor 吃/吐整列图（视频逐帧那条路）。
+                        'allow_list': bool(meta.get('allow_list')),
                     })
                 self._send_json({'interfaces': interfaces})
                 return
@@ -2779,6 +2970,23 @@ class SnapshotDetailerSamplerServer:
                 exec_options = body.get('exec_options', {})
                 inst.put_action('execute_interface', interface_index=interface_index, manual_values=manual_values, exec_options=exec_options)
                 self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/preset_video':
+                # 视频模式的 Pipeline Preset 跑：一段一段来（宿主按段发），每段 = 抽帧 →
+                # 逐帧过 preset 的 block 链 → 编码回 mp4。与 execute_interface 同一条队列/
+                # 同一套轮询口径，只是状态字段换成 preset_video_*。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    inst.put_action('preset_video',
+                                    preset_id=body.get('preset_id') or None,
+                                    extra_prompt=body.get('extra_prompt') or '',
+                                    video_inputs=body.get('video_inputs') or {},
+                                    mask_input=body.get('mask_input') or None)
+                    self._send_json({'ok': True})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
                 return
 
             if self.path == '/api/switch_pipeline':
@@ -5410,6 +5618,153 @@ class SnapshotDetailerSamplerNode:
         if hasattr(source, 'loras') and getattr(source, 'loras', None) is not None:
             setattr(target, 'loras', getattr(source, 'loras'))
 
+    def _run_preset_video(self, server, action, seed=0):
+        """视频模式跑一条 Pipeline Preset：抽一列帧 → **逐帧**过同一条 block 链 → 编码回 mp4。
+
+        与 run_detailer 的差别只有"输入是一列帧而不是一张图"：preset 解析、pipeline 绑定、
+        Preprocess 开关、prompt/lora 注入全部走同一份 `_run_pipeline_blocks`，所以同一套
+        preset 在视频里跑出来的单帧结果与图像模式完全一致。逐帧（而不是把帧当 batch）是
+        调用方拍板的：帧间不共享状态，但每一帧的预处理/裁剪/mask 都是独立的一趟。
+
+        mask 来自宿主传来的 `mask_input`（视频模式 Mask 轨的画面，亮度 = 覆盖）；没有就
+        不送 mask（整幅都是工作区）。产物不落图层/图池 —— 这一段视频回给宿主按段落位。
+        """
+        preset_id = action.get('preset_id') or None
+        extra_prompt = (action.get('extra_prompt') or '').strip()
+        vi = action.get('video_inputs') or {}
+        # 宿主按 {port: spec} 发（与 processor 同形）；单口场景也接受裸 spec。
+        spec = vi.get('0') if isinstance(vi, dict) and isinstance(vi.get('0'), dict) else vi
+        if not isinstance(spec, dict) or not spec.get('file'):
+            raise ValueError('No video input for the preset run')
+
+        fname = os.path.basename(str(spec.get('file') or ''))
+        vpath = os.path.join(_vid_media_dir(), fname)
+        frames = _vid_frames(vpath, ss=spec.get('ss', 0), t=spec.get('t'),
+                             n=spec.get('n'), fps=spec.get('fps'))
+        if not frames:
+            raise ValueError(f'No frames extracted from {fname} — is the file still in the asset library?')
+        try:
+            enc_fps = float(spec.get('fps') or 30)
+        except (TypeError, ValueError):
+            enc_fps = 30.0
+        server.preset_video_total = len(frames)
+        server.preset_video_current = 0
+        server.preset_video_progress = 0.0
+        print(f"[PresetVideo] {fname} → {len(frames)} frames @ {enc_fps:.1f}fps, preset={preset_id or '(active tab)'}")
+
+        # Mask 轨：同一段窗口抽同样条数，取亮度当覆盖（白 = 覆盖）。抽不满/没给 = 该帧无 mask。
+        mask_frames = None
+        m_in = action.get('mask_input')
+        if isinstance(m_in, dict) and m_in.get('file'):
+            mname = os.path.basename(str(m_in.get('file') or ''))
+            mpath = os.path.join(_vid_media_dir(), mname)
+            mask_frames = _vid_frames(mpath, ss=m_in.get('ss', 0), t=m_in.get('t'),
+                                      n=m_in.get('n') or len(frames), fps=m_in.get('fps') or enc_fps)
+            if not mask_frames:
+                print(f"[PresetVideo] mask track gave no frames ({mname}) — running without a mask")
+            else:
+                print(f"[PresetVideo] mask track {mname} → {len(mask_frames)} frames")
+
+        # preset 的选链规则与 run_detailer 完全一致（同一份优先级）：给了 id 且这一套还在就用它，
+        # 否则用当前激活 tab 的链。pipeline 绑定也跟着这一套走 —— 不能出现"按 A 套选链、
+        # 却按 B 套的 pipeline 跑"。
+        preset_set = next(
+            (s for s in (server.blocks_sets or [])
+             if s.get('id') == preset_id and s.get('blocks')),
+            None,
+        ) if preset_id else None
+        blocks = preset_set['blocks'] if preset_set is not None else server.blocks
+        run_set_id = preset_set['id'] if preset_set is not None else server.active_block_set
+        if preset_set is not None:
+            print(f"[PresetVideo] using pipeline preset '{preset_set.get('name')}' ({len(preset_set['blocks'])} blocks)")
+
+        wanted_pipeline = server.preset_pipeline_name(run_set_id)
+        if wanted_pipeline and wanted_pipeline != PIPELINE_CURRENT_SELECT:
+            target = server.find_pipeline_by_name(wanted_pipeline)
+            if target is None:
+                raise ValueError(f"Pipeline '{wanted_pipeline}' is missing — it no longer exists "
+                                 f"in the connected package; rebind it in Pipeline Settings")
+            if server.loaded_pipeline_node_id != target['node_id']:
+                ok, err = self._load_pipeline_from_node(server, target['node_id'], wanted_pipeline)
+                if not ok:
+                    raise ValueError(err)
+
+        if self._base_pipeline is None:
+            raise ValueError('Pipeline not initialized — pick a pipeline in Pipeline Settings first')
+
+        user_positive, user_loras = self._parse_prompt(server.prompt_server)
+        if extra_prompt:
+            user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
+
+        # 产出帧的 fps 与抽取 fps 相同 —— 段长在时间线上因此对得上（n / fps 秒）。
+        out_frames = []
+        for i, frame in enumerate(frames):
+            if mm.processing_interrupted():
+                raise mm.InterruptProcessingException()
+            run_pipeline = self._base_pipeline.copy()
+            run_pipeline.image = frame.clone()
+            # mask 的尺寸必须与这一帧一致（两张视频的像素尺寸不一定相同）——
+            # crop_mask 要求 image/mask 同网格，差一格就会炸在 block 里。
+            user_mask = None
+            if mask_frames:
+                mf = mask_frames[i] if i < len(mask_frames) else mask_frames[-1]
+                user_mask = mf
+                if user_mask.dim() == 4:
+                    user_mask = user_mask[0]
+                if user_mask.shape[-1] != 1:
+                    user_mask = user_mask.mean(dim=-1, keepdim=True)
+                if user_mask.shape[0] != frame.shape[1] or user_mask.shape[1] != frame.shape[2]:
+                    user_mask = torch.nn.functional.interpolate(
+                        user_mask.permute(2, 0, 1).unsqueeze(0),
+                        size=(int(frame.shape[1]), int(frame.shape[2])),
+                        mode='bilinear', align_corners=False,
+                    ).squeeze(0).permute(1, 2, 0)
+                user_mask = user_mask.squeeze(-1)
+
+            run_architecture = (run_pipeline.config.get('architecture')
+                                if run_pipeline.config else None)
+            global_params = {
+                'seed': seed,
+                **{k: getattr(server, k) for k in server.GLOBAL_PARAM_DEFAULTS},
+                'context_regex': '.+',
+            }
+            arch_overrides, _rule = server.arch_overrides(run_architecture)
+            if arch_overrides:
+                global_params.update(arch_overrides)
+
+            _next, _orig, detailed, detail_meta = self._run_pipeline_blocks(
+                run_pipeline, user_mask, user_positive, user_loras, global_params, blocks,
+                server=server, extra_prompt=extra_prompt,
+            )
+            if detailed is None:
+                raise ValueError(f'Frame {i + 1}/{len(frames)} produced no image')
+            img = detailed if detailed.dim() == 4 else detailed.unsqueeze(0)
+            if img.shape[0] > 1:
+                # 链一帧吐多张（少数批量节点）：视频只需要每帧一张，取第一张。
+                img = img[:1]
+            out_frames.append(img[0])
+            server.preset_video_current = i + 1
+            server.preset_video_progress = (i + 1) / len(frames)
+            if detail_meta:
+                print(f"[PresetVideo] frame {i + 1}: Recover Crop is off — the chain returned a patch "
+                      f"({tuple(img.shape)}), the video is that patch")
+            # seed 逐帧推进：同一段里每帧用不同种子，避免整段一模一样（与 block 链内
+            # next_seed 的节奏一致）。
+            seed = next_seed(seed)
+
+        url = _vid_encode(out_frames, fps=enc_fps,
+                          name=f'preset_{preset_set.get("name") if preset_set else "run"}')
+        if not url:
+            raise ValueError('Encoding the result to mp4 failed — check the ComfyUI console')
+        server.preset_video_meta = [{
+            'port': 0,
+            'type': 'IMAGE',
+            'name': (preset_set.get('name') if preset_set is not None else 'Preset'),
+            'video': url,
+            'frames': len(out_frames),
+        }]
+        print(f"[PresetVideo] done: {len(out_frames)} frames → {url}")
+
     def _execute_interface(self, server, interface_idx, manual_values, exec_options=None,
                             input_image=None, input_mask=None, return_image=False,
                             base_pipeline=None):
@@ -5525,28 +5880,58 @@ class SnapshotDetailerSamplerNode:
 
         # 构建端口级图片覆盖。端口声明为 MASK 的走亮度转换 —— 覆盖值都是 staging 里
         # 的 [1,H,W,C] 图，直接灌进 mask 端口形状不对。
+        # Allow List：image_keys 的值可以是**一列** staging id（list 模式的多图入口），
+        # video_inputs 直接按 {file, ss, t, fps} 抽帧成一列 —— 两条路都落成
+        # port_overrides 里的 list，由 InterfaceExecutor 的 list_mode 分流。
         start_types = pkg.get('start_types', {})
         _start_names = ((getattr(server, 'interface_meta', None) or {})
                         .get(pkg.get('name', '')) or {}).get('names', {}).get('start') or {}
+        list_mode = bool(exec_options.get('list_mode'))
+        video_inputs = exec_options.get('video_inputs') or {}
         port_overrides = {}
         for port_num_str, key in image_keys.items():
-            if key:
-                img = server.get_staging_image(key)
-                if img is not None:
-                    declared = start_types.get(str(port_num_str))
-                    if declared == 'MASK':
-                        port_overrides[int(port_num_str)] = staging_image_to_mask(img)
-                    else:
-                        port_overrides[int(port_num_str)] = img
-                    if own_trace:
-                        _pname = _start_names.get(str(port_num_str)) or f'value{port_num_str}'
-                        _detail = f'staging {key}' + ('（亮度转 mask）' if declared == 'MASK' else '')
-                        if declared == 'MASK':
-                            dbg.record_mask(f'输入覆盖 · {_pname}',
-                                            port_overrides[int(port_num_str)], detail=_detail)
-                        else:
-                            dbg.record_image(f'输入覆盖 · {_pname}', img, detail=_detail)
-                    print(f"[InterfaceExec] Port {port_num_str} image override: id={key} ({declared or 'IMAGE'})")
+            keys = key if isinstance(key, list) else [key]
+            imgs = [server.get_staging_image(k) for k in keys if k]
+            imgs = [x for x in imgs if x is not None]
+            if not imgs:
+                continue
+            declared = start_types.get(str(port_num_str))
+            if declared == 'MASK':
+                vals = [staging_image_to_mask(x) for x in imgs]
+            else:
+                vals = imgs
+            port_overrides[int(port_num_str)] = vals if (list_mode or len(vals) > 1) else vals[0]
+            if own_trace:
+                _pname = _start_names.get(str(port_num_str)) or f'value{port_num_str}'
+                _detail = f'staging {keys}' + (f'（{len(vals)} 张一列）' if len(vals) > 1 else '')
+                _detail += '（亮度转 mask）' if declared == 'MASK' else ''
+                if declared == 'MASK':
+                    dbg.record_mask(f'输入覆盖 · {_pname}', vals[0], detail=_detail)
+                else:
+                    dbg.record_image(f'输入覆盖 · {_pname}', vals[0], detail=_detail)
+            print(f"[InterfaceExec] Port {port_num_str} image override: "
+                  f"ids={keys} ({declared or 'IMAGE'}, {len(vals)} frame(s))")
+        # 视频入口：按片段信息抽帧（ffmpeg 直接读资产库里的文件，不绕浏览器）。
+        for port_num_str, spec in video_inputs.items():
+            if not isinstance(spec, dict):
+                continue
+            fname = os.path.basename(str(spec.get('file') or ''))
+            vpath = os.path.join(_vid_media_dir(), fname)
+            frames = _vid_frames(vpath, ss=spec.get('ss', 0), t=spec.get('t'),
+                                 n=spec.get('n'), fps=spec.get('fps'))
+            if not frames:
+                raise ValueError(f'Video input for port {port_num_str}: no frames extracted from {fname}')
+            declared = start_types.get(str(port_num_str))
+            vals = [staging_image_to_mask(f) for f in frames] if declared == 'MASK' else frames
+            port_overrides[int(port_num_str)] = vals
+            if own_trace:
+                _pname = _start_names.get(str(port_num_str)) or f'value{port_num_str}'
+                if declared == 'MASK':
+                    dbg.record_mask(f'视频输入 · {_pname}', vals[0],
+                                    detail=f'{fname} 抽 {len(vals)} 帧（亮度转 mask）')
+                else:
+                    dbg.record_image(f'视频输入 · {_pname}', vals[0], detail=f'{fname} 抽 {len(vals)} 帧')
+            print(f"[InterfaceExec] Port {port_num_str} video input: {fname} → {len(vals)} frames")
 
         injected_img = base_img
         injected_mask = base_mask
@@ -5603,7 +5988,8 @@ class SnapshotDetailerSamplerNode:
         )
 
         try:
-            results = executor.execute(pkg, manual_values, port_overrides=port_overrides)
+            results = executor.execute(pkg, manual_values, port_overrides=port_overrides,
+                                       list_mode=list_mode)
         except mm.InterruptProcessingException:
             # Cancel（/api/cancel_run）触发的打断：标成 cancelled，别写成 error。
             if own_trace:
@@ -5649,6 +6035,52 @@ class SnapshotDetailerSamplerNode:
             _end_names = ((getattr(server, 'interface_meta', None) or {})
                           .get(pkg.get('name', '')) or {}).get('names', {}).get('end') or {}
             result_ports = getattr(executor, 'result_ports', [])
+            # 视频入口那条路（Allow List + video_inputs）：每个 image/mask 出口的那一列
+            # **编码成一段视频**回给宿主（新轨上的片段），不再逐张进图池 —— 逐张落图层
+            # 对一列几百帧没有意义。编码 fps 用入口的 fps（= 抽帧 fps，时长因此对得上）。
+            if video_inputs:
+                encode_fps = 30.0
+                for spec in video_inputs.values():
+                    if isinstance(spec, dict) and spec.get('fps'):
+                        try:
+                            encode_fps = float(spec['fps'])
+                        except (TypeError, ValueError):
+                            pass
+                        break
+                groups = {}
+                for i, (ptype, val, name) in enumerate(results):
+                    port_num = result_ports[i] if i < len(result_ports) else None
+                    if ptype not in ('IMAGE', 'MASK'):
+                        continue
+                    groups.setdefault(port_num, []).append((ptype, val, name))
+                for port_num, items in groups.items():
+                    ptype, _, name = items[0]
+                    vals = [v for _, v, _ in items]
+                    url = _vid_encode(vals, fps=encode_fps, name=f"{pkg.get('name', 'proc')}_v{port_num}")
+                    if not url:
+                        continue
+                    server.interface_result_keys.append('')
+                    server.interface_result_meta.append(
+                        {'key': None, 'port': port_num, 'type': ptype, 'name': name,
+                         'video': url, 'frames': len(vals)})
+                    if own_trace:
+                        _pname = (_end_names.get(str(port_num)) if port_num is not None else None) \
+                            or (f'value{port_num}' if port_num is not None else name)
+                        if ptype == 'MASK':
+                            dbg.record_mask(f'输出 · {_pname}', vals[0],
+                                            detail=f'{len(vals)} 帧编码成视频 {url}')
+                        else:
+                            dbg.record_image(f'输出 · {_pname}', vals[0],
+                                             detail=f'{len(vals)} 帧编码成视频 {url}')
+                if own_trace:
+                    dbg.record_stage('离线结果（视频）',
+                                     f'{len(server.interface_result_meta)} 段视频编码回宿主，pipeline 当前图未改动')
+                    _tr = dbg.current_trace()
+                    if _tr is not None:
+                        _tr.meta['status'] = 'done'
+                print(f"[InterfaceExec] offline processor (video): "
+                      f"{len(server.interface_result_meta)} video results, pipeline untouched")
+                return None
             for i, (ptype, val, name) in enumerate(results):
                 port_num = result_ports[i] if i < len(result_ports) else None
                 if ptype == 'IMAGE':
@@ -6151,6 +6583,45 @@ class SnapshotDetailerSamplerNode:
                         server.interface_status = 'error'
                         server.interface_error = str(e)
                     finally:
+                        gc.collect()
+                        mm.soft_empty_cache()
+
+                if act == 'preset_video':
+                    # 视频模式的 Pipeline Preset：一段一趟（宿主按段发）。逐帧过链 + 编码，
+                    # 产出 URL 写进 preset_video_meta，宿主轮询到 done 后按段落位。
+                    server.preset_video_status = 'running'
+                    server.preset_video_error = None
+                    server.preset_video_progress = 0
+                    server.preset_video_current = 0
+                    server.preset_video_total = 0
+                    server.preset_video_meta = []
+                    dbg.begin_trace({
+                        'from_blend': False,
+                        'action': 'preset_video',
+                        'preset_id': action.get('preset_id'),
+                    })
+                    try:
+                        self._run_preset_video(server, action, seed=seed)
+                        server.preset_video_status = 'done'
+                        server.preset_video_progress = 1.0
+                    except mm.InterruptProcessingException:
+                        print("[SnapshotDetailerSampler] Preset video run cancelled by user")
+                        server.preset_video_status = 'idle'
+                        server.preset_video_error = None
+                    except Exception as e:
+                        if mm.processing_interrupted() or "interrupt" in str(e).lower():
+                            print("[SnapshotDetailerSampler] Interrupted during preset video run")
+                            break
+                        import traceback
+                        traceback.print_exc()
+                        server.preset_video_status = 'error'
+                        server.preset_video_error = str(e)
+                        dbg.record_error('preset 视频跑异常', str(e), where='_run_preset_video')
+                    finally:
+                        _tr = dbg.current_trace()
+                        if _tr is not None:
+                            _tr.meta['status'] = server.preset_video_status
+                            _tr.meta['error'] = server.preset_video_error
                         gc.collect()
                         mm.soft_empty_cache()
 

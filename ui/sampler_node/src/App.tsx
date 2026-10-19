@@ -4,6 +4,7 @@ import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockPar
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
 import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendAttrOpen, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUi, setBlendUi } from './workbench/store';
+import { vidStagingOverlay } from './workbench/video/procRun';
 import { ProbePanel } from './debug';
 
 const POLL_INTERVAL = 500;
@@ -133,7 +134,7 @@ const procChoicesOf = (v: unknown): BlendProcChoice[] => {
   });
 };
 const procUiOf = (v: unknown): BlendProcessorUi => {
-  if (!v || typeof v !== 'object') return { names: [], indices: [], choice: -1, inputs: [], params: [], outputs: [] };
+  if (!v || typeof v !== 'object') return { names: [], indices: [], choice: -1, inputs: [], params: [], outputs: [], allowList: false };
   const x = v as Record<string, unknown>;
   // names / indices 平行读：名字挡掉非字符串，下标就跟着名字走，绝不各自 filter（错位比缺一枚更糟）。
   const rawNames = Array.isArray(x.names) ? x.names : [];
@@ -168,6 +169,7 @@ const procUiOf = (v: unknown): BlendProcessorUi => {
     } : null;
     return [{
       num, name: typeof o.name === 'string' ? o.name : '', hint: typeof o.hint === 'string' ? o.hint : '',
+      type: o.type === 'MASK' ? 'MASK' : 'IMAGE',
       options, cur: typeof o.cur === 'string' ? o.cur : '', staging,
     }];
   });
@@ -198,7 +200,7 @@ const procUiOf = (v: unknown): BlendProcessorUi => {
       options, cur: typeof o.cur === 'string' ? o.cur : '',
     }];
   });
-  return { names, indices, choice, inputs, params, outputs };
+  return { names, indices, choice, inputs, params, outputs, allowList: x.allowList === true };
 };
 
 /** Geometry 那一格的快照：一枚记录的世界形状 + 舞台参考图。位置 / 四元数 / 颜色三样里缺一样就把
@@ -626,6 +628,8 @@ const App: React.FC = () => {
         // 初值 (meta 里的 output_targets / input_sources,/api/package 已按名字合并进 itf)。
         output_targets: itf.output_targets || interfaceMeta[itf.name]?.output_targets || {},
         input_sources: itf.input_sources || interfaceMeta[itf.name]?.input_sources || {},
+        // Allow List：开着时 image 输入行多一枚 Video 候选（视频模式逐帧拆 list），输出也是 list。
+        allow_list: !!(itf.allow_list ?? interfaceMeta[itf.name]?.allow_list),
       }));
     win.postMessage({ type: 'blend-processors', processors }, '*');
   }, [interfaces, interfaceMeta]);
@@ -1344,7 +1348,13 @@ const App: React.FC = () => {
           },
           // Processor 的三段行是描述符：逐行逐枚读回来，形状不对的丢掉（见 procUiOf）。
           processor: procUiOf(ui.processor),
-          staging: stagingUiOf(ui.staging),
+          // 视频 list 跑（宿主那一趟）在飞时，staging 段的 run 状态归它 —— 页面在跑动期间推来的
+          // 快照不认识这趟跑，按页面那份合流会把 busy/进度冲掉。overlay 就是那趟跑留下的旗。
+          staging: (() => {
+            const st = stagingUiOf(ui.staging);
+            if (!vidStagingOverlay.busy) return st;
+            return { ...st, busy: true, cancelLive: true, progress: vidStagingOverlay.progress };
+          })(),
           faces: mergeFaces(getBlendUi().faces, faceDelta(ui.faces)),
         });
       }
@@ -1410,11 +1420,14 @@ const App: React.FC = () => {
           processorRunRef.current = null;
           if (!win) return;
           if (st === 'done') {
-            const meta = (data.interface_result_meta || []) as { key: string; port: number; type: string; name: string }[];
+            const meta = (data.interface_result_meta || []) as
+              { key: string; port: number; type: string; name: string; video?: string; frames?: number }[];
             const full = await fetch('/api/staging').then(r => r.json()).catch(() => null);
             const list = (full?.staging || []) as StagingItem[];
             const results = meta
               .map(m => {
+                // 视频结果（Allow List 的视频路）：没有 staging 条目，URL 直接在 meta 上。
+                if (m.video) return { port: m.port, type: m.type, name: m.name, video: m.video, frames: m.frames };
                 const item = list.find((s: StagingItem) => s.id === m.key);
                 return item ? { port: m.port, type: m.type, name: m.name, id: item.id, src: item.src, width: item.width, height: item.height } : null;
               })

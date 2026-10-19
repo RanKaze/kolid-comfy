@@ -40,10 +40,12 @@ export type WorkbenchHostCtx = {
   /** Video 模式给 Canvas 与 Effects 两格的三样：模式本身（决定画哪一版正文）、**输出帧率**，以及
    *  视频轨清单（面 attribute 的 Frame source 下拉从这里挑轨道）。帧率与轨道都住在 Video 工程里
    *  （宿主 state），不是页面快照 —— 所以从这里递进去，写法同 `layout`。`tracks` 只列视频轨：
-   *  音频轨没有帧可取。 */
+   *  音频轨没有帧可取。Processor 窗的视频挑选（Sel. Track / Asset）也从这里拿清单 ——
+   *  `assets` 只列视频资产（音频没有帧）。 */
   video: {
     mode: 'image' | 'video'; fps: number; setFps: (v: number) => void;
     tracks: { id: string; name: string }[];
+    assets: { id: string; name: string }[];
   };
 };
 

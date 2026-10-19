@@ -21,7 +21,8 @@ export type VidCompositePlan = {
 };
 
 const clipOn = (p: VidProject, trackId: string, t: number): VidClip | null =>
-  p.clips.find(c => c.trackId === trackId && t >= c.start && t < c.start + c.duration) ?? null;
+  // 占位段（Processor 还没跑完的坑）没有画面：播放头掠过它 = 它不存在，命中顺延到下一层。
+  p.clips.find(c => c.trackId === trackId && !c.pending && t >= c.start && t < c.start + c.duration) ?? null;
 
 /** 哪一帧归谁。`muted` 里的 **Layer 轨被跳过**（mute = 这一段不合成，露出底下）—— 于是顶命中
  *  顺延到下一条轨：底下是视频段就照旧直接播，是另一条 Layer 段就换它合成。

@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  type VidClip, type VidController,
-  addLayerClip, addTrack, clipAtSolo, fmtTime, importToTrack, isAudioName, isVideoName, moveClip, placeAsset, removeClip, removeTrack,
-  splitClip, trackOf, trimClip, unlinkGroup, vidDuration,
+  type VidClip, type VidController, type VidTrack,
+  addLayerClip, addTrack, clipAtSolo, fmtTime, importToTrack, isAudioName, isVideoName, moveClip, moveTrack, placeAsset, removeClip, removeTrack, renameTrack,
+  setMaskTrack, splitClip, trackOf, trimClip, unlinkGroup, vidDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
 import { probeMedia } from './audio';
@@ -10,6 +10,7 @@ import { ingestFile } from './ingest';
 import {
   ensureFrame, ensureStrip, ensureWaveform, frameBackend, peekStrip, stripComplete, stripFrame, subscribeStrip,
 } from './previews';
+import { getProcFill, subscribeProcFill } from './procRun';
 
 /** 缩略条的订阅：抽好的那一刻敲一下组件重渲；挂载即开始在后台抽条。
  *  `src` 为空 = 这条片段不需要缩略条（音频段：波形另有 Cache，不该给纯音频源抽视频帧）。 */
@@ -315,6 +316,64 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
     return () => window.removeEventListener('keydown', onKey);
   }, [sel, vid]);
 
+  // ── 轨道头的拖动排序 / 双击重命名 ─────────────────────────────────────────────────────────
+  // 排序走 **pointer 拖**（不走 HTML5 DnD）：轨道头按住（按钮/输入框除外）移动 5px 即进入，
+  // 指针落在哪条轨的上半 / 下半，蓝色插入线就落在那条轨的上沿 / 下沿；松手按 splice 语义落位。
+  // 不用 DnD 是有意的：lane 上已经住着资产拖放（dragover/drop 全套），再塞一种 MIME 进去，
+  // 两种落点要在同一片区域里互相让路 —— pointer 拖根本不进那套事件，互不相干。
+  // 重命名：双击名字变输入框，Enter/失焦提交、Escape 取消；提交走 renameTrack（空串不动）。
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState('');
+  const renamingRef = useRef<string | null>(null); renamingRef.current = renaming;
+  const renameValRef = useRef(''); renameValRef.current = renameVal;
+  const commitRename = (trackId: string) => {
+    if (renamingRef.current !== trackId) return;   // Enter 提交后 input 卸载会再触发 blur：已收尾就别写
+    renamingRef.current = null;
+    setRenaming(null);
+    const v = renameValRef.current.trim();
+    const tr = p.tracks.find(t => t.id === trackId);
+    if (tr && v && v !== tr.name) vid.update(proj => renameTrack(proj, trackId, v), 'Rename track');
+  };
+  const [trkDrag, setTrkDrag] = useState<{ id: string; idx: number } | null>(null);   // idx = 插入线（第 idx 条轨的上沿）
+  const trkDragRef = useRef<{ id: string; idx: number } | null>(null); trkDragRef.current = trkDrag;
+  const hdrDrag = useRef<{ id: string; x0: number; y0: number; active: boolean } | null>(null);
+  const startHeaderDrag = (e: React.PointerEvent, tr: VidTrack) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('button,input')) return;   // mute/solo/删除/改名输入框不抓手势
+    // 按下**不**立刻抓指针：抓了会把后续 click/dblclick 全改派到头上，双击重命名就死了。
+    // 指针捕获推迟到拖动激活的那一刻（见 onHeaderMove）。
+    hdrDrag.current = { id: tr.id, x0: e.clientX, y0: e.clientY, active: false };
+  };
+  const onHeaderMove = (e: React.PointerEvent) => {
+    const d = hdrDrag.current;
+    if (!d) return;
+    if (!d.active) {
+      if (!(e.buttons & 1)) { hdrDrag.current = null; return; }   // 半路松了手（指针没回到头上）：别幻拖
+      if (Math.abs(e.clientY - d.y0) < 5 && Math.abs(e.clientX - d.x0) < 5) return;
+      d.active = true;
+      try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 指针已失活：不挡手势 */ }
+    }
+    // 插入线落点：扫一遍行，指针在行中点之上就算"插在它前面"。
+    const rows = Array.from(contentRef.current?.querySelectorAll<HTMLElement>('[data-vid-trackrow]') ?? []);
+    let idx = rows.length;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i].getBoundingClientRect();
+      if (e.clientY < r.top + r.height / 2) { idx = i; break; }
+    }
+    setTrkDrag(cur => (cur && cur.id === d.id && cur.idx === idx ? cur : { id: d.id, idx }));
+  };
+  const onHeaderUp = () => {
+    const d = hdrDrag.current;
+    const cur = trkDragRef.current;
+    hdrDrag.current = null;
+    setTrkDrag(null);
+    if (!d || !d.active || !cur || cur.id !== d.id) return;
+    const from = p.tracks.findIndex(t => t.id === d.id);
+    let to = cur.idx;
+    if (to > from) to -= 1;                       // 插入线语义 → splice 下标：跨过自己要减一格
+    if (from >= 0 && to !== from) vid.update(proj => moveTrack(proj, d.id, to), 'Reorder track');
+  };
+
   // ── 视口度量 ── 自定义横向滚动条需要滚动区/条子的宽度与 scrollLeft。
   const trackRef = useRef<HTMLDivElement | null>(null);
   // 内容的宽度：工程时长再留 10s 余量，但**永远不少于可视区** —— 轨道是无限延伸的画布，
@@ -456,6 +515,24 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
           title="Add a Layer track on top — it holds Layer segments, each with its own set of layers, composited over the video below. Only a Layer track that sits above every video track takes effect."
           onClick={() => vid.update(p2 => addTrack(p2, 'layer'), 'Add track')}>+ Layer Track</button>
         <button style={btn} title="Add an audio track at the bottom" onClick={() => vid.update(p2 => addTrack(p2, 'audio'), 'Add track')}>+ Audio Track</button>
+        {/* Video 模式的 Mask = **一条轨的绑定**（不是画布上的一张墨迹）：绑了就把那条轨的画面
+            亮度逐帧当 mask（白 = 覆盖）；None = 没绑 = 整幅都是工作区。preset 链没有输入口，
+            它的 mask 就来自这里；Processor 的 mask 口有自己的端口来源，不看这里。 */}
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4, fontSize: 10.5, color: 'rgba(255,255,255,0.5)' }}
+          title="Video-mode Mask is a TRACK binding — the picked track's frames (luminance, white = covered) become the mask for every frame of a run. None = no mask, the whole frame is the workspace. Only Pipeline Preset runs read this; a Processor's mask input has its own source picker.">
+          Mask
+          <select
+            data-vid-mask-track=""
+            value={p.maskTrackId || ''}
+            onChange={e => vid.update(proj => setMaskTrack(proj, e.target.value || null), 'Mask track')}
+            style={{ fontSize: 10.5, padding: '2px 4px', borderRadius: 4, background: '#2a2a2e', color: 'rgba(255,255,255,0.8)', border: '0.5px solid rgba(255,255,255,0.14)', maxWidth: 130 }}
+          >
+            <option value="">None</option>
+            {p.tracks.filter(t => t.kind === 'video').map(t => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
+        </label>
         <div style={{ flex: 1 }} />
         {blade && (
           <span title="Blade: left-click a clip to cut it in two. Hold Alt to cut only the one you clicked (its linked audio/video stays whole)."
@@ -535,7 +612,7 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
             // Layer = 段不合成（露出底下）。mute 优先于 solo。静音时轨道变灰、片段压暗。
             const isMuted = vid.mute.has(tr.id);
             return (
-            <div key={tr.id} style={{
+            <div key={tr.id} data-vid-trackrow="" style={{
               display: 'flex', height: TRACK_H[tr.kind],
               borderBottom: '0.5px solid rgba(255,255,255,0.05)',
               // 条纹底：两条轨挨着时边界一眼能分（同色系，亮暗交替，不抢片段）。
@@ -544,13 +621,51 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
                 : isSoloed ? 'rgba(255,159,10,0.07)'
                   : (ti % 2 ? KIND_UI[tr.kind].bandA : KIND_UI[tr.kind].bandB),
             }}>
-              {/* 轨道头：类型徽章 + 名字 + mute + solo + 删除。徽章是一枚 18px 的圆角色块，图标居中 ——
+              {/* 轨道头：拖住空白处上下拖 = 排序（插入线落点），双击名字 = 重命名。
+                  类型徽章 + 名字 + mute + solo + 删除。徽章是一枚 18px 的圆角色块，图标居中 ——
                   颜色说类型，形状说用途，名字让位给省略号。 */}
-              <div style={{ position: 'sticky', left: 0, width: HEADER_W, flexShrink: 0, zIndex: 4, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px' }}>
+              <div
+                onPointerDown={e => startHeaderDrag(e, tr)}
+                onPointerMove={onHeaderMove}
+                onPointerUp={onHeaderUp} onPointerCancel={onHeaderUp}
+                onDoubleClick={e => {
+                  // 双击 = 重命名（捕获从不在按下时抢，dblclick 会正常落到头上）；按钮/输入框上不接。
+                  if ((e.target as HTMLElement).closest('button,input')) return;
+                  e.stopPropagation();
+                  setRenameVal(tr.name);
+                  setRenaming(tr.id);
+                }}
+                title={`Drag to reorder — order is stacking: video tracks composite top to bottom, a Layer track only composites while it sits above every video track. Double-click to rename.`}
+                style={{ position: 'sticky', left: 0, width: HEADER_W, flexShrink: 0, zIndex: 4, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px', cursor: trkDrag ? 'grabbing' : 'grab', userSelect: 'none' }}
+              >
                 <span style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: KIND_UI[tr.kind].chipBg, color: KIND_UI[tr.kind].fg }}>
                   {tr.kind === 'video' ? <IconFilm /> : tr.kind === 'layer' ? <IconLayers /> : <IconWave />}
                 </span>
-                <span style={{ fontSize: 11, fontWeight: 600, color: isMuted ? 'rgba(255,255,255,0.38)' : 'rgba(255,255,255,0.8)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tr.name}</span>
+                {renaming === tr.id ? (
+                  <input
+                    autoFocus
+                    value={renameVal}
+                    onChange={e => setRenameVal(e.target.value)}
+                    onPointerDown={e => e.stopPropagation()}
+                    onKeyDown={e => {
+                      e.stopPropagation();     // 别让 C（剃刀）/ Delete（删片段）那套热键听见
+                      if (e.key === 'Enter') commitRename(tr.id);
+                      else if (e.key === 'Escape') { renamingRef.current = null; setRenaming(null); }
+                    }}
+                    onBlur={() => commitRename(tr.id)}
+                    title="Track name — Enter to apply, Escape to cancel"
+                    style={{ flex: 1, minWidth: 0, fontSize: 11, fontWeight: 600, background: 'rgba(0,0,0,0.45)', color: '#fff', border: '1px solid rgba(10,132,255,0.75)', borderRadius: 4, padding: '1px 4px', outline: 'none' }}
+                  />
+                ) : (
+                  <span
+                    style={{ fontSize: 11, fontWeight: 600, color: isMuted ? 'rgba(255,255,255,0.38)' : 'rgba(255,255,255,0.8)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  >{tr.name}</span>
+                )}
+                {/* 这颗小标 = 这条轨就是 Video 模式的 Mask 源（顶部那颗下拉绑的）。 */}
+                {p.maskTrackId === tr.id && (
+                  <span data-vid-mask-badge="" title="This track is the video-mode Mask source — its frames' luminance is the mask for every frame of a preset run."
+                    style={{ flexShrink: 0, fontSize: 8, fontWeight: 800, letterSpacing: 0.3, color: '#0a84ff', background: 'rgba(10,132,255,0.18)', border: '0.5px solid rgba(10,132,255,0.5)', borderRadius: 3, padding: '1px 3px', lineHeight: 1.1 }}>MASK</span>
+                )}
                 {/* mute：**所有轨类型都有**（Layer 轨也有 —— 它的段不合成）。亮着 = 这条轨不参与
                     输出（音频不响 / 视频不显示 / Layer 段不合成），且**优先于 solo**。再点一次取消。 */}
                 <button
@@ -620,13 +735,27 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
                       mediaFile={c.src.startsWith('/api/vid_media/') ? c.src.split('/').pop() : undefined}
                       onStartDrag={startClipDrag} onPointerMove={onClipPointerMove} onPointerUp={endClipDrag}
                       onDelete={() => { vid.update(proj => removeClip(proj, c.id), 'Delete clip'); setSel(s => (s === c.id ? null : s)); vid.focusClip(null); }}
-                      onUnlink={() => { if (gid) vid.update(proj => unlinkGroup(proj, gid), 'Unlink'); }} />
+                      onUnlink={() => { if (gid) vid.update(proj => unlinkGroup(proj, gid), 'Unlink'); }}
+                      onContinue={vid.continueProc} />
                   );
                 })}
               </div>
             </div>
             );
           })}
+
+          {/* 轨道排序的插入线：拖轨道头时落在指针上方的行边界上（内容坐标 = 标尺高 + 前面各行高，
+              行高随类型走）。画在 sticky 头之上（z 8）横贯整行，落点一眼可见。 */}
+          {trkDrag && (() => {
+            let y = RULER_H;
+            for (let i = 0; i < trkDrag.idx && i < p.tracks.length; i++) y += TRACK_H[p.tracks[i].kind];
+            return (
+              <div style={{
+                position: 'absolute', left: 0, width: contentW, top: y - 1.5, height: 3, borderRadius: 2,
+                background: '#0a84ff', zIndex: 8, pointerEvents: 'none', boxShadow: '0 0 7px rgba(10,132,255,0.75)',
+              }} />
+            );
+          })()}
 
           {/* 范围边界：I/O 各一条**贯穿轨道区的长竖线**（和播放头同一种画法），
               这样范围在整个时间线上是一条看得见的长边界，而不是只在标尺上标一下。
@@ -686,10 +815,18 @@ const Clip: React.FC<{
   onPointerUp: () => void;
   onDelete: () => void;
   onUnlink: () => void;
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onDelete, onUnlink }) => {
+  /** 占位段上的 ▶（续跑这一段）；undefined = 宿主没接（按钮不画）。 */
+  onContinue?: (clipId: string) => void;
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onDelete, onUnlink, onContinue }) => {
   const isAudio = c.kind === 'audio';
   // Layer 段没有源文件：不抽条、不取首尾帧，只画一块"合成区间"。
   const isLayer = c.kind === 'layer';
+  // Processor 占位段同样没有源（等跑完才有）：不抽条不取帧，画一块带快照的"待跑坑"。
+  const isPending = !!c.pending;
+  // 占位段的宽度命运：一段常常只有几十像素（1 秒 @ 60px/s），名字 + 段号 + ▶ Run 挤不下。
+  // 窄的时候只留一颗 ▶（名字/段号/时长让位给 tooltip）—— 按钮绝不能被 overflow 裁掉。
+  const clipW = Math.max(8, c.duration * pps);
+  const tight = isPending && clipW < 108;
   const K = KIND_UI[c.kind];
   const hideImg = (e: React.SyntheticEvent<HTMLImageElement>) => { e.currentTarget.style.display = 'none'; };
   // 视频段头/尾帧：t 是**片段自己的**第一帧/最后一帧（源内 offset 与 offset+duration 处）——
@@ -702,7 +839,7 @@ const Clip: React.FC<{
   // 拖动裁剪时**立刻**要有画面：先从缩略条上取最靠近的那一格（同步、零 seek），
   // 停手后再由下面的 effect 换成精确帧。两层合起来 = 跟手且准。
   // 音频段不给它抽条：条是视频帧，纯音频源（mp3/wav）咬不动，白占队列十几秒。
-  useStrip(isAudio || isLayer ? '' : c.src, c.srcDuration);
+  useStrip(isAudio || isLayer || isPending ? '' : c.src, c.srcDuration);
   // 静态预览的门槛：**正在裁**（需要逐帧跟手）或**这条源的条已经抽完**（索引稳定）。
   // 半成品只给拖动顶位用 —— 拿它当静态预览，抽条每发布一批画面就跳一次。
   const quickOk = performance.now() - lastTrimAt < 200 || stripComplete(c.src);
@@ -728,7 +865,7 @@ const Clip: React.FC<{
   const [headFrame, setHeadFrame] = useState<{ t: number; url: string } | null>(
     () => (mediaFile ? { t: headT, url: backendFrame(headT) } : null));
   useEffect(() => {
-    if (isAudio || isLayer) return;
+    if (isAudio || isLayer || isPending) return;
     let alive = true;
     const timer = setTimeout(() => {
       void (async () => {
@@ -741,7 +878,7 @@ const Clip: React.FC<{
 
   const [tailFrame, setTailFrame] = useState<{ t: number; url: string } | null>(null);
   useEffect(() => {
-    if (isAudio || isLayer || !wide) return;
+    if (isAudio || isLayer || isPending || !wide) return;
     let alive = true;
     const timer = setTimeout(() => {
       void (async () => {
@@ -757,6 +894,9 @@ const Clip: React.FC<{
   const preciseTail = tailFrame && Math.abs(tailFrame.t - tailT) < 0.02 ? tailFrame.url : undefined;
   const headSrc = preciseHead ?? quickHead;
   const tailSrc = wide ? (preciseTail ?? quickTail) : undefined;
+  // 占位段的"被充满"进度：这一段在跑时从左往右涨（procRun 的小仓库，段内 0..1）。
+  // -1 = 还没报出步数/没在跑 —— 画一窄条意思一下，跑完随替换一起消失。
+  const fillP = useSyncExternalStore(subscribeProcFill, () => getProcFill(c.id));
   return (
     <div
       onPointerDown={e => onStartDrag(e, 'move', c)}
@@ -766,21 +906,34 @@ const Clip: React.FC<{
       // 片段上按下已经选中它了；click / dblclick 别冒泡到 lane —— 那里"点空白"会清选中、双击会再造一段。
       onClick={e => e.stopPropagation()}
       onDoubleClick={e => e.stopPropagation()}
-      title={`${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}`}
+      title={isPending && c.pending
+        ? `${c.name} — ${c.pending.kind === 'preset' ? 'Pipeline Preset' : 'Processor'} placeholder, segment ${c.pending.segIndex + 1}/${c.pending.segCount} of 「${c.pending.iface}」 (nothing to show until it runs). Click ▶ Run to execute just this segment from its stored snapshot; drag/trim/delete like any clip.`
+        : `${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}`}
       style={{
         position: 'absolute', left: c.start * pps, width: Math.max(8, c.duration * pps), top: 3, bottom: 3,
         borderRadius: 6, overflow: 'hidden', cursor: blade ? BLADE_CURSOR : 'grab', userSelect: 'none',
         // 上亮下暗的立面色：片段是"一片实体"，不是一块半透明色纸；选中时白边 + 外发光。
+        // 占位段：虚线紫边 —— "这里有个坑等着被填"一眼认出，跑完换实体。
         background: `linear-gradient(180deg, ${K.clipA}, ${K.clipB})`,
-        border: selected ? '1px solid rgba(255,255,255,0.92)' : `0.5px solid ${K.edge}`,
+        border: selected ? '1px solid rgba(255,255,255,0.92)'
+          : isPending ? '1px dashed rgba(191,124,255,0.6)' : `0.5px solid ${K.edge}`,
         boxShadow: selected ? `0 0 0 1px ${K.edge}, 0 2px 8px rgba(0,0,0,0.45)` : '0 1px 3px rgba(0,0,0,0.35)',
         display: 'flex', alignItems: 'center', padding: '0 8px', gap: 6,
         // 静音：压暗 + 去色 —— 段还在（还能拖/裁/删），只是不参与输出。
         opacity: muted ? 0.34 : 1, filter: muted ? 'saturate(0.3)' : undefined,
       }}
     >
-      {/* 顶部 2px 高亮条：颜色即类型，一眼分得出这条是画面还是声音。 */}
-      <div style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 2, background: K.accent, opacity: 0.85, pointerEvents: 'none' }} />
+      {/* 顶部 2px 高亮条：颜色即类型，一眼分得出这条是画面还是声音。占位段用紫色。 */}
+      <div style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 2, background: isPending ? '#bf7cff' : K.accent, opacity: 0.85, pointerEvents: 'none' }} />
+      {/* 占位段的填充层：段在跑 = 从左往右被充满（紫色半透明 + 亮边线扫过去）。 */}
+      {isPending && (
+        <div style={{
+          position: 'absolute', left: 0, top: 0, bottom: 0, pointerEvents: 'none',
+          width: `${fillP >= 0 ? Math.max(2, fillP * 100) : 4}%`,
+          background: 'rgba(191,124,255,0.28)', borderRight: '1px solid rgba(191,124,255,0.8)',
+          transition: 'width 0.45s linear',
+        }} />
+      )}
       {/* 预览层：视频段 = 头帧 + 尾帧；音频段 = 全段波形裁出本片段的窗。 */}
       {!isAudio && !isLayer && headSrc && (
         <img src={headSrc} onError={hideImg} decoding="async"
@@ -800,8 +953,27 @@ const Clip: React.FC<{
       {isLayer && (
         <span style={{ display: 'flex', alignItems: 'center', color: '#e2c2ff', flexShrink: 0, position: 'relative', pointerEvents: 'none' }}><IconLayers /></span>
       )}
-      <span style={{ fontSize: 10.5, fontWeight: 600, color: 'rgba(255,255,255,0.94)', textShadow: '0 1px 2px rgba(0,0,0,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', pointerEvents: 'none', position: 'relative' }}>{c.name}</span>
-      <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.72)', flexShrink: 0, marginLeft: 'auto', fontVariantNumeric: 'tabular-nums', pointerEvents: 'none', position: 'relative', background: 'rgba(0,0,0,0.38)', padding: '1px 5px', borderRadius: 4, textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{fmtTime(c.duration)}</span>
+      {!(tight && isPending) && (
+        <span style={{ fontSize: 10.5, fontWeight: 600, color: 'rgba(255,255,255,0.94)', textShadow: '0 1px 2px rgba(0,0,0,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', pointerEvents: 'none', position: 'relative' }}>{c.name}</span>
+      )}
+      {/* 占位段：段号徽章 + ▶ Run。点 ▶ 只续跑这一段（快照重放），其余照常拖/裁/删。 */}
+      {isPending && c.pending && (
+        <>
+          {(!tight || clipW >= 64) && (
+            <span style={{ fontSize: 9, color: '#e2c2ff', flexShrink: 0, fontVariantNumeric: 'tabular-nums', pointerEvents: 'none', position: 'relative' }}>{c.pending.segIndex + 1}/{c.pending.segCount}</span>
+          )}
+          {onContinue && (
+            <button
+              title={`Run this segment from its stored snapshot (${c.pending.kind === 'preset' ? 'preset' : 'interface'} 「${c.pending.iface}」, segment ${c.pending.segIndex + 1}/${c.pending.segCount}; params and frame windows are kept in the clip).`}
+              onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onContinue(c.id); }}
+              style={{ flexShrink: 0, fontSize: 9, fontWeight: 700, color: '#17131c', background: '#bf7cff', border: 'none', borderRadius: 4, cursor: 'pointer', padding: tight ? '3px 6px' : '2px 7px', lineHeight: 1.2, position: 'relative', display: 'flex', alignItems: 'center', gap: 3, margin: tight ? '0 auto' : undefined }}
+            >{tight ? '▶' : '▶ Run'}</button>
+          )}
+        </>
+      )}
+      {!tight && (
+        <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.72)', flexShrink: 0, marginLeft: 'auto', fontVariantNumeric: 'tabular-nums', pointerEvents: 'none', position: 'relative', background: 'rgba(0,0,0,0.38)', padding: '1px 5px', borderRadius: 4, textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{fmtTime(c.duration)}</span>
+      )}
       {c.groupId && (
         <button
           title="Linked A/V pair — click to unlink; each side then moves/trims on its own (hold Alt while dragging for a one-off)"

@@ -61,6 +61,44 @@ export type VidClip = {
   hasAudio: boolean;
   /** 同一次导入拆出来的视频段 + 音频段共用一颗 —— 拖动/裁剪一起走。 */
   groupId?: string;
+  /** Processor 占位段（见 VidProcPending）：跑完被视频替换，撤掉前播放/合成当它不存在。 */
+  pending?: VidProcPending;
+};
+
+/** Processor 占位段里的**执行快照**：Run 确认的当下就在轨上摆好的坑（每段一个、预分配
+ *  空间），等对应段跑完被编码视频替换。里面存着这一段怎么跑的全部信息 —— 接口、参数、
+ *  每行输入的抽帧窗口（源内秒）—— 中途退出再进来，点占位上的 ▶ 就按快照原样重放
+ *  这一段（只跑被点的那个）。 */
+export type VidProcPending = {
+  /** 同一趟 Run 的所有占位共用一颗（播报/统计用）。 */
+  runId: string;
+  /** 这一趟是谁发的：processor（接口子图）/ preset（Pipeline Preset 的 block 链）。
+   *  缺省 = processor（旧存档）。续跑按它分流：一个 POST /api/execute_interface，
+   *  一个 POST /api/preset_video。 */
+  kind?: 'processor' | 'preset';
+  /** preset 路：preset（block set）的 id + 名字（播报/续跑名字兜底）。 */
+  presetId?: string;
+  presetName?: string;
+  /** preset 路：追加 prompt（与图像模式 preset Run 的 extra prompt 同义）。 */
+  extraPrompt?: string;
+  /** preset 路：这一趟绑的 Mask 轨（id + 名字快照；空 = 没绑 = 不送 mask）。
+   *  绑定轨的画面亮度逐帧当 mask（白 = 覆盖）。 */
+  maskTrackId?: string;
+  maskTrackName?: string;
+  /** 产物替换到哪个输出口（接口的第几号出口）。 */
+  port: number;
+  /** 接口名（续跑按名解析）+ 下标兜底。 */
+  iface: string;
+  ifaceNum: number;
+  /** 参数快照（manual_values：port → 值）。 */
+  params: Record<string, unknown>;
+  /** 这一段每行输入的抽帧窗口（port → {file, ss, t, n, fps}，ss/t 是源内秒）。 */
+  inputs: Record<string, { file: string; ss: number; t: number; n: number; fps: number }>;
+  /** preset 路：这一段的 Mask 轨抽帧窗口（同形，port 恒 '0'）。没绑 Mask 轨就是空。 */
+  maskInputs?: Record<string, { file: string; ss: number; t: number; n: number; fps: number }>;
+  /** 第几段（0 起）/ 共几段。 */
+  segIndex: number;
+  segCount: number;
 };
 
 export type VidProject = {
@@ -75,6 +113,11 @@ export type VidProject = {
   /** 输出帧率。预览/取帧的时间栅格按它走；Layer Track 逐帧合成也用它对齐
    *  （"执行到该帧"就是 t = n / fps）。旧档里没有这个字段 → 30。 */
   fps: number;
+  /** **Video 模式的 Mask**：绑到一条轨道上（该轨的画面亮度逐帧当 mask，白 = 覆盖）。
+   *  与图像模式的 Canvas Mask 层是同一个位置的两套形态 —— 视频没有"一张画布上的静态墨迹"
+   *  这回事，工作区得跟着帧走。空/找不到轨 = 没绑 = 视作没有 mask（整幅都是工作区）。
+   *  Processor 的 mask 口有自己的端口来源，不受这里影响；preset 链（没有输入口）用它。 */
+  maskTrackId?: string;
 };
 
 /** solo 状态：**音频与视频分开记** —— 一边亮着不影响另一边。空集 = 没有 solo（全部照常）。
@@ -171,6 +214,9 @@ export type VidController = {
   mute: VidMute;
   /** 切某条轨的 mute（再点一次取消）。**所有轨类型都接** —— 视频/音频/Layer 各有各的语义。 */
   toggleMute: (trackId: string) => void;
+  /** 占位段上的 ▶（Processor 段续跑）：按段里的执行快照把这一段单独重放，跑完当场替换。
+   *  宿主（EditPhase）接线；Timeline 的片段直接透传。 */
+  continueProc?: (clipId: string) => void;
 };
 
 const MIN_CLIP = 0.05;   // 片段/裁剪的最短寿命（s）
@@ -187,7 +233,7 @@ export const trackOf = (p: VidProject, id: string): VidTrack | null => p.tracks.
 export const clipAt = (p: VidProject, t: number, kind?: VidTrackKind): VidClip | null => {
   for (const tr of p.tracks) {
     if (kind && tr.kind !== kind) continue;
-    const hit = p.clips.find(c => c.trackId === tr.id && t >= c.start && t < c.start + c.duration);
+    const hit = p.clips.find(c => c.trackId === tr.id && !c.pending && t >= c.start && t < c.start + c.duration);
     if (hit) return hit;
   }
   return null;
@@ -211,7 +257,7 @@ export const clipAtSolo = (p: VidProject, t: number, soloVideo: ReadonlySet<stri
     if (tr.kind !== 'video') continue;
     if (muted.has(tr.id)) continue;                        // mute 优先
     if (soloVideo.size > 0 && !soloVideo.has(tr.id)) continue;
-    const hit = p.clips.find(c => c.trackId === tr.id && t >= c.start && t < c.start + c.duration);
+    const hit = p.clips.find(c => c.trackId === tr.id && !c.pending && t >= c.start && t < c.start + c.duration);
     if (hit) return hit;
   }
   return null;
@@ -295,7 +341,9 @@ export const splitClip = (p: VidProject, id: string, t: number, linked = true): 
     if (cut < MIN_CLIP || c.duration - cut < MIN_CLIP) { clips.push(c); continue; }   // 这一员切不了，原样留下
     changed = true;
     clips.push({ ...c, groupId: gLeft, duration: cut });
-    clips.push({ ...c, id: newVidId('clip'), groupId: gRight, start: c.start + cut, duration: c.duration - cut, offset: c.offset + cut });
+    // 占位段切开后右半丢掉 pending：两半都揣着同一段的快照，各点各的 ▶ 会把这一段跑两遍。
+    const { pending: _dropR, ...right } = c;
+    clips.push({ ...right, id: newVidId('clip'), groupId: gRight, start: c.start + cut, duration: c.duration - cut, offset: c.offset + cut });
   }
   return changed ? { ...p, clips } : p;
 };
@@ -343,7 +391,39 @@ export const removeTrack = (p: VidProject, trackId: string): VidProject => ({
   ...p,
   tracks: p.tracks.filter(t => t.id !== trackId),
   clips: p.clips.filter(c => c.trackId !== trackId),
+  // 删掉的就是 Mask 轨 → 绑定跟着断（留一条指向不存在轨的 id 等于"绑着但取不到"，
+  // 比"没绑"更难解释）。
+  ...(p.maskTrackId === trackId ? { maskTrackId: undefined } : {}),
 });
+
+/** 视频模式的 Mask：绑一条轨（或传空 = 解绑）。只认视频轨 —— 音频轨没有画面，
+ *  Layer 轨的"画面"是图层合成，两者当 mask 源都是误会。 */
+export const setMaskTrack = (p: VidProject, trackId: string | null): VidProject => {
+  if (!trackId) return { ...p, maskTrackId: undefined };
+  const tr = p.tracks.find(t => t.id === trackId && t.kind === 'video');
+  return { ...p, maskTrackId: tr ? tr.id : undefined };
+};
+
+/** 重命名轨道。名字只是显示用（mute/solo/拾取全跟 id 走），爱叫什么叫什么；空串 = 不动。 */
+export const renameTrack = (p: VidProject, trackId: string, name: string): VidProject => {
+  const trimmed = name.trim();
+  if (!trimmed) return p;
+  return { ...p, tracks: p.tracks.map(t => (t.id === trackId ? { ...t, name: trimmed } : t)) };
+};
+
+/** 拖动排序：把一条轨挪到 `to`（splice 语义的落点下标，越界夹回）。数组序 = 上下序，类型不设限
+ *  —— 合成语义本来就看序：视频轨的上下就是叠放次序（clipAt 从上往下找）、Layer 轨只有压过
+ *  所有视频轨才参与合成，音频轨彼此的序就是混音次序。 */
+export const moveTrack = (p: VidProject, trackId: string, to: number): VidProject => {
+  const from = p.tracks.findIndex(t => t.id === trackId);
+  if (from < 0) return p;
+  const to2 = Math.max(0, Math.min(p.tracks.length - 1, to));
+  if (to2 === from) return p;
+  const tracks = [...p.tracks];
+  const [tr] = tracks.splice(from, 1);
+  tracks.splice(to2, 0, tr);
+  return { ...p, tracks };
+};
 
 // ── 导入：一段源文件进时间线（拖放落定后调）───────────────────────────────────────────────
 /** 把一次拖放落成片段（含音画拆分）。`trackId` 为空 = 自动挑第一段视频轨。
@@ -431,6 +511,127 @@ export const importToTrack = (
   return placeAsset(next, asset, trackId, at);
 };
 
+/** Processor 的 Allow List 视频产物落位：一个出口的一列编码视频（/api/vid_media/...）
+ *  **新开一条视频轨**按序放进去（首尾相接、第一段对齐源片段起点）。大视频因此不必
+ *  一次抽完整列 —— 宿主按段跑、每段独立编码，峰值内存只由单段帧数决定；segs 长度 1
+ *  时就是单段直落。不走 importToTrack —— 那条路的 snapPlace 对空轨会吸到 0（"放到该轨
+ *  片段末尾"对一条新轨就是开头），而这里要的是"和源片段对齐"。
+ *  资产库照记每件（Assets 是项目所有数据的来源），同 src 重复跑只更新不重复加。 */
+export const placeProcVideoSegs = (
+  p: VidProject,
+  item: { name: string; segs: { src: string; start: number; duration: number }[] },
+): VidProject => {
+  let next = p;
+  for (const s of item.segs) {
+    const dur = Math.max(0.1, s.duration);
+    next = addAsset(next, {
+      id: newVidId('as'), name: item.name, src: s.src, origin: 'file',
+      kind: 'video', duration: dur, hasAudio: false,
+    });
+  }
+  const track: VidTrack = {
+    id: newVidId('trk'), kind: 'video',
+    name: `Video ${next.tracks.filter(t => t.kind === 'video').length + 1}`,
+  };
+  next = { ...next, tracks: [track, ...next.tracks] };
+  const clips: VidClip[] = item.segs.map(s => {
+    const dur = Math.max(0.1, s.duration);
+    return {
+      id: newVidId('clip'), trackId: track.id, kind: 'video', name: item.name,
+      src: s.src, origin: 'file', start: Math.max(0, s.start), duration: dur,
+      offset: 0, srcDuration: dur, hasAudio: false,
+    };
+  });
+  return { ...next, clips: [...next.clips, ...clips] };
+};
+
+/** Processor 的 Allow List 视频路（输出口 = New Track）：**Run 确认的当下**就开一条新
+ *  视频轨、按段的划分摆好占位段（每段一个坑、预分配空间）—— 段跑完一个替换一个，
+ *  不必等整趟结束。占位段带着执行快照（VidProcPending），中途退出也能点占位续跑。
+ *  item.segs 的 start/duration 是时间线口径（第一段对齐范围入点），inputs 是这一段的
+ *  抽帧窗口（全口）。每个被跟踪的输出口各开一条轨（与 placeProcVideoSegs 的口径一致）。 */
+export const placeProcPlaceholders = (
+  p: VidProject,
+  item: {
+    name: string; runId: string; port: number; iface: string; ifaceNum: number;
+    params: Record<string, unknown>;
+    /** 'preset' 的视频路用它记账（缺省 = processor）。 */
+    kind?: 'processor' | 'preset';
+    presetId?: string;
+    presetName?: string;
+    extraPrompt?: string;
+    maskTrackId?: string;
+    maskTrackName?: string;
+    segs: { start: number; duration: number; segIndex: number; segCount: number;
+      inputs: Record<string, { file: string; ss: number; t: number; n: number; fps: number }>;
+      maskInputs?: Record<string, { file: string; ss: number; t: number; n: number; fps: number }> }[];
+  },
+): VidProject => {
+  if (!item.segs.length) return p;
+  const track: VidTrack = {
+    id: newVidId('trk'), kind: 'video',
+    name: `Video ${p.tracks.filter(t => t.kind === 'video').length + 1}`,
+  };
+  const clips: VidClip[] = item.segs.map(s => ({
+    id: newVidId('clip'), trackId: track.id, kind: 'video', name: item.name,
+    src: '', origin: 'file', start: Math.max(0, s.start), duration: Math.max(0.1, s.duration),
+    offset: 0, srcDuration: Math.max(0.1, s.duration), hasAudio: false,
+    pending: {
+      runId: item.runId, port: item.port, iface: item.iface, ifaceNum: item.ifaceNum,
+      params: item.params, inputs: s.inputs, segIndex: s.segIndex, segCount: s.segCount,
+      ...(item.kind ? { kind: item.kind } : {}),
+      ...(item.presetId ? { presetId: item.presetId } : {}),
+      ...(item.presetName ? { presetName: item.presetName } : {}),
+      ...(item.extraPrompt ? { extraPrompt: item.extraPrompt } : {}),
+      ...(item.maskTrackId ? { maskTrackId: item.maskTrackId } : {}),
+      ...(item.maskTrackName ? { maskTrackName: item.maskTrackName } : {}),
+      ...(s.maskInputs ? { maskInputs: s.maskInputs } : {}),
+    },
+  }));
+  return { ...p, tracks: [track, ...p.tracks], clips: [...p.clips, ...clips] };
+};
+
+/** 一段跑完：占位段**当场**换成对应的编码视频（同位替换、pending 撤掉），产物照记
+ *  资产库（Assets 是项目所有数据的来源）。撤销这一步 = 这段退回占位（历史按快照走）。
+ *  占位已被用户删掉时 clip 找不到 —— 调用方（EditPhase）负责把那段产物改道资产库。 */
+export const fillProcSegment = (
+  p: VidProject, clipId: string, src: string, name: string, duration: number,
+): VidProject => {
+  const clip = p.clips.find(c => c.id === clipId);
+  if (!clip || !clip.pending) return p;
+  const dur = Math.max(0.1, duration);
+  const withAsset = addAsset(p, {
+    id: newVidId('as'), name, src, origin: 'file', kind: 'video', duration: dur, hasAudio: false,
+  });
+  return {
+    ...withAsset,
+    clips: withAsset.clips.map(c => {
+      if (c.id !== clipId || !c.pending) return c;
+      const { pending: _drop, ...rest } = c;
+      return { ...rest, name, src, duration: dur, srcDuration: dur, offset: 0 };
+    }),
+  };
+};
+
+/** Processor 的 Allow List 视频产物**只入库**（输出口选了 Asset）：时间线不动、不开轨，
+ *  每段编码产物在资产库里记一件（多段时名字带序号）。与 placeProcVideoSegs 同一批
+ *  产物、两种去处 —— 挑选值在 Processor 窗的输出口行上。 */
+export const placeProcAssets = (
+  p: VidProject,
+  item: { name: string; segs: { src: string; duration: number }[] },
+): VidProject => {
+  let next = p;
+  const many = item.segs.length > 1;
+  item.segs.forEach((s, i) => {
+    next = addAsset(next, {
+      id: newVidId('as'), name: many ? `${item.name} · ${i + 1}/${item.segs.length}` : item.name,
+      src: s.src, origin: 'file', kind: 'video',
+      duration: Math.max(0.1, s.duration), hasAudio: false,
+    });
+  });
+  return next;
+};
+
 // ── 持久化 ────────────────────────────────────────────────────────────────────────────────────
 const VID_PROJECT_STORE = 'sampler.videoProject';
 
@@ -467,6 +668,7 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
     const clips = p.clips.filter(c => {
       if (!c || !trackIds.has(c.trackId)) return false;
       if (!Number.isFinite(c.start) || !Number.isFinite(c.duration) || !(c.duration > 0)) return false;
+      if (c.pending) return true;   // 占位段没有 src（等跑完才有）—— 快照要活过重开，照常回来
       if (c.kind === 'layer') return c.src === '' || !c.src;
       return !!c.src && !c.src.startsWith('blob:');
     }).map(c => (c.kind === 'layer' ? { ...c, src: '', layerKey: c.layerKey || c.id } : c));
@@ -476,6 +678,9 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       tracks: p.tracks, clips, assets,
       inPoint: Math.max(0, +p.inPoint || 0), outPoint: Math.max(0, +p.outPoint || 0),
       fps: clampFps(Number(p.fps)),
+      // Mask 轨：绑的轨没了就当没绑（读档后轨道可能被删/改名）—— 不留一条悬空 id。
+      ...(typeof p.maskTrackId === 'string' && trackIds.has(p.maskTrackId)
+        ? { maskTrackId: p.maskTrackId } : {}),
     };
   } catch { return base; }
 };

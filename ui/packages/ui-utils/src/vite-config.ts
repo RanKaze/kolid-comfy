@@ -23,8 +23,10 @@ export function createViteConfig(options: ViteConfigOptions) {
         const dst = resolve(outDir, `${appName}.html`);
         if (existsSync(dst)) unlinkSync(dst);
         renameSync(src, dst);
-      } catch {
-        // ignore
+      } catch (e) {
+        // 失败不能无声：rename 落空 = 磁盘上躺着一份旧页面，真机/探针全在跑旧代码，
+        // 而且看起来"构建成功了"。至少喊一声。
+        console.warn(`[rename-html] FAILED to rename index.html -> ${appName}.html: ${e}`);
       }
     },
   };

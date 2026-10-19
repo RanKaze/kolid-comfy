@@ -1205,20 +1205,25 @@ class InterfaceExecutor:
         self.on_sampler_progress = on_sampler_progress
         self._sg_widget_values = {}  # Set during execute from pkg
         self._sg_input_defs = []
+        # Allow List：这一次 execute 是不是按"一列图"跑（见 execute 的 list_mode）。
+        self.list_mode = False
         # 与最近一次 execute() 的 results 逐条对齐的端口号 —— 离线 processor 按
         # 「哪个 end 端口出的这张图/mask」落位，靠它对表。
         self.result_ports = []
 
-    def execute(self, pkg, manual_values=None, port_overrides=None):
+    def execute(self, pkg, manual_values=None, port_overrides=None, list_mode=False):
         """执行一个 interface package。
         Args:
             pkg: InterfacePackageNode 输出的 PACKAGE dict
             manual_values: {port_num: value} 手动输入值（STRING/INT/FLOAT/BOOLEAN）
-            port_overrides: {port_num: value} 端口级覆盖值（优先于回调注入）
+            port_overrides: {port_num: value} 端口级覆盖值（优先于回调注入）；
+                list_mode 下 image/mask 口的覆盖值可以是**一列**（list of tensor）
+            list_mode: Allow List —— 内部节点按 INPUT_IS_LIST 分流（直通 list / 逐帧跑再合并）
         Returns:
             list of extracted values (images, pipelines, etc.)
         """
         manual_values = manual_values or {}
+        self.list_mode = bool(list_mode)
         start_id = pkg.get('start_node_id', '')
         end_id = pkg.get('end_node_id', '')
         interface_name = pkg.get('name', '')
@@ -1625,52 +1630,30 @@ class InterfaceExecutor:
             try:
                 obj = class_def()
                 func = getattr(obj, getattr(class_def, "FUNCTION", "execute"))
-                if getattr(class_def, "INPUT_IS_LIST", False):
-                    inputs = {k: [v] if not isinstance(v, list) else v for k, v in inputs.items()}
-
-                # Hook ComfyUI progress bar for sampler-like nodes
-                orig_hook = None
-                if self.on_sampler_progress:
-                    try:
-                        import comfy.utils
-                        orig_hook = comfy.utils.PROGRESS_BAR_HOOK
-                        def _sampler_hook(current, total, preview=None, **kwargs):
-                            if self.on_sampler_progress:
-                                self.on_sampler_progress(current, total, nid)
-                        comfy.utils.set_progress_bar_global_hook(_sampler_hook)
-                    except Exception:
-                        pass
-
-                try:
-                    result = func(**inputs)
-                finally:
-                    if orig_hook is not None:
-                        try:
-                            import comfy.utils
-                            comfy.utils.set_progress_bar_global_hook(orig_hook)
-                        except Exception:
-                            pass
-
-                # 宿主约定 (execution.py:359 get_output_from_returns): 节点返回
-                # {"ui": ..., "result": (...)} 时 result 才是出参, ui 给前端。KJNodes 的
-                # GetImageSizeAndCount 等这么写; 不解开就只有一个 dict 出参, 下游按槽位
-                # 取值全部落空, 输入会静默退回 widget 默认值。
-                if isinstance(result, dict):
-                    result = result.get("result", ())
-                if result is None:
-                    result = ()
+                is_list_node = bool(getattr(class_def, "INPUT_IS_LIST", False))
+                # Allow List（list_mode）：list 输入按**这个节点**是不是 INPUT_IS_LIST 分流 ——
+                #  * INPUT_IS_LIST：整列直接进（ComfyUI 的约定就是所有入参都是 list）；
+                #  * 否则：逐帧跑一遍（每个 list 输入按下标对齐，短的用最后一帧补），
+                #    产物按输出槽位合并回 list —— 下游拿到的还是"一列"。
+                # Start / End 两个边界节点不参与：它们是管道不是处理器，list 原样穿透
+                # （Start 的输出槽就是那列，End 收下那列交给 _extract_results 拆）。
+                frame_inputs = ({} if (nid == start_id or nid == end_id)
+                                else self._list_frame_inputs(inputs)) if self.list_mode else {}
+                if frame_inputs and not is_list_node:
+                    n_runs = len(next(iter(frame_inputs.values())))
+                    runs = []
+                    for i in range(n_runs):
+                        mm.throw_exception_if_processing_interrupted()
+                        one = dict(inputs)
+                        for _k, _v in frame_inputs.items():
+                            one[_k] = _v[i] if i < len(_v) else _v[-1]
+                        runs.append(self._call_node(class_def, func, one, nid, is_list_node))
+                    output_values[nid] = self._merge_list_runs(runs)
+                    print(f"[InterfaceExecutor]   list-map ×{n_runs} → "
+                          f"{len(output_values[nid])} output slots (merged)")
                 else:
-                    # Unwrap ComfyNode API NodeOutput objects
-                    try:
-                        from comfy_api.latest._io import NodeOutput
-                        if isinstance(result, NodeOutput):
-                            result = tuple(result.args) if result.args else ()
-                    except ImportError:
-                        pass
-                    if not isinstance(result, tuple):
-                        result = (result,)
-                output_values[nid] = result
-                print(f"[InterfaceExecutor]   → {len(result)} outputs")
+                    output_values[nid] = self._call_node(class_def, func, inputs, nid, is_list_node)
+                print(f"[InterfaceExecutor]   → {len(output_values[nid])} outputs")
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -1679,6 +1662,82 @@ class InterfaceExecutor:
             self._eval_stack.discard(nid)
 
         return output_values[nid]
+
+    # ---- Allow List：逐帧跑 + 合并 ----
+
+    @staticmethod
+    def _is_scalar(v):
+        return v is None or isinstance(v, (str, int, float, bool))
+
+    @classmethod
+    def _list_frame_inputs(cls, inputs):
+        """inputs 里那些"一列值"的入口：list 且不是纯标量列。
+
+        list 模式下一列只可能来自两处：边界注入（视频逐帧拆出来的帧列）和上游被 map
+        过的节点的合并输出。纯标量列（widget 值之类）不算 —— 它们进节点就该是单个值。
+        """
+        out = {}
+        for k, v in inputs.items():
+            if isinstance(v, list) and v and not all(cls._is_scalar(x) for x in v):
+                out[k] = v
+        return out
+
+    def _call_node(self, class_def, func, inputs, nid, is_list_node):
+        """跑一次节点：INPUT_IS_LIST 的约定包装 + 采样进度钩子 + 宿主返回约定解开。
+        map 路径里每一帧都走这一句，所以钩子的安装/卸载必须在每次调用内自成一对。"""
+        if is_list_node:
+            inputs = {k: [v] if not isinstance(v, list) else v for k, v in inputs.items()}
+        orig_hook = None
+        if self.on_sampler_progress:
+            try:
+                import comfy.utils
+                orig_hook = comfy.utils.PROGRESS_BAR_HOOK
+                def _sampler_hook(current, total, preview=None, **kwargs):
+                    if self.on_sampler_progress:
+                        self.on_sampler_progress(current, total, nid)
+                comfy.utils.set_progress_bar_global_hook(_sampler_hook)
+            except Exception:
+                pass
+        try:
+            result = func(**inputs)
+        finally:
+            if orig_hook is not None:
+                try:
+                    import comfy.utils
+                    comfy.utils.set_progress_bar_global_hook(orig_hook)
+                except Exception:
+                    pass
+        # 宿主约定 (execution.py:359 get_output_from_returns): 节点返回
+        # {"ui": ..., "result": (...)} 时 result 才是出参, ui 给前端。KJNodes 的
+        # GetImageSizeAndCount 等这么写; 不解开就只有一个 dict 出参, 下游按槽位
+        # 取值全部落空, 输入会静默退回 widget 默认值。
+        if isinstance(result, dict):
+            result = result.get("result", ())
+        if result is None:
+            result = ()
+        else:
+            # Unwrap ComfyNode API NodeOutput objects
+            try:
+                from comfy_api.latest._io import NodeOutput
+                if isinstance(result, NodeOutput):
+                    result = tuple(result.args) if result.args else ()
+            except ImportError:
+                pass
+            if not isinstance(result, tuple):
+                result = (result,)
+        return result
+
+    @staticmethod
+    def _merge_list_runs(runs):
+        """逐帧跑的产物按输出槽位合并回 list（转置）：第 i 槽收齐每次跑的第 i 个出参。
+        下游因此拿到的还是"一列"—— INPUT_IS_LIST 的节点直接吃，非 list 的再 map 一遍。"""
+        if not runs:
+            return ()
+        n_slots = len(runs[0])
+        merged = []
+        for slot in range(n_slots):
+            merged.append([r[slot] if slot < len(r) else None for r in runs])
+        return tuple(merged)
 
     # ---- link 解析辅助 ----
 
@@ -2261,25 +2320,22 @@ class InterfaceExecutor:
         try:
             obj = class_def()
             func = getattr(obj, getattr(class_def, "FUNCTION", "execute"))
-            if getattr(class_def, "INPUT_IS_LIST", False):
-                inputs = {k: [v] if not isinstance(v, list) else v for k, v in inputs.items()}
-            result = func(**inputs)
-            # 与 _evaluate_node 同一份宿主返回约定: {"ui": ..., "result": (...)} 里
-            # result 才是出参; 不解开, 下游按槽位取外部节点的输出全部落空。
-            if isinstance(result, dict):
-                result = result.get("result", ())
-            if result is None:
-                result = ()
+            is_list_node = bool(getattr(class_def, "INPUT_IS_LIST", False))
+            # Allow List：与子图内节点同一条分流（INPUT_IS_LIST 直通 / 否则逐帧跑再合并）。
+            frame_inputs = self._list_frame_inputs(inputs) if self.list_mode else {}
+            if frame_inputs and not is_list_node:
+                n_runs = len(next(iter(frame_inputs.values())))
+                runs = []
+                for i in range(n_runs):
+                    mm.throw_exception_if_processing_interrupted()
+                    one = dict(inputs)
+                    for _k, _v in frame_inputs.items():
+                        one[_k] = _v[i] if i < len(_v) else _v[-1]
+                    runs.append(self._call_node(class_def, func, one, node_id, is_list_node))
+                result = self._merge_list_runs(runs)
+                print(f"[InterfaceExecutor]   external list-map ×{n_runs} → merged")
             else:
-                # Unwrap ComfyNode API NodeOutput objects
-                try:
-                    from comfy_api.latest._io import NodeOutput
-                    if isinstance(result, NodeOutput):
-                        result = tuple(result.args) if result.args else ()
-                except ImportError:
-                    pass
-                if not isinstance(result, tuple):
-                    result = (result,)
+                result = self._call_node(class_def, func, inputs, node_id, is_list_node)
             output_values[node_id] = result
             return result
         except Exception as e:

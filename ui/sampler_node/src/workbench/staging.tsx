@@ -5,10 +5,11 @@ import { useBlendUi } from './store';
 import type { WorkbenchUnit, WorkbenchUnitProps } from './registry';
 
 // Staging 那一格：画布底部原来那条工作区整条搬进宿主 —— Extra Prompt（文字与 <image_id:…> 图片 chip
-// 混排的 contenteditable）+ Blend/Tag 两颗动作钮 + 那根进度条与浮出的 Cancel + 图池条（含最左两张钉死
-// 的 Context / Guidance 卡片）。页面只存 Extra Prompt 的**序列化字符串**（.cud / run payload 都读它），
-// 编辑的每一下经 `staging-prompt` 回去；图池条目、上传、删除一律不过页面 —— 工作区权威本就在宿主
-// （App.staging 从 /api/staging 拉）。
+// 混排的 contenteditable）+ Blend/Tag 两颗动作钮 + 图池条（含最左两张钉死的 Context / Guidance 卡片）。
+// 进度条与 Cancel 不在这里了 —— 搬到文档窗标题条右上（components/RunStatusSeg），但快照的
+// staging 段（busy/cancelLive/progress）仍是它们的数据源。页面只存 Extra Prompt 的**序列化字符串**
+// （.cud / run payload 都读它），编辑的每一下经 `staging-prompt` 回去；图池条目、上传、删除一律
+// 不过页面 —— 工作区权威本就在宿主（App.staging 从 /api/staging 拉）。
 //
 // 编辑器是**命令式**的：React 不碰它的子树，内容由下面这几个纯 DOM 函数按快照重建；只在输入框没被
 // 聚焦时重建，免得每帧回声把光标打回开头（同跨 iframe 那批 input 的教训）。chip 的缩略图取自图池。
@@ -379,26 +380,9 @@ const StagingBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
         </button>
       </div>
 
-      {/* 进度条：run 在飞才出现（原来 #toolbarProgress 那条）。progress < 0 = 未知，画成一段不定进度。 */}
-      {busy && (
-        <div style={{ height: 3, borderRadius: 2, overflow: 'hidden', background: 'rgba(255,255,255,0.08)' }}>
-          <div style={{
-            height: '100%', background: '#0a84ff', transition: 'width 0.2s ease',
-            width: s.progress < 0 ? '30%' : `${Math.max(0, Math.min(1, s.progress)) * 100}%`,
-          }} />
-        </div>
-      )}
-
-      {/* 运行中浮出的 Cancel（原来 #runCancelBtn：只有 detailer 那一趟才现）。 */}
-      {s.cancelLive && (
-        <button type="button"
-          title="Cancel — interrupt the current run (works mid-block, mid-sampling or during Generate Text)"
-          onClick={() => send('staging-cancel')}
-          style={{
-            border: 'none', borderRadius: 999, padding: '6px 16px', fontSize: 12, fontWeight: 700,
-            color: '#fff', background: 'rgba(255,69,58,0.92)', cursor: 'pointer',
-          }}>Cancel</button>
-      )}
+      {/* 进度条与 Cancel 搬走了：钉在文档窗标题条右上（RunStatusSeg，Image/Video 切换的
+          左边）—— 每一趟 run 的主角窗是工程画布大窗，不该埋在这一格正文里。数据仍是
+          blend-ui 快照的 staging 段，这里只留下 busy 给 Blend/Tag 两颗钮用。 */}
 
       {/* 图池条：两张钉死卡片恒在最左（Context / Guidance），其后是图池条目。拖文件进来上传；
           点条目 = 在 Extra Prompt 光标处插 <image_id:…>；✕ 移除；条目拖出去 = 以智能图层加入。 */}

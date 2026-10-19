@@ -1,8 +1,10 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
+import RunStatusSeg from './RunStatusSeg';
+import VidSegModal from './VidSegModal';
 import { type DockMode, type DockRules, type UnitId, type Dock, docUnit, docUidOf, dockUnits, fitLayout, loadDock, revealDoc, setBlockMode, setToolbarDock, setToolbarDirDock, syncDocUnits } from '../dock/model';
 import { fetchLayouts } from '../dock/layoutStore';
 import { type DockDrag, type DockOver, DockPanel } from '../dock/DockView';
@@ -10,11 +12,13 @@ import { registerProbe, note } from '../debug/probe';
 import { onGlobalKey, keyIs } from '../hotkeys';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type VidController, type VidProject, type VidTrackKind, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, saveVidProject } from '../workbench/video/model';
+import { type VidAsset, type VidController, type VidClip, type VidProject, type VidTrackKind, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, fillProcSegment, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, placeProcAssets, placeProcPlaceholders, saveVidProject } from '../workbench/video/model';
+import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
 import { setLayerEditBlocked } from '../workbench/editGate';
-import { getBlendUi } from '../workbench/store';
+import { getBlendUi, setBlendUi } from '../workbench/store';
 import { ingestFile } from '../workbench/video/ingest';
+import { clearProcFill, setProcFill, setVidProcRun, vidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets } from '../workbench/video/Assets';
 import { VidPlayer } from '../workbench/video/Player';
@@ -890,8 +894,637 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     e.preventDefault(); e.stopPropagation();
     if (isRedo) vidRedo(); else vidUndo();
   }), [vidOwnsUndo, vidUndo, vidRedo]);
+  // ── Processor 的 Allow List 视频路（宿主自己发的那一趟）─────────────────────────────
+  // Blend 页那条跑法吃的是画布 / 图层 / 工作区，视频不在它那边 —— 所以视频模式下
+  // （Allow List 开着）Run 由宿主接手：每个 image/mask 入口按 Processor 窗里挑的源
+  // （Tracks / Sel. Track / Asset，挑选值见 video/procPicks）解析出一段源窗口，按帧抽成
+  // 一列（后端 ffmpeg 直读资产库，不绕浏览器；MASK 口后端自动亮度转 mask），接口按
+  // list_mode 跑（INPUT_IS_LIST 的节点直通整列、其余逐帧跑再合并），每个出口的那一列
+  // 按挑的去处落位（New Track / Asset）。
+  // 大视频**分段跑**：一列几百帧的 float32 动辄几百 MB（抽帧前虽已缩到长边 720，条数
+  // 才是内存大头），所以按段切 —— 每段独立抽帧/执行/编码，峰值只由单段帧数决定；
+  // 产物在新轨上首尾相接。段边界按帧数切，帧间状态（temporal 类节点）不跨段。
+  // **输入范围与每段帧数都由用户每次运行时定**（VidSegModal）—— 喂哪一段、内存/耗时
+  // 的权衡该由调用的人拍板。
+  const SEG_MAX_FRAMES = 150;   // 单段帧数上限（内存预算；modal 的输入范围也是它）
+  const SEG_TOTAL_CAP = 36000;  // 范围总帧数上限（≈20 分钟 @30fps；按选中的范围查）
+  const vidProcBusy = useRef(false);
+  // Cancel 插旗：原本那颗 Cancel 按钮（RunStatusSeg → cancelActiveRun）落这面旗 + /api/cancel_run。
+  // 旗子让分段循环不再开下一段、轮询不再收当前段；后端那半边由 ComfyUI 的 interrupt 打断在飞的
+  // 执行（InterruptProcessingException → interface_status 回 idle）。
+  const vidCancelRef = useRef(false);
+  // 视频 list 跑的进度条与 Cancel 走**原本那一条**：写进 BlendUi 快照的 staging 段（与 detailer /
+  // 图像模式 Processor 同一个真值源），RunStatusSeg 原样读、原样画 —— 不另起一套。跑动期间页面
+  // 推来的快照由 App 侧按 vidStagingOverlay 合流，不会被冲掉。
+  const pushVidStaging = (patch: { busy?: boolean; cancelLive?: boolean; progress?: number }) => {
+    const ui = getBlendUi();
+    setBlendUi({ ...ui, staging: { ...ui.staging, ...patch } });
+  };
+  // 原本那颗 Cancel 的去向：视频 list 跑在飞就打断它；否则照旧走页面的 staging-cancel。
+  const cancelActiveRun = useCallback(() => {
+    if (vidProcBusy.current) {
+      vidCancelRef.current = true;
+      fetch('/api/cancel_run', { method: 'POST' }).catch(() => {});
+      return;
+    }
+    onBlendUiCommand('staging-cancel');
+  }, [onBlendUiCommand]);
+  // 分段配置 modal 的上下文：**锚源**（第一行的源窗口）+ 帧数总量。modal 里的输入范围
+  // 就是锚的时间线跨度；其余行跟着同一段时间线窗口走（Asset 行从自己头上起喂同样时长）。
+  const [vidSegCfg, setVidSegCfg] = useState<{ name: string; start: number; duration: number; total: number; fps: number; kind: 'clip' | 'asset' } | null>(null);
+  // 视频 list 跑的公共前置：接口选中、每个 image/mask 入口解析出源窗口。返回字符串 =
+  // 拒绝原因（播报用），对象 = 可以跑。总帧数上限不在这里卡 —— 范围由用户在 modal 里
+  // 圈，大片段圈一小段完全合理；cap 按**选中的范围**查（modal 里禁用 Run，宿主开跑前
+  // 再兜一次）。
+  type VidRowSrc =
+    | { kind: 'clip'; port: number; type: string; clip: VidClip }
+    | { kind: 'asset'; port: number; type: string; asset: VidAsset };
+  const prepVidProcRun = (): string | {
+    proc: BlendProcessorUi; iface: InterfaceInfo; idx: number; fps: number;
+    rows: VidRowSrc[];
+    anchor: { name: string; start: number; span: number; total: number; kind: 'clip' | 'asset' };
+  } => {
+    const proc = getBlendUi().processor;
+    const idx = proc.choice >= 0 && proc.choice < proc.indices.length ? proc.indices[proc.choice] : -1;
+    const iface = idx >= 0 ? interfaces[idx] : undefined;
+    if (!iface) return 'No processor interface is chosen.';
+    const inRows = proc.inputs.filter(r => r.type === 'IMAGE' || r.type === 'MASK');
+    if (!inRows.length) return `「${iface.name}」 has no image or mask inputs — nothing for the video run to feed.`;
+    const picks = getVidProcPicks();
+    const proj = vidProjectRef.current;
+    const fps = proj.fps;
+    const t = vidTransport.get();
+    // 游标底下的视频片段：给定轨（或从最上面的轨往下找）取第一段盖住游标的。
+    const clipAt = (trackId?: string): VidClip | undefined => {
+      const tracks = trackId ? proj.tracks.filter(tr => tr.id === trackId) : proj.tracks;
+      for (const tr of tracks) {
+        if (tr.kind !== 'video') continue;
+        const c = proj.clips.find(c => c.trackId === tr.id && c.kind === 'video'
+          && t >= c.start && t < c.start + c.duration);
+        if (c) return c;
+      }
+      return undefined;
+    };
+    const rows: VidRowSrc[] = [];
+    for (const row of inRows) {
+      const src = picks.src[String(row.num)] || 'tracks';
+      if (src === 'asset') {
+        const id = picks.asset[String(row.num)];
+        const asset = proj.assets.find(a => a.kind === 'video' && a.id === id)
+          || proj.assets.find(a => a.kind === 'video');
+        if (!asset) return `No video asset in the library for input 「${row.name}」 — import one first.`;
+        rows.push({ kind: 'asset', port: row.num, type: row.type, asset });
+      } else {
+        const trackId = src === 'sel_track' ? picks.track[String(row.num)] : undefined;
+        const clip = clipAt(trackId);
+        if (!clip) {
+          return src === 'sel_track'
+            ? `No video clip under the playhead on the picked track for input 「${row.name}」.`
+            : 'No video clip under the playhead — move the playhead onto one first.';
+        }
+        rows.push({ kind: 'clip', port: row.num, type: row.type, clip });
+      }
+    }
+    // 锚 = 第一行的源窗口：modal 里的输入范围就是它的时间线跨度。total 用 floor（+容差）：
+    // 容器元数据的时长常常不落在帧网格上（33.685s @30fps），round 会向上取整出一段
+    // 源根本覆盖不了的范围，"Full clip" 默认值自己就能触发 doesn't-cover 报错。
+    const first = rows[0];
+    const anchor = first.kind === 'clip'
+      ? { name: first.clip.name, start: first.clip.start, span: first.clip.duration, total: Math.floor(first.clip.duration * fps + 1e-6), kind: 'clip' as const }
+      : { name: first.asset.name, start: 0, span: first.asset.duration, total: Math.floor(first.asset.duration * fps + 1e-6), kind: 'asset' as const };
+    return { proc, iface, idx, fps, rows, anchor };
+  };
+  type SegMeta = { port: number; type: string; name: string; video: string; frames?: number };
+  // 跑一段 Processor：POST → 轮询 → 收这一段的视频产物。整趟分段跑与占位续跑共用这一条 ——
+  // 轮询口径与宿主那条 processor 相同（started 后第一次 status 可能还是 idle，所以 idle
+  // 不算收尾；10 分钟没动静就当失败，别让这一趟永远挂在 running）。取消旗子在轮询的
+  // 每个间隙都查 —— 插上旗就不等了；进度写进原本那条快照的 staging 段。
+  const executeSeg = useCallback(async (
+    ifaceIdx: number,
+    manualValues: Record<string, unknown>,
+    videoInputs: Record<string, { file: string; ss: number; t: number; n: number; fps: number }>,
+    segMsg: string, segAt: number, segCount: number,
+    onSegProgress?: (segP: number) => void,
+  ): Promise<SegMeta[]> => {
+    const setSegProgress = (segP: number) => {
+      const p = segCount > 1 ? (segAt + segP) / segCount : segP;
+      vidStagingOverlay.progress = p;
+      pushVidStaging({ progress: p });
+      onSegProgress?.(segP);
+    };
+    vidStagingOverlay.busy = true;
+    vidStagingOverlay.progress = segCount > 1 ? segAt / segCount : -1;
+    pushVidStaging({ busy: true, cancelLive: true, progress: vidStagingOverlay.progress });
+    setVidProcRun({ state: 'running', msg: segMsg });
+    await fetch('/api/execute_interface', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        interface_index: ifaceIdx,
+        manual_values: manualValues,
+        exec_options: { offline: true, list_mode: true, video_inputs: videoInputs },
+      }),
+    });
+    const deadline = Date.now() + 10 * 60 * 1000;
+    let seenRunning = false;
+    for (;;) {
+      await new Promise(r => setTimeout(r, 500));
+      if (vidCancelRef.current) throw new Error('cancelled');
+      const st = await fetch('/api/status').then(r => r.json()).catch(() => null);
+      if (!st) { if (Date.now() > deadline) throw new Error('timed out — check the ComfyUI console.'); continue; }
+      const s = st.interface_status || 'idle';
+      if (s === 'running') {
+        seenRunning = true;
+        // 段内步进：后端把 interface 执行的 on_progress 写在 /api/status 上（0..1）。
+        setSegProgress(Math.max(0, Math.min(1, Number(st.interface_progress) || 0)));
+        continue;
+      }
+      if (s === 'idle' && !seenRunning) { if (Date.now() > deadline) throw new Error('timed out — check the ComfyUI console.'); continue; }
+      if (s === 'done' || s === 'error' || s === 'idle') {
+        // Cancel 打断的收尾（后端把 InterruptProcessingException 转成 idle、错误清空）：
+        // 旗子说了算 —— 一律按"取消"报。
+        if (vidCancelRef.current) throw new Error('cancelled');
+        if (s !== 'done') {
+          throw new Error(`Processor failed: ${st.interface_error || 'unknown error'}`);
+        }
+        const meta = (st.interface_result_meta || []) as SegMeta[];
+        const vids = meta.filter(m => m && m.video);
+        if (!vids.length) throw new Error('Processor finished with no video results.');
+        return vids;
+      }
+    }
+  }, []);
+
+  const runVideoListProcessor = useCallback(async (segFrames: number, inFrame: number, outFrame: number) => {
+    if (vidProcBusy.current) return;
+    const prep = prepVidProcRun();
+    if (typeof prep === 'string') { setVidProcRun({ state: 'error', msg: prep }); return; }
+    const { proc, iface, idx, fps, rows, anchor } = prep;
+    // 输入范围（modal 里已按帧网格取整，这里再夹一次防越界）：[f0, f1) 帧，相对锚起点。
+    // 范围是用户圈的 —— 大片段只喂一小段时总量远低于整段，cap 按范围查。
+    const f0 = Math.max(0, Math.min(anchor.total, Math.round(inFrame)));
+    let f1 = Math.min(anchor.total, Math.round(outFrame));
+    // 出点按每行**实际覆盖**再夹一刀（floor + 半帧容差），超出不报错、按能覆盖的最大帧数
+    // 算 —— modal 的出点经过秒数文本（fmt 两位小数）与 round 的两次取整，任一步向上都会
+    // 超出源尾零点几秒；用户手填超了也一样，有多少喂多少。夹完为空走下面统一的空范围报错。
+    for (const row of rows) {
+      const covEnd = row.kind === 'clip'
+        ? Math.floor((row.clip.start + row.clip.duration - anchor.start) * fps + 1e-6)
+        : Math.floor(row.asset.duration * fps + 1e-6);
+      if (f1 > covEnd) f1 = Math.max(f0, covEnd);
+    }
+    if (f1 <= f0) {
+      setVidProcRun({ state: 'error', msg: 'The input range is empty — pick an out point after the in point.' });
+      return;
+    }
+    const rangeFrames = f1 - f0;
+    const rangeSec = rangeFrames / fps;
+    if (rangeFrames > SEG_TOTAL_CAP) {
+      setVidProcRun({ state: 'error', msg: `That range is ${rangeFrames} frames — the cap is ${SEG_TOTAL_CAP} (about 20 min at 30fps). Pick a shorter range.` });
+      return;
+    }
+    // 参数只报"填过的"那些口：空着 = 不报，后端拿图里派生出来的默认值跑（与 Blend 页
+    // runProcessor 同一口径）。bool 恒报（false 也是填过的）；枚举恒报当前候选。
+    const manual_values: Record<string, unknown> = {};
+    for (const row of proc.params) {
+      if (row.kind === 'bool') manual_values[String(row.num)] = row.on;
+      else if (row.kind === 'number') { if (row.value !== '') manual_values[String(row.num)] = Number(row.value); }
+      else if (row.kind === 'choices' || row.kind === 'select') { if (row.cur) manual_values[String(row.num)] = row.cur; }
+      else if (row.value !== '') manual_values[String(row.num)] = row.value;
+    }
+    // 分段：帧数由用户在 modal 里定（每次运行自己拍板内存/耗时），夹到 [1, SEG_MAX_FRAMES]。
+    // 段参数按 seg/fps 切，从范围入点起算，最后一段夹到范围尾（可能不足）。
+    const seg = Math.max(1, Math.min(SEG_MAX_FRAMES, Math.round(segFrames)));
+    const nSegs = Math.ceil(rangeFrames / seg);
+    // 每行把时间线范围映射到自己的源窗口：轨道行 = offset + (T - clip.start)，范围必须
+    // 整段落在这行的片段跨度里；资产行 = 锚自己时 T 就是源内秒、别行从头上起喂
+    // （T - 锚起点），资产得比范围长。base = 范围入点在这行源里的秒数，end = 源尾。
+    const anchorT0 = anchor.start + f0 / fps;   // 范围入点（时间线，也是产物落位起点）
+    const anchorT1 = anchor.start + f1 / fps;   // 范围出点
+    const specs: { port: number; file: string; base: number; end: number }[] = [];
+    for (const row of rows) {
+      if (row.kind === 'clip') {
+        const c = row.clip;
+        if (anchorT0 < c.start - 1e-6 || anchorT1 > c.start + c.duration + 1e-6) {
+          setVidProcRun({ state: 'error', msg: `「${c.name}」 doesn't cover the range (${anchorT0.toFixed(1)}s–${anchorT1.toFixed(1)}s) — move the playhead or shorten the range.` });
+          return;
+        }
+        specs.push({ port: row.port, file: c.src.split('/').pop() || '', base: c.offset + (anchorT0 - c.start), end: c.offset + c.duration });
+      } else {
+        const a = row.asset;
+        const base = anchor.kind === 'asset' ? anchorT0 : 0;
+        if (base + rangeSec > a.duration + 1e-6) {
+          setVidProcRun({ state: 'error', msg: `Asset 「${a.name}」 is ${a.duration.toFixed(1)}s — shorter than the ${rangeSec.toFixed(1)}s range. Pick a shorter range or a longer asset.` });
+          return;
+        }
+        specs.push({ port: row.port, file: a.src.split('/').pop() || '', base, end: a.duration });
+      }
+    }
+
+    // 去处在开跑前定死（挑选值快照一次，跑的过程中用户再拨输出口开关也不改这趟落位）：
+    // New Track 的口先摆占位再逐段替换，Asset 的口照旧整趟跑完一次入库。
+    const picks = getVidProcPicks();
+    const outNames = new Map(proc.outputs.map(o => [o.num, o.name]));
+    const trackedPorts = new Set(proc.outputs
+      .filter(o => (picks.dst[String(o.num)] || 'new_track') !== 'asset').map(o => o.num));
+
+    vidProcBusy.current = true;
+    // 同一趟 Run 的所有占位共用一颗 runId —— 播报统计/续跑按它认亲。
+    const runId = `proc-${Date.now()}`;
+    // 输出口 → 各段占位的 clip id（下标 = 段号）：跑完一段按它找到坑来替换。
+    const placeholderIds = new Map<number, string[]>();
+    try {
+      // New Track 的口：Run 确认的**当下**就开轨摆占位（每段一个坑、预分配空间）。
+      // 一步历史（'Run processor'）—— 撤销它连占位带轨整个收走。
+      if (trackedPorts.size) {
+        const plans = [...trackedPorts].map(port => ({
+          port,
+          name: outNames.get(port) || `value${port}`,
+          segs: Array.from({ length: nSegs }, (_, i) => {
+            const n = Math.max(1, Math.min(seg, rangeFrames - i * seg));
+            const video_inputs: Record<string, { file: string; ss: number; t: number; n: number; fps: number }> = {};
+            for (const s of specs) {
+              const ss = s.base + (i * seg) / fps;
+              video_inputs[String(s.port)] = { file: s.file, ss, t: Math.min(n / fps, s.end - ss), n, fps };
+            }
+            return { start: anchorT0 + (i * seg) / fps, duration: n / fps, segIndex: i, segCount: nSegs, inputs: video_inputs };
+          }),
+        }));
+        vidUpdate(proj => plans.reduce((acc, pl) => placeProcPlaceholders(acc, {
+          name: pl.name, runId, port: pl.port, iface: iface.name, ifaceNum: idx,
+          params: manual_values, segs: pl.segs,
+        }), proj), 'Run processor');
+        // 占位 id 就地收集（vidUpdate 同步换 ref，此刻已是新工程）；按下标放。
+        vidProjectRef.current.clips.forEach(c => {
+          if (!c.pending || c.pending.runId !== runId) return;
+          const arr = placeholderIds.get(c.pending.port) || [];
+          arr[c.pending.segIndex] = c.id;
+          placeholderIds.set(c.pending.port, arr);
+        });
+      }
+
+      // 逐段跑：每段完成**当场**替换对应占位（每段一步撤销，可单独撤回占位）；Asset 口
+      // 的产物攒着，整趟结束一次入库。段失败/取消不再"整趟全丢" —— 已完成的段留在轨上，
+      // 没跑的占位保持待跑，点占位上的 ▶ 按快照单独续跑那一段。
+      const perAsset = new Map<number, SegMeta[]>();
+      for (let i = 0; i < nSegs; i++) {
+        const n = Math.max(1, Math.min(seg, rangeFrames - i * seg));
+        const video_inputs: Record<string, { file: string; ss: number; t: number; n: number; fps: number }> = {};
+        for (const s of specs) {
+          const ss = s.base + (i * seg) / fps;
+          video_inputs[String(s.port)] = { file: s.file, ss, t: Math.min(n / fps, s.end - ss), n, fps };
+        }
+        const segMsg = nSegs === 1
+          ? `Running 「${iface.name}」 on ${rangeFrames} frames…`
+          : `「${iface.name}」 segment ${i + 1}/${nSegs} (${n} frames)…`;
+        // 占位段自己的填充进度：这一段所有口的坑一起充满（segP 是段内 0..1）。
+        const segFillIds = [...placeholderIds.entries()].flatMap(([, ids]) => ids[i] ? [ids[i]] : []);
+        segFillIds.forEach(id => setProcFill(id, 0));
+        let vids: SegMeta[];
+        try {
+          vids = await executeSeg(idx, manual_values, video_inputs, segMsg, i, nSegs, segP => {
+            segFillIds.forEach(id => setProcFill(id, segP));
+          });
+        } catch (e: unknown) {
+          segFillIds.forEach(id => clearProcFill(id));
+          throw new Error(nSegs > 1
+            ? `segment ${i + 1}/${nSegs}: ${e instanceof Error ? e.message : String(e)}`
+            : (e instanceof Error ? e.message : String(e)));
+        }
+        segFillIds.forEach(id => clearProcFill(id));
+        // 这段的产物按口分流：有占位的当场替换（一次 updater 把这一段所有口都填上），
+        // 其余（Asset 口 / 占位被用户删掉的口）攒进入库清单。
+        const fills = vids.filter(m => placeholderIds.get(m.port)?.[i]);
+        const rest = vids.filter(m => !placeholderIds.get(m.port)?.[i]);
+        if (fills.length) {
+          vidUpdate(proj => fills.reduce((acc, m) => fillProcSegment(
+            acc, placeholderIds.get(m.port)![i], m.video as string,
+            outNames.get(m.port) || m.name || `value${m.port}`, (m.frames || n) / fps,
+          ), proj), nSegs > 1 ? `Processor segment ${i + 1}/${nSegs}` : 'Processor → video');
+        }
+        for (const m of rest) {
+          const arr = perAsset.get(m.port);
+          if (arr) arr.push(m); else perAsset.set(m.port, [m]);
+        }
+      }
+      if (perAsset.size) {
+        const assetPlans = [...perAsset.entries()].map(([port, segs]) => ({
+          name: outNames.get(port) || segs[0].name || `value${port}`,
+          segs: segs.map(m => ({ src: m.video as string, duration: (m.frames || seg) / fps })),
+        }));
+        vidUpdate(proj => assetPlans.reduce((acc, pl) =>
+          placeProcAssets(acc, { name: pl.name, segs: pl.segs }), proj), 'Processor → assets');
+      }
+      const parts: string[] = [];
+      if (trackedPorts.size) parts.push(`${trackedPorts.size} new track${trackedPorts.size === 1 ? '' : 's'} filled segment by segment`);
+      if (perAsset.size) parts.push(`${perAsset.size} port${perAsset.size === 1 ? '' : 's'} added to the asset library`);
+      setVidProcRun({ state: 'done', msg: `Done — ${parts.join(', ') || 'nothing to place'}${nSegs > 1 ? `, ${nSegs} segments each` : ''}.` });
+    } catch (e: unknown) {
+      // 失败/取消都不是"什么都没放"：已完成的段已经替换在轨上了，没跑的占位还揣着快照
+      // 待跑 —— 播报把"还剩几个坑"说清，用户点占位继续。
+      const left = vidProjectRef.current.clips.filter(c => c.pending && c.pending.runId === runId).length;
+      const tail = left ? ` — ${left} placeholder segment${left === 1 ? '' : 's'} left on the timeline; click one to continue.` : '';
+      setVidProcRun(vidCancelRef.current
+        ? { state: 'cancelled', msg: `Processor run cancelled${tail}` }
+        : { state: 'error', msg: `Processor failed — ${e instanceof Error ? e.message : String(e)}${tail}` });
+    } finally {
+      // 撤掉原本那条 seg：快照 staging 段回 idle（页面之后的 push 也不再被覆盖）。
+      vidStagingOverlay.busy = false;
+      vidStagingOverlay.progress = -1;
+      pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
+      vidCancelRef.current = false;
+      vidProcBusy.current = false;
+    }
+  }, [interfaces, vidTransport, vidUpdate]);
+
+  // ── Pipeline Preset 的视频路（骨架与 Processor 视频路同一套）────────────────────────────
+  // 差别只在"预设没有输入口"：喂哪段视频由**每次运行**的 modal 定（Tracks / Sel. Track /
+  // Asset，与 Processor 窗那三颗同一语义），范围和每段帧数也还是那两栏。宿主逐段
+  // POST /api/preset_video —— 后端把这一段的帧逐帧过 preset 的 block 链再编码回 mp4；
+  // 产物在 Run 当下就开好的新轨上逐段替换占位，段上照样被进度充满。
+  // Mask 走**视频模式的那套形态**：工程里绑定一条轨（Tracks 窗顶部的 Mask 下拉），
+  // 那一轨的画面亮度逐帧当 mask；没绑 = 没 mask。
+  type PresetSrc = { kind: 'tracks' | 'sel_track' | 'asset'; trackId: string; assetId: string };
+  type PresetAnchor = {
+    name: string; start: number; duration: number; total: number; kind: 'clip' | 'asset';
+    file: string; base: number; end: number; err?: string;
+  };
+  // 源解析：与 prepVidProcRun 的 clipAt 同一套查找（游标所在/指定视频轨的片段），
+  // 资产则直接用整条源（时间线坐标 = 源内秒，起点 0）。解决不了就回一条带 err 的空锚，
+  // modal 照样开得出来（用户可以在里面换源），Run 因 0 帧而禁用。
+  const resolvePresetSrc = useCallback((src: PresetSrc): PresetAnchor => {
+    const proj = vidProjectRef.current;
+    const fps = proj.fps;
+    const t = vidTransport.get();
+    const empty = (name: string, kind: 'clip' | 'asset', err: string): PresetAnchor =>
+      ({ name, start: 0, duration: 0, total: 0, kind, file: '', base: 0, end: 0, err });
+    if (src.kind === 'asset') {
+      const asset = proj.assets.find(a => a.kind === 'video' && a.id === src.assetId)
+        || [...proj.assets].reverse().find(a => a.kind === 'video');
+      if (!asset) return empty('(no video asset)', 'asset', 'No video asset in the library — import one first.');
+      return {
+        name: asset.name, start: 0, duration: asset.duration,
+        total: Math.floor(asset.duration * fps + 1e-6), kind: 'asset',
+        file: asset.src.split('/').pop() || '', base: 0, end: asset.duration,
+      };
+    }
+    const tracks = src.kind === 'sel_track' && src.trackId
+      ? proj.tracks.filter(tr => tr.id === src.trackId) : proj.tracks;
+    for (const tr of tracks) {
+      if (tr.kind !== 'video') continue;
+      const c = proj.clips.find(c => c.trackId === tr.id && c.kind === 'video' && !c.pending
+        && t >= c.start && t < c.start + c.duration);
+      if (!c) continue;
+      return {
+        name: c.name, start: c.start, duration: c.duration,
+        total: Math.floor(c.duration * fps + 1e-6), kind: 'clip',
+        file: c.src.split('/').pop() || '', base: c.offset, end: c.offset + c.duration,
+      };
+    }
+    return empty(src.kind === 'sel_track' ? '(no clip on the picked track)' : '(nothing under the playhead)', 'clip',
+      src.kind === 'sel_track'
+        ? 'No video clip under the playhead on the picked track.'
+        : 'No video clip under the playhead — move it onto one, or pick another source.');
+  }, [vidTransport]);
+
+  // preset 的视频 modal：preset + 这一次选的源。源一变锚跟着变（modal 用 key 重挂，
+  // 范围回到整段 —— 换源后保留上一条的范围只会点出"源覆盖不了"）。
+  const [vidPresetCfg, setVidPresetCfg] = useState<{ presetId: string; presetName: string; src: PresetSrc } | null>(null);
+
+  // preset 行上的 ▶：视频模式改成宿主自己跑（Blend 页没有视频工程），其余照旧发页面。
+  const runPresetFromRow = useCallback((set: BlockSet) => {
+    if (vidModeRef.current !== 'video') { onRunPreset(set.id); return; }
+    if (vidProcBusy.current) {
+      setVidProcRun({ state: 'error', msg: 'A run is already in flight — wait for it or cancel it first.' });
+      return;
+    }
+    setVidPresetCfg({ presetId: set.id, presetName: set.name, src: { kind: 'tracks', trackId: '', assetId: '' } });
+  }, [onRunPreset]);
+
+  // 跑一段 preset：POST → 轮询 preset_video_* → 收这一段编码好的视频。
+  const executePresetSeg = useCallback(async (
+    presetId: string,
+    videoSpec: { file: string; ss: number; t: number; n: number; fps: number },
+    maskSpec: { file: string; ss: number; t: number; n: number; fps: number } | null,
+    segMsg: string, segAt: number, segCount: number,
+    onSegProgress?: (segP: number) => void,
+  ): Promise<SegMeta[]> => {
+    const setSegProgress = (segP: number) => {
+      const p = segCount > 1 ? (segAt + segP) / segCount : segP;
+      vidStagingOverlay.progress = p;
+      pushVidStaging({ progress: p });
+      onSegProgress?.(segP);
+    };
+    vidStagingOverlay.busy = true;
+    vidStagingOverlay.progress = segCount > 1 ? segAt / segCount : -1;
+    pushVidStaging({ busy: true, cancelLive: true, progress: vidStagingOverlay.progress });
+    setVidProcRun({ state: 'running', msg: segMsg });
+    await fetch('/api/preset_video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        preset_id: presetId,
+        extra_prompt: '',
+        video_inputs: { '0': videoSpec },
+        mask_input: maskSpec,
+      }),
+    });
+    const deadline = Date.now() + 10 * 60 * 1000;
+    let seenRunning = false;
+    for (;;) {
+      await new Promise(r => setTimeout(r, 500));
+      if (vidCancelRef.current) throw new Error('cancelled');
+      const st = await fetch('/api/status').then(r => r.json()).catch(() => null);
+      if (!st) { if (Date.now() > deadline) throw new Error('timed out — check the ComfyUI console.'); continue; }
+      const s = st.preset_video_status || 'idle';
+      if (s === 'running') {
+        seenRunning = true;
+        setSegProgress(Math.max(0, Math.min(1, Number(st.preset_video_progress) || 0)));
+        continue;
+      }
+      if (s === 'idle' && !seenRunning) { if (Date.now() > deadline) throw new Error('timed out — check the ComfyUI console.'); continue; }
+      if (s === 'done' || s === 'error' || s === 'idle') {
+        if (vidCancelRef.current) throw new Error('cancelled');
+        if (s !== 'done') throw new Error(`Preset failed: ${st.preset_video_error || 'unknown error'}`);
+        const meta = (st.preset_video_meta || []) as SegMeta[];
+        const vids = meta.filter(m => m && m.video);
+        if (!vids.length) throw new Error('The preset finished with no video.');
+        return vids;
+      }
+    }
+  }, []);
+
+  const runVideoPreset = useCallback(async (
+    presetId: string, presetName: string, src: PresetSrc,
+    segFrames: number, inFrame: number, outFrame: number,
+  ) => {
+    if (vidProcBusy.current) return;
+    const a = resolvePresetSrc(src);
+    if (a.err) { setVidProcRun({ state: 'error', msg: a.err }); return; }
+    const proj = vidProjectRef.current;
+    const fps = proj.fps;
+    const f0 = Math.max(0, Math.min(a.total, Math.round(inFrame)));
+    const f1 = Math.min(a.total, Math.round(outFrame));
+    if (f1 <= f0) {
+      setVidProcRun({ state: 'error', msg: 'The input range is empty — pick an out point after the in point.' });
+      return;
+    }
+    const rangeFrames = f1 - f0;
+    if (rangeFrames > SEG_TOTAL_CAP) {
+      setVidProcRun({ state: 'error', msg: `That range is ${rangeFrames} frames — the cap is ${SEG_TOTAL_CAP}. Pick a shorter range.` });
+      return;
+    }
+    const seg = Math.max(1, Math.min(SEG_MAX_FRAMES, Math.round(segFrames)));
+    const nSegs = Math.ceil(rangeFrames / seg);
+    const anchorT0 = a.start + f0 / fps;
+    const base = a.base + (anchorT0 - a.start);
+    const end = a.end;
+
+    // Mask 轨：只认能盖住范围入点的那一段（绑定轨上没片段 = 这一段没 mask）。
+    const maskTrack = proj.tracks.find(t => t.id === proj.maskTrackId && t.kind === 'video');
+    let maskFile = '', maskBase = 0, maskEnd = 0;
+    if (maskTrack) {
+      const mc = proj.clips.find(c => c.trackId === maskTrack.id && c.kind === 'video' && !c.pending
+        && anchorT0 >= c.start - 1e-6 && anchorT0 < c.start + c.duration);
+      if (mc) { maskFile = mc.src.split('/').pop() || ''; maskBase = mc.offset + (anchorT0 - mc.start); maskEnd = mc.offset + mc.duration; }
+    }
+
+    vidProcBusy.current = true;
+    const runId = `preset-${Date.now()}`;
+    const placeholderIds: string[] = [];
+    try {
+      // Run 确认的当下就开轨摆坑（每段一个、预分配空间），一步历史 'Run preset'。
+      const segs = Array.from({ length: nSegs }, (_, i) => {
+        const n = Math.max(1, Math.min(seg, rangeFrames - i * seg));
+        const ss = base + (i * seg) / fps;
+        const spec = { file: a.file, ss, t: Math.min(n / fps, end - ss), n, fps };
+        const maskInputs = maskFile ? (() => {
+          const mss = maskBase + (i * seg) / fps;
+          return { '0': { file: maskFile, ss: mss, t: Math.max(0.05, Math.min(n / fps, maskEnd - mss)), n, fps } };
+        })() : undefined;
+        return { start: anchorT0 + (i * seg) / fps, duration: n / fps, segIndex: i, segCount: nSegs, inputs: { '0': spec }, maskInputs };
+      });
+      vidUpdate(p => placeProcPlaceholders(p, {
+        name: presetName, runId, port: 0, iface: presetName, ifaceNum: -1,
+        params: {}, kind: 'preset', presetId, presetName,
+        maskTrackId: maskTrack?.id, maskTrackName: maskTrack?.name, segs,
+      }), 'Run preset');
+      vidProjectRef.current.clips.forEach(c => {
+        if (!c.pending || c.pending.runId !== runId) return;
+        placeholderIds[c.pending.segIndex] = c.id;
+      });
+
+      for (let i = 0; i < nSegs; i++) {
+        const s = segs[i];
+        const n = s.inputs['0'].n;
+        const segMsg = nSegs === 1
+          ? `Running 「${presetName}」 on ${rangeFrames} frames…`
+          : `「${presetName}」 segment ${i + 1}/${nSegs} (${n} frames)…`;
+        const fillId = placeholderIds[i];
+        if (fillId) setProcFill(fillId, 0);
+        let vids: SegMeta[];
+        try {
+          vids = await executePresetSeg(presetId, s.inputs['0'], s.maskInputs?.['0'] ?? null, segMsg, i, nSegs, segP => {
+            if (fillId) setProcFill(fillId, segP);
+          });
+        } catch (e: unknown) {
+          if (fillId) clearProcFill(fillId);
+          throw new Error(nSegs > 1
+            ? `segment ${i + 1}/${nSegs}: ${e instanceof Error ? e.message : String(e)}`
+            : (e instanceof Error ? e.message : String(e)));
+        }
+        if (fillId) clearProcFill(fillId);
+        const m = vids[0];
+        if (fillId && m) {
+          vidUpdate(p => fillProcSegment(p, fillId, m.video as string,
+            m.name || presetName, (m.frames || n) / fps),
+          nSegs > 1 ? `Preset segment ${i + 1}/${nSegs}` : 'Preset → video');
+        }
+      }
+      setVidProcRun({ state: 'done', msg: `Done — 「${presetName}」 on ${rangeFrames} frames${nSegs > 1 ? `, ${nSegs} segments` : ''}.` });
+    } catch (e: unknown) {
+      const left = vidProjectRef.current.clips.filter(c => c.pending && c.pending.runId === runId).length;
+      const tail = left ? ` — ${left} placeholder segment${left === 1 ? '' : 's'} left on the timeline; click one to continue.` : '';
+      setVidProcRun(vidCancelRef.current
+        ? { state: 'cancelled', msg: `Preset run cancelled${tail}` }
+        : { state: 'error', msg: `Preset failed — ${e instanceof Error ? e.message : String(e)}${tail}` });
+    } finally {
+      vidStagingOverlay.busy = false;
+      vidStagingOverlay.progress = -1;
+      pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
+      vidCancelRef.current = false;
+      vidProcBusy.current = false;
+    }
+  }, [resolvePresetSrc, vidUpdate]);
+
+
+  // 占位段上的 ▶（续跑）：按段里的执行快照把**这一段**单独重放，产物当场替换这个占位。
+  // 接口按名字解析（快照存了名 + 下标兜底 —— 退出期间接口列表可能变过），参数/抽帧窗口
+  // 原样重放，不再弹 modal。
+  const continuePendingClip = useCallback(async (clipId: string) => {
+    if (vidProcBusy.current) {
+      setVidProcRun({ state: 'error', msg: 'A run is already in flight — wait for it or cancel it first.' });
+      return;
+    }
+    const clip = vidProjectRef.current.clips.find(c => c.id === clipId);
+    if (!clip || !clip.pending) return;
+    const pd = clip.pending;
+    const isPreset = pd.kind === 'preset';
+    let idx = -1;
+    let presetId = '';
+    if (isPreset) {
+      // preset 按 id 认亲（名字兜底 —— 改名后 id 不变；复制出来的那一套是新 id，不该被续跑）。
+      const set = blockSets.find(s => s.id === pd.presetId)
+        ?? blockSets.find(s => s.name === (pd.presetName || pd.iface));
+      if (!set) {
+        setVidProcRun({ state: 'error', msg: `Preset 「${pd.presetName || pd.iface}」 no longer exists — re-run it from the Pipeline Presets list.` });
+        return;
+      }
+      presetId = set.id;
+    } else {
+      idx = interfaces.findIndex(x => x && x.name === pd.iface);
+      if (idx < 0 && pd.ifaceNum >= 0 && pd.ifaceNum < interfaces.length) idx = pd.ifaceNum;
+      if (idx < 0) {
+        setVidProcRun({ state: 'error', msg: `Interface 「${pd.iface}」 is no longer in the package — reload the pipeline and try again.` });
+        return;
+      }
+    }
+    vidProcBusy.current = true;
+    vidCancelRef.current = false;
+    try {
+      const segMsg = `Running 「${pd.iface}」 — segment ${pd.segIndex + 1}/${pd.segCount} (resumed)…`;
+      setProcFill(clipId, 0);
+      const vids = isPreset
+        ? await executePresetSeg(presetId, pd.inputs['0'], pd.maskInputs?.['0'] ?? null,
+          segMsg, pd.segIndex, pd.segCount, segP => setProcFill(clipId, segP))
+        : await executeSeg(idx, pd.params, pd.inputs, segMsg, pd.segIndex, pd.segCount,
+          segP => setProcFill(clipId, segP));
+      clearProcFill(clipId);
+      const m = vids.find(x => x.port === pd.port) ?? vids[0];
+      if (!m || !m.video) throw new Error('The run finished with no video results.');
+      const win = pd.inputs[String(isPreset ? 0 : pd.port)];
+      const dur = (m.frames || win?.n || 30) / (win?.fps || 30);
+      vidUpdate(proj => fillProcSegment(proj, clipId, m.video as string,
+        m.name || clip.name, dur), `${isPreset ? 'Preset' : 'Processor'} segment ${pd.segIndex + 1}/${pd.segCount}`);
+      setVidProcRun({ state: 'done', msg: `Segment ${pd.segIndex + 1}/${pd.segCount} filled in.` });
+    } catch (e: unknown) {
+      setVidProcRun(vidCancelRef.current
+        ? { state: 'cancelled', msg: 'Segment run cancelled — the placeholder stays; click it to try again.' }
+        : { state: 'error', msg: `${isPreset ? 'Preset' : 'Processor'} failed — ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      clearProcFill(clipId);
+      vidStagingOverlay.busy = false;
+      vidStagingOverlay.progress = -1;
+      pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
+      vidCancelRef.current = false;
+      vidProcBusy.current = false;
+    }
+  }, [interfaces, vidUpdate, blockSets, executePresetSeg]);
+
   // 工作台那几格的 send 先过宿主这一道 —— History 格的 Undo / Redo / 点某一行，
   // 要能落到视频那一半（页面的下标空间里没有它）。
+  // Processor 的 Run 也在这里分流：视频模式 + Allow List + 有 image 入口选了 Video 源时，
+  // 这一趟由宿主自己发（Blend 页那条跑法吃的是画布/图层/工作区，视频不在它那边）。
   const uiSend: BlendUiSend = useCallback((action, value) => {
     if (action === 'history-undo') {
       if (vidOwnsUndo(false)) { vidUndo(); return; }
@@ -901,9 +1534,20 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       const base = getBlendUi().history.steps.length;
       const n = Number(value);
       if (Number.isFinite(n) && n >= base) { vidJump(n - base); return; }
+    } else if (action === 'processor-run' && vidModeRef.current === 'video') {
+      const proc = getBlendUi().processor;
+      if (proc.allowList) {
+        // 这一趟由宿主接手：先过前置校验，过了弹配置 modal（输入范围 + 每段帧数
+        // 由用户定），确认后才开跑。校验失败直接播报（modal 里没有可改的东西）。
+        if (vidProcBusy.current) return;
+        const prep = prepVidProcRun();
+        if (typeof prep === 'string') { setVidProcRun({ state: 'error', msg: prep }); return; }
+        setVidSegCfg({ name: prep.anchor.name, start: prep.anchor.start, duration: prep.anchor.span, total: prep.anchor.total, fps: prep.fps, kind: prep.anchor.kind });
+        return;
+      }
     }
     onBlendUiCommand(action, value);
-  }, [onBlendUiCommand, vidOwnsUndo, vidUndo, vidRedo, vidJump]);
+  }, [onBlendUiCommand, vidOwnsUndo, vidUndo, vidRedo, vidJump, runVideoListProcessor]);
   // 视频模式下没选中 Layer 段 → Layers / Guidances 不知道该往哪写，动作条整排变灰。
   // 切回 Image 模式时把图层集还给文档主图层（否则画布还停在某个段的那一套上）。
   useEffect(() => {
@@ -942,7 +1586,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     blendPost, blendWindow,
     solo: { audio: soloAudio, video: soloVideo }, toggleSolo,
     mute, toggleMute,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute]);
+    // 占位段上的 ▶：按快照续跑这一段（见 continuePendingClip）。
+    continueProc: continuePendingClip,
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip]);
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。
@@ -984,12 +1630,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     () => vidProject.tracks.filter(t => t.kind === 'video').map(t => ({ id: t.id, name: t.name })),
     [vidProject.tracks],
   );
+  // Processor 窗的 Asset 源挑选用：只列视频资产（音频没有帧可抽）。
+  const vidAssetList = useMemo(
+    () => vidProject.assets.filter(a => a.kind === 'video').map(a => ({ id: a.id, name: a.name })),
+    [vidProject.assets],
+  );
   const wbHost = useMemo(() => ({
     staging, blendPreview, guidanceCard, stageUpload, stageRemove,
     layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock },
-    video: { mode: vidMode, fps: vidProject.fps, setFps: setVidFps, tracks: vidTrackList },
+    video: { mode: vidMode, fps: vidProject.fps, setFps: setVidFps, tracks: vidTrackList, assets: vidAssetList },
   }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock,
-    vidMode, vidProject.fps, setVidFps, vidTrackList]);
+    vidMode, vidProject.fps, setVidFps, vidTrackList, vidAssetList]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
   // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
   // 所以：**空列表在启动期是歧义的**，要等它至少说过一次"我有文档"，此后再说空才算关闭。
@@ -1805,8 +2456,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 tabOps: (u: UnitId) => docTabOps[u] ?? null,
                 heads: {
                   // 模式切换**只住这一处**：工程画布大窗（文档窗，doc:*）标题条右上、toolbar 化
-                  // 按钮左边 —— 那扇窗就是 Video 模式的播放器宿主，别的窗一概不给。
-                  ...Object.fromEntries(blendDocs.docs.map(d => [docUnit(d.uid), vidModeSeg])),
+                  // 按钮左边 —— 那扇窗就是 Video 模式的播放器宿主，别的窗一概不给。运行状态
+                  // （进度条 + Cancel）排在它的**左边**：同一扇窗，同一句话 —— "这一趟 run 属于
+                  // 这份工程"。
+                  ...Object.fromEntries(blendDocs.docs.map(d => [docUnit(d.uid), (
+                    <>
+                      {/* 原本那颗 Cancel：视频 list 跑在飞时打断宿主这趟，否则照旧转页面的 staging-cancel */}
+                      <RunStatusSeg onCancel={cancelActiveRun} />
+                      {vidModeSeg}
+                    </>
+                  )])),
                   context: (<>
                     {/* Log：画布上那颗常显状态药丸撤掉后，工作台的每一句反馈都攒在这里
                         （工作台 setStatus + 宿主自身动作，最近 32 条）。 */}
@@ -2004,10 +2663,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                         <GearIcon size={13} />
                       </button>
                       <button
-                        title={runMasked
-                          ? `Run 「${set.name}」 now — ▶ 带框：按 Mask 层裁出的区域跑，产出贴回原图`
-                          : `Run 「${set.name}」 now — 裸 ▶：整幅图就是工作区（Enable Mask 关，不做 mask 裁剪）`}
-                        onClick={() => onRunPreset(set.id)}
+                        title={vidMode === 'video'
+                          ? `Run 「${set.name}」 on video — video mode runs the chain on a picked clip/asset, frame by frame, in segments (a new track of placeholders fills in as it goes)`
+                          : runMasked
+                            ? `Run 「${set.name}」 now — ▶ 带框：按 Mask 层裁出的区域跑，产出贴回原图`
+                            : `Run 「${set.name}」 now — 裸 ▶：整幅图就是工作区（Enable Mask 关，不做 mask 裁剪）`}
+                        onClick={() => runPresetFromRow(set)}
                         style={{
                           display: 'flex', alignItems: 'center', padding: '4px 10px',
                           border: 'none', borderLeft: '0.5px solid rgba(255,255,255,0.12)',
@@ -2839,6 +3500,56 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       {/* Debug — 上一次 Run / Generate 的全过程快照 */}
       {showDebug && <DebugModal onClose={() => setShowDebug(false)} />}
       {showLog && <LogModal entries={actionLog} onClose={() => setShowLog(false)} />}
+      {/* Allow List 视频路的输入范围 + 分段帧数配置 —— 每次运行前由用户定（宿主才知道视频工程）。
+          锚 = 第一行输入的源窗口（片段或资产），modal 里的输入范围就是它的跨度。 */}
+      {vidSegCfg && (
+        <VidSegModal
+          anchorName={vidSegCfg.name}
+          anchorKind={vidSegCfg.kind}
+          spanStart={vidSegCfg.start}
+          spanDuration={vidSegCfg.duration}
+          total={vidSegCfg.total}
+          fps={vidSegCfg.fps}
+          onRun={(segFrames, inFrame, outFrame) => {
+            setVidSegCfg(null);
+            void runVideoListProcessor(segFrames, inFrame, outFrame);
+          }}
+          onClose={() => setVidSegCfg(null)}
+        />
+      )}
+      {/* Pipeline Preset 的视频路：preset 没有输入口，源在 modal 里选（Tracks / Sel. Track /
+          Asset），范围与每段帧数照旧。锚随源变 —— 换源就重挂，范围回到整段。 */}
+      {vidPresetCfg && (() => {
+        const a = resolvePresetSrc(vidPresetCfg.src);
+        const proj = vidProjectRef.current;
+        return (
+          <VidSegModal
+            key={`${vidPresetCfg.presetId}:${vidPresetCfg.src.kind}:${vidPresetCfg.src.trackId}:${vidPresetCfg.src.assetId}`}
+            title={`Run 「${vidPresetCfg.presetName}」 on video`}
+            subtitle={a.err ? `⚠ ${a.err}` : 'Pipeline Preset · frames are run through the chain one by one, in segments'}
+            note={`Each segment extracts its frames, runs the whole preset chain on every frame, and encodes the results back to video. Segments land back-to-back on a new track of placeholders — each one is replaced the moment it finishes, and a placeholder can be run again later from its stored snapshot. Mask comes from the track bound in the Tracks window (none bound = no mask).`}
+            anchorName={a.name}
+            anchorKind={a.kind}
+            spanStart={a.start}
+            spanDuration={a.duration}
+            total={a.total}
+            fps={proj.fps}
+            defaultIn={a.kind === 'clip' ? vidTransport.get() : undefined}
+            sources={{
+              ...vidPresetCfg.src,
+              tracks: proj.tracks.filter(t => t.kind === 'video').map(t => ({ id: t.id, name: t.name })),
+              assets: proj.assets.filter(x => x.kind === 'video').map(x => ({ id: x.id, name: x.name })),
+              onChange: next => setVidPresetCfg(c => (c ? { ...c, src: next } : c)),
+            }}
+            onRun={(segFrames, inFrame, outFrame) => {
+              const cfg = vidPresetCfg;
+              setVidPresetCfg(null);
+              void runVideoPreset(cfg.presetId, cfg.presetName, cfg.src, segFrames, inFrame, outFrame);
+            }}
+            onClose={() => setVidPresetCfg(null)}
+          />
+        );
+      })()}
     </div>
   );
 };
@@ -3283,6 +3994,19 @@ const InterfaceTab: React.FC<{
                           setIfaceMode(iface.name, 'processor', v);
                         }} />
                       </div>
+                      {/* Allow List：只在 Processor 开着时给。开着 = 这一口吃一整列图/mask（视频逐帧、
+                          多张 staging），吐出来也是 list；执行时按每个内部节点是不是 INPUT_IS_LIST
+                          分流（直通 list / 逐帧跑再合并）。视频模式下 Processor 窗的 image 输入行
+                          会多出一枚 Video 候选，产物落成新轨上的视频。 */}
+                      {modes.processor && (
+                        <div style={toggleRow}>
+                          <span style={toggleLabel} title="Allow List：Processor 的 image/mask 输入按**一整列**收（视频模式下 = 游标底下那段视频逐帧），输出也是 list。内部节点是 INPUT_IS_LIST 的直接吃 list，否则逐帧跑完再合并。">Allow List</span>
+                          <IOSToggle checked={!!meta.allow_list} onChange={v => {
+                            setModeHint(prev => ({ ...prev, [idx]: '' }));
+                            patchMeta(iface.name, { allow_list: v });
+                          }} />
+                        </div>
+                      )}
                       {modeHint[idx] && <div style={{ fontSize: 11, color: '#ff9f0a', marginBottom: 4 }}>{modeHint[idx]}</div>}
                       {modes.block && pipelineIn.length > 0 && pipelineOut.length > 0 && (() => {
                         const blockPorts = meta.block_ports || {};

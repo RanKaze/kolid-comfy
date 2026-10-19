@@ -418,13 +418,17 @@ export interface InterfaceInfo {
   output_targets?: Record<string, string>;
   /** image/mask 入口的默认来源（键 = 端口号字符串），Processor 小窗拿它当初值。 */
   input_sources?: Record<string, string>;
+  /** Allow List（/api/package 已按名字合并进 interface_meta）。 */
+  allow_list?: boolean;
 }
 
 /** Processor 输出落位的四个去处（blend_node 的 PROCESSOR_DST_* 表同名）。 */
 export type ProcessorDst = 'new_layer' | 'selected_layer' | 'selected_mask' | 'staging';
 
-/** Processor 输入来源的七个去处（blend_node 的 PROCESSOR_SRC_* 表同名）。 */
-export type ProcessorSrc = 'layers' | 'selected' | 'staging' | 'main_mask' | 'selected_mask' | 'selected_alpha' | 'mask_alpha';
+/** Processor 输入来源的七个去处（blend_node 的 PROCESSOR_SRC_* 表同名）。
+ *  `video` 只出现在 Allow List 打开的接口上：这一行读的是游标底下那段视频，按帧拆成
+ *  list 传进去（视频模式专用，见 EditPhase 的视频 list 跑法）。 */
+export type ProcessorSrc = 'layers' | 'selected' | 'staging' | 'main_mask' | 'selected_mask' | 'selected_alpha' | 'mask_alpha' | 'video';
 
 /** 一个 interface 的持久化配置（blocks_sets.json 的 interface_meta 键，按包名索引）。
  *  端口名只是展示 —— 执行全程按端口号走。names 的键是端口号字符串。 */
@@ -436,6 +440,10 @@ export interface InterfaceMetaEntry {
   output_targets?: Partial<Record<string, ProcessorDst>>;
   /** image/mask 入口的默认来源（键 = 端口号字符串），后端归一化时按枚举收敛。 */
   input_sources?: Partial<Record<string, ProcessorSrc>>;
+  /** Allow List：Processor 模式下这一口吃**一整列**图/mask（视频逐帧、多张 staging），
+   *  吐出来的也是 list。执行时按每个内部节点是不是 INPUT_IS_LIST 分流（见 InterfaceExecutor）。
+   *  关掉 = 老口径：一行一张图进、一张图出。 */
+  allow_list?: boolean;
 }
 
 export type InterfaceMeta = Record<string, InterfaceMetaEntry>;
@@ -655,9 +663,12 @@ export type BlendDetectorUi = { available: boolean; prompt: string; threshold: n
 export type BlendProcChoice = { value: string; label: string; tip: string };
 
 /** 一行输入口（image / mask）：它叫什么、那句类型说明，和这一行此刻选中的来源 + 可选项。选了 Staging
- *  的 image 输入多带一份工作区条目表（`staging`），null = 这一行不是那种情况。 */
+ *  的 image 输入多带一份工作区条目表（`staging`），null = 这一行不是那种情况。
+ *  `type` 是端口类型本身（'IMAGE' / 'MASK'）—— 宿主靠它认出哪些行能挂 Video 候选
+ *  （Allow List 的视频那条路只接 image 入口）。 */
 export type BlendProcInRow = {
   num: number; name: string; hint: string; options: BlendProcChoice[]; cur: string;
+  type: 'IMAGE' | 'MASK';
   staging: { options: { id: string; name: string }[]; cur: string } | null;
 };
 
@@ -681,10 +692,12 @@ export type BlendProcOutRow = {
  *  的后端 package 下标，换 interface 时把这个下标连同名字发回去（名字会撞，位置会漂，下标不会）。
  *  `choice` 是列表里的位置（-1 = 一个都没有，那一格给一句空态）；三段行由页面按当前 interface 现拼 ——
  *  段为空就不出现（与页面那三句 `if (inPorts.length)` 一字不差）。行里的每一颗控件都是页面那一段 DOM
- *  的等值物。 */
+ *  的等值物。`allowList` 是当前这枚接口的 Allow List 开关 —— 开着时 image 输入行多一枚 Video 候选
+ *  （视频模式把游标底下那段视频逐帧拆成 list 传进去），输出也会是 list。 */
 export type BlendProcessorUi = {
   names: string[]; indices: number[]; choice: number;
   inputs: BlendProcInRow[]; params: BlendProcParamRow[]; outputs: BlendProcOutRow[];
+  allowList: boolean;
 };
 
 /** Staging 那一格（画布底部那条工作区整条搬进宿主后合成的一格）：Extra Prompt 的序列化文本 + 那一格
@@ -694,7 +707,9 @@ export type BlendProcessorUi = {
  *  `staging_guidance` 那一张（页面本来就把它传进图池）。
  *  `prompt` 是唯一与页面共享的真值源：页面存它（.cud / run payload 都读它），宿主摆的是镜像；编辑的
  *  那一下走 `staging-prompt` 回来。`busy` = 有一趟 run 在飞（Blend/Tag 都灰）、`cancelLive` = 这一趟是
- *  detailer（Cancel 才浮出来）、`progress` 是那根条此刻的宽度（-1 = 未知，画成一段不定进度）。 */
+ *  detailer（Cancel 才现）、`progress` 是进度条此刻的宽度（-1 = 未知，画成一段不定进度）。
+ *  进度条与 Cancel 住在文档窗标题条右上（components/RunStatusSeg），不在 Staging 格正文里 ——
+ *  但数据源仍是这一段。 */
 export type BlendStaging = {
   prompt: string;
   placeholder: string;
@@ -807,7 +822,7 @@ export const EMPTY_BLEND_UI: BlendUi = {
   // 3D 与 Detector / Processor 一律空态：没有记录 / 没有 detector / 一个 processor interface 都没有。
   scene3d: { on: false, canOpen: false, note: '—' },
   detector: { available: false, prompt: '', threshold: 0.5, invert: false },
-  processor: { names: [], indices: [], choice: -1, inputs: [], params: [], outputs: [] },
+  processor: { names: [], indices: [], choice: -1, inputs: [], params: [], outputs: [], allowList: false },
   // Staging 空态：Extra Prompt 空着（占位句照页面那条 data-placeholder），没有 run 在飞、进度条不显，
   // Tagger 默认在（blend-config 那一次播报会把真值补上）。
   staging: {

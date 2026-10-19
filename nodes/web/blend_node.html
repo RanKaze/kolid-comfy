@@ -13105,8 +13105,16 @@ const UI_COMMANDS = {
         const p = processorCurrent(); if (!p) return;
         const o = uiRow(v);
         const port = p.start_ports.find(x => x.num === Number(o.port) && x.category === 'manual');
+        if (!port) return;
         // 值按那一口的类型归：与页面那颗控件原来发回来的形状一字不差（勾是布尔、数字是 number、其余字符串）。
-        if (port) procSetParam(p.index, port, o.value);
+        procSetParam(p.index, port, o.value);
+        // 枚举与布尔的显示是**受控**的（cur/on 只认快照）——落值后必须立刻回执，否则点完那一刻
+        // React 把旧值顶回去（"选了又弹回来"）。数字/文本不走这一步：每敲一键都过一次 iframe
+        // 边界，快照一到 defaultValue+key 的输入框整个重挂（光标丢）——它们的显示本来就不吃快照。
+        if (port.type === 'BOOLEAN' || (port.type === 'COMBO' && (port.options || []).length)) {
+            syncProcessorUI();
+            flushBlendUi();      // 回执立刻走：iframe 一被节流，rAF 排的队不知哪天才到
+        }
     },
     'processor-run': () => runProcessor(),
     'processor-reset': () => resetProcessorValues(),
@@ -13400,6 +13408,8 @@ function syncProcessorUI() {
             inputs.push({
                 num: port.num, name: port.name, hint: `${PROCESSOR_HINTS.in[port.type]} — ${port.name}`,
                 options: choices(table), cur, staging,
+                // 端口类型本身：宿主靠它认出哪些行能挂 Video 候选（Allow List 的视频路只接 image）。
+                type: port.type,
             });
         }
 
@@ -13458,6 +13468,9 @@ function syncProcessorUI() {
         indices: processorList.map(x => x.index),
         choice: processorChoice,
         inputs, params, outputs,
+        // Allow List：宿主据此在视频模式下给 image 输入行拼一枚 Video 候选（这一页的源表
+        // 不认识视频，候选由宿主现拼，选中值回到 processorSel 里原样带回）。
+        allowList: !!(p && p.allow_list),
     };
     queueBlendUi();
 }
@@ -13467,6 +13480,12 @@ function processorCollectInput(port, ifaceIdx) {
     const isMask = port.type === 'MASK';
     const table = isMask ? PROCESSOR_SRC_MASK : PROCESSOR_SRC_IMAGE;
     const choice = procPick(ifaceIdx, 'in', port.num, table, procDefaultPick(ifaceIdx, port.num));
+    // Video 候选只属于宿主那条路（视频模式 + Allow List，见 EditPhase 的 runVideoListProcessor）——
+    // 落到这一页说明人在图像模式，或者那趟跑被宿主放行了到这里：明说，别静默拿画布顶替。
+    if (choice === 'video') {
+        setStatus('Video input runs in video mode — switch the mode segment to Video and Run again', 'error');
+        return null;
+    }
     if (choice === 'staging') {
         const id = processorSel.get(procSelKey(ifaceIdx, 'in:staging', port.num));
         const it = stagingItems.find(s => s.id === id) || stagingItems[stagingItems.length - 1];
