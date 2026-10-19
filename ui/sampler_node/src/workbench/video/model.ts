@@ -77,6 +77,22 @@ export type VidProject = {
   fps: number;
 };
 
+/** solo 状态：**音频与视频分开记** —— 一边亮着不影响另一边。空集 = 没有 solo（全部照常）。
+ *  住在宿主（VidController），**不进工程、不持久化**：solo 是监视手段，不是工程内容 ——
+ *  关掉重开 .cud 时它是灭的，删轨/换文档时按轨道 id 自动清理（见 EditPhase 的清理 effect）。 */
+export type VidSolo = {
+  audio: ReadonlySet<string>;
+  video: ReadonlySet<string>;
+};
+
+/** mute 状态：**所有轨道类型共用一套**（轨道 id 全局唯一，不需要像 solo 那样按域分开）。
+ *  同样住在宿主、不进工程、不持久化，清理口径与 solo 相同。
+ *  语义按轨类型：音频轨 = 不响；视频轨 = 监视器不直接显示它的画面；Layer 轨 = 它的段不参与
+ *  合成（露出底下）。**mute 优先于 solo**：被静音的轨即使被 solo 也不出声/不显示。
+ *  注意 mute 只挡**直接输出**：Layer 合成把视频轨当源帧用时不受影响（合成是主动创作，
+ *  mute 是监视便利，不该把用户的合成设置弄坏）。 */
+export type VidMute = ReadonlySet<string>;
+
 /** 帧率的合理区间：低于 1 没有意义，高过 120 只会让逐帧取帧变慢。 */
 export const FPS_MIN = 1, FPS_MAX = 120;
 export const clampFps = (v: number): number =>
@@ -147,6 +163,14 @@ export type VidController = {
   blendPost: (msg: unknown, transfer?: Transferable[]) => boolean;
   /** Blend 页的 window —— 回图只认它，别处的同名消息一概不收。 */
   blendWindow: () => Window | null;
+  /** solo 状态（音频/视频分开）。空集 = 没有 solo。 */
+  solo: VidSolo;
+  /** 切某条轨的 solo（再点一次取消）。音频轨切音频 solo、视频轨切视频 solo；Layer 轨不接。 */
+  toggleSolo: (trackId: string, kind: VidTrackKind) => void;
+  /** mute 状态（所有轨类型一套）。空集 = 没有静音。 */
+  mute: VidMute;
+  /** 切某条轨的 mute（再点一次取消）。**所有轨类型都接** —— 视频/音频/Layer 各有各的语义。 */
+  toggleMute: (trackId: string) => void;
 };
 
 const MIN_CLIP = 0.05;   // 片段/裁剪的最短寿命（s）
@@ -175,6 +199,29 @@ export const snapPlace = (p: VidProject, trackId: string, at: number): number =>
   const trackEnd = ends.length ? Math.max(...ends) : 0;
   return Math.max(0, Math.min(at, trackEnd));
 };
+
+/** 监视器上的视频段查找：**mute 的轨一律跳过**（mute 优先于 solo —— 被静音的轨即使 solo
+ *  也不出画面）；**视频 solo 亮着时，剩下的里面只认 solo 轨上的段** —— 其余视频轨的画面不参与
+ *  监视器（段照常在时间线上，只是不播）。没有 solo/mute 时与 clipAt(…, 'video') 等价。
+ *  solo/mute 集合里的轨可能已被删掉（删轨后到清理 effect 跑之前）：那些 id 不在 tracks 里，
+ *  自然被跳过 —— 不会因此把画面整个挡掉。 */
+export const clipAtSolo = (p: VidProject, t: number, soloVideo: ReadonlySet<string>,
+  muted: ReadonlySet<string>): VidClip | null => {
+  for (const tr of p.tracks) {
+    if (tr.kind !== 'video') continue;
+    if (muted.has(tr.id)) continue;                        // mute 优先
+    if (soloVideo.size > 0 && !soloVideo.has(tr.id)) continue;
+    const hit = p.clips.find(c => c.trackId === tr.id && t >= c.start && t < c.start + c.duration);
+    if (hit) return hit;
+  }
+  return null;
+};
+
+/** 这段音频要不要响：**mute 的轨一律不响**（优先于 solo）；有音频 solo 时，非 solo 轨上的段
+ *  也不响（与视频 solo 无关，两边分开）。 */
+export const audioAudible = (trackId: string, soloAudio: ReadonlySet<string>,
+  muted: ReadonlySet<string>): boolean =>
+  !muted.has(trackId) && (soloAudio.size === 0 || soloAudio.has(trackId));
 
 // ── 写口（全部纯函数：旧 project 原样进，新 project 整份出）───────────────────────────────
 

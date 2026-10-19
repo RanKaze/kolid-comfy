@@ -10,7 +10,7 @@ import { registerProbe, note } from '../debug/probe';
 import { onGlobalKey, keyIs } from '../hotkeys';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type VidController, type VidProject, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, saveVidProject } from '../workbench/video/model';
+import { type VidController, type VidProject, type VidTrackKind, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, saveVidProject } from '../workbench/video/model';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
 import { setLayerEditBlocked } from '../workbench/editGate';
 import { getBlendUi } from '../workbench/store';
@@ -596,6 +596,42 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [vidSeek] = useState(() => createSeekCoalescer(vidTransport));
   const [vidPlaying, setVidPlaying] = useState(false);
   const [vidPps, setVidPps] = useState(60);
+  // ── solo ── 音频/视频**分开**：一边亮不影响另一边。住在宿主（不进工程、不持久化）——
+  // solo 是监视手段，不是工程内容；关掉重开 .cud 时它是灭的。
+  // 清理：solo 记的是轨道 id，删轨/换文档后那些 id 就没人认了 —— 按 tracks 变化清掉 stale 条目，
+  // 否则"solo 亮着但轨没了"会让画面整个空掉（clipAtSolo 找不到任何段）。
+  const [soloAudio, setSoloAudio] = useState<ReadonlySet<string>>(() => new Set());
+  const [soloVideo, setSoloVideo] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleSolo = useCallback((trackId: string, kind: VidTrackKind) => {
+    if (kind === 'layer') return;                    // Layer 轨不接 solo
+    const set = kind === 'audio' ? setSoloAudio : setSoloVideo;
+    set(prev => {
+      const next = new Set(prev);
+      if (next.has(trackId)) next.delete(trackId); else next.add(trackId);
+      return next;
+    });
+  }, []);
+  // ── mute ── **所有轨类型共用一套**（轨道 id 全局唯一）。语义按类型：音频 = 不响；
+  // 视频 = 监视器不显示；Layer = 段不合成。mute 优先于 solo。同样住在宿主、不持久化。
+  const [mute, setMute] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleMute = useCallback((trackId: string) => {
+    setMute(prev => {
+      const next = new Set(prev);
+      if (next.has(trackId)) next.delete(trackId); else next.add(trackId);
+      return next;
+    });
+  }, []);
+  // solo/mute 清理：轨道没了（删轨/换文档）就把对应条目摘掉。依赖 tracks 的引用 —— 它只在
+  // 增删轨时变（移动/裁剪片段不动 tracks），所以这个 effect 不会跟着每次编辑都跑。
+  useEffect(() => {
+    const ids = new Set(vidProject.tracks.map(t => t.id));
+    setSoloAudio(prev => (prev.size && [...prev].some(id => !ids.has(id)))
+      ? new Set([...prev].filter(id => ids.has(id))) : prev);
+    setSoloVideo(prev => (prev.size && [...prev].some(id => !ids.has(id)))
+      ? new Set([...prev].filter(id => ids.has(id))) : prev);
+    setMute(prev => (prev.size && [...prev].some(id => !ids.has(id)))
+      ? new Set([...prev].filter(id => ids.has(id))) : prev);
+  }, [vidProject.tracks]);
   /** 视频模式下正在编辑的 Layer 段 key（'' = 游标不在任何 Layer 段上，图层集是文档主图层）。 */
   const [vidLayerKey, setVidLayerKey] = useState('');
   // Video 模式下活跃文档窗永远交出**工作台画布**（View 与整套 Image 模式工具都作用在它上面）：
@@ -904,7 +940,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       if (t < clip.start || t >= clip.start + clip.duration) vidSeek(clip.start);
     },
     blendPost, blendWindow,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow]);
+    solo: { audio: soloAudio, video: soloVideo }, toggleSolo,
+    mute, toggleMute,
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute]);
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。

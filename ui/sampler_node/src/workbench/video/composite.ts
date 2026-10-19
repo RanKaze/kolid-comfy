@@ -23,10 +23,15 @@ export type VidCompositePlan = {
 const clipOn = (p: VidProject, trackId: string, t: number): VidClip | null =>
   p.clips.find(c => c.trackId === trackId && t >= c.start && t < c.start + c.duration) ?? null;
 
-export const compositePlanAt = (p: VidProject, t: number): VidCompositePlan | null => {
+/** 哪一帧归谁。`muted` 里的 **Layer 轨被跳过**（mute = 这一段不合成，露出底下）—— 于是顶命中
+ *  顺延到下一条轨：底下是视频段就照旧直接播，是另一条 Layer 段就换它合成。
+ *  视频轨的 mute **不影响 sources**：合成是主动创作（面 attribute 指名要哪条轨的帧），
+ *  mute 是监视便利，不该把用户的合成设置弄坏。 */
+export const compositePlanAt = (p: VidProject, t: number, muted: ReadonlySet<string>): VidCompositePlan | null => {
   let top: VidClip | null = null;
   for (const tr of p.tracks) {
     if (tr.kind !== 'video' && tr.kind !== 'layer') continue;
+    if (tr.kind === 'layer' && muted.has(tr.id)) continue;   // 静音的 Layer 段不参与合成
     const hit = clipOn(p, tr.id, t);
     if (hit) { top = hit; break; }
   }

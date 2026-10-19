@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   type VidClip, type VidController,
-  addLayerClip, addTrack, clipAt, fmtTime, importToTrack, isAudioName, isVideoName, moveClip, placeAsset, removeClip, removeTrack,
+  addLayerClip, addTrack, clipAtSolo, fmtTime, importToTrack, isAudioName, isVideoName, moveClip, placeAsset, removeClip, removeTrack,
   splitClip, trackOf, trimClip, unlinkGroup, vidDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
@@ -49,7 +49,7 @@ const MARK_H = 10;       // 范围半三角（底部带）
 const MARK_TOP = RULER_H - MARK_H;   // 24：范围标记的顶边
 const TICK_TOP = PLAY_H;             // 10：刻度带的上沿
 const TICK_BOTTOM = MARK_H;          // 10：刻度带的下沿（给底部三角让位）
-const HEADER_W = 118;
+const HEADER_W = 140;
 const TRACK_H: Record<'video' | 'audio' | 'layer', number> = { video: 52, audio: 42, layer: 44 };
 const STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
 
@@ -152,6 +152,10 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
   const ppsRef = useRef(pps); ppsRef.current = pps;
   const durRef = useRef(dur); durRef.current = dur;
   const projRef = useRef(p); projRef.current = p;
+  // solo/mute 快照：paint 闭包活在 transport 订阅里（effect 只依赖 transport），
+  // 直接读 vid 会拿到首帧那份 ——  mute/solo 改了底注不刷新。走 ref。
+  const soloVideoRef = useRef(vid.solo.video); soloVideoRef.current = vid.solo.video;
+  const muteRef = useRef(vid.mute); muteRef.current = vid.mute;
   useEffect(() => {
     const paint = () => {
       const t = transport.get();
@@ -160,10 +164,11 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
       if (triRef.current) triRef.current.style.transform = `translateX(${px}px)`;
       if (readRef.current) readRef.current.textContent = `${fmtTime(t)} / ${fmtTime(durRef.current)}`;
       if (noteRef.current) {
-        const c = clipAt(projRef.current, t, 'video');
+        // 底注跟监视器同一口径：静音/solo 挡住的段不算"预览中"。
+        const c = clipAtSolo(projRef.current, t, soloVideoRef.current, muteRef.current);
         noteRef.current.textContent = c
           ? `Preview: 「${c.name}」 (${fmtTime(c.offset + (t - c.start))} in source)`
-          : 'Preview: no video under the playhead — drag clips from Assets or drop files here';
+          : 'Preview: no video showing under the playhead — muted, not soloed, or nothing there';
       }
       // 跟随：播放头走出视野就滚过去（scrub 往回也跟 —— 与原口径一致）。
       const sc = scrollRef.current;
@@ -521,20 +526,63 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
           </div>
 
           {/* 轨道。 */}
-          {p.tracks.map((tr, ti) => (
+          {p.tracks.map((tr, ti) => {
+            // solo：音频/视频分开。Layer 轨不接。solo 亮着时这条轨的底色带一点琥珀。
+            const isLayer = tr.kind === 'layer';
+            const soloSet = isLayer ? null : (tr.kind === 'audio' ? vid.solo.audio : vid.solo.video);
+            const isSoloed = soloSet?.has(tr.id) ?? false;
+            // mute：**所有轨类型都有**。语义按类型：音频 = 不响；视频 = 监视器不显示；
+            // Layer = 段不合成（露出底下）。mute 优先于 solo。静音时轨道变灰、片段压暗。
+            const isMuted = vid.mute.has(tr.id);
+            return (
             <div key={tr.id} style={{
               display: 'flex', height: TRACK_H[tr.kind],
               borderBottom: '0.5px solid rgba(255,255,255,0.05)',
-              // 条纹底：两条轨挨着时边界一眼能分（同色系，亮暗交替，不抢片段）
-              background: ti % 2 ? KIND_UI[tr.kind].bandA : KIND_UI[tr.kind].bandB,
+              // 条纹底：两条轨挨着时边界一眼能分（同色系，亮暗交替，不抢片段）。
+              // solo 亮着时盖一层琥珀 —— 一眼看出"这条在被单独听/看"；mute 时整条变灰。
+              background: isMuted ? 'rgba(255,255,255,0.018)'
+                : isSoloed ? 'rgba(255,159,10,0.07)'
+                  : (ti % 2 ? KIND_UI[tr.kind].bandA : KIND_UI[tr.kind].bandB),
             }}>
-              {/* 轨道头：类型徽章 + 名字 + 删除。徽章是一枚 18px 的圆角色块，图标居中 ——
+              {/* 轨道头：类型徽章 + 名字 + mute + solo + 删除。徽章是一枚 18px 的圆角色块，图标居中 ——
                   颜色说类型，形状说用途，名字让位给省略号。 */}
-              <div style={{ position: 'sticky', left: 0, width: HEADER_W, flexShrink: 0, zIndex: 4, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)', display: 'flex', alignItems: 'center', gap: 6, padding: '0 7px' }}>
+              <div style={{ position: 'sticky', left: 0, width: HEADER_W, flexShrink: 0, zIndex: 4, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px' }}>
                 <span style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: KIND_UI[tr.kind].chipBg, color: KIND_UI[tr.kind].fg }}>
                   {tr.kind === 'video' ? <IconFilm /> : tr.kind === 'layer' ? <IconLayers /> : <IconWave />}
                 </span>
-                <span style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.8)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tr.name}</span>
+                <span style={{ fontSize: 11, fontWeight: 600, color: isMuted ? 'rgba(255,255,255,0.38)' : 'rgba(255,255,255,0.8)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tr.name}</span>
+                {/* mute：**所有轨类型都有**（Layer 轨也有 —— 它的段不合成）。亮着 = 这条轨不参与
+                    输出（音频不响 / 视频不显示 / Layer 段不合成），且**优先于 solo**。再点一次取消。 */}
+                <button
+                  data-vid-mute={tr.id}
+                  data-vid-mute-on={isMuted ? '1' : '0'}
+                  title={`Mute ${tr.kind} track 「${tr.name}」 — ${tr.kind === 'audio' ? 'its clips stop sounding' : tr.kind === 'video' ? 'its clips stop showing on the monitor' : 'its segments stop compositing (what is below shows through)'}. Mute wins over solo. Click again to unmute.`}
+                  onClick={() => vid.toggleMute(tr.id)}
+                  style={{
+                    flexShrink: 0, width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: isMuted ? '#ff453a' : 'transparent',
+                    border: isMuted ? 'none' : '0.5px solid rgba(255,255,255,0.2)',
+                    borderRadius: 3, color: isMuted ? '#1a1a1a' : 'rgba(255,255,255,0.35)',
+                    cursor: 'pointer', padding: 0, fontSize: 8.5, fontWeight: 800, lineHeight: 1,
+                  }}
+                >M</button>
+                {/* solo：视频/音频各一套（分开记）。亮着 = 只播 solo 的轨；视频 solo 还是**直接播**
+                    （不走画布合成/底片）。再点一次取消。Layer 轨不给这个按钮。 */}
+                {!isLayer && (
+                  <button
+                    data-vid-solo={tr.id}
+                    data-vid-solo-on={isSoloed ? '1' : '0'}
+                    title={`Solo ${tr.kind} track 「${tr.name}」 — only soloed ${tr.kind} tracks ${tr.kind === 'video' ? 'show (direct playback, bypasses the canvas)' : 'play'}. Click again to unsolo.`}
+                    onClick={() => vid.toggleSolo(tr.id, tr.kind as 'video' | 'audio')}
+                    style={{
+                      flexShrink: 0, width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: isSoloed ? '#ff9f0a' : 'transparent',
+                      border: isSoloed ? 'none' : '0.5px solid rgba(255,255,255,0.2)',
+                      borderRadius: 3, color: isSoloed ? '#1a1a1a' : 'rgba(255,255,255,0.35)',
+                      cursor: 'pointer', padding: 0, fontSize: 8.5, fontWeight: 800, lineHeight: 1,
+                    }}
+                  >S</button>
+                )}
                 <button
                   title={'Delete track 「' + tr.name + '」 (its clips go with it)'}
                   onClick={() => { vid.update(proj => removeTrack(proj, tr.id), 'Delete track'); setSel(s => (s && p.clips.some(c => c.id === s && c.trackId === tr.id)) ? null : s); }}
@@ -567,7 +615,7 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
                 {p.clips.filter(c => c.trackId === tr.id).map(c => {
                   const gid = c.groupId;
                   return (
-                    <Clip key={c.id} clip={c} pps={pps} selected={sel === c.id} blade={blade}
+                    <Clip key={c.id} clip={c} pps={pps} selected={sel === c.id} blade={blade} muted={isMuted}
                       wave={assetBySrc.get(c.src)?.waveform}
                       mediaFile={c.src.startsWith('/api/vid_media/') ? c.src.split('/').pop() : undefined}
                       onStartDrag={startClipDrag} onPointerMove={onClipPointerMove} onPointerUp={endClipDrag}
@@ -577,7 +625,8 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
                 })}
               </div>
             </div>
-          ))}
+            );
+          })}
 
           {/* 范围边界：I/O 各一条**贯穿轨道区的长竖线**（和播放头同一种画法），
               这样范围在整个时间线上是一条看得见的长边界，而不是只在标尺上标一下。
@@ -626,6 +675,8 @@ const Clip: React.FC<{
   selected: boolean;
   /** 剃刀在手（按住 C）：整个片段变十字光标，左键 = 剪开。 */
   blade?: boolean;
+  /** 所在轨被静音：片段整体压暗去色 —— "这条轨不参与输出"要一眼看得出。 */
+  muted?: boolean;
   /** 资产的整段波形 PNG（音频段按 offset/duration 裁窗；undefined = 没入库预览，纯色块）。 */
   wave?: string;
   /** /api/vid_media/ 的文件名（视频段按 offset / offset+duration 向后端按需取头尾帧）。 */
@@ -635,7 +686,7 @@ const Clip: React.FC<{
   onPointerUp: () => void;
   onDelete: () => void;
   onUnlink: () => void;
-}> = ({ clip: c, pps, selected, blade, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onDelete, onUnlink }) => {
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onDelete, onUnlink }) => {
   const isAudio = c.kind === 'audio';
   // Layer 段没有源文件：不抽条、不取首尾帧，只画一块"合成区间"。
   const isLayer = c.kind === 'layer';
@@ -724,6 +775,8 @@ const Clip: React.FC<{
         border: selected ? '1px solid rgba(255,255,255,0.92)' : `0.5px solid ${K.edge}`,
         boxShadow: selected ? `0 0 0 1px ${K.edge}, 0 2px 8px rgba(0,0,0,0.45)` : '0 1px 3px rgba(0,0,0,0.35)',
         display: 'flex', alignItems: 'center', padding: '0 8px', gap: 6,
+        // 静音：压暗 + 去色 —— 段还在（还能拖/裁/删），只是不参与输出。
+        opacity: muted ? 0.34 : 1, filter: muted ? 'saturate(0.3)' : undefined,
       }}
     >
       {/* 顶部 2px 高亮条：颜色即类型，一眼分得出这条是画面还是声音。 */}

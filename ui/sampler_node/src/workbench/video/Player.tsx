@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  type VidController, type VidClip, clipAt, fmtTime, vidDuration,
+  type VidController, type VidClip, audioAudible, clipAt, clipAtSolo, fmtTime, vidDuration,
 } from './model';
 import { compositePlanAt, vidFrameAt, VidFrameGrabber, type VidCompositePlan } from './composite';
 import { decodeAudio, vidAudio } from './audio';
@@ -30,6 +30,12 @@ export const VidPlayer: React.FC<{
   projectRef.current = p;
   const playingRef = useRef(playing);
   playingRef.current = playing;
+  // solo 快照：transport 订阅者与播放循环都要读它（每帧），走 ref 不进渲染图。
+  const soloRef = useRef(vid.solo);
+  soloRef.current = vid.solo;
+  // mute 快照：同上（每帧都要问"这条轨静音了吗"）。
+  const muteRef = useRef(vid.mute);
+  muteRef.current = vid.mute;
   const dur = vidDuration(p);
   const durRef = useRef(dur);
   durRef.current = dur;
@@ -59,9 +65,16 @@ export const VidPlayer: React.FC<{
   const requestRef = useRef<(plan: VidCompositePlan | null, t: number, force?: boolean) => void>(() => {});
 
   // 活片段：transport 的订阅者比对 id，只有换段才 setState（React 重渲染是稀罕事）。
-  const [activeId, setActiveId] = useState<string | null>(() => clipAt(p, transport.get(), 'video')?.id ?? null);
+  // 起手就按 solo/mute 找 —— 静音的轨不显示，视频 solo 亮着时只认 solo 轨上的段。
+  const [activeId, setActiveId] = useState<string | null>(() =>
+    clipAtSolo(p, transport.get(), vid.solo.video, vid.mute)?.id ?? null);
   const activeIdRef = useRef(activeId);
   const active = useMemo(() => (activeId ? p.clips.find(c => c.id === activeId) ?? null : null), [p, activeId]);
+
+  // 监视器空着的时候，告诉用户是"本来就没段"还是"有段但被静音/solo 挡了" ——
+  // 否则 mute 掉唯一一条视频轨，屏幕上只剩一句 "No clip under the playhead"，看着像坏了。
+  const [blocked, setBlocked] = useState<'none' | 'muted' | 'solo'>('none');
+  const blockedRef = useRef(blocked);
 
   // 拖动中盖在 <video> 上的那一格缩略条 —— **补位图**，真帧 seek 落定前的瞬间替身。
   // 常驻 <img>，ref 直改 src 与显隐：拖动路径上一个 setState 都不发（React 渲染本身
@@ -209,7 +222,10 @@ export const VidPlayer: React.FC<{
   const requestBase = useCallback((t: number) => {
     if (!visible) return;
     const p = projectRef.current;
-    const c = clipAt(p, t, 'video') ?? null;
+    // 底片跟着监视器走：静音的轨不送帧（画布在视频模式就是监视器，mute 要两边一致）。
+    // 这里被调用时 solo 必为空（onTick 里 soloActive 走的是 requestBaseOff），
+    // 但用 clipAtSolo 一处口径更稳 —— 空 solo 集时它与 clipAt(…, 'video') 等价。
+    const c = clipAtSolo(p, t, soloRef.current.video, muteRef.current) ?? null;
     const q = vidFrameAt(p.fps || 30, t);
     // 键里带上片段的起点/源内偏移：剪一下片段，就算帧号没变，取到的源帧也不是同一张。
     const key = c ? `${c.id}@${c.start}@${c.offset}@${q}` : '';
@@ -238,8 +254,14 @@ export const VidPlayer: React.FC<{
       const t = transport.get();
       if (readRef.current) readRef.current.textContent = fmtTime(t);
       const proj = projectRef.current;
-      // 这一帧归谁：layer 段在最上 → 交给工作台合成；否则照旧。
-      const plan = compositePlanAt(proj, t);
+      // 视频 solo 亮着 = **直接播**：不走画布系统 —— 合成计划作废、底片不送，
+      // 主 <video> 自己播 solo 轨那段（见下面的 clipAtSolo）。
+      const soloV = soloRef.current.video;
+      const soloActive = soloV.size > 0;
+      const muted = muteRef.current;
+      // 这一帧归谁：layer 段在最上 → 交给工作台合成；否则照旧。solo 时一律不合成；
+      // **静音的 Layer 轨被 compositePlanAt 跳过**（它的段不合成，露出底下）。
+      const plan = soloActive ? null : compositePlanAt(proj, t, muted);
       const modeId = plan ? plan.layer.id : null;
       if ((compModeRef.current?.id ?? null) !== modeId
         || (plan && compModeRef.current?.name !== plan.layer.name)) {
@@ -248,17 +270,28 @@ export const VidPlayer: React.FC<{
         setCompMode(next);
       }
       // 游标底下那一段的图层集 key（null = 不在任何 Layer 段上）变了就报一次：宿主据此切
-      // Layers 面板的作用对象，并决定画布是折图层还是放视频底片。
+      // Layers 面板的作用对象，并决定画布是折图层还是放视频底片。solo 时画布系统退场，
+      // 一律报 null（回到文档主图层集）。
       const layerKeyNow = plan ? plan.layerKey : null;
       if (layerKeyNow !== compLayerRef.current) {
         compLayerRef.current = layerKeyNow;
         onCompLayerRef.current?.(layerKeyNow);
       }
-      const c = clipAt(proj, t, 'video');
+      // solo/mute 感知的视频段：静音的轨不显示（mute 优先于 solo），solo 亮着时只认 solo 轨。
+      // 没有 solo/mute 时 clipAtSolo 与 clipAt(…, 'video') 等价 —— 一处口径，别再写三元。
+      const c = clipAtSolo(proj, t, soloV, muted);
       const cid = c?.id ?? null;
       if (cid !== activeIdRef.current) {
         activeIdRef.current = cid;
         setActiveId(cid);
+      }
+      // 空屏的原因：有段却被静音/solo 挡了 → 说清楚，别让用户以为工程坏了。
+      if (!c) {
+        const raw = clipAt(proj, t, 'video');
+        const nb = !raw ? 'none' : (muted.has(raw.trackId) ? 'muted' : (soloActive ? 'solo' : 'none'));
+        if (nb !== blockedRef.current) { blockedRef.current = nb; setBlocked(nb); }
+      } else if (blockedRef.current !== 'none') {
+        blockedRef.current = 'none'; setBlocked('none');
       }
       if (!playingRef.current && c && interactive) {
         // 交互跳转（拖标尺 / 拖 scrub 条）＝ PR 式跟手，两层配合：
@@ -285,8 +318,13 @@ export const VidPlayer: React.FC<{
           }
         }
       }
-      if (plan) requestBaseOff(); else requestBase(t);
-      requestComposite(plan, t);
+      // 底片与合成都送走 / 停掉。solo 时：不送底片（requestBase 一律不调），
+      // 并确保画布那边的底片态与合成态都已退（requestBaseOff / requestComposite(null)
+      // 都有守卫，不会重复发消息）。
+      if (soloActive) requestBaseOff();
+      else if (plan) requestBaseOff();
+      else requestBase(t);
+      requestComposite(plan, t);   // solo 时 plan 为 null → 停掉合成（发 frame-off）
     };
     // seek 落定 = 真帧已上屏：撤掉缩略条替身。两个守卫防止拖动中闪替身——
     //  * 在途 seek 的目标仍是"游标此刻该在的位置"（中途完成的旧 seek 不算数）；
@@ -295,7 +333,7 @@ export const VidPlayer: React.FC<{
     const tryHideStrip = () => {
       if (!stripRef.current) return;
       const t = transport.get();
-      const c2 = clipAt(projectRef.current, t, 'video');
+      const c2 = clipAtSolo(projectRef.current, t, soloRef.current.video, muteRef.current);
       const want2 = c2
         ? Math.min(Math.max(c2.offset, c2.offset + (t - c2.start)), c2.offset + Math.max(c2.duration - 0.02, 0.02))
         : null;
@@ -311,7 +349,7 @@ export const VidPlayer: React.FC<{
     v0?.addEventListener('seeked', onSeeked);
     // 挂载时无条件报一次（含 null = 游标不在任何 Layer 段上）：宿主那边可能还留着上一份文档 /
     // 上一轮的值，而 onTick 只在"换段"时开口，起手正好不在段上就永远不会刷新。
-    const plan0 = compositePlanAt(projectRef.current, transport.get());
+    const plan0 = compositePlanAt(projectRef.current, transport.get(), muteRef.current);
     compLayerRef.current = plan0 ? plan0.layerKey : null;
     onCompLayerRef.current?.(compLayerRef.current);
     onTick();
@@ -387,7 +425,7 @@ export const VidPlayer: React.FC<{
     const timer = setInterval(() => {
       const r = compReq.current;
       if (r.inFlight || !r.key || performance.now() - r.lastReply < 1800) return;
-      const plan = compositePlanAt(projectRef.current, transport.get());
+      const plan = compositePlanAt(projectRef.current, transport.get(), muteRef.current);
       if (plan) requestRef.current(plan, transport.get(), true);
     }, 800);
     return () => clearInterval(timer);
@@ -530,8 +568,16 @@ export const VidPlayer: React.FC<{
       transport.set(np);
       // 音频：覆盖游标的段要播在**游标对应的源内位置**上。已经在播的也要每帧对表 ——
       // 回绕、拖动、片段被搬动/裁剪，全都是"该听的位置变了"，偏差超 80ms 就重新起播。
+      // **mute / 音频 solo**：静音的轨一律不响（mute 优先）；有 solo 时非 solo 轨也不响
+      // （与视频 solo 无关，两边分开）。
+      const soloA = soloRef.current.audio;
+      const muted = muteRef.current;
       for (const c of proj.clips) {
         if (c.kind !== 'audio') continue;
+        if (!audioAudible(c.trackId, soloA, muted)) {
+          if (vidAudio.has(c.id)) vidAudio.stop(c.id);
+          continue;
+        }
         const covers = np >= c.start && np < c.start + c.duration;
         if (!covers) { if (vidAudio.has(c.id)) vidAudio.stop(c.id); continue; }
         if (!vidAudio.has(c.id)) { void startVoice(c.id, c.src); continue; }
@@ -545,8 +591,10 @@ export const VidPlayer: React.FC<{
       // 纠偏只认**精确 currentTime**（fastSeek 在播放中会拽回一个 GOP，越拽越落后），
       // 且必须过宽限期 + 偏差够大才动手 —— 起播/跳转头几百毫秒解码器本来就在追赶，
       // 这时纠偏 = 打断追赶 = 从关键帧重来 = "跳过去之后卡着播几秒"的元凶。
+      // **视频 solo / mute**：漂移校正也只认"上得了监视器"的段（与 clipAtSolo 同一口径：
+      // 静音的不显示，solo 亮着时只认 solo 轨）。
       const v = videoRef.current;
-      const av = clipAt(proj, np, 'video');
+      const av = clipAtSolo(proj, np, soloRef.current.video, muted);
       if (v && av && v.dataset.clipId === av.id && v.readyState >= 2) {
         const endT = av.offset + Math.max(av.duration - 0.02, 0.02);
         const expected = Math.min(av.offset + (np - av.start), endT);
@@ -573,6 +621,9 @@ export const VidPlayer: React.FC<{
   }, [visible]);
 
   const inSet = p.outPoint > p.inPoint;
+  // solo 徽章：视频 solo 亮着 = 直接播（不走画布），音频 solo 亮着 = 只响 solo 轨。
+  const soloVActive = vid.solo.video.size > 0;
+  const soloAActive = vid.solo.audio.size > 0;
   const tCtrl: React.CSSProperties = {
     width: 28, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center',
     background: 'rgba(255,255,255,0.07)', border: '0.5px solid rgba(255,255,255,0.16)',
@@ -600,7 +651,24 @@ export const VidPlayer: React.FC<{
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none', display: 'none' }} />
         {!active && !compMode && (
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.28)', fontSize: 12, textAlign: 'center', padding: 20 }}>
-            No clip under the playhead.<br />Drop videos onto the Tracks window below.
+            {blocked === 'muted'
+              ? 'The clip under the playhead is on a muted track.'
+              : blocked === 'solo'
+                ? 'No soloed clip under the playhead.'
+                : 'No clip under the playhead.'}<br />Drop videos onto the Tracks window below.
+          </div>
+        )}
+        {/* solo 徽章：顶中，不抢左上角的段名与右上角的 I/O。视频 solo 用琥珀（直接播），
+            音频 solo 用绿（只响 solo 轨），两个都亮时合并成一个。 */}
+        {(soloVActive || soloAActive) && (
+          <div style={{
+            position: 'absolute', left: '50%', top: 8, transform: 'translateX(-50%)',
+            padding: '2px 10px', borderRadius: 6, fontSize: 10, fontWeight: 700, letterSpacing: 0.4,
+            whiteSpace: 'nowrap', pointerEvents: 'none',
+            background: soloVActive ? 'rgba(255,159,10,0.25)' : 'rgba(48,209,88,0.25)',
+            color: soloVActive ? '#ffb340' : '#5ce07a',
+          }}>
+            {soloVActive && soloAActive ? 'SOLO' : soloVActive ? 'V-SOLO · direct' : 'A-SOLO'}
           </div>
         )}
         {(active || compMode) && (
