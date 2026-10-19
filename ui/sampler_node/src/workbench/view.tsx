@@ -56,7 +56,8 @@ export const viewUnit: WorkbenchUnit = {
   hint: 'H hand (left-drag to pan the view), Z zoom (left click in, right click out, drag right/left for '
     + 'continuous zoom around the point you press), R rotate (turn the view like a knob around the view '
     + 'centre; Shift snaps to 15°, a click steps 15°). Ctrl+F flips horizontally, the wheel zooms, Space '
-    + 'or middle-drag pans, Fit restores the framing, Enter or Esc exits the active tool. '
-    + 'Esc straightens a rotated view — zoom, pan and flip are kept. The Reset button also drops those.',
+    + 'or middle-drag pans, Fit fits the canvas into the workbench (rotation kept), Enter or Esc exits '
+    + 'the active tool. Esc also returns to the default view — straight, unflipped and filled to the '
+    + 'workbench — and the Reset button does the same.',
   Body: ViewBody,
 };

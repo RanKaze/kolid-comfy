@@ -36,9 +36,9 @@ const LAYER_ENTRIES: AddEntry[] = [
   },
 ];
 
-const LayersBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
+const LayersBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
   const ui = useBlendUi();
-  return <LayerListView stack="layer" rows={ui.stacks.layers} send={send} />;
+  return <LayerListView stack="layer" rows={ui.stacks.layers} send={send} video={host.video} />;
 };
 
 // 总开关 / Clear All / Add 那一排住进 dock 的动作条里（正文下面、滚动条之外）——图层再多也顶不走它们。

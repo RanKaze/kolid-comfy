@@ -231,6 +231,13 @@ function attrRefs(ref) {
     if (!ref) return 0;
     let n = 0;
     for (const l of layers) if (attrRefList(l).indexOf(ref) >= 0) n++;
+    // Video 的每个 Layer 段各有一套图层（见 blend_node.html 的 layerSets），它们也拿这张表当视图：
+    // 不算上，"换文档"那趟 pruneAttrs 会把正在等着的那些段里的记录当场放手（文字描述符、特效链全没）。
+    // 活跃那套就是上面的 layers，别数两遍。
+    for (const [key, s] of layerSets) {
+        if (key === activeLayerSet) continue;
+        for (const l of (s.layers || [])) if (attrRefList(l).indexOf(ref) >= 0) n++;
+    }
     // 剪贴板是表外的持有者 (复制之后把原本删掉,再粘贴必须还有那份数据可贴),所以它也算一次引用。
     const cb = clipboardRecord && clipboardRecord.layer;
     if (cb && attrRefList(cb).indexOf(ref) >= 0) n++;

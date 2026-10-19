@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { BlendAttrChip, BlendChainLane, BlendLayerRow, BlendStack, BlendUiSend } from '../types';
+import type { WorkbenchHostCtx } from './registry';
 import { useBlendUi } from './store';
 import { useLayerEditBlocked } from './editGate';
 
@@ -31,7 +32,7 @@ const hasFiles = (dt: DataTransfer | null) => hasType(dt, 'Files');
 
 type Over = { key: string; seam?: 'above' | 'below' | 'before' | 'after' | 'into'; slot?: number };
 type Menu = { stack: BlendStack; kind: 'row' | 'attr' | 'attr-add' | 'add'; rowId: number; attrId: string;
-  x: number; y: number; up?: boolean };
+  x: number; y: number; up?: boolean; sub?: string };
 type Hover = { stack: BlendStack; id: number; key: string } | null;
 type RowUi = { over: Over | null; dragging: string; menu: Menu | null; hover: Hover };
 
@@ -239,10 +240,12 @@ const MenuCard = ({ menu, children }: { menu: Menu; children: React.ReactNode })
   );
 };
 
-const MenuItem = ({ label, title, onClick, disabled }:
-  { label: string; title: string; onClick: () => void; disabled?: boolean }) => (
+/** `keepOpen` 是给那一口**就地展开**的菜单用的（`+` 里点 decal/mask 要先问绑哪条 video 轨）：
+ *  按下去换的是这口菜单的内容，菜单不该跟着关掉。默认那一下照旧——按了就关。 */
+const MenuItem = ({ label, title, onClick, disabled, keepOpen }:
+  { label: string; title: string; onClick: () => void; disabled?: boolean; keepOpen?: boolean }) => (
   <button type="button" role="menuitem" className="layer-menu-item" title={title} disabled={disabled}
-    onClick={ev => { ev.stopPropagation(); closeMenu(); onClick(); }}>
+    onClick={ev => { ev.stopPropagation(); if (!keepOpen) closeMenu(); onClick(); }}>
     {label}
   </button>
 );
@@ -449,7 +452,7 @@ const nameSuffix = (row: BlendLayerRow): string =>
       : row.kind === 'text' ? ' · text' : row.kind === 'direction' ? ' · direction'
         : row.kind === 'stash' ? ' · stash' : row.kind === 'raster' ? ' · raster' : '';
 
-const LayerRow = ({ row, send }: { row: BlendLayerRow; send: BlendUiSend }) => {
+const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend; video: WorkbenchHostCtx['video'] }) => {
   const ui = useBlendUi();
   const st = useRowUi();
   const [renaming, setRenaming] = useState(false);
@@ -609,15 +612,19 @@ const LayerRow = ({ row, send }: { row: BlendLayerRow; send: BlendUiSend }) => {
           }}><Plus /></button>
       </div>
       {st.menu && st.menu.stack === row.stack && st.menu.rowId === row.id && (
-        <RowMenus menu={st.menu} row={row} send={send} />
+        <RowMenus menu={st.menu} row={row} send={send} video={video} />
       )}
     </div>
   );
 };
 
 /** 一口行 / 条带的菜单：条目全在这一处（拍板 5.a），出现与灰掉问的是快照随行交过来的那六个谓词。 */
-const RowMenus = ({ menu, row, send }: { menu: Menu; row: BlendLayerRow; send: BlendUiSend }) => {
+const RowMenus = ({ menu, row, send, video }:
+  { menu: Menu; row: BlendLayerRow; send: BlendUiSend; video: WorkbenchHostCtx['video'] }) => {
   const ui = useBlendUi();
+  // 视频模式下没选中 Layer 段时这两摞本来就不许动手（`StackHead` 那颗 Add 已经灰了）；行级的 `+`
+  // 也得守同一条闸 —— 否则"给主文档的图层加 decal"会被误当成"给某个 Layer 段的图层加"而问轨道。
+  const blocked = useLayerEditBlocked();
   if (menu.kind === 'attr') {
     const chip = row.attrs.find(a => a.guid === menu.attrId);
     if (!chip) return null;
@@ -646,13 +653,41 @@ const RowMenus = ({ menu, row, send }: { menu: Menu; row: BlendLayerRow; send: B
     );
   }
   if (menu.kind === 'attr-add') {
+    // decal / mask（surface 那一类）在**视频模式的 Layer 摞**里要先问"绑哪条 video 轨"：轨清单
+    // 只住在宿主（Video 工程），所以这一问就在这口菜单里就地展开 —— 与 Effect Parameters 那行
+    // Frame source 是同一份清单、同一个绑定（面记录自己的 frameTrack）。Guidances 摞、Image 模式、
+    // 以及工程里还没有视频轨时都不问，照旧直接加入（这就是没有轨道可绑时唯一说得通的做法）。
+    const canBind = row.stack === 'layer' && video.mode === 'video' && !blocked && video.tracks.length > 0;
+    const sub = menu.sub && canBind ? ui.attrKinds.find(k => k.type === menu.sub) : undefined;
+    if (sub) {
+      return (
+        <MenuCard menu={menu}>
+          <MenuItem label="‹ Back" title="Back to the attribute list — nothing has been added yet"
+            keepOpen onClick={() => setRowUi({ menu: { ...menu, sub: undefined } })} />
+          <MenuItem label="Painted surface"
+            title={`Use the surface painted on「${row.name}」— this ${sub.label.toLowerCase()} keeps its own pixels instead of sampling a video frame.`}
+            onClick={() => send('attr-add', { layerId: row.id, type: sub.type })} />
+          {video.tracks.map(t => (
+            <MenuItem key={t.id} label={t.name}
+              title={`Sample「${t.name}」's current frame as this ${sub.label.toLowerCase()}'s picture while a Layer track is composited — the same binding Frame source shows later.`}
+              onClick={() => send('attr-add', { layerId: row.id, type: sub.type, trackId: t.id })} />
+          ))}
+        </MenuCard>
+      );
+    }
     if (!ui.attrKinds.length) return null;
     return (
       <MenuCard menu={menu}>
-        {ui.attrKinds.map(k => (
-          <MenuItem key={k.type} label={'Add ' + k.label} title={k.addTitle}
-            onClick={() => send('attr-add', { layerId: row.id, type: k.type })} />
-        ))}
+        {ui.attrKinds.map(k => {
+          const bind = canBind && k.kind === 'surface';
+          return (
+            <MenuItem key={k.type} label={'Add ' + k.label} title={k.addTitle}
+              keepOpen={bind}
+              onClick={() => bind
+                ? setRowUi({ menu: { ...menu, sub: k.type } })
+                : send('attr-add', { layerId: row.id, type: k.type })} />
+          );
+        })}
       </MenuCard>
     );
   }
@@ -742,7 +777,8 @@ const EMPTY_TEXT: Record<BlendStack, string> = {
   layer: 'No layers yet — click Add',
 };
 
-export const LayerListView = ({ stack, rows, send }: { stack: BlendStack; rows: BlendLayerRow[]; send: BlendUiSend }) => {
+export const LayerListView = ({ stack, rows, send, video }:
+  { stack: BlendStack; rows: BlendLayerRow[]; send: BlendUiSend; video: WorkbenchHostCtx['video'] }) => {
   const st = useRowUi();
   useHoverKeys();
   const listKey = 'list:' + stack;
@@ -784,7 +820,7 @@ export const LayerListView = ({ stack, rows, send }: { stack: BlendStack; rows: 
         send('layer-move', { id, toId: null, above: false, stack });
       }}>
       {!rows.length && <div className="layer-empty">{EMPTY_TEXT[stack]}</div>}
-      {rows.map(row => <LayerRow key={row.id} row={row} send={send} />)}
+      {rows.map(row => <LayerRow key={row.id} row={row} send={send} video={video} />)}
       <HoverPreview stack={stack} />
     </div>
   );
@@ -803,7 +839,7 @@ export const StackHead = ({ stack, entries, withBypass, send }:
   const off = blocked ? { opacity: 0.35, cursor: 'default' as const } : null;
   const mine = st.menu && st.menu.kind === 'add' && st.menu.stack === stack ? st.menu : null;
   return (
-    <div ref={groupRef} className="mini-group" title={blocked ? 'Select a Layer segment in the Tracks window first — layers and guidances are written into the selected segment' : undefined}>
+    <div ref={groupRef} className="mini-group" title={blocked ? 'Move the playhead onto a Layer segment in the Tracks window first — layers and guidances are written into that segment' : undefined}>
       {withBypass && (
         // 那颗「看加特效前的原样」总开关。画法不能在这里抄第二根魔棒 —— 快照里那句 fx.wand 就是
         // 页面 fxWandSvg() 的原串，条带上那枚链 chip 认的是同一个作者。
@@ -818,12 +854,12 @@ export const StackHead = ({ stack, entries, withBypass, send }:
       )}
       <button type="button" className="mini-btn" disabled={blocked} style={off ?? undefined}
         title={blocked
-          ? 'Select a Layer segment in the Tracks window first'
+          ? 'Move the playhead onto a Layer segment in the Tracks window first'
           : (stack === 'guidance' ? 'Remove every guidance layer' : 'Remove every layer (guidances stay)')}
         onClick={() => send('layer-clear', { stack })}>Clear All</button>
       <button type="button" className="mini-btn" disabled={blocked} style={off ?? undefined}
         aria-haspopup="menu" aria-expanded={!!mine}
-        title={blocked ? 'Select a Layer segment in the Tracks window first' : stack === 'guidance'
+        title={blocked ? 'Move the playhead onto a Layer segment in the Tracks window first' : stack === 'guidance'
           ? 'Add a guidance: composited over the layers image, and what the workspace Guidance card publishes'
           : 'Add a layer: one the size of the canvas, or one you draw out at any resolution'}
         onClick={() => {

@@ -547,6 +547,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 光动 Assets/Tracks 它不会亮 —— 所以这一份要宿主自己记，存盘后清掉。
   const vidDirty = useRef(new Set<number>());
   const [vidDirtyTick, bumpVidDirty] = useReducer((x: number) => x + 1, 0);
+  // 视频工程置脏的唯一写口：宿主记一份（tab 上的 ●、dockRules），同时**当场**告诉工作台 ——
+  // "关之前要不要先存一下"是它在管（closeDocument 读 entry.dirty），而它的账只有这条消息
+  // 一个来源。变脏就发、不等点 ✕：桌面双击流那条 dropPristineBootDocument 也读 entry.dirty，
+  // 只在 ✕ 上补发会漏掉那一支。同一条消息幂等（工作台那端 !entry.dirty 才落）。
+  const markVidDirty = useCallback((uid: number) => {
+    if (vidDirty.current.has(uid)) return;
+    vidDirty.current.add(uid);
+    bumpVidDirty();
+    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-vid-dirty', uid }, '*');
+  }, [blendIframeRef]);
   const dockRules = useMemo(
     () => dockRulesFor(blendDocs.docs, vidDirty.current), [blendDocs, vidDirtyTick],
   );
@@ -568,12 +578,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setVidModeState(m);
   }, []);
   // ── Video 工程状态 ── 权威在宿主：Player / Tracks 两扇窗都从这里拿快照（VidController），
-  // 改动防抖落盘 localStorage（blob: 的本地图活不过刷新，读档时自会剪掉）。
-  // 播放头不住这里：它每帧都在走，走 React state 会把整页拖着每秒重渲几十次（scrub 卡顿的根子）。
-  // 它住外置 transport —— Player/Timeline 订阅它直改 DOM，React 只管低频的事。
   // **按文档分桶**：Video 工程随 .cud 走（保存时 iframe 来要快照、读档时送回来），桶键 = 文档
   // uid；写入落进活跃文档的桶，切文档 = 换一份工程。
-  const [vidProject, setVidProject] = useState<VidProject>(loadVidProject);
+  // 页面存档（localStorage）只是"刷新之后手上还没有任何 .cud"时的起手工程：它喂给开机那份空白
+  // 文档，绝不渗进任何一份从文件打开的文档（见下面的文档切换 effect）。
+  // 播放头不住这里：它每帧都在走，走 React state 会把整页拖着每秒重渲几十次（scrub 卡顿的根子）。
+  // 它住外置 transport —— Player/Timeline 订阅它直改 DOM，React 只管低频的事。
+  // 页面存档（localStorage）只是"刷新之后手上还没有任何 .cud"时的起手工程：它喂给**这次开机见到
+  // 的第一份文档**，之后就作废。绝不渗进之后打开/新建的任何文档 —— 那些的正身要么在 .cud 里
+  // （blend-vid-restore 送来），要么就是空白。
+  const vidSeedRef = useRef<{ p: VidProject } | null>({ p: loadVidProject() });
+  const [vidProject, setVidProject] = useState<VidProject>(() => vidSeedRef.current!.p);
   const vidProjectRef = useRef(vidProject); vidProjectRef.current = vidProject;
   const [vidTransport] = useState(createVidTransport);
   // seek 走合流器：标尺拖动每发指针事件都进这里，合到 rAF 一帧一落（见 createSeekCoalescer）。
@@ -581,8 +596,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [vidSeek] = useState(() => createSeekCoalescer(vidTransport));
   const [vidPlaying, setVidPlaying] = useState(false);
   const [vidPps, setVidPps] = useState(60);
-  /** 视频模式下选中的 Layer 段 key（'' = 没选中，图层集是文档主图层）。 */
+  /** 视频模式下正在编辑的 Layer 段 key（'' = 游标不在任何 Layer 段上，图层集是文档主图层）。 */
   const [vidLayerKey, setVidLayerKey] = useState('');
+  // Video 模式下活跃文档窗永远交出**工作台画布**（View 与整套 Image 模式工具都作用在它上面）：
+  //  · 游标压在 Layer 段上 ⇒ 画布上就是那一段的图层（逐帧源帧折在同一张图上），Transform 可用；
+  //  · 游标不在段上 ⇒ 画布内容换成当前视频帧（页面那张底片，1:1 铺满、不带图层 transform），
+  //    编辑与 Transform 由页面挡掉 —— 这时没有对象可动。
+  // 测量挂在 render 之外，拿不到 state 闭包，所以走 ref。
+  const vidCanvasRef = useRef(false);
+  vidCanvasRef.current = vidMode === 'video';
   const vidByDoc = useRef(new Map<number, VidProject>());
   const activeUid = blendDocs.activeUid;
   const activeUidRef = useRef(activeUid); activeUidRef.current = activeUid;
@@ -629,10 +651,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     vidByDoc.current.set(uid, proj);
     vidProjectRef.current = proj;
     if (uid === activeUidRef.current) setVidProject(proj);
-    if (!vidDirty.current.has(uid)) { vidDirty.current.add(uid); bumpVidDirty(); }
+    markVidDirty(uid);
     vidEditAt.current = Date.now();
     bumpVidHist();
-  }, []);
+  }, [markVidDirty]);
   const vidUndo = useCallback((): boolean => {
     const uid = activeUidRef.current;
     if (uid == null) return false;
@@ -689,23 +711,34 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     if (uid != null) {
       vidByDoc.current.set(uid, next);
       pushVidHist(uid, prev, label || 'Video edit');
-      if (!vidDirty.current.has(uid)) {
-        vidDirty.current.add(uid);
-        bumpVidDirty();                        // tab / 标题条上的 ● 要跟着亮
-      }
+      markVidDirty(uid);                       // tab 上的 ● 与工作台的关前询问，都靠这一笔
     }
-  }, [pushVidHist]);
-  // 文档切换 = 换一份 Video 工程：第一次见到的文档，头一份继承页面存档，之后的从空白起手。
+  }, [pushVidHist, markVidDirty]);
+  // 文档切换 = 换一份 Video 工程。**工程的正身就在 .cud 里**（读档那趟由 blend-vid-restore 送回来），
+  // 所以这里只做三件事：
+  //   · 桶里已有 ⇒ 装回它那一份；
+  //   · 没见过，且这是这次开机的**第一份**文档 ⇒ 用页面存档当起手（刷新后的落脚点）；
+  //   · 其余 ⇒ 空白（等文件自己那份送来）。
+  // 页面存档只喂一次：之后再打开/新建的文档都不继承它，否则时间线会从上一份凭空长过来。
   useEffect(() => {
     const uid = blendDocs.activeUid;
     if (uid == null) return;
     const map = vidByDoc.current;
-    if (!map.has(uid)) map.set(uid, map.size === 0 ? vidProjectRef.current : defaultVidProject());
+    if (!map.has(uid)) {
+      const seed = vidSeedRef.current;
+      map.set(uid, seed ? seed.p : defaultVidProject());
+      vidSeedRef.current = null;
+    }
     setVidProject(map.get(uid)!);
   }, [blendDocs.activeUid]);
   // 文档关掉了 → 它那一桶（工程 + 脏标记）跟着走。uid 是工作台**每次开机从 1 重新发**的，
   // 留着旧的会在下一次复用同一个 uid 时串台（新文档凭空多出上一位的片段）。
+  // 关掉的是**最后一份**时，屏幕上那份工程也必须一起走：Tracks / Assets 读的就是 vidProject，
+  // 留着它就会出现"文档已经关了、时间线和资产还摆在那儿"—— 那两扇窗属于文档，不属于页面。
+  // `announced` 之前开文档集是**未知**（还没播报），这时一个字都不能动，否则刷新时会把
+  // 页面存档/刚送回来的工程当成"没有文档"清掉。
   useEffect(() => {
+    if (!blendDocs.announced) return;
     const live = new Set(blendDocs.docs.map(d => d.uid));
     for (const uid of [...vidByDoc.current.keys()]) {
       if (!live.has(uid)) {
@@ -714,8 +747,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         vidHist.current.delete(uid);       // uid 会被复用：旧步留着就会串到下一份文档上
       }
     }
+    if (blendDocs.activeUid == null) {
+      // 一份都不剩：播放停掉，工程换成空白（轨道回到默认那两条），别把上一份的片段留在屏幕上。
+      setVidPlaying(false);
+      setVidLayerKey('');
+      vidByDoc.current.clear();
+      vidDirty.current.clear();
+      vidHist.current.clear();
+      const empty = defaultVidProject();
+      vidProjectRef.current = empty;
+      setVidProject(empty);
+      vidEditAt.current = 0;
+      layerEditAt.current = 0;
+    }
     bumpVidHist();
-  }, [blendDocs.docs]);
+  }, [blendDocs.docs, blendDocs.activeUid, blendDocs.announced]);
   // iframe 的两条 Video 消息：保存时按 uid 来要快照；读档/重开时把文件里那份送回桶里。
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
@@ -839,23 +885,34 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     win.postMessage(msg, '*', transfer);
     return true;
   }, [blendIframeRef]);
+  // 播放器报"游标底下是哪一段 Layer 段"：画布内容、Layers 面板的作用对象、Transform 的开工条件
+  // 全跟着游标走 —— 离开段就回到主图层集（画布转成视频底片，见页面 vidBaseOn）。
+  const showPlayLayer = useCallback((key: string | null) => {
+    const next = key || '';
+    setVidLayerKey(prev => (prev === next ? prev : next));
+    onBlendUiCommand('layer-set', { key: next });
+  }, [onBlendUiCommand]);
   const vidCtl: VidController = useMemo(() => ({
     project: vidProject, transport: vidTransport, playing: vidPlaying, pps: vidPps,
     staging, update: vidUpdate, seek: vidSeek, setPlaying: setVidPlaying, setPps: setVidPps,
-    // 选中 Layer 段 = 把 Layers 窗切成这一段自己那一套（主文档是 ''）。页面侧整组换入换出，
-    // 所以这里只要把 key 递过去 —— 图层的增删改仍然全走页面那套命令。
+    // 点 Layer 段 = 把游标带进这一段：画布只在游标压着它时折这一套图层（见 vidCanvasRef）。
+    // 这里不写 vidLayerKey / 不发 layer-set —— 那一份由播放器按游标底下**实际命中**的段来报
+    // （见 showPlayLayer），否则点一下段、游标却留在段外，两边说的就不是同一段了。
     focusClip: clip => {
-      const key = clip && clip.kind === 'layer' ? (clip.layerKey || clip.id) : '';
-      setVidLayerKey(key);
-      onBlendUiCommand('layer-set', { key });
+      if (!clip || clip.kind !== 'layer') return;
+      const t = vidTransport.get();
+      if (t < clip.start || t >= clip.start + clip.duration) vidSeek(clip.start);
     },
     blendPost, blendWindow,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, onBlendUiCommand, blendPost, blendWindow]);
-  // 页面存档照旧跟活跃文档的那份走（刷新后的起手工程；.cud 才是随文档走的正身）。
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow]);
+  // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
+  // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
+  // 新建文档就会凭空长出上一份的轨道与片段。
   useEffect(() => {
+    if (blendDocs.activeUid == null) return;
     const t = setTimeout(() => saveVidProject(vidProject), 400);
     return () => clearTimeout(t);
-  }, [vidProject]);
+  }, [vidProject, blendDocs.activeUid]);
   // 切回 Image 模式就停播（Player 对 visible 也停了一遍，这里兜底 —— 两扇窗那时已不在树里）。
   useEffect(() => {
     if (vidMode !== 'video') setVidPlaying(false);
@@ -1063,11 +1120,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // No box, or a box that is folded away (display:none measures zero): the frame stays mounted, it
     // just has nowhere to be. Unmounting it here would reload the workbench.
     let next: { x: number; y: number; w: number; h: number } | null = null;
-    // Video 模式：活跃文档窗的正文是播放器，活画布 iframe 让位 —— 停在屏外（不卸载，不重载），
-    // 切回 Image 模式这一帧量回原位，工作台接着用。
-    if (host && body && vidModeRef.current !== 'video' && body.clientWidth > 0 && body.clientHeight > 0) {
+    // Video 模式：活跃文档窗的正文整个让给工作台画布（见 vidCanvasRef）—— 画布常驻，量到走带
+    // 那条的上沿为止，播放按钮留在原位不被盖住。游标在 Layer 段上时画布折这一段图层；不在段上时
+    // 页面自己换成视频底片（见 blend_node.html 的 vidBaseOn），所以这里不用再按段让位。
+    if (host && body && (vidModeRef.current !== 'video' || vidCanvasRef.current) && body.clientWidth > 0 && body.clientHeight > 0) {
       const a = body.getBoundingClientRect(), b = host.getBoundingClientRect();
-      next = { x: Math.round(a.left - b.left), y: Math.round(a.top - b.top), w: Math.round(a.width), h: Math.round(a.height) };
+      let h = Math.round(a.height);
+      // 视频模式把画布让进活跃窗时，播放器底下那条走带（⏮ ▶ ⏹）**不归画布**：量到它的上沿为止，
+      // 按钮就留在原位、照常可按。Image 模式没有这一条，整块归画布。
+      if (vidModeRef.current === 'video') {
+        const tr = body.querySelector('[data-vid-transport]');
+        if (tr) h = Math.max(1, Math.round(tr.getBoundingClientRect().top - a.top));
+      }
+      next = { x: Math.round(a.left - b.left), y: Math.round(a.top - b.top), w: Math.round(a.width), h };
     }
     // Only a real change may re-render, or measuring would feed itself.
     setFrameRect(prev => prev?.x === next?.x && prev?.y === next?.y && prev?.w === next?.w && prev?.h === next?.h ? prev : next);
@@ -1090,13 +1155,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // project painted before the workbench switched away from it. A document the workbench never showed
   // — a 3D scene, whose canvas is not a composite this page can flatten — is simply dark.
   // Video 模式下例外：**活跃文档窗的正文整个换成播放器**（那扇大窗就是 Video 的监视器），
-  // 其余文档窗照旧显示各自的静帧。
+  // 其余文档窗照旧显示各自的静帧。工作台画布常驻在播放器之上、只盖画面那一块（见 measureFrame /
+  // vidCanvasRef）—— 底下那条走带仍归播放器，按钮留在原位；段外时画布内容就是当前视频帧。
   const docBodies: Record<UnitId, React.ReactNode> = {};
   for (const d of blendDocs.docs) {
     const active = d.uid === blendDocs.activeUid;
     const still = active ? null : docStills[d.uid];
     docBodies[docUnit(d.uid)] = active && vidMode === 'video'
-      ? <VidPlayer vid={vidCtl} visible={tab === 'draw'} />
+      ? <VidPlayer vid={vidCtl} visible={tab === 'draw'} onCompLayer={showPlayLayer} />
       : still
         ? <img src={still} alt={d.name} style={styles.docStill} />
         : <div style={styles.docVoid} />;
@@ -1122,8 +1188,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       <button style={styles.docCloseTab} data-dock-doc-close={d.uid} title={'Close 「' + d.name + '」'}
         onClick={e => {
           e.stopPropagation();
-          // 只有 Video 被动过的时候，工作台那份账还是干净的 —— 而"关之前要不要问一句"
-          // 是它在管。先把这笔脏递过去，再把 close 这条命令递过去（postMessage 保序）。
+          // 编辑当时 markVidDirty 已经把脏递过去了（工作台的 entry.dirty 就是它的账）。
+          // 这里再补一发是兜底：万一工作台那本账丢过（iframe 重载后 entry.dirty 归零，
+          // 而宿主还记着这份脏），关之前照样问一句。两条消息同目标同源，保序。
           if (vidDirty.current.has(d.uid)) {
             blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-vid-dirty', uid: d.uid }, '*');
           }
@@ -1736,8 +1803,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               // 一小把宿主事实 —— 图池镜像、画布合成预览、以及图池的两个后端写口（`wbHost`）。
               ...workbenchBodies(uiSend, wbHost),
               // Tracks / Assets 是常驻的普通窗：Video 模式显示各自正文，Image 模式正文留空。树一概不动。
-              vtracks: vidMode === 'video' ? <VidTimeline vid={vidCtl} /> : null,
-              vassets: vidMode === 'video' ? <VidAssets vid={vidCtl} /> : null,
+              // **没有打开的文档 = 没有工程**：这两扇窗读的就是 vidProject，文档关光之后必须换成
+              // 一句空态，不能把刚关掉那份的轨道/资产继续摆着（它们属于文档，不属于页面）。
+              vtracks: vidMode !== 'video' ? null
+                : blendDocs.activeUid === null
+                  ? <div style={styles.vidVoid}>No project open — Tracks belong to a document.</div>
+                  : <VidTimeline vid={vidCtl} />,
+              vassets: vidMode !== 'video' ? null
+                : blendDocs.activeUid === null
+                  ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
+                  : <VidAssets vid={vidCtl} />,
               context: (<>
                 <div style={styles.dockCard}>
                   <div style={styles.contextPreviewWrap}>
@@ -3340,6 +3415,8 @@ const styles: Record<string, React.CSSProperties> = {
   // aspect on the same ground so switching projects does not flash a different background.
   docStill: { width: '100%', height: '100%', objectFit: 'contain', display: 'block', background: '#0d0d0d' },
   docVoid: { flex: 1, minHeight: 0, background: '#0d0d0d' },
+  // Tracks / Assets 在没有文档可依附时的空态（那份工程随 .cud 走了，这两扇窗就该空着）。
+  vidVoid: { flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, color: 'rgba(255,255,255,0.35)', fontSize: 12, textAlign: 'center' },
   activeDot: { width: 7, height: 7, borderRadius: 999, background: '#30d158', flexShrink: 0, display: 'inline-block', marginRight: 5, verticalAlign: 'middle', boxShadow: '0 0 6px rgba(48,209,88,0.6)' },
   docClose: { flexShrink: 0, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 5, color: 'rgba(255,255,255,0.55)', cursor: 'pointer', padding: 0 },
   // tab 里那一颗：小一号、更淡一点，紧贴着名字 —— 它说的是"这一份"，不是"这一窗"。

@@ -24,6 +24,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     background-image: linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%),
                       linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%);
     background-size: 16px 16px; background-position: 0 0, 8px 8px; }
+/* Video 底片：游标不在 Layer 段上时，画布的内容就是当前视频帧 —— 文档尺寸、原样铺满，
+   不套任何图层 transform。它压在最底下；底片态里把 blend / guidance 藏起来就能看见它。 */
+#vidBaseCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: none; transform-origin: 0 0; will-change: transform; border-radius: 4px; pointer-events: none; }
 /* The Guidances stack is a DISPLAY layer, not part of the picture: #blendCanvas stays exactly the
    context image (working layers only) so every consumer of it — the run input, the Tag regions,
    Layer Context, Export PNG, the host preview — is guidance-free without a single special case.
@@ -353,6 +356,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <input type="file" id="modelFile" accept=".fbx,.glb,.gltf,.obj" multiple hidden>
         <div id="canvasArea">
         <div id="viewport">
+            <canvas id="vidBaseCanvas"></canvas>
             <canvas id="blendCanvas"></canvas>
             <canvas id="guidanceCanvas"></canvas>
             <canvas id="overlayCanvas"></canvas>
@@ -729,6 +733,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script>
 const canvasArea = document.getElementById('canvasArea');
 const viewport = document.getElementById('viewport');
+const vidBaseCanvas = document.getElementById('vidBaseCanvas');
+const vidBaseCtx = vidBaseCanvas.getContext('2d');
 const blendCanvas = document.getElementById('blendCanvas');
 const guidanceCanvas = document.getElementById('guidanceCanvas');
 const overlayCanvas = document.getElementById('overlayCanvas');
@@ -788,6 +794,12 @@ let mode = 'transform';        // 'transform' | 'mask' | 'zoom' | 'pan' | 'rotat
 let assetSeq = 0;                     // 同 layerSeq:永不清零,guid 在会话内唯一就够
 const assets = new Map();             // 'img_N' -> { id, img, src }
 
+// Layer 集（Video 模式的 Layer 段，每个段一套独立图层）：活跃那一套永远就是全局 `layers`，其余
+// 每一套住在这里（键 = 段的 layerKey）。声明跟着这张表走是有意的 —— `sourceRefs` 也要扫它们，
+// 而载入期它就可能被调到（见那里的注释）。语义与换入换出见后面「Layer 集」那一节。
+const layerSets = new Map();
+let activeLayerSet = '';
+
 function newAssetRecord(img, src) {
     const a = { id: 'img_' + (++assetSeq), img: img || null, src: src || '' };
     assets.set(a.id, a);
@@ -804,6 +816,12 @@ function sourceRefs(ref) {
     if (!ref) return 0;
     let n = 0;
     for (const l of layers) if (l.srcRef === ref) n++;
+    // Layer 段那一套套（没在用的那些）也拿这张表当视图：不算上它们，换文档/换段那趟 pruneAssets 会
+    // 把它们的源记录当场放手 —— 图层还在，像素却没了。活跃那套就是上面的 layers，别数两遍。
+    for (const [key, s] of layerSets) {
+        if (key === activeLayerSet) continue;
+        for (const l of (s.layers || [])) if (l.srcRef === ref) n++;
+    }
     if (maskLayer && maskLayer.srcRef === ref) n++;
     // 剪贴板是表外的持有者 (复制一个图层之后把它删掉,再粘贴必须还有像素可贴),所以它也算一次引用。
     if (clipboardRecord && clipboardRecord.layer && clipboardRecord.layer.srcRef === ref) n++;
@@ -904,6 +922,10 @@ let layerSeq = 0;
 const MIN_ZOOM = 0.02, MAX_ZOOM = 64;
 const MIN_ROTATE_RADIUS = 12;  // px from the view centre where the pointer angle is still meaningful
 const view = { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true };
+// Video 底片态：游标不在 Layer 段上时，画布内容 = 当前视频帧（宿主逐帧送来）。它只是显示用的
+// 一层底图，**不进 blendCanvas** —— context image 仍然是那套工作图层。
+let vidBaseOn = false;
+let vidBaseFrame = null;       // ImageBitmap：最近一帧视频（换新帧时关掉旧的）
 let overlayDpr = 1;
 let viewDrag = null;           // {kind:'zoom'|'rotate'|'pan', sign, startX, startY, startView, anchorDoc, centerDoc, moved}
 let keySpace = false, keyAlt = false, keyCtrl = false, keyShift = false;
@@ -1147,12 +1169,14 @@ function hasLayerImage(l) { return !!(l && l.img && l.src); }
 function sizeCanvasElement() {
     // The guidance overlay is the same doc-space bitmap as the composite: one size for both, so a
     // canvas resize can never leave the two out of register.
-    for (const c of [blendCanvas, guidanceCanvas]) {
+    for (const c of [blendCanvas, guidanceCanvas, vidBaseCanvas]) {
         c.width = canvasW;
         c.height = canvasH;
         c.style.width = canvasW + 'px';
         c.style.height = canvasH + 'px';
     }
+    // 重设位图尺寸会清空内容：底片态下按新尺寸再铺一次。
+    if (vidBaseOn) paintVidBase();
 }
 
 // ==================== 光栅图层 ====================
@@ -2293,6 +2317,8 @@ const blendUiState = {
     faces: {},
 };
 let blendUiFrame = 0;
+let blendUiQueued = false;      // 有没有一条快照在等 rAF —— 句柄本身可能是 0，不能拿它当标志
+let blendUiFallback = 0;
 let blendUiSent = '';
 function sendBlendUiNow() {
     // 这两格是唯一需要像素的面：先把"要不要重编那几张"问过一遍，再去重。
@@ -2313,18 +2339,37 @@ function sendBlendUiNow() {
     for (const k in blendUiState.faces) delete blendUiState.faces[k];
 }
 function queueBlendUi() {
-    if (blendUiFrame || window.parent === window) return;
-    blendUiFrame = requestAnimationFrame(() => {
-        blendUiFrame = 0;
-        sendBlendUiNow();
-    });
+    if (window.parent === window) return;
+    if (!blendUiQueued) {
+        blendUiQueued = true;
+        blendUiFrame = requestAnimationFrame(() => {
+            blendUiQueued = false;
+            blendUiFrame = 0;
+            if (blendUiFallback) { clearTimeout(blendUiFallback); blendUiFallback = 0; }
+            sendBlendUiNow();
+        });
+    }
+    // Video 模式下工作台的 iframe 常常停在屏外（活跃文档窗让给播放器；只有选中 Layer 段那会儿
+    // 才把画布量回原位）：rAF 可能被浏览器压到几乎不跑，而宿主那两格 Layers / Guidances 只认
+    // 这份快照 —— 面板就会永远停在空态上。一帧没按时到就自己补一趟；正常 60fps 时它等不到。
+    if (!blendUiFallback) {
+        blendUiFallback = setTimeout(() => {
+            blendUiFallback = 0;
+            if (!blendUiQueued) return;
+            cancelAnimationFrame(blendUiFrame);
+            blendUiQueued = false;
+            blendUiFrame = 0;
+            sendBlendUiNow();
+        }, 120);
+    }
 }
 // 动作回执不等下一帧。宿主那几颗受控控件（尤其 Processor 的 interface 枚举）的值只认这份快照：
 // 平时 rAF 一帧后就到，可 iframe 一被节流/不绘制，回调就压着不跑，控件于是一直停在旧值上 ——
 // 用户看到的就是"选了又弹回去 / 切不过去"。动作改完状态就立刻播，别把回执挂在渲染帧上。
 function flushBlendUi() {
     if (window.parent === window) return;
-    if (blendUiFrame) { cancelAnimationFrame(blendUiFrame); blendUiFrame = 0; }
+    if (blendUiQueued) { cancelAnimationFrame(blendUiFrame); blendUiQueued = false; blendUiFrame = 0; }
+    if (blendUiFallback) { clearTimeout(blendUiFallback); blendUiFallback = 0; }
     sendBlendUiNow();
 }
 
@@ -2368,6 +2413,8 @@ function applyView() {
     const viewTransform = `translate(${view.panX + mo.x}px, ${view.panY + mo.y}px) rotate(${view.rotation}rad) scale(${view.zoom * view.flipX}, ${view.zoom})`;
     blendCanvas.style.transform = viewTransform;
     guidanceCanvas.style.transform = viewTransform;
+    // 底片跟着同一套视图变换：缩放/平移/旋转/翻转都照常，只是它自己不带图层 transform。
+    vidBaseCanvas.style.transform = viewTransform;
     // Keep the transparency checkerboard at a constant size on screen.
     const cb = 16 / view.zoom;
     if (blendCanvas._cb !== cb) {
@@ -2389,24 +2436,13 @@ function fitView(keepOrientation) {
     const c = Math.abs(Math.cos(view.rotation)), sn = Math.abs(Math.sin(view.rotation));
     const bw = canvasW * c + canvasH * sn;
     const bh = canvasW * sn + canvasH * c;
-    view.zoom = clampZoom(Math.min((s.w - 24) / bw, (s.h - 24) / bh, 1));
+    // 默认视图 = 尽可能占满：只留 4px 呼吸位，也不再压 1× 上限（小画布同样放大到填满）。
+    view.zoom = clampZoom(Math.min((s.w - 8) / bw, (s.h - 8) / bh));
     centerView();
     applyView();
 }
 
 function resetView() { view.autoFit = true; fitView(false); }
-
-// Straightens the view about its centre, keeping zoom / pan / flip untouched. Returns true when
-// there was an angle to undo, so Esc can report what it did instead of always flashing a status.
-function resetViewRotation() {
-    if (!view.rotation) return false;
-    const p = vpCenter();
-    const docPt = screenToDoc(p);
-    view.rotation = 0;
-    anchorView(p, docPt);
-    applyView();
-    return true;
-}
 
 function zoomAt(sp, factor) {
     const docPt = screenToDoc(sp);
@@ -2970,6 +3006,12 @@ function drawRectPreview() {
 }
 
 function drawOverlay() {
+    // 底片态：画布上是视频帧，没有"正在编辑的图层" —— 把手、选框、蒙版色一概不画。
+    if (vidBaseOn) {
+        overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
+        overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        return;
+    }
     const w = overlayCanvas.width / overlayDpr, h = overlayCanvas.height / overlayDpr;
     overlayCtx.setTransform(overlayDpr, 0, 0, overlayDpr, 0, 0);
     overlayCtx.clearRect(0, 0, w, h);
@@ -3936,34 +3978,47 @@ function render() {
         // 指纹里 ⇒ 改画布必然重抄 (栅格层的重采样只是过渡,下一帧就被这份新抄写覆盖)。guidance 栈里
         // 的 Stash 两份都要:它的「以下」横跨两条栈 (见抄写分支)。
         let belowWork = canvasW + 'x' + canvasH + ';', belowGuide = belowWork;
-        for (let i = layers.length - 1; i >= 0; i--) {
-            const l = layers[i];
-            const guidance = isGuidanceLayer(l);
-            const target = guidance ? guidanceCtx : blendCtx;
-            if (isStashLayer(l) && l.visible) {
-                // guidance 栈里的 Stash 压在整条 Layers 合成之上:走到这里时 blendCtx 已画完全部
-                // 工作层 (循环顺序保证),guidanceCtx 里摆好的是它以下那几层。指纹也吃两条栈 ——
-                // 下面的工作层改了,它照样重抄;两条栈各带尺寸前缀,重复无妨。
-                if (guidance) stashResample(l, blendCtx, belowWork + belowGuide, guidanceCtx);
-                else stashResample(l, target, belowWork);
+        // Video 逐帧：这一趟先把源帧临时换进面 attribute（vidFrameInject），折出来的就是
+        // 「这一段的图层 + 源帧」—— 它同时就是监视器上的那一帧（scheduleVidFrameReply 抄的正是
+        // 这张画布）。只在**这一包说的正是活画布上这套**（正选中它）时才折：别的段那套由监视器
+        // 那条单独的临时画布去折，别把源帧糊到用户手上这套的活画布上。没有帧包（Image 模式、
+        // 或游标不在 Layer 段上）时一个字节都不掺。
+        const vidRestore = vidFramePacket
+            && (vidFramePacket.layerKey || '') === (activeLayerSet || '')
+            ? vidFrameInject(vidFramePacket, vidFrameWorkLayers(activeLayerSet))
+            : null;
+        try {
+            for (let i = layers.length - 1; i >= 0; i--) {
+                const l = layers[i];
+                const guidance = isGuidanceLayer(l);
+                const target = guidance ? guidanceCtx : blendCtx;
+                if (isStashLayer(l) && l.visible) {
+                    // guidance 栈里的 Stash 压在整条 Layers 合成之上:走到这里时 blendCtx 已画完全部
+                    // 工作层 (循环顺序保证),guidanceCtx 里摆好的是它以下那几层。指纹也吃两条栈 ——
+                    // 下面的工作层改了,它照样重抄;两条栈各带尺寸前缀,重复无妨。
+                    if (guidance) stashResample(l, blendCtx, belowWork + belowGuide, guidanceCtx);
+                    else stashResample(l, target, belowWork);
+                }
+                drawLayer(l, target);
+                // 参考图吃的是**同一趟**的循环顺序, 所以它必须在 Stash 重抄之后才画 (那份抄写读的是 target
+                // 此刻的内容), 也不能吃进 guidance —— 它俩本来就不是一张图。
+                // 一条例外: Stash 若在"正在编辑的那一枚"之后才轮到自己 (它压着那一枚), 它的快照里就带着
+                // 那一枚, 抄进参考面就又长出第二份。这种时候宁可少这一层 —— 它抄的那些像素本来也已经逐层
+                // 各自进来了 —— 也不许"两个标记"这件事发生。
+                if (dirRef && !guidance && !(isStashLayer(l) && dirPainted)) {
+                    if (l.id === dirRef.skipLayer && l.visible && l.img) {
+                        const rec = attrRecord(dirRef.skipRef);
+                        const was = rec ? rec.enabled : null;
+                        if (rec) rec.enabled = false;       // 折缓存签名认 enabled:这一趟折出"没有它"的那张
+                        drawLayer(l, dirRef.ctx);
+                        if (rec) rec.enabled = was;         // 原样放回 —— 主画布那一趟已经把带面的版本折好缓存
+                    } else drawLayer(l, dirRef.ctx);
+                }
+                if (dirRef && l.id === dirRef.skipLayer && l.visible && l.img) dirPainted = true;
+                if (guidance) belowGuide += stashLayerKey(l); else belowWork += stashLayerKey(l);
             }
-            drawLayer(l, target);
-            // 参考图吃的是**同一趟**的循环顺序, 所以它必须在 Stash 重抄之后才画 (那份抄写读的是 target
-            // 此刻的内容), 也不能吃进 guidance —— 它俩本来就不是一张图。
-            // 一条例外: Stash 若在"正在编辑的那一枚"之后才轮到自己 (它压着那一枚), 它的快照里就带着
-            // 那一枚, 抄进参考面就又长出第二份。这种时候宁可少这一层 —— 它抄的那些像素本来也已经逐层
-            // 各自进来了 —— 也不许"两个标记"这件事发生。
-            if (dirRef && !guidance && !(isStashLayer(l) && dirPainted)) {
-                if (l.id === dirRef.skipLayer && l.visible && l.img) {
-                    const rec = attrRecord(dirRef.skipRef);
-                    const was = rec ? rec.enabled : null;
-                    if (rec) rec.enabled = false;       // 折缓存签名认 enabled:这一趟折出"没有它"的那张
-                    drawLayer(l, dirRef.ctx);
-                    if (rec) rec.enabled = was;         // 原样放回 —— 主画布那一趟已经把带面的版本折好缓存
-                } else drawLayer(l, dirRef.ctx);
-            }
-            if (dirRef && l.id === dirRef.skipLayer && l.visible && l.img) dirPainted = true;
-            if (guidance) belowGuide += stashLayerKey(l); else belowWork += stashLayerKey(l);
+        } finally {
+            if (vidRestore) vidRestore();
         }
         if (dirRef) dirRefDone();       // 纹理看这个版本号决定要不要重传, 拖动期间它一个字节都没变
     }
@@ -3974,20 +4029,27 @@ function render() {
     scheduleGuidanceCard();
     // 图层像素变了，监视器上那一帧也要跟着变 —— 宿主只有在播放头动的时候才会发新包，
     // 暂停着画图的时候（最常见）这里就是唯一的更新口。
-    scheduleVidFrameComposite();
+    scheduleVidFrameReply();
 }
 
 // ==================== Video 逐帧合成 ====================
-// Layer 段压在最上层的那几帧，监视器的画面不再是任何一条视频轨：它是
-//   「下方第一条视频轨的当前帧 + 这一段的图层集」合成出来的图。
-// 分两半：宿主取帧（它才摸得到 <video>），这一页合成（图层与特效链都在这儿）。一来一回两包：
+// 宿主（它才摸得到 <video>）每一帧抓一次源帧发过来；这一页把源帧折进面 attribute，折出来的
+// 就是监视器上那一帧。折在哪张画布上分两种（见 scheduleVidFrameReply）：
+//   · 这一包说的正是用户手上这套（选中了它）⇒ 折在**活画布**上（render() 那一趟顺手做掉），
+//     监视器和画布因此是同一张图 —— 编辑所见即所得，View / 各种工具都作用在同一张图上；
+//   · 否则 ⇒ 折进一张临时画布，监视器仍是"游标底下那一段"的旧口径，不糊到用户手上这套上。
+//   · 不把脚下那条视频轨的当前帧当底图 —— Layer 段是"遮住"底下的：空段就是一张空图；
+//   · 底下视频轨的帧仍照抓：一给输出定栅格，二是当"源帧"——面 attribute 的 Frame source 从里面
+//     挑（decal / mask 绑了哪条轨，就取哪条的那一帧，这正是把视频接进图层里的那条路）。
+// 分两半：宿主取帧（它才摸得到 <video>），这一页折图（图层与特效链都在这儿）。一来一回两包：
 // 宿主发 { t, layerKey, baseTrackId, sources:[{trackId, bitmap}] }，这一页回一张 ImageBitmap。
-// 帧的替换只发生在**折叠那一趟**里：面 attribute 的 surface 临时换成该轨当前帧（decal 按 contain
-// 铺满自己的网格；mask 把亮度搬进 alpha），折完原样放回 —— 缓存/特效链/Stash 的读法一个字不改。
+// 帧的替换只发生在**折叠那一趟**里（vidFrameInject）：面 attribute 的 surface 临时换成该轨当前帧
+// （decal 按 contain 铺满自己的网格；mask 把亮度搬进 alpha），折完原样放回 —— 缓存/特效链/Stash
+// 的读法一个字不改。
 const VID_FRAME_LUMA_FILTER = 'url(#vidFrameLumaAlpha)';
 let vidFramePacket = null;          // { reqId, t, layerKey, baseTrackId, sources:Map, bitmaps:[] }
 let vidFrameRaf = 0;
-let vidFrameCanvas = null;
+let vidFrameCanvas = null;          // 监视器那一趟的临时画布（只在"要看的那套 ≠ 活画布上这套"时用）
 let vidFrameCtx = null;
 const vidFrameSurfaces = new Map(); // 记录 id -> 临时面（同一枚共享记录只换一次）
 
@@ -4020,12 +4082,53 @@ function drawVidFrameContain(ctx, src, w, h) {
 // 空白文档 undo 回 0 之后再加层，还要靠它把画布重新立起来。
 let vidGrid = null;
 
+// Layer 段里点 Add 的那一刻画布可能还是 0：视频元数据没到，或者这个工程里根本没有视频。
+// 不当作拒绝 —— 等一小会儿，栅格一来就照常落地；一直没有任何视频可读，就按标准输出栅格
+// 1920×1080 立起来（否则 Layer 段里永远加不进第一层，面板一直停在"No layers yet"）。
+// 这条放宽只给"正编辑 Layer 段"：Image 模式里加层仍然要求先有画布/图。
+const LAYER_ADD_GRID_WAIT = 1200;
+const LAYER_ADD_DEFAULT_W = 1920;
+const LAYER_ADD_DEFAULT_H = 1080;
+let pendingCanvasAdd = null;      // { timer, run } —— 只有一个，新的 Add 顶掉旧的
+
+function adoptDefaultCanvas() {
+    if (canvasW > 0 && canvasH > 0) return;
+    canvasW = LAYER_ADD_DEFAULT_W; canvasH = LAYER_ADD_DEFAULT_H;
+    canvasCustom = true;
+    sizeCanvasElement();
+    ensureMaskLayer();
+    layoutCanvas();
+    updateCanvasReadout();
+    setStatus(`Canvas ${canvasW} × ${canvasH} — default output frame (no video frame size yet)`);
+}
+
+function runPendingCanvasAdd() {
+    const p = pendingCanvasAdd;
+    if (!p) return;
+    pendingCanvasAdd = null;
+    clearTimeout(p.timer);
+    p.run();
+}
+
+function whenLayerCanvas(run) {
+    ensureVidCanvas();
+    if (canvasW > 0 && canvasH > 0) { run(); return; }
+    if (pendingCanvasAdd) clearTimeout(pendingCanvasAdd.timer);
+    setStatus('Waiting for the video frame size…');
+    const timer = setTimeout(() => {
+        pendingCanvasAdd = null;
+        adoptDefaultCanvas();
+        run();
+    }, LAYER_ADD_GRID_WAIT);
+    pendingCanvasAdd = { timer, run };
+}
+
 function noteVidGrid(w, h) {
     w = Math.round(+w || 0); h = Math.round(+h || 0);
     if (!(w >= 1 && h >= 1)) return false;
     vidGrid = { w, h };
     if (isSceneDoc(activeDoc)) return false;      // 3D tab 有自己的栅格，视频帧不该动它
-    if (canvasW > 0 && canvasH > 0) return false;
+    if (canvasW > 0 && canvasH > 0) { runPendingCanvasAdd(); return false; }
     if (w > MAX_CANVAS_SIDE || h > MAX_CANVAS_SIDE || w * h > MAX_CANVAS_PIXELS) return false;
     canvasW = w; canvasH = h;
     canvasCustom = true;          // 视频的输出栅格：不再让第一张进来的图把它改大
@@ -4034,12 +4137,60 @@ function noteVidGrid(w, h) {
     layoutCanvas();
     updateCanvasReadout();
     setStatus(`Canvas ${w} × ${h} — the video output grid`);
+    runPendingCanvasAdd();
     return true;
 }
 
 function ensureVidCanvas() {
     if ((canvasW > 0 && canvasH > 0) || !vidGrid) return;
     noteVidGrid(vidGrid.w, vidGrid.h);
+}
+
+// ==================== Video 底片（游标不在 Layer 段上）====================
+// 视频模式下画布常驻。游标不在任何 Layer 段上时，画布的内容就是**当前视频帧**：按文档尺寸原样
+// 铺满，不套任何图层 transform（那时也没有可动的对象）。帧由宿主逐帧送来 —— 只有它拿得到 <video>。
+// 这张底图只负责显示：blendCanvas 仍是 context image（工作图层），底片态里只是把它藏起来。
+function paintVidBase() {
+    const cw = vidBaseCanvas.width, ch = vidBaseCanvas.height;
+    vidBaseCtx.setTransform(1, 0, 0, 1, 0, 0);
+    vidBaseCtx.globalAlpha = 1;
+    vidBaseCtx.globalCompositeOperation = 'source-over';
+    vidBaseCtx.clearRect(0, 0, cw, ch);
+    if (vidBaseFrame && canvasW > 0 && canvasH > 0) {
+        // 铺满整张画布：直接拉到文档尺寸 —— 没有第二层 transform。
+        vidBaseCtx.drawImage(vidBaseFrame, 0, 0, canvasW, canvasH);
+    }
+}
+
+function applyVidBaseMode() {
+    vidBaseCanvas.style.display = vidBaseOn ? 'block' : 'none';
+    // 工作层与 guidance 让位（它们仍是 context image 的来源，只是不摆出来）。
+    blendCanvas.style.visibility = vidBaseOn ? 'hidden' : '';
+    guidanceCanvas.style.visibility = vidBaseOn ? 'hidden' : '';
+    // applyView 会把同一套变换给三张画布，并顺手重画 overlay（底片态下它会清空）。
+    applyView();
+    if (vidBaseOn) paintVidBase();
+}
+
+function handleVidBaseMessage(d) {
+    const bmp = d.bitmap || null;
+    const prev = vidBaseFrame;
+    vidBaseFrame = bmp;
+    if (prev && prev !== bmp) { try { prev.close(); } catch (e) { /* gone */ } }
+    // 画布还没立起来（宿主还没报过栅格）：拿这一帧的尺寸当文档栅格。
+    if (bmp && (canvasW <= 0 || canvasH <= 0)) noteVidGrid(bmp.width, bmp.height);
+    // 每帧只重铺这张底图；进出底片态那一下才动可见性与视图变换。
+    if (!vidBaseOn) { vidBaseOn = true; applyVidBaseMode(); }
+    else paintVidBase();
+}
+
+function vidBaseOff() {
+    const prev = vidBaseFrame;
+    vidBaseFrame = null;
+    if (prev) { try { prev.close(); } catch (e) { /* gone */ } }
+    if (!vidBaseOn) return;
+    vidBaseOn = false;
+    applyVidBaseMode();
 }
 
 function vidFrameSurfaceFor(rec, w, h) {
@@ -4053,26 +4204,12 @@ function vidFrameSurfaceFor(rec, w, h) {
     return cv;
 }
 
-function composeVidFrame(packet) {
-    if (!packet || packet !== vidFramePacket) return;
-    if (!canvasW || !canvasH) { replyVidFrame(packet.reqId, null); return; }
-    if (!vidFrameCanvas) {
-        vidFrameCanvas = document.createElement('canvas');
-        vidFrameCtx = vidFrameCanvas.getContext('2d');
-    }
-    if (!vidFrameCtx) { replyVidFrame(packet.reqId, null); return; }
-    if (vidFrameCanvas.width !== canvasW || vidFrameCanvas.height !== canvasH) {
-        vidFrameCanvas.width = canvasW;
-        vidFrameCanvas.height = canvasH;
-    }
-    const out = vidFrameCtx;
-    resetCtx(out);
-    out.clearRect(0, 0, canvasW, canvasH);
-    // 底图：脚下第一条视频轨的当前帧。没有就是透明（图层自己落在虚空上）。
-    const base = vidFrameSource(packet.sources, packet.baseTrackId);
-    if (base) drawVidFrameContain(out, base, canvasW, canvasH);
-
-    const stack = vidFrameWorkLayers(packet.layerKey);
+// 把这一包的源帧临时换进面 attribute：命中的记录换上该轨当前帧（decal 按 contain 铺满自己的
+// 网格；mask 把亮度搬进 alpha）。`stack` 是要折的那一套（活画布那一趟传当前图层集；监视器那一趟
+// 传这一包说的那一段自己那套）。返回一个还原函数 —— 折叠缓存的身份靠 markAttrPainted 记账，
+// 所以注入与还原两边都要各记一次。取不到帧 = 这一枚这一趟什么都不出（蒙版也不裁），与"停用一步"
+// 同一个结果。
+function vidFrameInject(packet, stack) {
     const touched = [];
     const used = new Set();
     for (const l of stack) {
@@ -4097,28 +4234,51 @@ function composeVidFrame(packet) {
                 if (r.type === 'mask') g.filter = 'none';
             }
             touched.push({ r, had: Object.prototype.hasOwnProperty.call(r, 'surface'), was: r.surface });
-            // 取不到帧 = 这一枚这一趟什么都不出（蒙版也不裁）：与"停用一步"同一个结果。
             r.surface = src ? cv : null;
         }
     }
     // 帧像素换了 ⇒ 折叠缓存必须重算。
     for (const t of touched) markAttrPainted(t.r);
-    try {
-        // 从最下面那层往上画；guidances 不进监视器（它们只属于 Guidance 卡）。
-        for (let i = stack.length - 1; i >= 0; i--) drawLayer(stack[i], out);
-    } finally {
+    return function vidFrameRestore() {
         // 原样放回，并再 +1 代次：折叠缓存里此刻留的是**临时面**的身份，下一次正片重算
         // 必须认得出那份结果不能复用。
         for (const t of touched) {
             if (t.had) t.r.surface = t.was; else delete t.r.surface;
             markAttrPainted(t.r);
         }
+    };
+}
+
+// 这一包说的那一段自己那套折进一张临时画布 —— 只在"监视器要看的那套不是活画布上这套"时才走
+// （没选中 Layer 段，或选中的不是游标底下那段）。活画布那一套已经由 render() 折好，直接抄；
+// 这条只补上"宿主监视器看到的仍是游标底下那一段"这个旧口径。
+function composeVidFrameCanvas(packet) {
+    if (!canvasW || !canvasH) return null;
+    if (!vidFrameCanvas) {
+        vidFrameCanvas = document.createElement('canvas');
+        vidFrameCtx = vidFrameCanvas.getContext('2d');
     }
-    replyVidFrame(packet.reqId, vidFrameCanvas);
+    if (!vidFrameCtx) return null;
+    if (vidFrameCanvas.width !== canvasW || vidFrameCanvas.height !== canvasH) {
+        vidFrameCanvas.width = canvasW;
+        vidFrameCanvas.height = canvasH;
+    }
+    const out = vidFrameCtx;
+    resetCtx(out);
+    out.clearRect(0, 0, canvasW, canvasH);
+    // 从最下面那层往上画；guidances 不进监视器（它们只属于 Guidance 卡）。
+    const stack = vidFrameWorkLayers(packet.layerKey);
+    const restore = vidFrameInject(packet, stack);
+    try {
+        for (let i = stack.length - 1; i >= 0; i--) drawLayer(stack[i], out);
+    } finally {
+        restore();
+    }
+    return vidFrameCanvas;
 }
 
 function replyVidFrame(reqId, canvas) {
-    if (!canvas) {
+    if (!canvas || !canvas.width || !canvas.height) {
         window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null }, '*');
         return;
     }
@@ -4129,12 +4289,19 @@ function replyVidFrame(reqId, canvas) {
     });
 }
 
-// 一帧最多合成一次：播放时包按 fps 来，重绘（画笔/参数）又会在同一帧里喊一次 —— 都并到这一口。
-function scheduleVidFrameComposite() {
+// 一帧回一张图给监视器。两半：
+//   · 这一包说的那一段就是活画布上这套（最常见：正选中它）+ 画布正显示着 ⇒ 直接抄 blendCanvas，
+//     那句话在 render() 里已经折好了，这里一个像素都不重画；
+//   · 否则（没选中 Layer 段、或选中的是别段）⇒ 单独把游标底下那段折进临时画布，监视器仍是旧口径。
+// 合并到 rAF 一口：播放时包按 fps 来，重绘（画笔/参数）又会在同一帧里喊一次 —— 都并到这一口。
+function scheduleVidFrameReply() {
     if (!vidFramePacket || vidFrameRaf) return;
     vidFrameRaf = requestAnimationFrame(() => {
         vidFrameRaf = 0;
-        composeVidFrame(vidFramePacket);
+        const p = vidFramePacket;
+        if (!p) return;
+        if ((p.layerKey || '') === (activeLayerSet || '')) replyVidFrame(p.reqId, blendCanvas);
+        else replyVidFrame(p.reqId, composeVidFrameCanvas(p));
     });
 }
 
@@ -4163,7 +4330,11 @@ function handleVidFrameMessage(d) {
         sources,
         bitmaps,
     };
-    scheduleVidFrameComposite();
+    // 源帧收进 packet 就该画了，分两条走：这一包说的正是用户手上这套（选中了它）⇒ 重画活画布
+    // （源帧折在上面，收尾会顺手抄一份回给监视器）；否则用户手上这套一个像素都不动，只单独折一张
+    // 临时画布回给监视器（旧口径：监视器看的始终是游标底下那一段）。
+    if ((vidFramePacket.layerKey || '') === (activeLayerSet || '')) render();
+    else scheduleVidFrameReply();
 }
 
 function vidFrameOff() {
@@ -4173,6 +4344,8 @@ function vidFrameOff() {
     if (prev) for (const b of prev.bitmaps) { try { b.close(); } catch (e) { /* gone */ } }
     vidFrameSurfaces.clear();
     if (vidFrameCanvas) { vidFrameCanvas.width = 0; vidFrameCanvas.height = 0; }
+    // 帧包撤了：再画一趟，把面 attribute 换回它们自己的像素（画布不再是合成图）。
+    render();
 }
 
 // ==================== The Guidance card ====================
@@ -4308,39 +4481,45 @@ function snapshotState() {
     return snapshot2D();
 }
 
+// 一张图层 → 快照里那一条记录。历史、文档 ctx、每个 Layer 段那套都走这一份：值 + srcRef 标签，
+// 与活图层那套「像素只住资产表」的形状分开 —— 快照自己带着值，重放不必问表（见源图资产表）。
+function snapshotLayerRecord(l) {
+    return {
+        id: l.id, name: l.name, src: l.src, img: l.img,
+        // 共享以标签的形式进快照:两条记录写同一个 srcRef,重放时同组只立一条记录。缓冲值本身照旧
+        // 逐层存 (img 只换不改的老规矩),表因此永远不必替历史保管任何东西。
+        srcRef: l.srcRef,
+        visible: l.visible,
+        fragment: !!l.fragment,
+        raster: !!l.raster,
+        stash: !!l.stash,
+        // 3D 图层的身份和它那块场景 tab 的 uid。合成不看它们;它们只保证一次 undo、一次 tab
+        // 往返之后,行上的跳转按钮还认得原来那个场景。
+        three: !!l.three,
+        sceneUid: l.sceneUid || null,
+        stack: stackOf(l),
+        // Shared by reference, never copied: a cud descriptor is immutable (a relink swaps the
+        // whole object), so an undo step pointing at the old one cannot drift.
+        cud: l.cud || null,
+        // Same rule for a text descriptor — patchTextLayer swaps it, never edits it. The
+        // rendered buffer travels as `img`, so the snapshot draws without re-rendering.
+        text: l.text || null,
+        dir: l.dir || null,
+        transform: cloneTransform(l.transform),
+        // Attribute 存成"值 + 它自己的 guid"的有序列表:strip 的顺序因此活过 undo 与 tab 往返,而 guid
+        // 就是身份 (重放照号收下),所以特效里指着某一枚的引用也一起活过去。表仍然只是派生态 ——
+        // 面按引用共享,链按深拷贝带走。
+        attrs: snapshotAttrs(l),
+    };
+}
+
 function snapshot2D() {
     return {
         canvasW, canvasH, canvasCustom,
         selectedId,
         group: [...activeGroup()],
         maskVisible: maskLayer.visible,
-        layers: layers.map(l => ({
-            id: l.id, name: l.name, src: l.src, img: l.img,
-            // 共享以标签的形式进快照:两条记录写同一个 srcRef,重放时同组只立一条记录。缓冲值本身照旧
-            // 逐层存 (img 只换不改的老规矩),表因此永远不必替历史保管任何东西。
-            srcRef: l.srcRef,
-            visible: l.visible,
-            fragment: !!l.fragment,
-            raster: !!l.raster,
-            stash: !!l.stash,
-            // 3D 图层的身份和它那块场景 tab 的 uid。合成不看它们;它们只保证一次 undo、一次 tab
-            // 往返之后,行上的跳转按钮还认得原来那个场景。
-            three: !!l.three,
-            sceneUid: l.sceneUid || null,
-            stack: stackOf(l),
-            // Shared by reference, never copied: a cud descriptor is immutable (a relink swaps the
-            // whole object), so an undo step pointing at the old one cannot drift.
-            cud: l.cud || null,
-            // Same rule for a text descriptor — patchTextLayer swaps it, never edits it. The
-            // rendered buffer travels as `img`, so the snapshot draws without re-rendering.
-            text: l.text || null,
-            dir: l.dir || null,
-            transform: cloneTransform(l.transform),
-            // Attribute 存成"值 + 它自己的 guid"的有序列表:strip 的顺序因此活过 undo 与 tab 往返,而 guid
-            // 就是身份 (重放照号收下),所以特效里指着某一枚的引用也一起活过去。表仍然只是派生态 ——
-            // 面按引用共享,链按深拷贝带走。
-            attrs: snapshotAttrs(l),
-        })),
+        layers: layers.map(snapshotLayerRecord),
         maskDecal: maskLayer.decal,
     };
 }
@@ -4364,6 +4543,37 @@ function mergeLegacyGenerators(ls) {
     if (ls.three && !has('3d')) attrs.push({ type: '3d', sceneUid: ls.sceneUid || null, ownsGrid: true });
     ls.attrs = attrs;
     return ls;
+}
+
+// 一串快照记录 → 活图层。活跃那套与每个 Layer 段那套共用这一趟：同一张 srcRef 分组表（byRef）与
+// attribute 身份表（byAttr），跨套共享的面因此也只立一条记录。活图层的像素只住资产表，所以重放
+// 必须走这里（记录自带值），不能把套里的活对象直接搬来搬去 —— 换文档那趟 pruneAssets 会把没人指的
+// 记录当场放手。
+function liveLayersFromRecords(recs, byRef, byAttr) {
+    return (Array.isArray(recs) ? recs : []).map(ls => {
+        mergeLegacyGenerators(ls);
+        return restoreSource({
+        id: ls.id, name: ls.name,
+        visible: ls.visible,
+        fragment: !!ls.fragment,
+        raster: !!ls.raster,
+        stash: !!ls.stash,
+        three: !!ls.three,
+        sceneUid: ls.sceneUid || null,
+        // An undo step from before the Guidances stack existed (or from a hand-written snapshot)
+        // simply means every entry is a working layer.
+        stack: ls.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
+        cud: ls.cud || null,
+        text: ls.text || null,
+        dir: ls.dir || null,
+        transform: cloneTransform(ls.transform),
+        // 这几样已经从图层字段搬进 strip:面按引用带回 (它是 copy-on-write 的),链由 spec.load 另拷
+        // 一份,所以重放永远不会把历史里那条数组接手过来当活链。
+        attrs: adoptAttrPayloads(ls.attrs, byAttr),
+        // fxCache 从不进快照 —— 它是派生数据,靠 fxResolved 的身份键自己判定失效。
+        fxCache: null,
+    }, ls, byRef);
+    });
 }
 
 function restoreState(s, opts) {
@@ -4397,30 +4607,7 @@ function restoreState(s, opts) {
     // adoptAttrPayloads),所以特效里的 attribute 引用活得过 undo、切 tab 与重开。同一枚被两条引用时,
     // 一次重放只按这个号立一条记录。
     const byAttr = new Map();
-    layers = s.layers.map(ls => {
-        mergeLegacyGenerators(ls);
-        return restoreSource({
-        id: ls.id, name: ls.name,
-        visible: ls.visible,
-        fragment: !!ls.fragment,
-        raster: !!ls.raster,
-        stash: !!ls.stash,
-        three: !!ls.three,
-        sceneUid: ls.sceneUid || null,
-        // An undo step from before the Guidances stack existed (or from a hand-written snapshot)
-        // simply means every entry is a working layer.
-        stack: ls.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
-        cud: ls.cud || null,
-        text: ls.text || null,
-        dir: ls.dir || null,
-        transform: cloneTransform(ls.transform),
-        // 这几样已经从图层字段搬进 strip:面按引用带回 (它是 copy-on-write 的),链由 spec.load 另拷
-        // 一份,所以重放永远不会把历史里那条数组接手过来当活链。
-        attrs: adoptAttrPayloads(ls.attrs, byAttr),
-        // fxCache 从不进快照 —— 它是派生数据,靠 fxResolved 的身份键自己判定失效。
-        fxCache: null,
-    }, ls, byRef);
-    });
+    layers = liveLayersFromRecords(s.layers, byRef, byAttr);
     // A replay can land on an uncommitted gesture: a raster layer only ever stores a non-identity
     // transform while a preview owns it, and the one box its unbaked buffer can be read at is its
     // own content box. Re-opening the session here is what makes undo/redo and a tab switch draw
@@ -4443,6 +4630,29 @@ function restoreState(s, opts) {
     else if (selectedId !== null && !groupIds.has(selectedId)) groupIds = new Set([selectedId]);
     maskLayer.visible = s.maskVisible;
     adoptMaskSurface(s.maskDecal);
+    // Layer 集是页面级全局，换文档就是整组换：ctx 里那一份装回来（活跃那套的 key 跳过 —— 它的内容
+    // 就是上面的 `layers`，重放时已经重建过了）。这一步必须赶在 pruneAssets 之前 —— 那些套的源记录
+    // 与 attribute 记录靠 sourceRefs / attrRefs 扫描留住（见那两处的注释）。
+    if (asDocument) {
+        layerSets.clear();
+        const sets = s.layerSets && typeof s.layerSets === 'object' ? s.layerSets : {};
+        const activeKey = typeof s.activeLayerSet === 'string' ? s.activeLayerSet : '';
+        for (const key of Object.keys(sets)) {
+            const set = sets[key];
+            const k = String(key);
+            if (!set || k === activeKey) continue;      // 活跃那套的内容就是上面的 layers
+            const d = set.decal || null;
+            layerSets.set(k, {
+                layers: liveLayersFromRecords(set.layers, byRef, byAttr),
+                selectedId: Number.isInteger(set.selectedId) ? set.selectedId : null,
+                decal: d,
+                decalCtx: d ? d.getContext('2d') : null,
+                undoStack: [], redoStack: [], lastActionKey: null,
+            });
+        }
+        activeLayerSet = activeKey;
+        if (pendingCanvasAdd) { clearTimeout(pendingCanvasAdd.timer); pendingCanvasAdd = null; }
+    }
     // 重放换掉了整批活图层,上一批的源记录与 attribute 到此没人指了 —— 两张表都只给活图层当视图用,
     // 不替历史保管画布。
     pruneAssets();
@@ -4470,6 +4680,20 @@ function restoreState(s, opts) {
 
 // The Mask layer's scratch canvas has to match the canvas, so it is rebuilt here and the
 // surface from the snapshot adopted as-is (falling back to a resize if the two disagree).
+// 一枚面按画布尺寸规整：一样大就原样用（不做无谓拷贝），否则拉一张画布把它铺进去。活跃那份
+// （adoptMaskSurface）与每个 Layer 段那套的 decal 共用这条规矩 —— 切段是直接换上用，不 resize。
+function surfaceAtCanvasSize(surface, w, h) {
+    if (!w || !h) return null;
+    if (surface && surface.width === w && surface.height === h) return surface;
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    if (surface && surface.width && surface.height) {
+        c.getContext('2d').drawImage(surface, 0, 0, surface.width, surface.height, 0, 0, w, h);
+    }
+    return c;
+}
+
 function adoptMaskSurface(decal) {
     const w = Math.round(canvasW), h = Math.round(canvasH);
     if (!w || !h) {
@@ -4482,16 +4706,7 @@ function adoptMaskSurface(decal) {
     scratch.width = w;
     scratch.height = h;
     maskLayer.img = scratch;
-    let surface = decal;
-    if (!surface || surface.width !== w || surface.height !== h) {
-        const c = document.createElement('canvas');
-        c.width = w;
-        c.height = h;
-        if (surface && surface.width && surface.height) {
-            c.getContext('2d').drawImage(surface, 0, 0, surface.width, surface.height, 0, 0, w, h);
-        }
-        surface = c;
-    }
+    const surface = surfaceAtCanvasSize(decal, w, h);
     maskLayer.decal = surface;
     maskLayer.decalCtx = surface.getContext('2d');
 }
@@ -4530,8 +4745,7 @@ function pushHistory(key, label) {
 // 每个 Layer 段一套**独立图层**。这里不引入 group 字段（那要改几十处遍历），而是**整组换入换出**：
 // `layers` 永远只装"当前这一套"，渲染 / 列表 / 历史都不认识"组"这回事；切段 = 存回当前、装上目标。
 // 画布尺寸不跟着换 —— 它就是视频的输出栅格，所有段共用。
-const layerSets = new Map();
-let activeLayerSet = '';
+// `layerSets` / `activeLayerSet` 两个存储声明在源图资产表那一段顶上（`sourceRefs` 要扫它们）。
 
 function captureLayerSet() {
     return {
@@ -4541,20 +4755,48 @@ function captureLayerSet() {
     };
 }
 
+// 一套图层进 ctx / 进档要的是**记录**（见 snapshotLayerRecord），不是活对象 —— 活图层的像素只住
+// 资产表，而换文档那趟 pruneAssets 会把没人指的记录当场放手（历史记录自带值，不需要表替它保管）。
+// decal 不进资产表：它就是它自己的像素，照原样带走。
+function captureLayerSetRecords(set) {
+    return {
+        layers: (set && Array.isArray(set.layers) ? set.layers : []).map(snapshotLayerRecord),
+        selectedId: (set && Number.isInteger(set.selectedId)) ? set.selectedId : null,
+        decal: (set && set.decal) || null,
+    };
+}
+
+// 随文档走的那一份：只装**非活跃**的几套。活跃那套的内容就是全局 `layers`（由 snapshot2D 带），
+// 重放时按 activeLayerSet 认回来，所以这里跳过它，免得同一批图层在 ctx 里存在两份。
+function layerSetsToRecords() {
+    const out = {};
+    for (const [key, set] of layerSets) {
+        if (key === activeLayerSet) continue;
+        out[key] = captureLayerSetRecords(set);
+    }
+    return out;
+}
+
 function switchLayerSet(key) {
     const k = String(key || '');
     if (k === activeLayerSet) return;
+    // 那个还在等栅格的 Add 属于上一段，不能落进新选中的这一套里。
+    if (pendingCanvasAdd) { clearTimeout(pendingCanvasAdd.timer); pendingCanvasAdd = null; }
     layerSets.set(activeLayerSet, captureLayerSet());
     activeLayerSet = k;
     const s = layerSets.get(k);
     if (s) {
         layers = s.layers;
         selectedId = layers.some(l => l.id === s.selectedId) ? s.selectedId : null;
-        maskLayer.decal = s.decal;
-        maskLayer.decalCtx = s.decalCtx;
-        undoStack = s.undoStack;
-        redoStack = s.redoStack;
-        lastActionKey = s.lastActionKey;
+        // decal 必须是画布那么大的一张面（切段直接换上用，不 resize）。文件里那套可能压根没画过
+        // 蒙版 —— 那就现给一张空面，别把上一次那张留在上面。
+        maskLayer.decal = s.decal || surfaceAtCanvasSize(null, Math.round(canvasW), Math.round(canvasH));
+        maskLayer.decalCtx = maskLayer.decal ? maskLayer.decal.getContext('2d') : null;
+        // 读档装回来的那套历史是空的：这会儿全局已经是它了，正好在它身上补一条基线（不然撤销会
+        // 空转到别的段的内容上）。
+        undoStack = (Array.isArray(s.undoStack) && s.undoStack.length) ? s.undoStack : [tagHistoryStep(snapshotState(), null, 'Layer segment opened')];
+        redoStack = Array.isArray(s.redoStack) ? s.redoStack : [];
+        lastActionKey = s.lastActionKey || null;
     } else {
         // 这一套还没人建过：空图层 + 一条基线快照（撤销不会空转到别的段的内容上）。
         layers = [];
@@ -4868,11 +5110,12 @@ function layerRowModel(l) {
 }
 
 // `+` 那一口菜单的条目表：声明序就是它该出现的序，addTitle 缺省时补的那一句也是页面原来那一句
-// （页面这一句现在是唯一的作者）。
+// （页面这一句现在是唯一的作者）。`kind` 一起交出去：宿主要认得 surface 那一类（decal / mask），
+// 视频模式下加它之前得先问"绑哪条 video 轨"（那一问在宿主那一侧就地展开，轨清单住在那儿）。
 function attrKindsOf() {
     return Object.keys(ATTR_TYPES).map(type => {
         const spec = ATTR_TYPES[type];
-        return { type, label: spec.label,
+        return { type, label: spec.label, kind: spec.kind,
             addTitle: spec.addTitle || `Add a ${spec.label.toLowerCase()} as this layer's last step — what its left steps leave is what it gets.` };
     });
 }
@@ -5129,10 +5372,18 @@ function isArmedChip(l, r) {
         && paintRecord(l, r.type, false) === r;
 }
 
-function addAttrToLayer(l, type) {
+// `frameTrack` 是加 decal / mask 时当场点的那条 video 轨（宿主 `+` 菜单里那一问）；'' / 缺省 =
+// 就用手画的那张面，与今天的默认一模一样。只对 surface 那一类有意义 —— 链 / 生成器没有这个字段。
+function addAttrToLayer(l, type, frameTrack) {
     const spec = ATTR_TYPES[type];
     const r = insertAttr(l, type, 'tail');
     if (!r) return;
+    // 绑定写在记录自己的字段上（与 attr-frame-source 同一处真值），而且必须在任何折叠/刷播报之前 ——
+    // 第一次折就已经按它取帧了，晚一步写入的话这一枚面会先按"没绑"折一张再被重折。
+    if (spec.kind === 'surface' && frameTrack) {
+        r.frameTrack = frameTrack;
+        markAttrPainted(r);
+    }
     setStatus(`「${spec.label}」is now ${l.name}'s last step (${attrRefList(l).length})`);
     pushHistory(null, 'Added 「' + spec.label + '」 as a step');
     // 装上一枚面就该能画它 —— 空面和没装在读法上是一回事 ("蒙版还没画"),所以这一句不是额外状态,
@@ -7664,6 +7915,7 @@ viewport.addEventListener('mouseleave', () => {
 // text. A double-click inside the editor is word selection, not a layer gesture.
 viewport.addEventListener('dblclick', e => {
     if (e.button !== 0 || e.target === textEditorEl) return;
+    if (vidBaseOn) return;             // 底片态没有可编辑的图层
     if (textEditingId !== null || rectArmed || adjustModeActive()) return;
     if (!canvasW) return;
     const hit = pickLayer(screenToDoc(toScreenCoords(e)));
@@ -7682,6 +7934,15 @@ viewport.addEventListener('mousedown', e => {
     if (textEditingId !== null) {
         if (e.target !== textEditorEl) { e.preventDefault(); commitTextEditor(); }
         return;
+    }
+    // Video 底片态：画布上只有视频帧，没有可编辑的图层。View 手势（平移/缩放/旋转）照常放行，
+    // 其余按下（选层、画笔、Transform、选区…）全部吞掉 —— 别把笔画进看不见的那套图层里。
+    if (vidBaseOn) {
+        const viewGesture = e.button === 1 || (keySpace && e.button === 0)
+            || (mode === 'pan' && e.button === 0)
+            || (mode === 'zoom' && (e.button === 0 || e.button === 2))
+            || (mode === 'rotate' && e.button === 0);
+        if (!viewGesture) { e.preventDefault(); return; }
     }
     // Each fresh right-press decides for itself whether it drove a gesture or asks for the menu, so a
     // contextmenu the platform never sent cannot leave the flag armed and swallow the next click.
@@ -7841,6 +8102,7 @@ let rightGesture = false;
 viewport.addEventListener('contextmenu', e => {
     e.preventDefault();
     if (rightGesture) { rightGesture = false; return; }
+    if (vidBaseOn) return;             // 底片态没有选层/选区可操作
     if (picking || textEditingId !== null || selDrag || rectDrag || modDrag) return;
     // The menu is the selection's verbs, so it exists exactly when a selection does — whatever tool
     // is armed (Generate is useful from the paint tools too; PS gates nothing here on the tool).
@@ -7948,7 +8210,8 @@ window.addEventListener('blur', () => {
 });
 
 viewport.addEventListener('wheel', e => {
-    if (mode === 'mask' && !e.ctrlKey && !e.metaKey) {
+    // 底片态没有笔尖：滚轮一律是缩放（不然会静默改画笔尺寸）。
+    if (mode === 'mask' && !e.ctrlKey && !e.metaKey && !vidBaseOn) {
         e.preventDefault();
         setActiveSize(activeSizeValue() + (e.deltaY < 0 ? 2 : -2));
         return;
@@ -7960,6 +8223,7 @@ viewport.addEventListener('wheel', e => {
 // Touch: paint the mask, or drag the selected layer
 viewport.addEventListener('touchstart', e => {
     if (!canvasW || e.touches.length !== 1) return;
+    if (vidBaseOn) return;             // 底片态不落笔（也没法用手势做 View）
     e.preventDefault();
     const t = e.touches[0];
     const pos = toDocCoords(t);
@@ -8155,6 +8419,11 @@ function addSurfaceLayer(opts) {
 function addDefaultLayer(stack) {
     const st = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
     const guidance = st === GUIDANCE_STACK;
+    // 正在编辑某个 Layer 段 = 视频模式：画布就是视频的输出栅格，值得等它（见 whenLayerCanvas）。
+    if (!(canvasW > 0 && canvasH > 0) && activeLayerSet) {
+        whenLayerCanvas(() => addDefaultLayer(st));
+        return null;
+    }
     ensureVidCanvas();
     if (!canvasW || !canvasH) {
         setStatus('Set a canvas size, or add an image, before adding a layer', 'error');
@@ -8178,6 +8447,10 @@ function addDefaultLayer(stack) {
 // fills them — the row is built before that first copy, so it must not read "no image" (see 图层行).
 function addStashLayer(stack) {
     const st = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
+    if (!(canvasW > 0 && canvasH > 0) && activeLayerSet) {
+        whenLayerCanvas(() => addStashLayer(st));
+        return null;
+    }
     ensureVidCanvas();
     if (!canvasW || !canvasH) {
         setStatus('Set a canvas size before adding a Stash', 'error');
@@ -10150,7 +10423,10 @@ window.addEventListener('keydown', e => {
         if (cancelSelDrag()) return;      // a marquee mid-sweep is not yet a selection
         if (cancelRectDrag()) return;      // the Dynamic Layer rectangle is a mode of its own
         setMode('none');
-        if (resetViewRotation()) setStatus('View rotation reset');
+        // Esc 回到**默认视图**：正视图 + 尽可能铺满可用空间（缩放/平移/旋转/翻转一并归位）。
+        // 这也是 autoFit 的语义 —— 之后窗口再变，它继续自己铺满。
+        resetView();
+        setStatus('View fitted');
         return;
     }
     const tag = (e.target && e.target.tagName || '').toLowerCase();
@@ -10261,6 +10537,12 @@ window.addEventListener('keydown', e => {
     // alias (a tabbed browser answers it first with a new tab; app windows hand it to the page),
     // and stopPropagation keeps the host page (LiteGraph, other nodes) from also answering it.
     const isT = (e.key === 't' || e.key === 'T' || e.code === 'KeyT');
+    // 底片态没有可动的对象：T / Ctrl+T / Alt+T 都不进编辑（Transform 那一格在宿主那儿也是灰的）。
+    if (isT && vidBaseOn) {
+        e.preventDefault();
+        setStatus('Move the playhead onto a Layer segment to transform', 'error');
+        return;
+    }
     if (isT && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         e.stopPropagation();
@@ -10275,6 +10557,12 @@ window.addEventListener('keydown', e => {
     if (isT && !e.altKey) {
         e.preventDefault();
         if (l) activateMode('transform');
+        return;
+    }
+    // 底片态没有可编辑的图层：Enter（编辑文字）/ Delete / Backspace（删层）都不接，免得改到
+    // 画布背后那一套看不见的图层。视图键、播放键、Esc 不受影响。
+    if (vidBaseOn && (e.key === 'Enter' || e.key === 'Delete' || e.key === 'Backspace')) {
+        e.preventDefault();
         return;
     }
     if (e.key === 'Enter') {
@@ -10507,6 +10795,10 @@ function capture2D() {
         maskLayer, mode, paintTarget,
         view: Object.assign({}, view),
         tools: captureCudTools(),
+        // Layer 集（每个 Layer 段一套图层）随文档走：ctx 里存的是**记录**（与 `layers` 同一条形制），
+        // 切回来按 activeLayerSet 那一把钥匙把活跃那套认回 `layers`，其余各套重建。
+        layerSets: layerSetsToRecords(),
+        activeLayerSet,
     });
 }
 
@@ -10520,6 +10812,8 @@ function blankContext() {
         selectedId: null, group: [], maskVisible: true, layers: [], maskDecal: null,
         maskLayer: blankMaskLayer(), mode: 'transform', paintTarget: 'mask',
         view: { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true },
+        // 每个 Layer 段一套图层（见 layerSets）：文件里那份与 ctx 里那份都用同两个字段带。
+        layerSets: {}, activeLayerSet: '',
         tools,
     };
 }
@@ -11122,8 +11416,17 @@ function requestHostVid(uid) {
     });
 }
 
+// 这份工程有没有可存的内容：活跃那套有图层，或哪一套 Layer 段里有图层，都算。
+// 视频优先的文档常常**只有 Layer 段里有图层**（播放头在段外时活跃那套是空的）——
+// 拿"活跃那套是空的"当没内容，会把整份工程挡在保存门外（关 tab 时那句"先存一下"
+// 因此存不出去，视频改动只能丢）。三个保存入口（Save / Save As / buildCudBlob）共用这一句。
+function hasAnyLayers() {
+    return layers.length > 0
+        || [...layerSets.values()].some(s => s && Array.isArray(s.layers) && s.layers.length);
+}
+
 async function buildCudBlob() {
-    if (!layers.length || !canvasW || !canvasH) throw new Error('nothing to save — add a layer first');
+    if (!hasAnyLayers() || !canvasW || !canvasH) throw new Error('nothing to save — add a layer first');
     // A file writes a raster layer at the identity (its buffer IS its picture), so a released
     // gesture has to become pixels before the bytes are assembled.
     applyTransformPending();
@@ -11224,49 +11527,55 @@ async function buildCudBlob() {
         return out;
     };
     // `layers` is kept top-first; the file preserves that order verbatim.
-    const records = [];
-    for (const l of layers) {
-        const n = nativeSize(l.img);
-        // A layer the row draws with the red × has no image, only a pixel box. Encoding its
-        // all-transparent canvas as a PNG asset is what made the round trip lie: on reload the
-        // layer had a `src` again, so it read as "an image" and displayed as black on the dark UI.
-        // `image: null` says out loud what the layer is, and `pw`/`ph` carry the box a blank
-        // surface needs to be rebuilt at (a Dynamic Layer's box is not the canvas, so the
-        // transform alone cannot recover it). A layer still decoding has no `img` at all — that
-        // one is NOT blank, and encoding it must keep failing loudly instead of saving nothing.
-        const blank = !!l.img && !l.src;
-        records.push({
-            id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
-            raster: !!l.raster,
-            // A Stash owns no pixels to store (its `src` is empty, so `blank` above files it with
-            // `image: null` like every hand-made surface) — the one flag is all the file needs, and
-            // the first draw after a load re-copies the stack under it. Storing the sample would
-            // only ever be a stale copy of layers the file already carries.
-            stash: !!l.stash,
-            // Which palette this row belongs to. The file keeps `layers` order verbatim, so an
-            // older document (no `stack` on its records) decodes as an all-Layers stack.
-            stack: stackOf(l),
-            // Raster layers always travel at the identity — their stored transform is
-            // transient drag state, and their buffer is already canvas-sized.
-            transform: isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 } : cloneTransform(l.transform),
-            pw: n.w, ph: n.h,
-            // Where a cud layer's pixels came from. The composite itself is already in `image` —
-            // this says nothing the file needs in order to draw, only what a refresh may re-read.
-            cud: l.cud || null,
-            // A text layer's descriptor. Its render is deliberately NOT stored as `image` (a text
-            // buffer has no src, so it encodes as `image: null` like every hand-made surface): the
-            // fields + transform rebuild the editable layer on Load, and the pixels follow.
-            text: l.text ? Object.assign({}, l.text) : null,
-            // Same deal as a text descriptor: the render is never stored, the three angles
-            // and the colour are the whole document, and the pixels are rebuilt from them on Load.
-            dir: l.dir ? Object.assign({}, l.dir) : null,
-            // 链入档的是数据本身,不是它烘出来的像素 —— 文件里那张 image 永远是原图,重开还能改。
-            // 绑定的贴图例外:它的像素走自己的 role='map' 资产(见 cudEffects)。
-            // v4 起蒙版/贴片/链都住在这一串里,顺序就是应用顺序;老文件的三个平字段由读端折算回来。
-            attrs: cudAttrs(l),
-            image: blank ? null : addAsset('image', l.img, n.w, n.h),
-        });
-    }
+    // 每一套图层都过这一趟：活跃那套进 header.layers（旧读端只看这一份），每个 Layer 段那套进
+    // header.layerSets（见下面）。像素一律走同一张资产表，跨套共享的源照旧只存一份。
+    const buildLayerRecords = list => {
+        const out = [];
+        for (const l of list) {
+            const n = nativeSize(l.img);
+            // A layer the row draws with the red × has no image, only a pixel box. Encoding its
+            // all-transparent canvas as a PNG asset is what made the round trip lie: on reload the
+            // layer had a `src` again, so it read as "an image" and displayed as black on the dark UI.
+            // `image: null` says out loud what the layer is, and `pw`/`ph` carry the box a blank
+            // surface needs to be rebuilt at (a Dynamic Layer's box is not the canvas, so the
+            // transform alone cannot recover it). A layer still decoding has no `img` at all — that
+            // one is NOT blank, and encoding it must keep failing loudly instead of saving nothing.
+            const blank = !!l.img && !l.src;
+            out.push({
+                id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
+                raster: !!l.raster,
+                // A Stash owns no pixels to store (its `src` is empty, so `blank` above files it with
+                // `image: null` like every hand-made surface) — the one flag is all the file needs, and
+                // the first draw after a load re-copies the stack under it. Storing the sample would
+                // only ever be a stale copy of layers the file already carries.
+                stash: !!l.stash,
+                // Which palette this row belongs to. The file keeps `layers` order verbatim, so an
+                // older document (no `stack` on its records) decodes as an all-Layers stack.
+                stack: stackOf(l),
+                // Raster layers always travel at the identity — their stored transform is
+                // transient drag state, and their buffer is already canvas-sized.
+                transform: isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 } : cloneTransform(l.transform),
+                pw: n.w, ph: n.h,
+                // Where a cud layer's pixels came from. The composite itself is already in `image` —
+                // this says nothing the file needs in order to draw, only what a refresh may re-read.
+                cud: l.cud || null,
+                // A text layer's descriptor. Its render is deliberately NOT stored as `image` (a text
+                // buffer has no src, so it encodes as `image: null` like every hand-made surface): the
+                // fields + transform rebuild the editable layer on Load, and the pixels follow.
+                text: l.text ? Object.assign({}, l.text) : null,
+                // Same deal as a text descriptor: the render is never stored, the three angles
+                // and the colour are the whole document, and the pixels are rebuilt from them on Load.
+                dir: l.dir ? Object.assign({}, l.dir) : null,
+                // 链入档的是数据本身,不是它烘出来的像素 —— 文件里那张 image 永远是原图,重开还能改。
+                // 绑定的贴图例外:它的像素走自己的 role='map' 资产(见 cudEffects)。
+                // v4 起蒙版/贴片/链都住在这一串里,顺序就是应用顺序;老文件的三个平字段由读端折算回来。
+                attrs: cudAttrs(l),
+                image: blank ? null : addAsset('image', l.img, n.w, n.h),
+            });
+        }
+        return out;
+    };
+    const records = buildLayerRecords(layers);
     const maskSurface = (maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height)
         ? addAsset('masklayer', maskLayer.decal, maskLayer.decal.width, maskLayer.decal.height)
         : null;
@@ -11275,9 +11584,29 @@ async function buildCudBlob() {
     // 照旧逐层折);读老文件没有这张图,也退回逐层折叠。
     render();
     const compositeAsset = addAsset('composite', blendCanvas, canvasW, canvasH);
+    // 每个 Layer 段那套图层也入档（活跃那套已经进了 header.layers）。连它自己的 decal 一起 ——
+    // 读档照 key 装回 layerSets，于是"某一段的图层"活过重开，重开那天点回该段就是原样。
+    const layerSetList = [];
+    for (const [key, set] of layerSets) {
+        if (key === activeLayerSet) continue;                 // 活跃那套就是上面的 records
+        const d = set && set.decal;
+        layerSetList.push({
+            key,
+            selectedId: set && Number.isInteger(set.selectedId) ? set.selectedId : null,
+            decal: (d && d.width && d.height) ? addAsset('masklayer', d, d.width, d.height) : null,
+            layers: buildLayerRecords(set && Array.isArray(set.layers) ? set.layers : []),
+        });
+    }
     // 所有编码落地后 entry.length 与 payload 才齐, header 才能序列化。
     await Promise.all(encodes);
     const hostVid = await requestHostVid(activeDoc ? activeDoc.uid : 0);
+    // 这份工程里若有片段/资产的 src 是 blob:（后端 ffmpeg 不可用，前端回退到 objectURL），它写进
+    // 文件也活不过下一次读档 —— 读档那趟 normalizeVidProject 会把 blob: 的整条剪掉。存盘时不静悄悄:
+    // 数出来交给调用方，让那句 "Saved …" 后面挂上"这些片段重开就没了"。
+    const transient = hostVid && typeof hostVid === 'object'
+        ? [...(hostVid.clips || []), ...(hostVid.assets || [])]
+            .filter(x => x && typeof x.src === 'string' && x.src.startsWith('blob:')).length
+        : 0;
     const header = {
         format: 'cud',
         version: CUD_VERSION,
@@ -11291,7 +11620,11 @@ async function buildCudBlob() {
         video: hostVid || undefined,
         maskLayer: { visible: maskLayer.visible, surface: maskSurface },
         composite: compositeAsset,
+        // `layers` 装的是**活跃**那一套（旧读端只看这一份，行为与从前一致）；活跃那套属于哪一段由
+        // activeLayerSet 说明。其余每一套（没在用的 Layer 段）在 layerSets 里各自成条，连自己的 decal。
         layers: records,
+        activeLayerSet,
+        layerSets: layerSetList,
         // The Guidance card is a projection of the stacks that are already in this file, so it must
         // not travel as a workspace image too — reloading would resurrect it as a plain entry and
         // then publish a second card on top of that.
@@ -11304,7 +11637,7 @@ async function buildCudBlob() {
     const size = new Uint8Array(4);
     new DataView(size.buffer).setUint32(0, headerBytes.byteLength, true);
     const blob = new Blob([CUD_MAGIC, size, headerBytes].concat(payload), { type: 'application/octet-stream' });
-    return { blob, count: records.length };
+    return { blob, count: records.length + layerSetList.reduce((n, s) => n + s.layers.length, 0), transient };
 }
 
 // The one way bytes reach a chosen document: POSTed to the backend by token, or written through
@@ -11328,7 +11661,7 @@ async function writeDocTo(doc, blob) {
 // whatever was chosen, so the next Ctrl+S lands on it without asking again.
 async function saveCudAs() {
     if (cudBusy) return false;
-    if (!layers.length || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
+    if (!hasAnyLayers() || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
     const pick = await pickDocuments('save', 'cud', currentCudName || cudFileName(), false);
     if (pick.busy) return false;
     if (pick.error) { setStatus('Save failed: ' + pick.error, 'error'); return false; }
@@ -11337,7 +11670,7 @@ async function saveCudAs() {
     cudBusy = true; syncDocList();
     setStatus('Writing the context…');
     try {
-        const { blob, count } = await buildCudBlob();
+        const { blob, count, transient } = await buildCudBlob();
         const mb = (blob.size / 1048576).toFixed(1);
         if (target) {
             await writeDocTo(target, blob);
@@ -11354,7 +11687,8 @@ async function saveCudAs() {
         // Only now may a linked row elsewhere repaint: the refresh can leave a host project dirty,
         // and this one's own clean mark must not wipe that behind it.
         const links = await refreshCudLinks(target, blob);
-        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${mb} MB${cudRefreshSuffix(links)}`, 'success');
+        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${mb} MB${cudRefreshSuffix(links)}${cudTransientSuffix(transient)}`,
+            transient ? 'error' : 'success');
         return true;
     } catch (err) {
         setStatus('Save failed: ' + ((err && err.message) || err), 'error');
@@ -11375,11 +11709,11 @@ async function saveCud() {
     // tell, so a Ctrl+S landing mid-export would otherwise vanish without a trace.
     if (cudBusy) { setStatus('Still working on the last one…'); return false; }
     if (!currentCudHandle) return saveCudAs();
-    if (!layers.length || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
+    if (!hasAnyLayers() || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
     cudBusy = true; syncDocList();
     setStatus(`Saving ${currentCudName}…`);
     try {
-        const { blob, count } = await buildCudBlob();
+        const { blob, count, transient } = await buildCudBlob();
         await writeDocTo(currentCudHandle, blob);
         markDocumentClean();
         announceSaved();
@@ -11387,7 +11721,8 @@ async function saveCud() {
         // project that points at this file. After the clean mark on purpose — a host project that
         // changed underneath has to stay dirty.
         const links = await refreshCudLinks(currentCudHandle, blob);
-        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${currentCudName} · ${(blob.size / 1048576).toFixed(1)} MB${cudRefreshSuffix(links)}`, 'success');
+        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${currentCudName} · ${(blob.size / 1048576).toFixed(1)} MB${cudRefreshSuffix(links)}${cudTransientSuffix(transient)}`,
+            transient ? 'error' : 'success');
         return true;
     } catch (err) {
         // The document can go stale (the file was moved, deleted, or is held open elsewhere).
@@ -11448,9 +11783,16 @@ function decodeCud(buffer) {
     // 参数里指着它的 dirRef 因此都活得过重开。v3/v4 没有这张表,那句判断便什么都不做,老形状本来就是条目。
     if (Array.isArray(header.attributes)) {
         const table = new Map(header.attributes.filter(a => a && a.id).map(a => [a.id, a]));
-        for (const rec of (Array.isArray(header.layers) ? header.layers : []))
-            if (Array.isArray(rec.attrs))
-                rec.attrs = rec.attrs.map(k => table.get(typeof k === 'string' ? k : null)).filter(Boolean);
+        // 一段图层记录列表就地展开:表里没有的 (旧档的裸条目、或指向已删记录的号) 原样让下游自己判。
+        const expand = list => {
+            for (const rec of (Array.isArray(list) ? list : []))
+                if (Array.isArray(rec.attrs))
+                    rec.attrs = rec.attrs.map(k => table.get(typeof k === 'string' ? k : null)).filter(Boolean);
+        };
+        expand(header.layers);
+        // Video 的每个 Layer 段各有一套图层（见 layerSets），它们引用的 attribute 是同一张表里的号 ——
+        // 不一起展开，那些段重开就会丢掉文字描述符、方向、特效链。
+        for (const set of (Array.isArray(header.layerSets) ? header.layerSets : [])) expand(set && set.layers);
     }
     return { header, blobs };
 }
@@ -11757,14 +12099,14 @@ async function resolveRecAttrs(rec, blobs, cache, mapKeys) {
     return out;
 }
 
-function cudContext(header, records, maskSurface) {
+function cudContext(header, records, maskSurface, setData) {
     const c = header.canvas || {}, sel = header.selection || {}, ml = header.maskLayer || {}, v = header.view || {};
     const cw = Math.round(Number(c.w) || 0), ch = Math.round(Number(c.h) || 0);
     const surface = blankMaskLayer();
     surface.visible = ml.visible !== false;
     const ids = records.map(r => r.id);
     const keep = sel.selectedId === MASK_LAYER_ID || ids.indexOf(sel.selectedId) >= 0;
-    return {
+    const ctx = {
         // The file records an exact canvas with transforms expressed against it, so it is adopted
         // as-is rather than re-derived (which would rescale every layer).
         canvasW: cw > 0 ? Math.min(cw, MAX_CANVAS_SIDE) : 0,
@@ -11789,6 +12131,20 @@ function cudContext(header, records, maskSurface) {
         video: header.video && typeof header.video === 'object' ? header.video : null,
         videoFromCud: !!(header.video && typeof header.video === 'object'),
     };
+    // 每个 Layer 段那套图层（见 layerSets）：读档装回 map，重开那天点回该段就是原样。这里只交出
+    // 记录 + 选中的行 + 画布大小的 decal；活图层由 restoreState 那一趟按记录重建（与活跃那套同一趟）。
+    ctx.layerSets = {};
+    for (const key of Object.keys(setData || {})) {
+        const s = setData[key] || {};
+        ctx.layerSets[key] = {
+            layers: Array.isArray(s.layers) ? s.layers : [],
+            selectedId: Number.isInteger(s.selectedId) ? s.selectedId : null,
+            decal: surfaceAtCanvasSize(s.decal, ctx.canvasW, ctx.canvasH),
+        };
+    }
+    // 文件里 header.layers 装的是活跃那一套，这里记下它属于哪一段（读档后宿主还会按播放头再报一次）。
+    ctx.activeLayerSet = typeof header.activeLayerSet === 'string' ? header.activeLayerSet : '';
+    return ctx;
 }
 
 // Opens the file in a NEW tab and switches to it. Everything that can fail (parsing, decoding)
@@ -11799,100 +12155,128 @@ async function openCudDocument(file, doc) {
     setStatus(`Opening ${file.name}…`);
     try {
         const { header, blobs } = decodeCud(await file.arrayBuffer());
-        const records = [];
         // 共享的那枚面在两层之间只解一次:表键就是这份缓存的索引 (见 resolveRecAttrs)。
         const attrDecoded = new Map();
+        // 每个 Layer 段那套图层（见 layerSets）：先在这里定下这份文件的列表，下面几处（有内容判定、
+        // 逐套解码、计数器拔高）都读它。
+        const setList = Array.isArray(header.layerSets) ? header.layerSets : [];
         let skipped = 0;
-        for (const rec of header.layers) {
-            const hasImage = rec && rec.image !== null && rec.image !== undefined;
-            const textDesc = rec && !rec.raster ? sanitizeTextDescriptor(rec.text) : null;
-            // 老字段只当**迁移原料**:文件里真写了姿态才立一枚 Direction。sanitizeDirectionDescriptor 对
-            // null 交回的是恒等姿态 (它要给工具小窗一个可编辑的初始值),所以照 text 那样无条件过一遍,
-            // 等于给每一行非栅格图层凭空补一枚 Direction —— 删掉的 attribute 重开又站回来。
-            const dirDesc = rec && !rec.raster && rec.dir ? sanitizeDirectionDescriptor(rec.dir) : null;
-            let img = null, url = '';
-            if (!hasImage) {
-                // `image: null` is a layer that has no image — the row shows the red ×. Rebuild the
-                // blank scratch canvas it was saved from, at the pixel box the file carries, so the
-                // layer stays "no image yet" across the round trip instead of arriving as a
-                // transparent (on this dark UI: black) picture. A mask/decal painted on it is a
-                // separate asset and still lands below.
-                const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.pw) || 1)));
-                const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.ph) || 1)));
-                // 文字/方向/3D 行重建的也是一张空白底:描述符 (或烘好的面) 走 attrs 那张表回来,像素由
-                // 各自的 sync 在第一次折叠前重算 —— 底不再是渲染,它只是格子。
-                img = makeBlankCanvas(pw, ph);
-            } else {
-                const imgBlob = blobs.get(rec.image);
-                if (!imgBlob) { skipped++; continue; }        // a genuinely unreadable asset
-                if (rec.raster) {
-                    // A raster row's buffer must arrive as a canvas, not the <img> a smart row keeps:
-                    // effectiveTransform() reads its content box with getImageData and every
-                    // resample/bake calls getContext on it — an <img> there throws mid-Load and
-                    // leaves the project opened but unpainted. The thumbnail follows the same shape
-                    // the rasterize/Generate paths already use.
-                    img = await blobToCanvas(imgBlob);
-                    url = img.toDataURL('image/png');
+        // 一串文件里的图层记录 → 活图层。活跃那一套与每个 Layer 段那一套都走这一趟：同一张 attr
+        // 缓存，跨套共享的那枚面因此也只解一次。
+        const buildRecords = async recs => {
+            const records = [];
+            for (const rec of (Array.isArray(recs) ? recs : [])) {
+                const hasImage = rec && rec.image !== null && rec.image !== undefined;
+                const textDesc = rec && !rec.raster ? sanitizeTextDescriptor(rec.text) : null;
+                // 老字段只当**迁移原料**:文件里真写了姿态才立一枚 Direction。sanitizeDirectionDescriptor 对
+                // null 交回的是恒等姿态 (它要给工具小窗一个可编辑的初始值),所以照 text 那样无条件过一遍,
+                // 等于给每一行非栅格图层凭空补一枚 Direction —— 删掉的 attribute 重开又站回来。
+                const dirDesc = rec && !rec.raster && rec.dir ? sanitizeDirectionDescriptor(rec.dir) : null;
+                let img = null, url = '';
+                if (!hasImage) {
+                    // `image: null` is a layer that has no image — the row shows the red ×. Rebuild the
+                    // blank scratch canvas it was saved from, at the pixel box the file carries, so the
+                    // layer stays "no image yet" across the round trip instead of arriving as a
+                    // transparent (on this dark UI: black) picture. A mask/decal painted on it is a
+                    // separate asset and still lands below.
+                    const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.pw) || 1)));
+                    const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.ph) || 1)));
+                    // 文字/方向/3D 行重建的也是一张空白底:描述符 (或烘好的面) 走 attrs 那张表回来,像素由
+                    // 各自的 sync 在第一次折叠前重算 —— 底不再是渲染,它只是格子。
+                    img = makeBlankCanvas(pw, ph);
                 } else {
-                    const decoded = await blobToImage(imgBlob);
-                    img = decoded.img;
-                    url = decoded.url;
-                    // 保存提速 (2.1a): 把这份资产的原 Blob 挂在图上 —— 没动过的层保存时直取原字节,
-                    // 0 编码。链接它的是对象身份, 而这张图从不被原地修改。
-                    cudAssetBytes.set(img, { part: imgBlob, len: imgBlob.size });
+                    const imgBlob = blobs.get(rec.image);
+                    if (!imgBlob) { skipped++; continue; }        // a genuinely unreadable asset
+                    if (rec.raster) {
+                        // A raster row's buffer must arrive as a canvas, not the <img> a smart row keeps:
+                        // effectiveTransform() reads its content box with getImageData and every
+                        // resample/bake calls getContext on it — an <img> there throws mid-Load and
+                        // leaves the project opened but unpainted. The thumbnail follows the same shape
+                        // the rasterize/Generate paths already use.
+                        img = await blobToCanvas(imgBlob);
+                        url = img.toDataURL('image/png');
+                    } else {
+                        const decoded = await blobToImage(imgBlob);
+                        img = decoded.img;
+                        url = decoded.url;
+                        // 保存提速 (2.1a): 把这份资产的原 Blob 挂在图上 —— 没动过的层保存时直取原字节,
+                        // 0 编码。链接它的是对象身份, 而这张图从不被原地修改。
+                        cudAssetBytes.set(img, { part: imgBlob, len: imgBlob.size });
+                    }
                 }
+                const tr = rec.transform || {};
+                records.push({
+                    id: (Number.isInteger(rec.id) && rec.id > 0) ? rec.id : ++layerSeq,
+                    // 图层自带像素，不绑任何图池 id —— 跨会话导入天然无悬空引用。
+                    name: rec.name || 'Layer', src: url, img,
+                    visible: rec.visible !== false,
+                    fragment: !!rec.fragment,
+                    raster: !!rec.raster,
+                    // 老文件没这个字段 —— 没有它就不是 Stash,而它存档的那张空面照旧当一张普通栅格层画。
+                    stash: !!rec.stash,
+                    // A document saved before the Guidances stack existed has no `stack` on its rows —
+                    // every one of them is a working layer, which is also what it looked like then.
+                    stack: rec.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
+                    // Text descriptor rebuilt above; a raster/`false` record never carries one.
+                    // (text/dir 只是 mergeLegacyGenerators 的迁移原料 —— 老文件走这条,新文件的描述符
+                    // 已经在 attrs 表里,这两个字段随后被 attachAttrView 的 getter 遮成死重。)
+                    text: textDesc,
+                    dir: dirDesc,
+                    transform: rec.raster
+                        // Old files could carry a non-identity raster transform; the invariant is identity.
+                        ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
+                        : {
+                            cx: Number.isFinite(tr.cx) ? tr.cx : 0.5,
+                            cy: Number.isFinite(tr.cy) ? tr.cy : 0.5,
+                            w: Number.isFinite(tr.w) ? tr.w : 1,
+                            h: Number.isFinite(tr.h) ? tr.h : 1,
+                            rotation: Number.isFinite(tr.rotation) ? tr.rotation : 0,
+                        },
+                    // A cud layer's link is a pointer, and pointers do not survive a session: the key an
+                    // older file carries resolves only if that document was opened again here. Nothing
+                    // depends on that — the row's own pixels arrived above.
+                    cud: (rec.cud && typeof rec.cud.link === 'string' && rec.cud.link)
+                        ? { link: rec.cud.link, name: typeof rec.cud.name === 'string' ? rec.cud.name : '', path: typeof rec.cud.path === 'string' ? rec.cud.path : '' }
+                        : null,
+                    // attribute 的面在文件里是资产 id,回来才是画布;链过一遍 restoreFxMaps,绑定才接回
+                    // 这次导入带来的那份像素。v1 文件里没这些字段 —— 空白链就是「没有特效」,不是「特效坏了」。
+                    attrs: await resolveRecAttrs(rec, blobs, attrDecoded),
+                });
+                // 老文件的 text/dir 还是图层字段:strip 里没有同类记录时补一条 (新文件直接读 attrs)。
+                    mergeLegacyGenerators(records[records.length - 1]);
             }
-            const tr = rec.transform || {};
-            records.push({
-                id: (Number.isInteger(rec.id) && rec.id > 0) ? rec.id : ++layerSeq,
-                // 图层自带像素，不绑任何图池 id —— 跨会话导入天然无悬空引用。
-                name: rec.name || 'Layer', src: url, img,
-                visible: rec.visible !== false,
-                fragment: !!rec.fragment,
-                raster: !!rec.raster,
-                // 老文件没这个字段 —— 没有它就不是 Stash,而它存档的那张空面照旧当一张普通栅格层画。
-                stash: !!rec.stash,
-                // A document saved before the Guidances stack existed has no `stack` on its rows —
-                // every one of them is a working layer, which is also what it looked like then.
-                stack: rec.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
-                // Text descriptor rebuilt above; a raster/`false` record never carries one.
-                // (text/dir 只是 mergeLegacyGenerators 的迁移原料 —— 老文件走这条,新文件的描述符
-                // 已经在 attrs 表里,这两个字段随后被 attachAttrView 的 getter 遮成死重。)
-                text: textDesc,
-                dir: dirDesc,
-                transform: rec.raster
-                    // Old files could carry a non-identity raster transform; the invariant is identity.
-                    ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
-                    : {
-                        cx: Number.isFinite(tr.cx) ? tr.cx : 0.5,
-                        cy: Number.isFinite(tr.cy) ? tr.cy : 0.5,
-                        w: Number.isFinite(tr.w) ? tr.w : 1,
-                        h: Number.isFinite(tr.h) ? tr.h : 1,
-                        rotation: Number.isFinite(tr.rotation) ? tr.rotation : 0,
-                    },
-                // A cud layer's link is a pointer, and pointers do not survive a session: the key an
-                // older file carries resolves only if that document was opened again here. Nothing
-                // depends on that — the row's own pixels arrived above.
-                cud: (rec.cud && typeof rec.cud.link === 'string' && rec.cud.link)
-                    ? { link: rec.cud.link, name: typeof rec.cud.name === 'string' ? rec.cud.name : '', path: typeof rec.cud.path === 'string' ? rec.cud.path : '' }
-                    : null,
-                // attribute 的面在文件里是资产 id,回来才是画布;链过一遍 restoreFxMaps,绑定才接回
-                // 这次导入带来的那份像素。v1 文件里没这些字段 —— 空白链就是「没有特效」,不是「特效坏了」。
-                attrs: await resolveRecAttrs(rec, blobs, attrDecoded),
-            });
-            // 老文件的 text/dir 还是图层字段:strip 里没有同类记录时补一条 (新文件直接读 attrs)。
-            mergeLegacyGenerators(records[records.length - 1]);
-        }
-        if (!records.length) throw new Error('the .cud holds no readable layers');
+            return records;
+        };
+        const records = await buildRecords(header.layers);
+        // 活跃那套可能是空的（视频工程：播放头不在任何 Layer 段上，图层全在各段那套里）。
+        if (!records.length && !setList.some(s => s && Array.isArray(s.layers) && s.layers.length))
+            throw new Error('the .cud holds no readable layers');
         const ml = header.maskLayer || {};
         const msBlob = ml.surface !== null && ml.surface !== undefined ? blobs.get(ml.surface) : null;
         const maskSurface = msBlob ? await blobToCanvas(msBlob) : null;
+        // 每个 Layer 段那套图层（见 layerSets）：文件带的都在这儿解码，连它自己的 decal。走同一张
+        // attr 缓存（跨套共享的面只解一次），与活跃那套共用同一套计数器与跳过计数。
+        const setData = {};
+        for (const set of setList) {
+            if (!set || typeof set.key !== 'string' || !set.key || set.key === '') continue;
+            const dBlob = set.decal !== null && set.decal !== undefined ? blobs.get(set.decal) : null;
+            setData[set.key] = {
+                layers: await buildRecords(set.layers),
+                selectedId: Number.isInteger(set.selectedId) ? set.selectedId : null,
+                decal: dBlob ? await blobToCanvas(dBlob) : null,
+            };
+        }
         // Layer ids must stay unique for the rest of the session, so the counter only ever grows.
+        const allSets = Object.keys(setData).map(k => setData[k].layers);
         layerSeq = records.reduce((m, r) => Math.max(m, r.id), layerSeq);
+        for (const ls of allSets) layerSeq = ls.reduce((m, r) => Math.max(m, r.id), layerSeq);
         // 特效 id 同理:文件里带来的链占用的号也要把计数器顶上去。
         fxSeq = records.reduce((m, r) => Math.max(m, attrChainsOf(r).reduce(
             (x, chain) => Math.max(x, chain.reduce((y, e) => Math.max(y, (e && e.id) | 0), 0)), 0)), fxSeq);
-        const ctx = cudContext(header, records, maskSurface);
+        for (const ls of allSets) fxSeq = ls.reduce((m, r) => Math.max(m, attrChainsOf(r).reduce(
+            (x, chain) => Math.max(x, chain.reduce((y, e) => Math.max(y, (e && e.id) | 0), 0)), 0)), fxSeq);
+        const ctx = cudContext(header, records, maskSurface, setData);
+        const layerCount = records.length + allSets.reduce((n, ls) => n + ls.length, 0);
 
         // 工作区恢复：文件里的池原样挂到新建条目上，由 activateDocument 换给全局并按
         // 保留 id 整池同步宿主（见 postStagingSync）。这里不再直接上传 —— 追加会把
@@ -11901,7 +12285,7 @@ async function openCudDocument(file, doc) {
         entry.staging = Array.isArray(header.staging) ? header.staging.filter(s => s && s.src) : [];
         activateDocument(entry);
         if (!ctx.canvasW || !ctx.canvasH) applyCanvasSize();   // no usable size in the file — derive it
-        setStatus(`Opened ${entry.name} · ${records.length} layer${records.length === 1 ? '' : 's'}${skipped ? ` · ${skipped} unreadable skipped` : ''}`, 'success');
+        setStatus(`Opened ${entry.name} · ${layerCount} layer${layerCount === 1 ? '' : 's'}${skipped ? ` · ${skipped} unreadable skipped` : ''}`, 'success');
         return true;
     } catch (err) {
         setStatus('Load failed: ' + ((err && err.message) || err), 'error');
@@ -12099,14 +12483,27 @@ async function flattenCudBytes(buffer, mapKeys) {
 
 // Every layer record in every open project that draws from this link. The active tab's records are
 // the live `layers` objects (its `ctx` is only ever the last captured copy), a background tab's are
-// the records sitting in its ctx.
+// the records sitting in its ctx. 一个工程的图层不止活跃那套：Video 的每个 Layer 段各有一套
+// （见 layerSets），它们也可能挂着链接。
+function entryLayerRecords(entry) {
+    const out = [];
+    if (entry === activeDoc) {
+        out.push(...layers);
+        for (const [key, set] of layerSets) if (key !== activeLayerSet) out.push(...(set.layers || []));
+    } else {
+        const ctx = (entry && entry.ctx) || {};
+        out.push(...(ctx.layers || []));
+        for (const key of Object.keys(ctx.layerSets || {})) out.push(...((ctx.layerSets[key] || {}).layers || []));
+    }
+    return out;
+}
+
 function linkedCudRecords(link) {
     const hits = [];
     if (!link) return hits;
-    for (const entry of documents) {
-        const recs = entry === activeDoc ? layers : ((entry.ctx && entry.ctx.layers) || []);
-        for (const rec of recs) if (rec && rec.cud && rec.cud.link === link) hits.push(rec);
-    }
+    for (const entry of documents)
+        for (const rec of entryLayerRecords(entry))
+            if (rec && rec.cud && rec.cud.link === link) hits.push(rec);
     return hits;
 }
 
@@ -12138,8 +12535,7 @@ async function refreshCudLinks(doc, blob) {
     // picture — so they have to say so. A background tab cannot call markDocumentDirty (it speaks for
     // the active one only), hence the direct write on that branch.
     for (const entry of documents) {
-        const recs = entry === activeDoc ? layers : ((entry.ctx && entry.ctx.layers) || []);
-        if (!recs.some(r => touched.has(r))) continue;
+        if (!entryLayerRecords(entry).some(r => touched.has(r))) continue;
         if (entry === activeDoc) { markDocumentDirty(); refreshLayerPanels(); render(); }
         else { entry.dirty = true; }
     }
@@ -12151,6 +12547,13 @@ function cudRefreshSuffix(result) {
     if (!result) return '';
     if (result.failed) return ` · ${result.failed} linked layer${result.failed === 1 ? '' : 's'} could not be re-read`;
     return result.updated ? ` · ${result.updated} linked layer${result.updated === 1 ? '' : 's'} updated` : '';
+}
+
+// 工程里那些只活在本会话的片段（blob: —— 后端没能把媒体入库，见 buildCudBlob）：写进文件也
+// 活不过读档。存盘不报错，但必须把这句话说出来 —— 否则用户只会以为"视频没保存上"。
+function cudTransientSuffix(transient) {
+    if (!transient) return '';
+    return ` · warning: ${transient} clip${transient === 1 ? '' : 's'} use media the server could not store (ffmpeg missing) — they will be gone when this .cud is reopened`;
 }
 
 // Add ▸ Cud Project. The picker comes first (a browser one needs the click that opens it), then the
@@ -12483,7 +12886,9 @@ const UI_COMMANDS = {
         const o = uiRow(v);
         const l = getLayer(Number(o.layerId));
         const type = String(o.type);
-        if (l && ATTR_TYPES[type]) addAttrToLayer(l, type);
+        // `trackId` 只在视频模式的 Layer 摞里由宿主那一问带过来（surface 那一类先选轨再加入）；
+        // 其余入口这一格是空的，落回"手画的那张面"。
+        if (l && ATTR_TYPES[type]) addAttrToLayer(l, type, o.trackId ? String(o.trackId) : '');
     },
     // 条带上的一步换位置：同层换缝与跨层搬家报的不是同一句话，分流在 moveAttrStep 那一句里（三个落点
     // —— chip 两侧、条带尾缝、`+` 那颗 —— 今天共用它）。beforeAttrId 为空 = 追加为最后一步。
@@ -13246,6 +13651,8 @@ window.addEventListener('message', event => {
     }
     if (d.type === 'blend-vid-frame') { handleVidFrameMessage(d); return; }
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
+    if (d.type === 'blend-vid-base') { handleVidBaseMessage(d); return; }
+    if (d.type === 'blend-vid-base-off') { vidBaseOff(); return; }
     if (d.type === 'blend-vid-grid') { noteVidGrid(d.width, d.height); return; }
     if (d.type === 'blend-guidance-republish') {
         // 宿主说图池里那张 Guidance 卡不是我们的了（被别的实例顶掉，或整池换水时被清掉）：
@@ -13418,6 +13825,11 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-ui-command') {
         // 四块薄面板（Canvas / Transform / Selection / View）的正文在宿主 dock 里，按钮发的是动作键。
         // 动作只作用于**当前活着的这一份文档** —— 面板永远跟着活动文档，与 10 号拍板一致。
+        // 底片态（游标不在 Layer 段上）没有可编辑对象：Transform 的两条改动作直接拒绝，View 照常。
+        if (vidBaseOn && (d.action === 'transform-adjust' || d.action === 'transform-fill')) {
+            setStatus('Move the playhead onto a Layer segment to transform', 'error');
+            return;
+        }
         const run = UI_COMMANDS[d.action];
         if (run) run(d.value);
         return;

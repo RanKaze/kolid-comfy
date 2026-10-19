@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 
-// 图层编辑的门闸：**视频模式下没选中 Layer 段时，Layers / Guidances 不许动手**。
+// 图层编辑的门闸：**视频模式下游标不在 Layer 段上时，Layers / Guidances / Transform 不许动手**。
+// （这时画布内容是视频底片，背后那一套图层并不显示，改了也看不见。）
 //
-// 为什么是一颗全局小闸而不是 props：这两个面板的动作条（Clear All / Add / 总开关）住在
-// `StackHead` 里，而它同时被 Layers 与 Guidances 两格使用 —— 一个状态、两处生效。
-// 门闸的判据只有宿主知道（当前是哪个模式、有没有选中段），所以由 EditPhase 推过来。
+// 为什么是一颗全局小闸而不是 props：这几格的动作条住在宿主 dock 里，判据只有宿主知道
+// （当前是哪个模式、游标压在哪个 Layer 段上），所以由 EditPhase 推过来。
 let blocked = false;
 const subs = new Set<() => void>();
 

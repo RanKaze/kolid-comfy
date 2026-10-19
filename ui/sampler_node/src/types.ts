@@ -506,8 +506,10 @@ export type BlendChainStep = { id: number; type: string; label: string; icon: st
 export type BlendChainLane = { guid: string; bypass: boolean; skip: string; steps: BlendChainStep[] };
 
 /** 条带末尾那颗 `+` 菜单里的一类 attribute。顺序就是页面注册表的声明序，`addTitle` 是注册表自己那句
- *  （它没写过才是页面那句模板补的）—— 有哪几类、加进去会做什么，只有注册表答得出。 */
-export type BlendAttrKind = { type: string; label: string; addTitle: string };
+ *  （它没写过才是页面那句模板补的）—— 有哪几类、加进去会做什么，只有注册表答得出。`kind` 是注册表
+ *  的分支（surface / chain / generator）：只有 surface 那一类（decal / mask）带 frameTrack，视频模式下
+ *  加入前要问"绑哪条 video 轨"，所以这一侧得认得出来。 */
+export type BlendAttrKind = { type: string; label: string; addTitle: string; kind: string };
 
 /** 右键菜单每一条的出现/灰掉所问的那六个谓词。菜单归宿主摆（拍板 5.a），但这些事实只有页面答得出：
  *  `genHasImg` 与行上 ▶ 那句用的不是同一个判据（方向层恒算有图，哪怕还没墨），`cudDocOpen` 问的是
@@ -950,7 +952,7 @@ export type BlendUiPayloads = {
   'attr-remove': { layerId: number; attrId: string };
   'attr-duplicate': { layerId: number; attrId: string };
   'attr-apply': { layerId: number; attrId: string };
-  'attr-add': { layerId: number; type: string };
+  'attr-add': { layerId: number; type: string; trackId?: string };
   /** 面 attribute 的 Frame source：绑到哪条视频轨（'' = 解绑，仍用画好的那张面）。 */
   'attr-frame-source': { layerId: number; attrId: string; trackId: string };
   /** 条带上的一步换位置：`beforeAttrId` 是落点那一枚，`after` 说的是插它前面还是后面；为空 = 追加尾步。 */

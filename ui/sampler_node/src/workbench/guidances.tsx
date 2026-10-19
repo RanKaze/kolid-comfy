@@ -27,7 +27,7 @@ const GUIDANCE_ENTRIES: AddEntry[] = [
   },
 ];
 
-const GuidancesBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
+const GuidancesBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
   const ui = useBlendUi();
   // Mask 不再是自己的窗口（用户拍板）：一整扇窗只装一行，剩下的全是空白，空间利用率太差。
   // 它现在是这一格里的**第一行**，钉在列表顶上（`MaskRow` 自己 sticky）—— 它不是 guidance 那一摞
@@ -35,7 +35,7 @@ const GuidancesBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minHeight: 0 }}>
       <MaskRow send={send} />
-      <LayerListView stack="guidance" rows={ui.stacks.guidances} send={send} />
+      <LayerListView stack="guidance" rows={ui.stacks.guidances} send={send} video={host.video} />
     </div>
   );
 };

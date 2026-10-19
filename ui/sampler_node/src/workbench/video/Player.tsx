@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  type VidController, clipAt, fmtTime, vidDuration,
+  type VidController, type VidClip, clipAt, fmtTime, vidDuration,
 } from './model';
 import { compositePlanAt, vidFrameAt, VidFrameGrabber, type VidCompositePlan } from './composite';
 import { decodeAudio, vidAudio } from './audio';
@@ -17,7 +17,12 @@ import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame
 // 画面漂移（>0.25s 才纠，<video> 自己的时钟在短片段上会抖）。scrub / 换段都把 <video> 拉回
 // 正确的源内时刻。
 
-export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ vid, visible }) => {
+export const VidPlayer: React.FC<{
+  vid: VidController;
+  visible: boolean;
+  /** 游标底下的 Layer 段 key（null = 不在任何 Layer 段上）。宿主拿它决定这一格给画布还是给视频。 */
+  onCompLayer?: (key: string | null) => void;
+}> = ({ vid, visible, onCompLayer }) => {
   const { project: p, transport, playing } = vid;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const readRef = useRef<HTMLSpanElement | null>(null);
@@ -31,13 +36,18 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
 
   // ── 逐帧合成（Layer 轨压在最上层的那几帧）──────────────────────────────────────────────
   // 计划由 compositePlanAt 在 transport 每一次 tick 上现算：命中 layer 段就向工作台页面发一包
-  // 「这一帧的源帧」，页面用那一段自己的图层集合成后回一张图。画面与音频各走各的 —— 主 <video>
-  // 没有被停掉，它现在是底图的取帧器（播放时零额外 seek），声音仍然只从 VidAudio 出来。
-  // `compMode` 只在换段/进出合成那一刻走 React；每一帧的回图直改 canvas，不惊动整页。
+  // 「这一帧的源帧」，页面用那一段自己的图层集合成后回一张图 —— 画面只有那些图层，不叠脚下的
+  // 视频帧（空段就是空图）。画面与音频各走各的 —— 主 <video> 没有被停掉：它仍然播着脚下那条
+  // 视频轨，给输出定栅格、也当那一轨源帧的取帧器（播放时零额外 seek），声音仍然只从 VidAudio
+  // 出来。`compMode` 只在换段/进出合成那一刻走 React；每一帧的回图直改 canvas，不惊动整页。
   const compCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const compModeRef = useRef<{ id: string; name: string } | null>(null);
   const [compMode, setCompMode] = useState<{ id: string; name: string } | null>(null);
   const [hasComp, setHasComp] = useState(false);
+  // 宿主只在乎"游标底下是不是 Layer 段、是哪一段"——换段才报一次，播放时不惊动它。
+  const compLayerRef = useRef<string | null>(null);
+  const onCompLayerRef = useRef(onCompLayer);
+  onCompLayerRef.current = onCompLayer;
   const grabberRef = useRef<VidFrameGrabber | null>(null);
   const liveRef = useRef(true);
   const vidRef = useRef(vid);
@@ -147,6 +157,81 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
   }, [vid, visible, sendComposite]);
   requestRef.current = requestComposite;
 
+  // ── 底片预览（游标不在 Layer 段上）────────────────────────────────────────────────────
+  // 视频模式下工作台画布常驻：游标一离开 Layer 段，画布内容就换成当前视频帧。帧只有宿主拿得到
+  // （<video> 在这儿），所以逐帧抓了送过去。同一帧号只送一次；抓取期间只留最后一帧，播放不掉队。
+  const baseReq = useRef({
+    key: '\u0000', on: false, busy: false,
+    retryAt: 0,                       // 抓帧失败后的下一次重试时刻（见 sendBase 里那段）
+    pending: null as { clip: VidClip | null; q: number; key: string } | null,
+  });
+  const postBase = useCallback((q: number, bmp: ImageBitmap | null) => {
+    const r = baseReq.current;
+    const sent = vid.blendPost({ type: 'blend-vid-base', t: q, bitmap: bmp }, bmp ? [bmp] : []);
+    if (!sent) {
+      // 页面还没挂上（iframe 尚未加载）：这一帧作废，键清回去让下一个 tick 重试。
+      r.key = '\u0000';
+      r.on = false;
+      if (bmp) { try { bmp.close(); } catch { /* gone */ } }
+      return;
+    }
+    r.on = true;
+  }, [vid]);
+  const sendBase = useCallback(async (clip: VidClip | null, q: number, key: string) => {
+    const r = baseReq.current;
+    r.busy = true;
+    try {
+      let bmp: ImageBitmap | null = null;
+      if (clip) {
+        const grabber = grabberRef.current ?? (grabberRef.current = new VidFrameGrabber());
+        bmp = await grabber.capture(clip, q, videoRef.current, playingRef.current);
+      }
+      // 抓取期间游标又走了：这一帧已经过时，丢掉（别让底片倒着播）。
+      if (!liveRef.current || r.key !== key) { bmp?.close(); return; }
+      // 有片段却没抓到帧（源还在解码/找不到/被删）：**不能**把底片翻成空白 —— 那会让整个画布
+      // 变成空的（"按了播放什么都没有了"就是这个症状）。保留上一帧，键清回去让后面的 tick 重试。
+      if (clip && !bmp) {
+        r.key = '\u0000';
+        r.retryAt = performance.now() + 500;
+        return;
+      }
+      r.retryAt = 0;                      // 拿到帧了：重试窗口清掉
+      postBase(q, bmp);
+    } finally {
+      r.busy = false;
+      const pend = r.pending;
+      r.pending = null;
+      if (pend && liveRef.current) sendBaseRef.current(pend.clip, pend.q, pend.key);
+    }
+  }, [postBase]);
+  const sendBaseRef = useRef<(clip: VidClip | null, q: number, key: string) => void>(() => {});
+  sendBaseRef.current = (clip, q, key) => { void sendBase(clip, q, key); };
+  const requestBase = useCallback((t: number) => {
+    if (!visible) return;
+    const p = projectRef.current;
+    const c = clipAt(p, t, 'video') ?? null;
+    const q = vidFrameAt(p.fps || 30, t);
+    // 键里带上片段的起点/源内偏移：剪一下片段，就算帧号没变，取到的源帧也不是同一张。
+    const key = c ? `${c.id}@${c.start}@${c.offset}@${q}` : '';
+    const r = baseReq.current;
+    if (key === r.key) return;
+    // 上一次抓帧失败过：等重试窗口过去再试，别每个 tick 都去捅一次解码器。
+    if (r.retryAt && performance.now() < r.retryAt) return;
+    r.key = key;
+    if (r.busy) { r.pending = { clip: c, q, key }; return; }
+    sendBaseRef.current(c, q, key);
+  }, [visible]);
+  const requestBaseOff = useCallback(() => {
+    if (!visible) return;
+    const r = baseReq.current;
+    r.key = '\u0000';                  // 再回到"段外"时第一帧要重新送
+    r.retryAt = 0;
+    r.pending = null;
+    if (!r.on) return;
+    r.on = false;
+    vid.blendPost({ type: 'blend-vid-base-off' });
+  }, [visible, vid]);
+
   // ── transport 订阅 ── 读数/scrub 条直改；活片段只在换段时走 React；暂停态的画面跟手。
   useEffect(() => {
     const onTick = (interactive?: boolean) => {
@@ -161,6 +246,13 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
         const next = plan ? { id: plan.layer.id, name: plan.layer.name } : null;
         compModeRef.current = next;
         setCompMode(next);
+      }
+      // 游标底下那一段的图层集 key（null = 不在任何 Layer 段上）变了就报一次：宿主据此切
+      // Layers 面板的作用对象，并决定画布是折图层还是放视频底片。
+      const layerKeyNow = plan ? plan.layerKey : null;
+      if (layerKeyNow !== compLayerRef.current) {
+        compLayerRef.current = layerKeyNow;
+        onCompLayerRef.current?.(layerKeyNow);
       }
       const c = clipAt(proj, t, 'video');
       const cid = c?.id ?? null;
@@ -193,6 +285,7 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
           }
         }
       }
+      if (plan) requestBaseOff(); else requestBase(t);
       requestComposite(plan, t);
     };
     // seek 落定 = 真帧已上屏：撤掉缩略条替身。两个守卫防止拖动中闪替身——
@@ -216,10 +309,15 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
     };
     const v0 = videoRef.current;
     v0?.addEventListener('seeked', onSeeked);
+    // 挂载时无条件报一次（含 null = 游标不在任何 Layer 段上）：宿主那边可能还留着上一份文档 /
+    // 上一轮的值，而 onTick 只在"换段"时开口，起手正好不在段上就永远不会刷新。
+    const plan0 = compositePlanAt(projectRef.current, transport.get());
+    compLayerRef.current = plan0 ? plan0.layerKey : null;
+    onCompLayerRef.current?.(compLayerRef.current);
     onTick();
     const un = transport.subscribe(onTick);
     return () => { un(); v0?.removeEventListener('seeked', onSeeked); };
-  }, [transport, showStrip, hideStrip, requestComposite]);
+  }, [transport, showStrip, hideStrip, requestComposite, requestBase, requestBaseOff]);
 
   // ── 合成回图 ── 只认 Blend 页那个 window + 当前 reqId。旧包的回图（页面自己也可能在补发）
   // 到得晚就直接扔掉：监视器永远只摆最新一帧。回图是 ImageBitmap，直接搬进 canvas 的
@@ -263,16 +361,21 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
     if (compMode) hideStrip();
   }, [compMode, hideStrip]);
 
-  // 收摊 / 藏起来：告诉页面这一包作废（它清掉缓存的源帧），取帧器也一并拆掉。
+  // 收摊 / 藏起来：告诉页面这一包作废（它清掉缓存的源帧），底片态也一并退掉，取帧器稍后拆。
   useEffect(() => {
     if (visible) return;
     compReq.current.key = '';
     vid.blendPost({ type: 'blend-vid-frame-off' });
+    baseReq.current.on = false;
+    baseReq.current.key = '\u0000';
+    baseReq.current.pending = null;
+    vid.blendPost({ type: 'blend-vid-base-off' });
   }, [visible, vid]);
   useEffect(() => () => {
     liveRef.current = false;
     compReq.current.key = '';
     vidRef.current.blendPost({ type: 'blend-vid-frame-off' });
+    vidRef.current.blendPost({ type: 'blend-vid-base-off' });
     grabberRef.current?.dispose();
     grabberRef.current = null;
   }, []);
@@ -334,6 +437,60 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
       v.removeEventListener('loadeddata', announce);
     };
   }, [blendPost, activeId]);
+
+  // ── 栅格的兜底来源：游标底下没有视频时，主 <video> 没源、报不出尺寸。 ──
+  // Layer 段可以摆在视频之间的空档里，甚至工程里暂时还没有视频 —— 画布就一直是 0，
+  // Layers 格里的 Add 会一直等栅格。这里按"游标下命中的第一条视频轨，否则离游标最近的那段"
+  // 挑一个视频，单独读一次元数据（preload=metadata，不取帧）报给工作台；主 <video> 已经
+  // 有尺寸时一个字不发，避免两个尺寸抢着立画布。
+  const fallbackGridSrc = useMemo(() => {
+    const t = transport.get();
+    let nearest = '';
+    let nearestScore = Infinity;
+    for (const track of p.tracks) {
+      if (track.kind !== 'video') continue;
+      for (const c of p.clips) {
+        if (c.trackId !== track.id || c.kind !== 'video' || !c.src) continue;
+        if (t >= c.start && t < c.start + c.duration) return c.src;
+        const score = Math.min(Math.abs(t - c.start), Math.abs(t - (c.start + c.duration)));
+        if (score < nearestScore) { nearestScore = score; nearest = c.src; }
+      }
+    }
+    return nearest;
+  }, [p, transport]);
+  useEffect(() => {
+    if (!fallbackGridSrc) return;
+    let cancelled = false;
+    const probe = document.createElement('video');
+    probe.preload = 'metadata';
+    probe.muted = true;
+    const onMeta = () => {
+      if (cancelled) return;
+      if (probe.videoWidth && probe.videoHeight) {
+        blendPost({ type: 'blend-vid-grid', width: probe.videoWidth, height: probe.videoHeight });
+      }
+      done();
+    };
+    const done = () => {
+      probe.removeEventListener('loadedmetadata', onMeta);
+      probe.removeAttribute('src');
+      try { probe.load(); } catch { /* already gone */ }
+    };
+    // 主 <video> 通常几十毫秒内就报尺寸了；给它一个先手，别让兜底抢在它前面选错尺寸。
+    const timer = setTimeout(() => {
+      const main = videoRef.current;
+      if (cancelled || (main && main.videoWidth > 0)) return;
+      probe.addEventListener('loadedmetadata', onMeta, { once: true });
+      probe.addEventListener('error', () => { if (!cancelled) done(); }, { once: true });
+      probe.src = fallbackGridSrc;
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      probe.removeEventListener('loadedmetadata', onMeta);
+      done();
+    };
+  }, [blendPost, fallbackGridSrc]);
 
   // ── 播 / 停 ──
   const graceRef = useRef(0);   // 纠偏宽限期（performance.now 截止）：起播/换段/纠偏后给解码器追赶的时间
@@ -428,8 +585,9 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
       <div data-vid-screen="" style={{ flex: 1, minHeight: 0, position: 'relative', background: '#0d0d0d', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <video ref={videoRef} muted playsInline
           style={{ width: '100%', height: '100%', objectFit: 'contain', display: active ? 'block' : 'none' }} />
-        {/* 逐帧合成的画面：Layer 段压在最上层时，这一格盖住主 <video>（它继续播底图，声音不在这儿）。
-            像素由工作台页面合成后回传，尺寸是文档画布；object-fit 让它按画布比例落在监视器里。 */}
+        {/* 逐帧合成的画面：Layer 段压在最上层时，这一格盖住主 <video>（它继续播脚下那条轨，
+            定栅格与取源帧用，声音不在这儿）。像素由工作台页面合成后回传，尺寸是文档画布；
+            object-fit 让它按画布比例落在监视器里。段里没有图层时回的是空图 —— 这一格就是空的。 */}
         <canvas ref={compCanvasRef} data-vid-composite="" aria-hidden="true"
           style={{
             position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain',
@@ -456,8 +614,9 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
           </div>
         )}
       </div>
-      {/* 走带控制。 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderTop: '0.5px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
+      {/* 走带控制。这一条**不**让工作台画布盖住（EditPhase 量画布高度时按它上沿截断）——
+          选中 Layer 段时画布只占上面那块画面，按钮留在原位。 */}
+      <div data-vid-transport="" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderTop: '0.5px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
         <button style={tCtrl} title="Go to In point (or start)" onClick={() => seek(inSet ? p.inPoint : 0)}>⏮</button>
         <button style={{ ...tCtrl, width: 34 }} title={playing ? 'Pause' : 'Play (loops within In/Out when set)'}
           onClick={() => vid.setPlaying(!playing)}>

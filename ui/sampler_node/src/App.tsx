@@ -25,9 +25,11 @@ const rowMenu = (v: unknown): BlendRowMenu => {
 };
 const rowList = (v: unknown): BlendLayerRow[] => (Array.isArray(v) ? v as Array<Record<string, unknown>> : [])
   .map(r => ({ ...(r as unknown as BlendLayerRow), menu: rowMenu(r.menu) }));
-/** `+` 菜单的条目：不是数组回空表，条目里非字符串的两段丢掉（那一类摆不出名字就没法报它做什么）。 */
+/** `+` 菜单的条目：不是数组回空表，条目里非字符串的两段丢掉（那一类摆不出名字就没法报它做什么）。
+ *  `kind` 读不出来就当空串 —— 那是"不认识的分支"，视频模式下因此不会为它问轨道（安全的一侧）。 */
 const kindList = (v: unknown): BlendAttrKind[] => (Array.isArray(v) ? (v as BlendAttrKind[]) : [])
-  .filter(k => !!k && typeof k.type === 'string' && typeof k.label === 'string');
+  .filter(k => !!k && typeof k.type === 'string' && typeof k.label === 'string')
+  .map(k => ({ ...k, kind: typeof k.kind === 'string' ? k.kind : '' }));
 
 /** 一条快照里的面是增量：非字符串的值、以及页面那句"这张面没了"的空串都不算新面。 */
 const faceDelta = (v: unknown): Record<string, string> => {

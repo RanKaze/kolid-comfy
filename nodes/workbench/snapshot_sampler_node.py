@@ -11,7 +11,7 @@ import webbrowser
 from ...libs.client_host import open_ui, is_open_with_app, set_open_with_app
 import time
 import base64
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 import io
 import copy
 import shutil
@@ -25,7 +25,7 @@ import comfy.model_management as mm
 # 导入现有模块
 # =============================================================================
 from ...libs.utils import AlwaysEqualProxy
-from ...libs.data_paths import data_dir, data_file, web_file
+from ...libs.data_paths import PACK_ROOT, data_dir, data_file, web_file
 
 try:
     from .prompt_node import SnapshotPromptServer, SnapshotPromptNode
@@ -467,17 +467,24 @@ _VID_CONT_OK = {'.mp4', '.m4v', '.webm', '.mov'}
 
 def _vid_media_dir():
     """资产媒体库的落点：data/sampler/media/vid/。"""
-    return os.path.join(data_dir(), 'sampler', 'media', 'vid')
+    return os.path.join(data_dir('sampler'), 'media', 'vid')
 
 
 def _ff_bin(name):
-    """ffmpeg / ffprobe 可执行文件：先看 PATH，再试 KOLID_FFMPEG_DIR（指到 bin 目录）。"""
+    """ffmpeg / ffprobe 可执行文件：先看 PATH，再试 KOLID_FFMPEG_DIR（指到 bin 目录），
+    最后落到**包内自带的那份**（plugins/ffmpeg/bin，与 video_node / video_utils 同一落点）。
+    ComfyUI 进程的 PATH 是启动那一刻的：ffmpeg 后装进系统、或从精简启动器起来时它看不见 ——
+    包内这份随仓库走，是那时唯一还在的。找不到才交 None，由调用方降级（前端回退 blob:）。"""
     exe = shutil.which(name)
     if exe:
         return exe
-    env_dir = os.environ.get('KOLID_FFMPEG_DIR')
-    if env_dir:
-        cand = os.path.join(env_dir, name + ('.exe' if os.name == 'nt' else ''))
+    fname = name + ('.exe' if os.name == 'nt' else '')
+    dirs = [os.environ.get('KOLID_FFMPEG_DIR'),
+            os.path.join(PACK_ROOT, 'plugins', 'ffmpeg', 'bin')]
+    for d in dirs:
+        if not d:
+            continue
+        cand = os.path.join(d, fname)
         if os.path.isfile(cand):
             return cand
     return None
@@ -2530,7 +2537,10 @@ class SnapshotDetailerSamplerServer:
 
             # 资产媒体库：Video 工程 Assets 的文件伺服（带 Range —— <video> 的 seek 靠它）。
             if self.path.startswith('/api/vid_media/'):
-                fname = os.path.basename(self.path[len('/api/vid_media/'):])
+                # 文件名里的空格/中文等会被浏览器百分号编码（`Rabbit%20Dance_.mp4`）：这里必须解码
+                # 回来，否则拼出的路径永远对不上盘上的文件 → 404 → <video> 报
+                # MEDIA_ERR_SRC_NOT_SUPPORTED（videoWidth=0，播放头照走、画面全空）。
+                fname = os.path.basename(unquote(urlparse(self.path).path[len('/api/vid_media/'):]))
                 path = os.path.join(_vid_media_dir(), fname)
                 if not os.path.isfile(path):
                     self.send_error(404)

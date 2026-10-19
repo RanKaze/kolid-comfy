@@ -3,8 +3,9 @@ import type { VidClip, VidProject } from './model';
 // ── 逐帧合成：哪一帧归谁 ────────────────────────────────────────────────────────────────────
 // 口径（见 model.ts 的轨道序）：轨道的数组序就是上下序，**最上层命中的那一段**决定这一帧怎么出。
 //  * 命中 video 段（或者根本没有段）→ null，Player 走原来那条路（主 <video> 自己播）；
-//  * 命中 layer 段 → 这一帧交给工作台的图层系统：底下第一条 video 轨的当前帧当底图，
-//    所有 video 轨的当前帧当"源帧"（面 attribute 的 Frame source 从里面挑）。
+//  * 命中 layer 段 → 这一帧交给工作台的图层系统，画面**只有这一段自己的图层**：Layer 段是遮住
+//    脚下一层的，不把底下视频帧当底图，所以空段就是一张空图。所有 video 轨的当前帧当"源帧"
+//    交过去 —— 面 attribute 的 Frame source 从里面挑（`baseTrackId` 那条只用来定输出栅格）。
 // 音频轨不参与：它们不产生画面，声音本来就走 VidAudio。
 export type VidCompositeSource = { trackId: string; clip: VidClip };
 
@@ -12,9 +13,10 @@ export type VidCompositePlan = {
   layer: VidClip;
   /** 这一段的图层集 key（= layerKey，缺省时就是段自己的 id）。 */
   layerKey: string;
-  /** 底图来自哪条轨；null = 脚下没有视频（图层叠在透明上）。 */
+  /** 脚下第一条视频轨（Layer 段盖住的那条）；null = 脚下没有视频。画面不再画它 —— 它只用来
+   *  定输出栅格（`blend-vid-grid`）。面 attribute 另按自己的 frameTrack 从 sources 里挑源帧。 */
   baseTrackId: string | null;
-  /** 这一帧所有 video 轨命中的段，按轨道上下序（第一条就是底图）。 */
+  /** 这一帧所有 video 轨命中的段，按轨道上下序（第一条就是 baseTrackId 那条）。 */
   sources: VidCompositeSource[];
 };
 

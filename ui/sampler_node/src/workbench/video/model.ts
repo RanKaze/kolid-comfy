@@ -17,7 +17,8 @@ import type { MediaInfo } from './audio';
 // 三种轨：
 //  * video / audio —— 素材轨，帧与声直接来自源文件；
 //  * layer —— **合成轨**。它自己不装素材，只装"Layer 段"：每一段绑定一套独立图层
-//    （在 Layers 窗里编辑），并把下方视频轨的当前帧当作底图叠上去。
+//    （在 Layers 窗里编辑），这一帧的画面**就是这一段图层自己的合成** —— 不叠加脚下视频轨的帧，
+//    空段因此是一张空图。要让画面里出现某条视频轨的帧，就把它绑到 decal / mask 的 Frame source。
 //    **只有它排在所有视频轨之上时才会生效**（渲染按轨道序找第一条命中的轨，先命中先赢）。
 export type VidTrackKind = 'video' | 'audio' | 'layer';
 export type VidTrack = { id: string; kind: VidTrackKind; name: string };
