@@ -492,8 +492,13 @@ def recover_crop(background, image, crop_info, recover_method, mask=None):
         if mask is not None:
             Bm, Hm, Wm = mask.shape
             recovered_mask = torch.zeros((Bm, oh, ow), dtype=background.dtype, device=device)
-            # 把 cropped mask 放回原始位置
-            recovered_mask[:, cy:cy + Hm, cx:cx + Wm] = mask[:, :Hm, :Wm]
+            # 把 cropped mask 放回原始位置。crop 框可能贴着画布右下角（或 crop 帧在
+            # batch 内被 padding 放大过），此时 mask 会超出画布可用区域——按画布内的
+            # 实际范围裁剪粘贴，避免 target/源尺寸对不上直接报错。
+            h = min(Hm, oh - cy)
+            w = min(Wm, ow - cx)
+            if h > 0 and w > 0:
+                recovered_mask[:, cy:cy + h, cx:cx + w] = mask[:, :h, :w]
 
         _rc_sum = f"{recovered_mask.sum().item():.1f}" if recovered_mask is not None else "N/A"
         print(f"[MASK-TRACE] recover_crop OUTPUT | recovered_mask shape={recovered_mask.shape if recovered_mask is not None else None} | sum={_rc_sum}")

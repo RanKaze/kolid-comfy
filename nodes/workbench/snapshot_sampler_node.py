@@ -42,6 +42,8 @@ from ..pipeline.sampler_node import get_loras_from_string, ConditioningCacheStor
 from ...libs.generate_text_utils import apply_generate_text_to_prompt
 from ...libs import debug_trace as dbg
 from ...architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
+from .pipeline_graph import (blocks_to_graph, graph_from_config, exec_plan, port_kind,
+                            OP_INFO_PORT, START_ID, switch_n, sw_data_in, sw_data_out)
 import gc
 import uuid
 
@@ -1275,6 +1277,13 @@ class SnapshotDetailerSamplerServer:
             else:
                 self.active_block_set = None
                 self.blocks = []
+        # 图镜像：激活 set 若是新格式（带 `graph`）就用它，否则由旧 `blocks` 自动迁移成图。
+        # 后端执行引擎按 `self.graph` 跑；`self.blocks` 保留为旧格式镜像（摘要 / 兼容）。
+        _active = next((s for s in (self.blocks_sets or [])
+                        if s.get('id') == self.active_block_set), None)
+        self.graph = graph_from_config(_active) if _active else None
+        if self.graph is None:
+            self.graph = blocks_to_graph(self.blocks or [])
         # Pipeline Settings：选中的 pipeline 名字（`overrides` 是旧版按名字存的那份，原样保留、
         # 无人再读）。与 blocks_sets 同路（config 只是初值，落盘文件赢）—— 同样是纯 UI 状态。
         self.pipeline_settings = self._normalize_pipeline_settings(cfg.get('pipeline_settings'))
@@ -2145,12 +2154,16 @@ class SnapshotDetailerSamplerServer:
                     self.active_block_set = self.blocks_sets[0].get('id')
                 active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
                 if active_set is not None:
-                    self._set_blocks(active_set.get('blocks') or [])
+                    self._set_blocks(active_set.get('blocks') or [], active_set.get('graph'))
             else:
                 self.active_block_set = None
                 self._set_blocks([])
             self._save_blocks_sets_file()
-        if 'blocks' in data:
+        if 'graph' in data and isinstance(data['graph'], dict):
+            # 新格式：前端直接送图（每个 set 也带 graph）。图为准，blocks 只是它的投影。
+            self._set_blocks(data.get('blocks') or self.blocks or [], data['graph'])
+            self._save_blocks_sets_file()
+        elif 'blocks' in data:
             self._set_blocks(data['blocks'])
         # Pipeline Settings 整份替换（前端是唯一作者：选中项，外加旧版按名字的 override 原样带回）。
         if 'pipeline_settings' in data:
@@ -2169,13 +2182,22 @@ class SnapshotDetailerSamplerServer:
         if 'open_with_app' in data:
             set_open_with_app(bool(data['open_with_app']))
 
-    def _set_blocks(self, blocks):
-        """Adopt a flat block chain as the active one.
+    def _set_blocks(self, blocks, graph=None):
+        """Adopt a flat block chain (and its graph) as the active one.
 
-        Used by both the legacy `blocks` key and the multi-set tabs path. The chain itself is the
-        only state here — per-block sampling params are read straight from each block at run time,
-        they are never mirrored onto the server."""
+        Used by both the legacy `blocks` key and the multi-set tabs path. `graph` 是新格式的图：
+        给了就采用；只给 `blocks`（旧格式）就**就地迁移成图**，磁盘与执行都用它。`self.blocks`
+        仍是旧格式镜像，`self.graph` 才是执行引擎读的那一份。"""
         self.blocks = blocks or []
+        if isinstance(graph, dict) and isinstance(graph.get('nodes'), list):
+            self.graph = graph
+        else:
+            self.graph = blocks_to_graph(self.blocks)
+        if self.blocks_sets and self.active_block_set is not None:
+            for s in self.blocks_sets:
+                if s.get('id') == self.active_block_set:
+                    s['graph'] = self.graph
+                    break
 
     # ------------------------------------------------------------------
     # Prompt presets — 共享、持久化的 selection 模板；Prompt 块只存 preset_id 引用。
@@ -2446,6 +2468,7 @@ class SnapshotDetailerSamplerServer:
                     'has_pipeline_package': bool(inst and inst.pipeline_packages),
                     'pipeline_package_count': len(inst.pipeline_packages) if inst else 0,
                     'blocks': inst.blocks if inst else [],
+                    'graph': getattr(inst, 'graph', None) if inst else None,
                     'blocks_sets': inst.blocks_sets if inst else [],
                     'active_block_set': inst.active_block_set if inst else None,
                     # Pipeline Settings（此刻选中的 pipeline 名字；overrides 是旧数据）与这条节点上
@@ -4545,7 +4568,7 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Detailer
     # -------------------------------------------------------------------------
-    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None, extra_prompt='', prompt_ref_ids=None):
+    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None, extra_prompt='', prompt_ref_ids=None, graph=None):
         seed = global_params['seed']
         mask_grow = int(global_params.get('mask_grow', 32))
         mask_blur = int(global_params.get('mask_blur', 32))
@@ -4771,16 +4794,152 @@ class SnapshotDetailerSamplerNode:
                 print("[Detailer] Flux2Klein edit patch applied to pipeline model")
 
         try:
-            for i, block in enumerate(blocks):
-                is_last = (i == len(blocks) - 1)
+            # ── 执行计划：图优先，线性旧链回落 ──────────────────────────────────
+            # 图与「旧 blocks 迁移出的图」**逐条相等**时，图就是旧链的同一件事 —— 直接走老
+            # 循环（行为一字不差）；只有用户真的在画布上改过接线（分叉 / 重连 / 增删边）时，
+            # 才切到图引擎：按 Execute 拓扑序执行、运行时按 detect 命中/未命中放行分支、
+            # 并从显式 Image/Mask/Info 边取数。
+            steps = None
+            graph_mode = False
+            # 本次运行那条链的图：调用方按它所选的 preset set 传进来；没传就回落实例镜像
+            # （激活 set 的图），再不行就地由 blocks 迁移。
+            _pg = graph if isinstance(graph, dict) and graph.get('nodes') else getattr(self, 'graph', None)
+            if isinstance(_pg, dict) and _pg.get('nodes'):
+                try:
+                    _expected = blocks_to_graph(blocks)
+                    _sig = lambda g: sorted(
+                        (e.get('source'), e.get('sourcePort'), e.get('target'), e.get('targetPort'))
+                        for e in g.get('edges', []))
+                    if _sig(_pg) != _sig(_expected):
+                        steps = exec_plan(_pg)
+                        graph_mode = True
+                except Exception as _e:
+                    print(f'[Detailer] graph planning failed, falling back to the flat chain: {_e}')
+            if not graph_mode:
+                steps = [{'id': b.get('id'), 'type': b.get('type'), 'name': b.get('name'),
+                          'params': b.get('params', b), 'interface_index': b.get('interface_index'),
+                          'exec_options': b.get('exec_options'), 'guard': [], 'inputs': None}
+                         for b in blocks]
+
+            # 图引擎的端口值表：Start 交出链首裁剪/缩放后的工作图与 mask。
+            _values = {(START_ID, 'image'): resized_image, (START_ID, 'mask'): resized_mask}
+            _det_verdict = {}      # detect 节点 id → 命中与否（运行时分支依据）
+            _prev = None           # 上一颗真正执行的节点 {id,kind,index}
+            _step_inputs = None    # 当前节点的显式输入连线（图模式才有）
+            det_hit = True         # 每轮默认 True；只有 detect 会改写
+
+            def _take_explicit_info(_info_kind):
+                """图模式下：当前节点若有指向该类型 Info 的显式边，取其帧并从 geo_open 摘掉
+                （显式配对后不再靠"弹栈顶"）。非图模式 / 无边 → None（回落老栈）。"""
+                if not (graph_mode and _step_inputs):
+                    return None
+                _src = _step_inputs.get(_info_kind)
+                if _src is None:
+                    return None
+                _fr = _values.get((_src[0], _src[1]))
+                if _fr is None:
+                    return None
+                for _j in range(len(geo_open) - 1, -1, -1):
+                    if geo_open[_j] is _fr:
+                        geo_open.pop(_j)
+                        break
+                return _fr
+
+            for i, step in enumerate(steps):
+                block = {'id': step.get('id') if step.get('id') is not None else f'block-{i+1}',
+                         'type': step.get('type') or step.get('kind'),
+                         'name': step.get('name'),
+                         'params': step.get('params') or {},
+                         'interface_index': step.get('interface_index'),
+                         'exec_options': step.get('exec_options')}
+                _kind = block['type']
+                is_last = (i == len(steps) - 1)
+
+                # (1) 收下上一颗节点的输出存进值表（图模式；detect 顺带记命中）
+                if graph_mode and _prev is not None:
+                    _pid, _pk, _pi = _prev['id'], _prev['kind'], _prev['index']
+                    if port_kind(_pk, 'out', 'image') == 'image':
+                        _values[(_pid, 'image')] = current_image
+                    if port_kind(_pk, 'out', 'mask') == 'mask':
+                        _values[(_pid, 'mask')] = current_mask
+                    _iop = OP_INFO_PORT.get(_pk)
+                    if _iop is not None and geo_open and geo_open[-1].get('block') == _pi + 1:
+                        _values[(_pid, _iop[0])] = geo_open[-1]
+                    if _pk == 'detect':
+                        _det_verdict[_pid] = bool(det_hit)
+                    _prev = None
+
+                # (2) 运行时分支约束：detect 分支决定只在该放行时才跑这颗节点
+                _guard = step.get('guard') or []
+                if graph_mode and _guard:
+                    _ok = True
+                    for _did, _want in _guard:
+                        _hit = _det_verdict.get(_did)
+                        if _hit is None or (_hit != (_want == 'yes')):
+                            _ok = False
+                            break
+                    if not _ok:
+                        print(f"[PipelineBlock {i+1}/{len(steps)}] {block.get('name') or _kind} skipped "
+                              f"(detect branch not taken)")
+                        continue
+
+                # (3) 显式取数：从连线指向的源端口拿 image / mask
+                _step_inputs = step.get('inputs') if graph_mode else None
+                if _step_inputs:
+                    _isrc = _step_inputs.get('image')
+                    if _isrc is not None:
+                        _iv = _values.get((_isrc[0], _isrc[1]))
+                        if _iv is None:
+                            print(f"[PipelineBlock {i+1}/{len(steps)}] {block.get('name') or _kind} skipped "
+                                  f"(Image input has no value)")
+                            continue
+                        current_image = _iv
+                        next_pipeline.image = _iv
+                    _msrc = _step_inputs.get('mask')
+                    if _msrc is not None:
+                        _mv = _values.get((_msrc[0], _msrc[1]))
+                        if _mv is not None:
+                            current_mask = _mv
+
+                det_hit = True
+                _prev = {'id': block['id'], 'kind': _kind, 'index': i}
 
                 # 每个 block 执行前检查 interrupt 状态
                 mm.throw_exception_if_processing_interrupted()
 
+                # ── Switch（倒过来的 switch / gather）──────────────────────────
+                # 输入多头（每条分枝 = 一个 exec 头 + 它下面的若干 data，data 无类型），输出单头：
+                # 1 个 exec + N 个 data，N = 各分枝 data 数的最大值。对每个输出位置按**分枝顺序**
+                # 取"第一个有值的分枝"；没被 detect 放行 / 没连线的分枝不产值 → 该位置补空。
+                if block.get('type') == 'switch':
+                    _sw_id = block['id']
+                    _branches = (block.get('params') or {}).get('branches') or []
+                    _n_out = switch_n(block.get('params') or {})
+                    _filled = 0
+                    for _i in range(_n_out):
+                        _val = None
+                        for _b in range(len(_branches)):
+                            _src = (_step_inputs or {}).get(sw_data_in(_b, _i))
+                            if _src is None:
+                                continue
+                            _v = _values.get((_src[0], _src[1]))
+                            if _v is not None:
+                                _val = _v
+                                break
+                        _values[(_sw_id, sw_data_out(_i))] = _val
+                        if _val is not None:
+                            _filled += 1
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Switch block: "
+                          f"{len(_branches)} branch(es) → exec + {_n_out} data ({_filled} filled)")
+                    dbg.record_block(i + 1, f'Block {i+1} · Switch',
+                                     f'{len(_branches)} branches → {_n_out} data',
+                                     branches=len(_branches), outputs=_n_out, filled=_filled)
+                    continue
+
                 if block.get('type') == 'interface':
                     # Interface 块在 chain 内执行：以当前 pipeline 的 image/mask 作为输入，
                     # 执行子图后把结果写回 pipeline，作为下一 block 的输入（不加入 history）。
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Interface block — executing sub-graph (chain mode)")
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Interface block — executing sub-graph (chain mode)")
                     bp = block.get('params', block)
                     # 按接口名绑定（接口包重排/增删不会错绑到别的接口）；旧配置没有名字时
                     # 回退到下标。名字解不出 = 接口已不存在 → 标记性跳过（bypass），不中断 chain。
@@ -4876,7 +5035,7 @@ class SnapshotDetailerSamplerNode:
                     # content, but the extra typed in Blend right now must survive it.
                     if extra_prompt:
                         user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Query block answered: "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Query block answered: "
                           f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
                     dbg.record_prompt(f'Block {i+1} · Query 块回答后', user_positive,
                                       block=i + 1, loras=debug_lora_entries(user_loras))
@@ -4897,7 +5056,7 @@ class SnapshotDetailerSamplerNode:
                         # content, but the extra typed in Blend right now must survive it.
                         if extra_prompt:
                             user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
-                        print(f"[PipelineBlock {i+1}/{len(blocks)}] Prompt block applied: "
+                        print(f"[PipelineBlock {i+1}/{len(steps)}] Prompt block applied: "
                               f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
                         dbg.record_prompt(f'Block {i+1} · Prompt 块生效后', user_positive,
                                           block=i + 1, loras=debug_lora_entries(user_loras))
@@ -4947,7 +5106,7 @@ class SnapshotDetailerSamplerNode:
                             except Exception as tag_apply_err:
                                 print(f"[PipelineBlock {i+1}] WARNING: applying tag result failed ({tag_apply_err})")
                         user_positive = f"{user_positive}, {tag}" if user_positive else tag
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Tagger block ({tag_mode}): "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Tagger block ({tag_mode}): "
                           f"tag='{tag[:200]}' -> positive='{user_positive[:200]}'")
                     dbg.record_prompt(f'Block {i+1} · Tagger 块追加后', user_positive,
                                       block=i + 1, loras=debug_lora_entries(user_loras))
@@ -5012,7 +5171,7 @@ class SnapshotDetailerSamplerNode:
                         work_align = scale_align if scale_align > 1 else None
 
                     out_h, out_w = int(scaled_image.shape[1]), int(scaled_image.shape[2])
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Scale block: {in_w}x{in_h} → "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Scale block: {in_w}x{in_h} → "
                           f"{out_w}x{out_h} (scale={scale_val}, align={scale_align}"
                           + (" pipeline)" if use_pipeline_align else " block)"))
                     dbg.record_block(i + 1, f'Block {i+1} · Scale',
@@ -5069,7 +5228,7 @@ class SnapshotDetailerSamplerNode:
                     work_pixel_limit = None if limit_cap_only else limit_block_pixels
                     work_align = limit_block_align if limit_block_align > 1 else None
                     after_w, after_h = int(l_img.shape[2]), int(l_img.shape[1])
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Limit block: {before_w}x{before_h} → "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Limit block: {before_w}x{before_h} → "
                           f"{after_w}x{after_h} (pixels={limit_block_pixels}, align={limit_block_align}"
                           + (", cap_only)" if limit_cap_only else ")"))
                     dbg.record_block(i + 1, f'Block {i+1} · Limit',
@@ -5108,15 +5267,18 @@ class SnapshotDetailerSamplerNode:
                     before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
                     c_img, c_mask, c_info = crop_mask(image=current_image, mask=crop_input_mask,
                                                       reserve=crop_block_reserve)
+                    # crop_mask 帧：bg/bg_mask 是裁之前的整幅（坐标与原图同维），
+                    # crop_mask 是裁完那份（与裁出的 image 同维）—— recover_crop 要的
+                    # 是后者（它按 cx/cy 把 mask 贴回画布），所以恢复时的兜底 mask 用它。
                     geo_open.append({'kind': 'crop', 'info': c_info, 'bg': current_image,
-                                     'bg_mask': crop_input_mask, 'block': i + 1})
+                                     'bg_mask': crop_input_mask, 'crop_mask': c_mask, 'block': i + 1})
                     next_pipeline.image = c_img
                     next_pipeline.mask = c_mask
                     current_image, current_mask = c_img, c_mask
                     work_pixel_limit = None
                     work_align = None
                     after_w, after_h = int(c_img.shape[2]), int(c_img.shape[1])
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Crop block: {before_w}x{before_h} → "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Crop block: {before_w}x{before_h} → "
                           f"{after_w}x{after_h} (reserve={crop_block_reserve}"
                           + (" pipeline)" if use_pipe_reserve else " block)"))
                     dbg.record_block(i + 1, f'Block {i+1} · Crop',
@@ -5149,10 +5311,10 @@ class SnapshotDetailerSamplerNode:
                     # 上方压着 Scale / Limit（只改分辨率）时先自动收掉 —— 否则
                     # 「Crop → Scale → Recover Crop」会因为中间夹了个 Scale 就报错。
                     _close_soft_frames(geo_open)
-                    frame = geo_pop_frame(geo_open, 'crop', i + 1) if geo_open else None
+                    frame = _take_explicit_info('crop_info') or (geo_pop_frame(geo_open, 'crop', i + 1) if geo_open else None)
                     if (rc_method != 'bounds_only'
                             and current_mask is None
-                            and (frame is None or frame.get('bg_mask') is None)):
+                            and (frame is None or frame.get('crop_mask') is None)):
                         raise RuntimeError(
                             f"Recover Crop block (block {i+1}) uses Recover Method '{rc_method}', which "
                             f"needs a mask — the chain has none at this point. Use 'bounds_only', or put "
@@ -5162,7 +5324,7 @@ class SnapshotDetailerSamplerNode:
                         r_img, r_mask = recover_crop(
                             background=frame['bg'], image=current_image, crop_info=frame['info'],
                             recover_method=rc_method,
-                            mask=current_mask if current_mask is not None else frame.get('bg_mask'))
+                            mask=current_mask if current_mask is not None else frame.get('crop_mask'))
                         src = f'block {frame["block"]}'
                     elif crop_info_open is not None:
                         # 链首那两步是**隐式**的（Crop 在外、Limit 在内）。要回到整幅，就得
@@ -5191,7 +5353,7 @@ class SnapshotDetailerSamplerNode:
                     current_image, current_mask = r_img, r_mask
                     work_pixel_limit = None
                     work_align = None
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Recover Crop block: {before_w}x{before_h} → "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Recover Crop block: {before_w}x{before_h} → "
                           f"{int(r_img.shape[2])}x{int(r_img.shape[1])} (restored {src}, method={rc_method})")
                     dbg.record_block(i + 1, f'Block {i+1} · Recover Crop', f'restored {src}',
                                      recover_method=rc_method)
@@ -5220,7 +5382,7 @@ class SnapshotDetailerSamplerNode:
                     work_pixel_limit = None
                     work_align = None
                     after_w, after_h = int(m_img.shape[2]), int(m_img.shape[1])
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Meet block: {before_w}x{before_h} → "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Meet block: {before_w}x{before_h} → "
                           f"{after_w}x{after_h} (cover {meet_w or 'auto'}x{meet_h or 'auto'})")
                     dbg.record_block(i + 1, f'Block {i+1} · Meet',
                                      f'{before_w}x{before_h} → {after_w}x{after_h}',
@@ -5235,7 +5397,7 @@ class SnapshotDetailerSamplerNode:
 
                 if block.get('type') == 'recover_meet':
                     _close_soft_frames(geo_open)
-                    frame = geo_pop_frame(geo_open, 'meet', i + 1)
+                    frame = _take_explicit_info('meet_info') or geo_pop_frame(geo_open, 'meet', i + 1)
                     bp = block.get('params', block)
                     rm_interp = str(bp.get('interpolation') or 'bilinear') if isinstance(bp, dict) else 'bilinear'
                     # 与 ImageRecoverMeetNode 对齐：background 是**可选输入**，不接就是有损还原
@@ -5253,7 +5415,7 @@ class SnapshotDetailerSamplerNode:
                     current_image, current_mask = r_img, r_mask
                     work_pixel_limit = None
                     work_align = None
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Recover Meet block: {before_w}x{before_h} → "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Recover Meet block: {before_w}x{before_h} → "
                           f"{int(r_img.shape[2])}x{int(r_img.shape[1])} (restored block {frame['block']}, "
                           f"{'background' if rm_use_bg else 'padding ' + rm_pad})")
                     dbg.record_block(i + 1, f'Block {i+1} · Recover Meet',
@@ -5283,7 +5445,7 @@ class SnapshotDetailerSamplerNode:
                     work_pixel_limit = None
                     work_align = None
                     after_w, after_h = int(f_img.shape[2]), int(f_img.shape[1])
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Fit block: {before_w}x{before_h} → "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Fit block: {before_w}x{before_h} → "
                           f"{after_w}x{after_h} (contain {fit_w or 'auto'}x{fit_h or 'auto'}, pad={fit_pad})")
                     dbg.record_block(i + 1, f'Block {i+1} · Fit',
                                      f'{before_w}x{before_h} → {after_w}x{after_h}',
@@ -5298,7 +5460,7 @@ class SnapshotDetailerSamplerNode:
 
                 if block.get('type') == 'recover_fit':
                     _close_soft_frames(geo_open)
-                    frame = geo_pop_frame(geo_open, 'fit', i + 1)
+                    frame = _take_explicit_info('fit_info') or geo_pop_frame(geo_open, 'fit', i + 1)
                     bp = block.get('params', block)
                     rf_interp = str(bp.get('interpolation') or 'bilinear') if isinstance(bp, dict) else 'bilinear'
                     before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
@@ -5309,7 +5471,7 @@ class SnapshotDetailerSamplerNode:
                     current_image, current_mask = r_img, r_mask
                     work_pixel_limit = None
                     work_align = None
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Recover Fit block: {before_w}x{before_h} → "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Recover Fit block: {before_w}x{before_h} → "
                           f"{int(r_img.shape[2])}x{int(r_img.shape[1])} (restored block {frame['block']})")
                     dbg.record_block(i + 1, f'Block {i+1} · Recover Fit',
                                      f'restored block {frame["block"]}', interpolation=rf_interp)
@@ -5331,11 +5493,11 @@ class SnapshotDetailerSamplerNode:
                     bp = block.get('params', block)
                     r_interp = str(bp.get('interpolation') or 'bilinear') if isinstance(bp, dict) else 'bilinear'
                     before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
-                    frame = None
+                    frame = _take_explicit_info('scale_info' if kind == 'scale' else 'limit_info')
                     # 顶上若是另一种软帧（Scale ↔ Limit）先收掉：两者都只改分辨率，
                     # 跨着收没有歧义，不该为了顺序问题逼用户再补一颗块。
                     _close_soft_frames(geo_open, keep=kind)
-                    if geo_open and geo_open[-1].get('kind') == kind:
+                    if frame is None and geo_open and geo_open[-1].get('kind') == kind:
                         frame = geo_open.pop()
                     if frame is None and kind == 'limit' and last_resize_info is not None:
                         # 老口径：栈上没有 Limit 帧时，还掉链首那次隐式 Limit（顶上是
@@ -5374,7 +5536,7 @@ class SnapshotDetailerSamplerNode:
                     current_image, current_mask = r_img, r_mask
                     work_pixel_limit = None
                     work_align = None
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] {GEO_RECOVER_LABEL[kind]} block: "
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] {GEO_RECOVER_LABEL[kind]} block: "
                           f"{before_w}x{before_h} → {int(r_img.shape[2])}x{int(r_img.shape[1])} "
                           f"(restored {src})")
                     dbg.record_block(i + 1, f'Block {i+1} · {GEO_RECOVER_LABEL[kind]}',
@@ -5409,12 +5571,11 @@ class SnapshotDetailerSamplerNode:
                         det_threshold = 0.5
                     det_threshold = min(1.0, max(0.0, det_threshold))
                     det_invert = bool(bp.get('invert'))
-                    det_mode = str(bp.get('mode') or 'replace')
                     det_img = current_image[0] if current_image.dim() == 4 else current_image
                     dbg.record_block(i + 1, f'Block {i+1} · Detect',
                                      det_prompt or '(whole image)',
                                      prompt=det_prompt, threshold=det_threshold,
-                                     invert=det_invert, mode=det_mode)
+                                     invert=det_invert)
                     dbg.record_image(f'Block {i+1} · Detect 输入图', current_image, block=i + 1)
                     if det_prompt:
                         _root = _parse_expr(det_prompt, det_threshold)
@@ -5447,15 +5608,16 @@ class SnapshotDetailerSamplerNode:
                             mode='bilinear', align_corners=False,
                         ).squeeze(1)
                     det_mask = det_mask.float().clamp_(0.0, 1.0)
-                    if det_mode == 'intersect' and current_mask is not None:
-                        det_mask = det_mask * current_mask.float()
                     next_pipeline.mask = det_mask
                     current_mask = det_mask
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Detect block: "
+                    # 运行时分支依据：命中 = 检测出了非空 mask。图引擎据此放行 exec_yes /
+                    # exec_no 两条分支（旧线性链不看它）。
+                    det_hit = bool(det_mask is not None and float(det_mask.sum()) > 0.0)
+                    print(f"[PipelineBlock {i+1}/{len(steps)}] Detect block: "
                           f"{det_prompt or '(whole image)'} → mask {tuple(det_mask.shape)} "
-                          f"(sum={float(det_mask.sum()):.0f}, mode={det_mode})")
+                          f"(sum={float(det_mask.sum()):.0f})")
                     dbg.record_mask(f'Block {i+1} · Detect 结果（新 pipeline mask）', det_mask,
-                                    block=i + 1, mode=det_mode,
+                                    block=i + 1,
                                     detail=f'sum={float(det_mask.sum()):.0f}')
                     continue
 
@@ -5494,7 +5656,7 @@ class SnapshotDetailerSamplerNode:
                 block_seed = seed
                 seed = next_seed(seed)
 
-                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, seed={block_seed}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, textgen={enable_text_generate}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
+                print(f"[PipelineBlock {i+1}/{len(steps)}] Detailer: noise={add_noise}, seed={block_seed}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, textgen={enable_text_generate}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
                 dbg.record_block(i + 1, f'Block {i+1} · Detailer',
                                  f'{block.get("name", "")}',
                                  add_noise=add_noise,
@@ -5939,16 +6101,22 @@ class SnapshotDetailerSamplerNode:
                 # Recover to pre-resize (cropped) resolution so next block starts at cropped size
                 if not is_last:
                     if resize_info is not None:
-                        recovered_decoded, _ = recover_size(
+                        recovered_decoded, recovered_mask = recover_size(
                             image=decoded_image,
                             resize_info=resize_info,
                             mask=resized_mask
                         )
                         current_image = recovered_decoded
+                        # mask 要用"本块输入 mask 按同一档缩放还原回来"的那一份 —— 它才是
+                        # 链上当前生效的 mask（可能被上游 Detect / Crop 重造过）在这一分辨率
+                        # 下的对应物。旧的 `= cropped_mask` 是链首隐式 crop 的那份：在「mask
+                        # 由链内 Detect 现造」时它是 None，会把链内 mask 直接抹掉，随后的
+                        # Recover Limit 跟着丢 None，Recover Crop 兜底到整幅 mask → 尺寸不符崩溃。
+                        current_mask = recovered_mask if recovered_mask is not None else cropped_mask
                     else:
                         # Enable Limit 关：从没缩放过，工作区尺寸恒定，无需复原。
                         current_image = decoded_image
-                    current_mask = cropped_mask
+                        current_mask = resized_mask
                 else:
                     current_image = decoded_image
                     current_mask = resized_mask
@@ -6272,6 +6440,7 @@ class SnapshotDetailerSamplerNode:
         ) if preset_id else None
         blocks = preset_set['blocks'] if preset_set is not None else server.blocks
         run_set_id = preset_set['id'] if preset_set is not None else server.active_block_set
+        run_graph = graph_from_config(preset_set) if preset_set is not None else getattr(server, 'graph', None)
         if preset_set is not None:
             print(f"[PresetVideo] using pipeline preset '{preset_set.get('name')}' ({len(preset_set['blocks'])} blocks)")
 
@@ -6331,7 +6500,7 @@ class SnapshotDetailerSamplerNode:
 
             _next, _orig, detailed, detail_meta = self._run_pipeline_blocks(
                 run_pipeline, user_mask, user_positive, user_loras, global_params, blocks,
-                server=server, extra_prompt=extra_prompt,
+                server=server, extra_prompt=extra_prompt, graph=run_graph,
             )
             if detailed is None:
                 raise ValueError(f'Frame {i + 1}/{len(frames)} produced no image')
@@ -6928,6 +7097,7 @@ class SnapshotDetailerSamplerNode:
                             print(f"[run_detailer] using pipeline preset '{preset_set.get('name')}' ({len(preset_set['blocks'])} blocks)")
                         blocks = preset_set['blocks'] if preset_set is not None else server.blocks
                         run_set_id = preset_set['id'] if preset_set is not None else server.active_block_set
+                        run_graph = graph_from_config(preset_set) if preset_set is not None else getattr(server, 'graph', None)
 
                         # 遮罩必须存在，否则 detailer 无意义 —— 例外：Enable Mask 总闸关
                         # （生效链第一个 detailer 的 params.enable_mask）时整幅都是工作区，
@@ -7042,7 +7212,7 @@ class SnapshotDetailerSamplerNode:
 
                         next_pipeline, original_image, detailed_image, detail_meta = self._run_pipeline_blocks(
                             run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server,
-                            extra_prompt=extra_prompt, prompt_ref_ids=prompt_ref_ids
+                            extra_prompt=extra_prompt, prompt_ref_ids=prompt_ref_ids, graph=run_graph
                         )
 
                         server.original_image = original_image

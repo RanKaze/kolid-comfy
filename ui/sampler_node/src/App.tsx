@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, PipelineBlockKind, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendUiPayloads, BlendUiSend, BlendPen } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendUiPayloads, BlendUiSend, BlendPen } from './types';
+import { blocksToGraph, graphToBlocks, type PipelineGraph } from './workbench/pipeline-graph';
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
 import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendAttrOpen, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUi, setBlendUi } from './workbench/store';
@@ -444,29 +445,31 @@ const App: React.FC = () => {
     // 在 Run 时统一解析，所有 detailer block 共用。
     context_regex: '.+',
   };
-  const defaultInterfaceParams: InterfaceBlockParams = {
-    interface_idx: 0,
-    operation: 'default',
-    crop_reserve: 32,
-    image_keys: {},
-    context_image_key: null,
-    context_mask_key: null,
-    manual_values: {},
-  };
+  // 每套链都保证带 `graph`：旧数据（只有 blocks）就地迁移；新数据原样用。
+  // `blocks` 始终是 `graph` 沿 Execute 顺序的投影，两条路各写一处、保持一致。
+  const normalizeSet = useCallback((s: BlockSet): BlockSet => {
+    const g: PipelineGraph = (s.graph && Array.isArray(s.graph.nodes))
+      ? s.graph
+      : blocksToGraph(s.blocks ?? []);
+    return { ...s, graph: g, blocks: graphToBlocks(g) };
+  }, []);
   // Multi-set Pipeline Blocks ("tabs" in the workbench). The ACTIVE set's blocks ARE the working
   // chain — everything downstream (EditPhase's list, /api/update_config, the Blend workbench's
   // block list) sees only that flat array; the sets are the storage layer wrapped around it.
   const [blockSets, setBlockSets] = useState<BlockSet[]>([
-    { id: 'set-1', name: 'Default', blocks: [
+    normalizeSet({ id: 'set-1', name: 'Default', blocks: [
       { id: 'block-1', type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } },
-    ] },
+    ] }),
   ]);
   const [activeBlockSetId, setActiveBlockSetId] = useState<string>('set-1');
   const blockSetIdCounter = useRef(2);
   const blocks = useMemo(
     () => blockSets.find(s => s.id === activeBlockSetId)?.blocks ?? blockSets[0]?.blocks ?? [],
     [blockSets, activeBlockSetId]);
-  const [architecture, setArchitecture] = useState<string | null>(null);
+  // 图视图编辑的是**激活那套的图**；老数据没图时现由 blocks 迁移一份（只读兜底）。
+  const activeGraph = useMemo<PipelineGraph>(
+    () => blockSets.find(s => s.id === activeBlockSetId)?.graph ?? blocksToGraph(blocks),
+    [blockSets, activeBlockSetId, blocks]);
   const [maskGrow, setMaskGrow] = useState(32);
   const [maskBlur, setMaskBlur] = useState(32);
   // DEFAULT SETTING（Settings 页）：所有 preset 共享（server config 持久化）
@@ -499,14 +502,18 @@ const App: React.FC = () => {
         setTgenPixelsVal(data.tgen_pixels ?? 1048576);
         setTgenAlignVal(data.tgen_align ?? 8);
         if (Array.isArray(data.blocks_sets)) {
-          setBlockSets(data.blocks_sets);
+          setBlockSets(data.blocks_sets.map(normalizeSet));
           setActiveBlockSetId(
             data.active_block_set && data.blocks_sets.some((s: BlockSet) => s.id === data.active_block_set)
               ? data.active_block_set
               : (data.blocks_sets[0]?.id ?? ''));
         } else if (data.blocks && data.blocks.length > 0) {
           // Legacy config without sets: wrap the flat chain into a single Default tab.
-          setBlockSets([{ id: 'set-1', name: 'Default', blocks: data.blocks }]);
+          setBlockSets([normalizeSet({ id: 'set-1', name: 'Default', blocks: data.blocks })]);
+          setActiveBlockSetId('set-1');
+        } else if (data.graph && Array.isArray(data.graph.nodes)) {
+          // 新格式但还没分 set：把图包成一个 Default tab。
+          setBlockSets([normalizeSet({ id: 'set-1', name: 'Default', blocks: data.blocks ?? [], graph: data.graph })]);
           setActiveBlockSetId('set-1');
         }
         // Counters restart at 2 each load; skip past ids already persisted on the server,
@@ -523,7 +530,6 @@ const App: React.FC = () => {
         setArchSettings({ rules: archRules });
         archRuleIdCounter.current = Math.max(2, maxIdSuffix(archRules.map(r => r.id), 'arch-') + 1);
         setDetailStatus(data.detail_status);
-        setArchitecture(data.architecture ?? null);
         setPipelineSettings(data.pipeline_settings ?? EMPTY_PIPELINE_SETTINGS);
         setInterfaceMeta(data.interface_meta ?? {});
         setOpenWithApp(!!data.open_with_app);
@@ -723,7 +729,6 @@ const App: React.FC = () => {
         // 一条 preset 绑定的 pipeline 是在 run 循环里现加载的：名字与架构都会跟着变，
         // 轮询顺手同步，前端就不用再拉一次 config。
         if (typeof data.loaded_pipeline_name === 'string') setLoadedPipelineName(data.loaded_pipeline_name);
-        if (data.architecture !== undefined) setArchitecture(data.architecture ?? null);
         // 同一趟 run 里 lora_regex 也可能换了代（后端已经跟着重扫过 lora 了）：Prompt tab 开着
         // 的话这一代当场送过去，别等用户下次进那个 tab。
         if (typeof data.pipeline_lora_epoch === 'number') loraEpochRef.current = data.pipeline_lora_epoch;
@@ -1459,7 +1464,6 @@ const App: React.FC = () => {
       if (data.success) {
         // 切换即加载：edit 设置按架构渲染、override 按名字取，两者都要跟着刷新
         fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
-          setArchitecture(cfg.architecture ?? null);
           setLoadedPipelineName(cfg.loaded_pipeline_name ?? '');
           loraEpochRef.current = cfg.pipeline_lora_epoch ?? loraEpochRef.current;
           // 这里以前是 setTimeout(100) 的一次性 post：iframe 还没挂上监听就永久丢在空气里。
@@ -1474,16 +1478,30 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Single write path for every blocks mutation: the sets plus the active chain go out together
-  // (the server mirrors `blocks` as its runner chain AND derives it from the active set).
-  const handleBlocksChange = useCallback((next: PipelineBlock[]) => {
-    const nextSets = blockSets.map(s => s.id === activeBlockSetId ? { ...s, blocks: next } : s);
+  // 图落盘的合并写：节点内联编辑会高频触发，这里延后到停顿 400ms 再发（UI 已即时更新）。
+  const graphSaveTimer = useRef<number | null>(null);
+  const scheduleGraphSave = useCallback((sets: BlockSet[], activeId: string, blocks: PipelineBlock[], graph: PipelineGraph) => {
+    if (graphSaveTimer.current !== null) window.clearTimeout(graphSaveTimer.current);
+    graphSaveTimer.current = window.setTimeout(() => {
+      graphSaveTimer.current = null;
+      fetch('/api/update_config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blocks_sets: sets, active_block_set: activeId, blocks, graph }),
+      }).catch(() => {});
+    }, 400);
+  }, []);
+
+  // Graph 视图的写路径：图是真源，`blocks` 是它沿 Execute 顺序的投影（给旧路径/摘要用）。
+  const handleGraphChange = useCallback((next: PipelineGraph) => {
+    const nextSets = blockSets.map(s => s.id === activeBlockSetId
+      ? { ...s, graph: next, blocks: graphToBlocks(next) }
+      : s);
     setBlockSets(nextSets);
-    fetch('/api/update_config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ blocks_sets: nextSets, active_block_set: activeBlockSetId, blocks: next }),
-    }).catch(() => {});
+    const active = nextSets.find(s => s.id === activeBlockSetId) ?? nextSets[0];
+    // 节点内联编辑每敲一下都会走到这里 —— 网络写必须合并，否则一次编辑就是几十个 POST。
+    // UI 立即更新（setBlockSets 在上面），落盘延后到停顿 400ms。
+    scheduleGraphSave(nextSets, activeBlockSetId, active?.blocks ?? [], next);
   }, [blockSets, activeBlockSetId]);
 
   const handleDefaultParamChange = useCallback((key: OverrideKey, value: number) => {
@@ -1503,73 +1521,6 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  const handleAddBlock = useCallback((type: PipelineBlockKind) => {
-    const id = 'block-' + blockIdCounter.current++;
-    // 几何块与 Recover 块都只有一两颗旋钮 —— 默认值就是「什么都不做」（0 = 沿用当前尺寸，
-    // reserve 跟随 DEFAULT SETTING），所以刚加进来时链的行为不变，用户再拧。
-    const newBlock: PipelineBlock = type === 'detailer'
-      ? { id, type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } }
-      : type === 'interface'
-        ? { id, type: 'interface', name: 'Interface', params: { ...defaultInterfaceParams } }
-        : type === 'query'
-          ? { id, type: 'query', name: 'Query', params: {} }
-          : type === 'tagger'
-            ? { id, type: 'tagger', name: 'Tagger', params: { mode: 'mask' } }
-            : type === 'scale'
-              ? { id, type: 'scale', name: 'Scale', params: { scale: 1.0, align: 8, use_pipeline_align: true } }
-              : type === 'crop'
-                ? { id, type: 'crop', name: 'Crop', params: { reserve: 0, use_pipeline_reserve: true } }
-                : type === 'meet'
-                  ? { id, type: 'meet', name: 'Meet', params: { width: 0, height: 0, interpolation: 'bilinear' } }
-                  : type === 'fit'
-                    ? {
-                      id, type: 'fit', name: 'Fit',
-                      params: { width: 0, height: 0, interpolation: 'bilinear', padding_color: '255, 255, 255' },
-                    }
-                    : type === 'recover_meet'
-                      ? {
-                        id, type, name: 'Recover Meet',
-                        // 与 ImageRecoverMeetNode 同参数表：插值 + 可选背景（不接背景就补色）
-                        params: {
-                          interpolation: 'bilinear',
-                          use_background: true,
-                          padding_color: '255, 255, 255',
-                        },
-                      }
-                      : type === 'recover_fit' || type === 'recover_scale'
-                        ? {
-                          id, type, name: type === 'recover_fit' ? 'Recover Fit' : 'Recover Scale',
-                          params: { interpolation: 'bilinear' },
-                        }
-                        : type === 'recover_crop'
-                          ? {
-                            id, type: 'recover_crop', name: 'Recover Crop',
-                            params: { recover_method: 'mask_blend' },
-                          }
-                          : type === 'recover_limit'
-                            ? { id, type: 'recover_limit', name: 'Recover Limit', params: {} }
-                            : type === 'limit'
-                              ? { id, type: 'limit', name: 'Limit', params: { pixels: 0, align: 0, cap_only: false } }
-                              : type === 'detect'
-                                ? {
-                                  id, type: 'detect', name: 'Detect',
-                                  params: { prompt: '', threshold: 0.5, invert: false, mode: 'replace' },
-                                }
-                                : { id, type: 'prompt', name: 'Prompt', params: { preset_id: null } };
-    handleBlocksChange([...blocks, newBlock]);
-  }, [blocks, handleBlocksChange]);
-
-  const handleRemoveBlock = useCallback((blockId: string) => {
-    if (blocks.length <= 1) return;
-    handleBlocksChange(blocks.filter(b => b.id !== blockId));
-  }, [blocks, handleBlocksChange]);
-
-  const handleReorderBlocks = useCallback((fromIdx: number, toIdx: number) => {
-    const next = [...blocks];
-    const [moved] = next.splice(fromIdx, 1);
-    next.splice(toIdx, 0, moved);
-    handleBlocksChange(next);
-  }, [blocks, handleBlocksChange]);
 
   /**
    * Run one pipeline preset right now — the ▶ half of the sampler's Pipeline Presets
@@ -1611,15 +1562,18 @@ const App: React.FC = () => {
 
   // ── Pipeline Blocks tabs（多套 blocks，每套独立持久化在后端 config）──
   const persistSets = useCallback((nextSets: BlockSet[], nextActiveId: string) => {
-    setBlockSets(nextSets);
+    // 每套保证带图：缺图的旧 set 就地迁移，**已有的图原样保留** —— tab 的新建/改名/删除
+    // 不能把用户在图里搭好的接线按 blocks 重算成线性迁移（那会悄悄清掉分支）。
+    const sets: BlockSet[] = nextSets.map(normalizeSet);
+    setBlockSets(sets);
     setActiveBlockSetId(nextActiveId);
-    const active = nextSets.find(s => s.id === nextActiveId) ?? nextSets[0];
+    const active = sets.find(s => s.id === nextActiveId) ?? sets[0];
     fetch('/api/update_config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ blocks_sets: nextSets, active_block_set: nextActiveId, blocks: active?.blocks ?? [] }),
+      body: JSON.stringify({ blocks_sets: sets, active_block_set: nextActiveId, blocks: active?.blocks ?? [], graph: active?.graph }),
     }).catch(() => {});
-  }, []);
+  }, [normalizeSet]);
 
   const handleAddBlockSet = useCallback(() => {
     const id = 'set-' + blockSetIdCounter.current++;
@@ -1746,33 +1700,36 @@ const App: React.FC = () => {
     persistSets(blockSets.map(s => s.id === setId ? { ...s, pipeline_name: pipelineName } : s), activeBlockSetId);
   }, [blockSets, activeBlockSetId, persistSets]);
 
-  // One-time migration: interface blocks saved before name-binding only carry interface_idx.
-  // Once the interfaces list is known, resolve and write the name into every set's blocks so
-  // later reordering/removal of interface packages cannot silently rebind them.
+  // One-time migration: interface nodes saved before name-binding only carry interface_idx.
+  // Once the interfaces list is known, resolve and write the name into every set's **graph**
+  // nodes (图是唯一真源)，blocks 由图重算 —— 否则这一步会把用户搭好的接线冲成线性迁移。
   const ifaceNameMigratedRef = useRef(false);
   useEffect(() => {
     if (ifaceNameMigratedRef.current || interfaces.length === 0 || blockSets.length === 0) return;
     ifaceNameMigratedRef.current = true;
     let changed = false;
-    const nextSets = blockSets.map(set => ({
-      ...set,
-      blocks: set.blocks.map(b => {
-        if (b.type !== 'interface') return b;
-        const ip = b.params as InterfaceBlockParams;
-        if (ip.interface_name) return b;
+    const sets: BlockSet[] = blockSets.map(set => {
+      const g: PipelineGraph = (set.graph && Array.isArray(set.graph.nodes))
+        ? set.graph : blocksToGraph(set.blocks ?? []);
+      const nodes = g.nodes.map(n => {
+        if (n.kind !== 'interface') return n;
+        const ip = n.params as InterfaceBlockParams;
+        if (ip.interface_name) return n;
         const itf = interfaces[ip.interface_idx];
-        if (!itf) return b;   // out of range: stays unnamed = Missing until the user re-picks
+        if (!itf) return n;   // out of range: stays unnamed = Missing until the user re-picks
         changed = true;
-        return { ...b, params: { ...ip, interface_name: itf.name } };
-      }),
-    }));
+        return { ...n, params: { ...ip, interface_name: itf.name } };
+      });
+      const graph: PipelineGraph = { nodes, edges: g.edges };
+      return { ...set, graph, blocks: graphToBlocks(graph) };
+    });
     if (!changed) return;
-    const active = nextSets.find(s => s.id === activeBlockSetId) ?? nextSets[0];
-    setBlockSets(nextSets);
+    setBlockSets(sets);
+    const active = sets.find(s => s.id === activeBlockSetId) ?? sets[0];
     fetch('/api/update_config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ blocks_sets: nextSets, active_block_set: activeBlockSetId, blocks: active?.blocks ?? [] }),
+      body: JSON.stringify({ blocks_sets: sets, active_block_set: activeBlockSetId, blocks: active?.blocks ?? [], graph: active?.graph }),
     }).catch(() => {});
   }, [interfaces, blockSets, activeBlockSetId]);
 
@@ -1831,7 +1788,6 @@ const App: React.FC = () => {
         staging={staging}
         promptIframeRef={promptIframeRef}
         blocks={blocks}
-        architecture={architecture}
         maskGrow={maskGrow}
         maskBlur={maskBlur}
         cropReserve={cropReserve}
@@ -1841,17 +1797,15 @@ const App: React.FC = () => {
         refAlignVal={refAlignVal}
         tgenPixelsVal={tgenPixelsVal}
         tgenAlignVal={tgenAlignVal}
-        onBlocksChange={handleBlocksChange}
         onDefaultParamChange={handleDefaultParamChange}
-        onAddBlock={handleAddBlock}
         pendingQuery={pendingQuery}
         onRunPreset={handleRunPreset}
         onQueryAnswer={handleQueryAnswer}
         onQueryCancel={handleQueryCancel}
-        onRemoveBlock={handleRemoveBlock}
-        onReorderBlocks={handleReorderBlocks}
         blockSets={blockSets}
         activeBlockSetId={activeBlockSetId}
+        activeGraph={activeGraph}
+        onGraphChange={handleGraphChange}
         onAddBlockSet={handleAddBlockSet}
         onRenameBlockSet={handleRenameBlockSet}
         onDuplicateBlockSet={handleDuplicateBlockSet}

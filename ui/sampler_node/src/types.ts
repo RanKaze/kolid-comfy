@@ -1,3 +1,7 @@
+// 图模型（xyflow）的定义在 workbench/pipeline-graph.ts；这里只做类型引用（type-only，
+// 编译期擦除，不会与那边的 `import type ... from '../types'` 形成运行期循环）。
+import type { PipelineGraph } from './workbench/pipeline-graph';
+
 export interface ServerConfig {
   prompt_url: string;
   detail_status: 'idle' | 'running' | 'done' | 'error';
@@ -23,6 +27,9 @@ export interface ServerConfig {
   has_pipeline_package: boolean;
   pipeline_package_count: number;
   blocks: PipelineBlock[];
+  /** 新格式：激活那套链的**图**（xyflow 数据模型）。存在时它就是执行真源，
+   *  `blocks` 只是它沿 Execute 顺序的投影（过渡期给旧路径/摘要用）。 */
+  graph?: PipelineGraph | null;
   /** 多套 Pipeline Blocks（工作台里的 tabs）；`blocks` 始终是激活那一套的镜像 */
   blocks_sets?: BlockSet[];
   active_block_set?: string | null;
@@ -42,11 +49,15 @@ export interface ServerConfig {
   pipeline_lora_epoch?: number;
 }
 
-/** 一套 Pipeline Blocks = 一个 tab。id 稳定（重命名不改 id），blocks 与旧模型同构。 */
+/** 一套 Pipeline Blocks = 一个 tab。id 稳定（重命名不改 id）。
+ *  新格式以 `graph` 为真源，`blocks` 是它沿 Execute 顺序的投影（旧路径/摘要用）；只有
+ *  `blocks`（旧数据）时由 `blocksToGraph` 就地迁移。 */
 export interface BlockSet {
   id: string;
   name: string;
   blocks: PipelineBlock[];
+  /** 新格式的图；缺省 = 由 `blocks` 迁移。 */
+  graph?: PipelineGraph;
   /** 这套链跑起来时用哪条 pipeline：'' = 不切换（[Current Select] 语义）、
    *  PIPELINE_CURRENT_SELECT、或某个 pipeline 名字。绑定按名字（不是索引）。 */
   pipeline_name?: string | null;

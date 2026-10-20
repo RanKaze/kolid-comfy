@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react';
-import type { PipelineBlock, PipelineBlockKind, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, CropBlockParams, MeetFitBlockParams, RecoverBlockParams, RecoverCropBlockParams, DetectBlockParams, LimitBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
@@ -10,6 +10,8 @@ import { fetchLayouts } from '../dock/layoutStore';
 import { type DockDrag, type DockOver, DockPanel } from '../dock/DockView';
 import { registerProbe, note } from '../debug/probe';
 import { onGlobalKey, keyIs } from '../hotkeys';
+import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
+import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
 import { type VidAsset, type VidController, type VidClip, type VidProject, type VidTrackKind, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, fillProcSegment, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, placeProcAssets, placeProcPlaceholders, saveVidProject } from '../workbench/video/model';
@@ -52,7 +54,7 @@ const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks
 const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'preprocess', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
   toolbar: 'File', context: 'Context', pipeline: 'Pipeline & Presets', preprocess: 'Preprocess',
-  blocks: 'Pipeline Blocks', vtracks: 'Tracks', vassets: 'Assets',
+  blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets',
   ...WORKBENCH_TITLES,
 };
 const COLUMN_W = 340;
@@ -220,52 +222,6 @@ const ContextMenu: React.FC<{
   </div>
 );
 
-// What the "Add +" dropdown offers. Query is the only kind that interacts with the user
-// mid-run: the chain stops there and waits for a prompt choice.
-// 前六种是"处理链"（改的是 prompt/子图/模型那一趟），后十种是"几何 / 检测"（改的是链上
-// 此刻的工作图与 mask）。两组的 `sep` 会把菜单分成两段 —— 十六项一条平列时，Scale 与
-// Crop 在视觉上会连成一片，用户找不着边界。
-const ADD_BLOCK_KINDS: { kind: PipelineBlockKind | ''; label: string; color: string; hint: string; sep?: boolean }[] = [
-  { kind: 'detailer', label: 'Detailer', color: '#30d158', hint: 'Refine the masked region' },
-  { kind: 'interface', label: 'Interface', color: '#bf5af2', hint: 'Run an interface sub-graph inside the chain' },
-  { kind: 'prompt', label: 'Prompt', color: '#64d2ff', hint: 'Inject a shared prompt preset for the blocks after it' },
-  { kind: 'query', label: 'Query', color: '#ffd60a', hint: 'Stop the run here and ask you for a prompt' },
-  { kind: 'tagger', label: 'Tagger', color: '#ff9f0a', hint: 'Tag the current image and append the tag to the prompt for the blocks after it' },
-  { kind: 'scale', label: 'Scale', color: '#5e5ce6', hint: 'Resize the working image by a ratio and snap it to the align grid (limit_pixels semantics)' },
-  { kind: '', label: 'geometry', color: '', hint: '', sep: true },
-  { kind: 'crop', label: 'Crop', color: '#ff375f', hint: 'Crop the working area to the Mask bounding box — pair it with Recover Crop' },
-  { kind: 'recover_crop', label: 'Recover Crop', color: '#ff375f', hint: 'Paste the last Crop back into the image it came from' },
-  { kind: 'meet', label: 'Meet', color: '#0a84ff', hint: 'Cover: scale until it fills the target frame, then centre-crop the overflow' },
-  { kind: 'recover_meet', label: 'Recover Meet', color: '#0a84ff', hint: 'Put a Meet back — the cropped-away edges come back from the original' },
-  { kind: 'fit', label: 'Fit', color: '#64d2ff', hint: 'Contain: scale until it fits the target frame, then pad the rest' },
-  { kind: 'recover_fit', label: 'Recover Fit', color: '#64d2ff', hint: 'Take a Fit back — inner frame scaled to the original size, padding gone' },
-  { kind: 'limit', label: 'Limit', color: '#8e8e93', hint: 'Re-apply the pixel budget mid-chain — pair it with Recover Limit' },
-  { kind: 'recover_limit', label: 'Recover Limit', color: '#8e8e93', hint: 'Return to the resolution from before the last Limit (a Limit block, or the chain-start one)' },
-  { kind: 'recover_scale', label: 'Recover Scale', color: '#5e5ce6', hint: 'Undo the last Scale block — repainted pixels stay, the rest comes back from the original' },
-  { kind: 'detect', label: 'Detect', color: '#ffd60a', hint: 'Run the node detector here and use the result as the pipeline mask' },
-];
-
-
-// One palette per block kind: the Add menu's row and the card's dot read the same entry, so a kind
-// can never be one colour in the menu and another on its card.
-const BLOCK_TINT: Record<string, string> = ADD_BLOCK_KINDS.reduce(
-  (a, o) => (o.kind ? { ...a, [o.kind]: o.color } : a), {} as Record<string, string>);
-// What a Query block does — hover the card's type label for it. It used to be a paragraph inside the
-// card, which pushed the real parameters down for information you read once.
-const QUERY_BLOCK_HINT = '执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。';
-
-// Pipeline Blocks 重排的 dragover/dragenter 授权：整张块卡都是落点（见使用处的注释）。
-// 载荷走**专属 MIME**（BLOCK_DND_MIME）：真实拖拽里 Chrome 会自动附加内部类型
-// （chromium/x-drag-id），"types 只有 text/plain 一种"的判别在真机上永远不成立 —— 合成
-// 事件里没有那个内部类型，单测会骗人。专属类型只有块重排写，dock 搬窗口、块套、文件、
-// 视频资产都绝不会带它，不需要排除法。
-const BLOCK_DND_MIME = 'application/x-block-idx';
-const acceptBlockDrop = (e: React.DragEvent) => {
-  if (!e.dataTransfer.types.includes(BLOCK_DND_MIME)) return;
-  e.preventDefault(); e.stopPropagation();
-  e.dataTransfer.dropEffect = 'move';
-};
-
 // The nine numeric knobs of the Settings tab, in UI order — the same order as OVERRIDE_KEYS
 // (frontend) and ARCH_OVERRIDE_KEYS (backend). ONE table serves both surfaces: the Default Setting
 // rows and the per-rule rows, so a range can never drift between the two places it is edited.
@@ -411,8 +367,6 @@ interface EditPhaseProps {
   staging: StagingItem[];
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
   blocks: PipelineBlock[];
-  /** 当前 pipeline 架构（edit 设置按架构渲染，目前仅 Krea2 提供Enable Edit） */
-  architecture: string | null;
   /** Settings tab 的九个数值旋钮 —— 即 DEFAULT SETTING（server config 持久化）。
    *  它们是没被任何架构规则命中时用的那一组值。 */
   maskGrow: number;
@@ -425,9 +379,7 @@ interface EditPhaseProps {
   refAlignVal: number;
   tgenPixelsVal: number;
   tgenAlignVal: number;
-  onBlocksChange: (blocks: PipelineBlock[]) => void;
   onDefaultParamChange: (key: OverrideKey, value: number) => void;
-  onAddBlock: (type: PipelineBlockKind) => void;
   /** 一个正等用户回答的 Query 块（run 停在它上面），由 /api/status 下发 */
   pendingQuery: PendingQuery | null;
   /** 立刻以某个 pipeline preset 跑一趟（画布在 Blend 工作台里，由工作台发起） */
@@ -437,11 +389,12 @@ interface EditPhaseProps {
   onQueryAnswer: (selection: Record<string, any>) => void | Promise<void>;
   /** 关掉 Query 弹窗 = 中止整条链 */
   onQueryCancel: () => void;
-  onRemoveBlock: (blockId: string) => void;
-  onReorderBlocks: (fromIdx: number, toIdx: number) => void;
   /** 多套 Pipeline Blocks（tabs）；blocks = 激活那一套的镜像 */
   blockSets: BlockSet[];
   activeBlockSetId: string;
+  /** 激活那套链的**图**（新格式）。Graph 视图直接编辑它；改动经 onGraphChange 落回。 */
+  activeGraph: PipelineGraph;
+  onGraphChange: (g: PipelineGraph) => void;
   onAddBlockSet: () => void;
   onRenameBlockSet: (id: string, name: string) => void;
   onDuplicateBlockSet: (id: string) => void;
@@ -501,10 +454,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, promptUrl,
   promptReady, detailStatus,
   staging, promptIframeRef,
-  blocks, architecture, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal,
+  blocks, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal,
   refPixelsVal, refAlignVal, tgenPixelsVal, tgenAlignVal,
-  onBlocksChange, onDefaultParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
+  onDefaultParamChange,
   blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onReorderBlockSets, onSwitchBlockSet,
+  activeGraph, onGraphChange,
   pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   blendIframeRef,
@@ -536,15 +490,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [renamingValue, setRenamingValue] = useState('');
   // Prompt preset editor: which prompt block's PRESET is being edited in the prompt_node
   // iframe (full prompt UI, saved to the shared preset — persisted, referenced by id).
-  const [editingPromptBlockId, setEditingPromptBlockId] = useState<string | null>(null);
+  const [editingPromptPresetId, setEditingPromptPresetId] = useState<string | null>(null);
   // Shared prompt presets (backend prompt_presets.json). Blocks reference them by id;
   // editing a preset affects every block that references it.
   const [promptPresets, setPromptPresets] = useState<PromptPreset[]>([]);
-  const [presetsLoaded, setPresetsLoaded] = useState(false);
-  // Inline rename of a preset (replaces the card's select while active).
-  const [renamingPresetId, setRenamingPresetId] = useState<string | null>(null);
-  // The Pipeline Blocks "Add +" dropdown (the four block kinds it can append).
-  const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   // The Pipeline Presets "Add +" dropdown — same control, same behaviour as the Blocks one.
   const [presetAddMenu, setPresetAddMenu] = useState<{ x: number; y: number } | null>(null);
   // 面板的折叠状态（默认全展开，改动落 localStorage）。折叠只在**容器 Block**（Vertical/Horizontal）里
@@ -1915,7 +1864,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 左栏不再有自己的把手：它就是 dock 树里的一个嵌套，宽度跟着画布那枚单元的边角一起改。
   // 右键某个 preset 行才出现的菜单；null = 没有菜单。
   const [presetMenu, setPresetMenu] = useState<{ x: number; y: number; setId: string } | null>(null);
-  const [renamingPresetValue, setRenamingPresetValue] = useState('');
   // 某个 preset 行的 ⚙ 打开的 pipeline 绑定弹窗；存的是这套链的 id，null = 没开。
   const [presetPipelineFor, setPresetPipelineFor] = useState<string | null>(null);
 
@@ -1964,7 +1912,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       const data = await res.json();
       setPromptPresets(Array.isArray(data?.presets) ? data.presets : []);
     } catch { /* keep whatever we had */ }
-    setPresetsLoaded(true);
   }, []);
   useEffect(() => { void refreshPromptPresets(); }, [refreshPromptPresets]);
 
@@ -2031,7 +1978,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const onSaved = (event: MessageEvent) => {
       if (event.data?.type !== 'prompt-preset-saved') return;
       void refreshPromptPresets();
-      setEditingPromptBlockId(null);
+      setEditingPromptPresetId(null);
     };
     window.addEventListener('message', onSaved);
     return () => window.removeEventListener('message', onSaved);
@@ -2079,8 +2026,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // id (the Tab type, stores and message channels all key on it) — only the display name changed.
   const TAB_LABELS: Record<Tab, string> = { prompt: 'Prompt', draw: 'Workbench', interface: 'Interface', settings: 'Settings' };
 
+  // 参数一律写回**图**（图是唯一真源）：按节点 id 定位并改它的 params。这样 Preprocess /
+  // Settings 这些面板改 first detailer 时，不会把用户在图里搭好的接线（分支/重连）冲掉。
   const updateBlockParam = (blockId: string, key: string, value: string | number | boolean | Record<string, any> | null) => {
-    onBlocksChange(blocks.map(b => b.id === blockId ? { ...b, params: { ...b.params, [key]: value } as any } : b));
+    onGraphChange({
+      ...activeGraph,
+      nodes: activeGraph.nodes.map(n =>
+        n.id === blockId ? { ...n, params: { ...n.params, [key]: value } } : n),
+    });
   };
 
   // An interface block is MISSING when its bound interface no longer exists (package removed or
@@ -2094,79 +2047,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     return !(interfaces as InterfaceInfo[])[ip.interface_idx ?? -1];
   };
 
-  // Prompt blocks INJECT the bound preset's selection at run time; Query blocks SEED their
-  // dialog with it. Same shared preset, same row — only the tooltip says which.
-  const renderPresetBinding = (block: PipelineBlock, bindingTitle: string) => {
-    const pp = block.params as PromptBlockParams;
-    const preset = pp.preset_id ? promptPresets.find(p => p.id === pp.preset_id) : null;
-    const sel = preset?.selection;
-    const nTags = (sel?.tags || []).length;
-    const nLoras = (sel?.loras || []).length;
-    const nPrefabs = (sel?.prefabs || []).length;
-    const nPrograms = (sel?.programs || []).length;
-    const presetMissing = !!pp.preset_id && presetsLoaded && !preset;
-    const summary = presetMissing
-      ? '⚠ preset 已被删除 (missing) — 请重新选择或新建'
-      : !preset
-        ? '未选择 preset — 从下拉选择或新建一个'
-        : `${nTags} tags · ${nLoras} loras · ${nPrefabs} prefabs · ${nPrograms} programs`;
-    const startRename = () => {
-      setRenamingPresetId(preset?.id || null);
-      setRenamingPresetValue(preset?.name || '');
-    };
-    const commitRename = () => {
-      if (renamingPresetId && renamingPresetValue.trim()) {
-        void renamePromptPreset(renamingPresetId, renamingPresetValue.trim());
-      }
-      setRenamingPresetId(null);
-    };
-    const iconBtnStyle = (enabled: boolean): React.CSSProperties => ({
-      background: 'none', border: 'none', color: enabled ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)',
-      cursor: enabled ? 'pointer' : 'default', fontSize: 12, padding: '2px 4px', lineHeight: 1, flexShrink: 0,
-    });
-    return (<>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: '100%' }}>
-        {renamingPresetId && preset ? (
-          <input
-            autoFocus
-            value={renamingPresetValue}
-            onChange={e => setRenamingPresetValue(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenamingPresetId(null); }}
-            onBlur={commitRename}
-            style={{ flex: 1, minWidth: 0, padding: '4px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(100,210,255,0.4)', color: '#fff', fontSize: 11.5, outline: 'none' }}
-          />
-        ) : (
-          <select
-            value={pp.preset_id || ''}
-            onChange={e => updateBlockParam(block.id, 'preset_id', e.target.value || null)}
-            title={bindingTitle}
-            style={{ flex: 1, minWidth: 0, padding: '4px 6px', borderRadius: 6, background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.15)', color: '#fff', fontSize: 11.5 }}
-          >
-            <option value="" style={{ background: '#1c1c1e' }}>— 选择 preset —</option>
-            {pp.preset_id && presetsLoaded && !promptPresets.some(p => p.id === pp.preset_id) && (
-              <option value={pp.preset_id} style={{ background: '#1c1c1e' }}>(missing)</option>
-            )}
-            {promptPresets.map(p => <option key={p.id} value={p.id} style={{ background: '#1c1c1e' }}>{p.name}</option>)}
-          </select>
-        )}
-        <button title="New preset and use it on this block" style={iconBtnStyle(true)}
-          onClick={async () => { const p = await createPromptPreset(); if (p) updateBlockParam(block.id, 'preset_id', p.id); }}>＋</button>
-        <button title="Rename this preset" disabled={!preset} style={iconBtnStyle(!!preset)} onClick={startRename}>✎</button>
-        <button title={preset ? 'Open the prompt editor for this preset' : presetMissing ? 'This preset was deleted — pick another one' : 'Select or create a preset first'}
-          disabled={!preset} style={iconBtnStyle(!!preset)}
-          onClick={() => { if (preset) setEditingPromptBlockId(block.id); }}>⚙</button>
-        <button title="Delete this preset (referencing blocks will show (missing))" disabled={!preset} style={iconBtnStyle(!!preset)}
-          onClick={() => {
-            if (!preset) return;
-            if (window.confirm(`删除 preset「${preset.name}」？引用它的块会保留引用并显示 (missing)，run 时按空处理。`)) void deletePromptPreset(preset.id);
-          }}>🗑</button>
-      </div>
-      <div style={{
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        fontSize: 11, color: presetMissing ? '#ff9f0a' : 'rgba(255,255,255,0.45)',
-      }}>{summary}</div>
-    </>);
-  };
 
   // limit_pixels 的 pixels/align 为全局参数，取自第一个 detailer block（与后端 first_bp 一致）。
   const firstDetailer = blocks.find(b => b.type === 'detailer');
@@ -2178,8 +2058,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const enableLimit = firstDp ? (firstDp.enable_limit ?? true) : true;
   const dynLayer = firstDp ? (firstDp.enable_dynamic_layer ?? false) : false;
 
-  // Krea2 提供 fit/crop 两种 Edit 模式（source patch）；其余架构仅显示 Enable Edit
-  const isKrea2 = !!architecture && /krea2/i.test(architecture);
 
   const toggleFinishSelection = (key: string) => {
     setSelectedKeys(prev => {
@@ -2817,661 +2695,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               </>),
               blocks: (<>
-                <div style={styles.dockCard}>
-              {blocks.map((block, blockIdx) => (
-                <div key={block.id}
-                  // 探针钩子：卡片根上留一颗"我是哪一块"。没有它，界面探针只能靠内文猜卡
-                  // （十四种块的卡长得几乎一样，靠 label 文案找卡会在中英文/换行上翻车）。
-                  data-block-id={block.id}
-                  data-block-kind={block.type}
-                  // 整张卡都是落点，不是只有那颗 28px 的六点把手：把手是**拖起处**，人把块拖到
-                  // 目标卡片上松手时压的是卡身 —— 只有把手接 drop 的那一版，松手落在卡身上就是
-                  // "未授权的拖拽"（最后一次 dragenter/dragover 没被取消），浏览器直接取消整个
-                  // 手势，drop 不派发，看上去就是"重排序失效"。dragenter 与 dragover 同判，
-                  // 进入即授权（与 dock 的 BlockBox 同一条经验，见 DockView 的 onDragIn）。
-                  // 载荷认**纯 text/plain**：块重排的 dragstart 只写这一种 MIME。dock 搬窗口
-                  // （application/x-dock-units + text/plain）、块套拖动（x-blockset）、文件、
-                  // 视频资产都带着别的类型 —— types 不止一种就原样放行，不抢它们的地盘。
-                  onDragEnter={acceptBlockDrop}
-                  onDragOver={acceptBlockDrop}
-                  onDrop={(e) => {
-                    if (!e.dataTransfer.types.includes(BLOCK_DND_MIME)) return;
-                    e.preventDefault(); e.stopPropagation();
-                    const from = parseInt(e.dataTransfer.getData(BLOCK_DND_MIME));
-                    if (!isNaN(from)) onReorderBlocks(from, blockIdx);
-                  }}
-                  style={{
-                  background: 'rgba(255,255,255,0.03)',
-                  borderRadius: 10,
-                  marginBottom: 8,
-                  border: '0.5px solid rgba(255,255,255,0.08)',
-                  overflow: 'hidden',
-                }}>
-                  {/* Block header: drag handle + centered title + actions */}
-                  <div style={{
-                    display: 'flex', alignItems: 'center', height: 32,
-                    borderBottom: '0.5px solid rgba(255,255,255,0.06)',
-                  }}>
-                    {/* Drag handle */}
-                    <div
-                      draggable
-                      onDragStart={(e) => { e.dataTransfer.setData(BLOCK_DND_MIME, String(blockIdx)); e.dataTransfer.effectAllowed = 'move'; }}
-                      onDragOver={acceptBlockDrop}
-                      onDrop={(e) => {
-                        if (!e.dataTransfer.types.includes(BLOCK_DND_MIME)) return;
-                        e.preventDefault(); e.stopPropagation();
-                        const from = parseInt(e.dataTransfer.getData(BLOCK_DND_MIME));
-                        if (!isNaN(from)) onReorderBlocks(from, blockIdx);
-                      }}
-                      title="Drag to reorder"
-                      style={{
-                        width: 28, height: '100%', flexShrink: 0,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        cursor: 'grab', color: 'rgba(255,255,255,0.2)',
-                      }}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="3" cy="3" r="1.3"/><circle cx="9" cy="3" r="1.3"/><circle cx="3" cy="6" r="1.3"/><circle cx="9" cy="6" r="1.3"/><circle cx="3" cy="9" r="1.3"/><circle cx="9" cy="9" r="1.3"/></svg>
-                    </div>
-                    {/* Centered title. For a Query card the name doubles as the hint's host. */}
-                    <span title={block.type === 'query' ? QUERY_BLOCK_HINT : undefined} style={{
-                      flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                    }}>
-                      <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: BLOCK_TINT[block.type] || '#bf5af2' }} />
-                      <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.82)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{block.name}</span>
-                    </span>
-                    {ifaceIsMissing(block) && (
-                      <span title="The bound interface no longer exists — this block will be bypassed at run time"
-                        style={{
-                          background: 'rgba(255,159,10,0.2)', color: '#ff9f0a', borderRadius: 999,
-                          fontSize: 9.5, fontWeight: 700, padding: '1px 7px', flexShrink: 0,
-                        }}>Missing</span>
-                    )}
-                    {/* Action buttons */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: 28, flexShrink: 0, justifyContent: 'center' }}>
-                      {blocks.length > 1 && (
-                        <button title="Remove" style={{ background: 'none', border: 'none', color: 'rgba(255,90,90,0.5)', cursor: 'pointer', fontSize: 13, padding: '2px 4px', lineHeight: 1 }}
-                          onClick={() => onRemoveBlock(block.id)}>✕</button>
-                      )}
-                    </div>
-                  </div>
-                  {/* Block params */}
-                  <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {block.type === 'prompt' && renderPresetBinding(block, 'Which shared prompt preset this block injects')}
-                    {block.type === 'tagger' && (() => {
-                      const tp = block.params as TaggerBlockParams;
-                      return (
-                        <div style={styles.paramRow}
-                          title="Mask Tag：裁出 mask 区域打标。Covered Tag：mask 区域合成到白底打标。Full Tag：整图打标。
-                                 Mask/Covered 在链中该位置没有 mask 会报错中止整条链。tag 追加到 prompt，只影响其后的 detailer。">
-                          <label style={styles.paramLabel}>Mode</label>
-                          <select style={styles.paramSelect} value={tp.mode ?? 'full'} onChange={e => updateBlockParam(block.id, 'mode', e.target.value)}>
-                            <option value="mask" style={{ background: '#1c1c1e', color: '#fff' }}>Mask Tag</option>
-                            <option value="covered" style={{ background: '#1c1c1e', color: '#fff' }}>Covered Tag</option>
-                            <option value="full" style={{ background: '#1c1c1e', color: '#fff' }}>Full Tag</option>
-                          </select>
-                        </div>
-                      );
-                    })()}
-                    {block.type === 'scale' && (() => {
-                      const sp = block.params as ScaleBlockParams;
-                      const followPipeline = sp.use_pipeline_align ?? true;
-                      return (<>
-                        <div style={styles.paramRow}
-                          title="比例缩放：链上此刻的工作图宽高各自乘这个倍率，再就近吸附到 Align 像素格。>1 放大，<1 缩小；1 = 只落格不缩放。只影响它后面的 block（后续 detailer 按缩放后的分辨率采样）；收尾仍按 Recover 契约落回画布。">
-                          <label style={styles.paramLabel}>Scale</label>
-                          <input style={styles.paramInput} type="number" min={0.01} max={16} step={0.01}
-                            value={sp.scale ?? 1.0}
-                            onChange={e => updateBlockParam(block.id, 'scale', parseFloat(e.target.value))} />
-                        </div>
-                        <div style={styles.paramRow}
-                          title="开：沿用 pipeline 的 Align（DEFAULT SETTING 的那一颗，与链首同一来源；QwenImage2.1 自动抬到 32）。关：用块自己的 Align。">
-                          <label style={styles.paramLabel}>Use Pipeline Align</label>
-                          <IOSToggle checked={followPipeline}
-                            onChange={v => updateBlockParam(block.id, 'use_pipeline_align', v)} />
-                        </div>
-                        {!followPipeline && (
-                          <div style={styles.paramRow}
-                            title="缩放后的宽高就近吸附到这个像素格（语义同 DEFAULT SETTING 的 Align / limit_pixels）。QwenImage2.1 会自动抬到 32（vision/latent 网格）。">
-                            <label style={styles.paramLabel}>Align</label>
-                            <input style={styles.paramInput} type="number" min={1} max={64} step={1}
-                              value={sp.align ?? 8}
-                              onChange={e => updateBlockParam(block.id, 'align', parseInt(e.target.value) || 1)} />
-                          </div>
-                        )}
-                      </>);
-                    })()}
-                    {/* ── 几何块 / 检测块 ────────────────────────────────────────── */}
-                    {/* 这一档与 scale 同形：改的是链上此刻的工作图与 mask，只影响它后面的块。
-                        三个成对的几何块（Crop / Meet / Fit）在链上压一帧，Recover 块把
-                        **直接压在自己下面**的那一帧还回去 —— 所以卡片上只说"我吃哪一步"，
-                        真正的配对判据在后端那条帧栈里（漏了恢复会在链尾报错）。 */}
-                    {block.type === 'crop' && (() => {
-                      const cp = block.params as CropBlockParams;
-                      const followPipeline = cp.use_pipeline_reserve ?? true;
-                      return (<>
-                        <div style={styles.paramRow}
-                          title="开：沿用 DEFAULT SETTING 的 Crop Reserve（与链首那次隐式 crop 同一颗旋钮）。关：用块自己的 Reserve。">
-                          <label style={styles.paramLabel}>Use Pipeline Reserve</label>
-                          <IOSToggle checked={followPipeline}
-                            onChange={v => updateBlockParam(block.id, 'use_pipeline_reserve', v)} />
-                        </div>
-                        {!followPipeline && (
-                          <div style={styles.paramRow}
-                            title="在 mask 外接框四周多留这么多像素的上下文再裁（ImageCropMaskNode 的 Reserve，范围 0–1000）。">
-                            <label style={styles.paramLabel}>Reserve</label>
-                            <input style={styles.paramInput} type="number" min={0} max={1000} step={1}
-                              value={cp.reserve ?? 0}
-                              onChange={e => updateBlockParam(block.id, 'reserve', parseInt(e.target.value) || 0)} />
-                          </div>
-                        )}
-                        <div style={styles.blockNote}>
-                          Crops the working area to the Mask's bounding box. Nothing painted = this block
-                          stops the run (put a Detect block above it if you want the box from a detector).
-                        </div>
-                      </>);
-                    })()}
-                    {block.type === 'recover_crop' && (() => {
-                      const rcp = block.params as RecoverCropBlockParams;
-                      const method = rcp.recover_method ?? 'mask_blend';
-                      return (<>
-                        <div style={styles.paramRow}
-                          title="Mask Blend：按 mask 覆盖度羽化混合（默认）。Mask Only：只贴 mask 覆盖到的像素，边缘硬。Bounds Only：整块硬覆盖，不需要 mask。">
-                          <label style={styles.paramLabel}>Recover Method</label>
-                          <select style={styles.paramSelect} value={method}
-                            onChange={e => updateBlockParam(block.id, 'recover_method', e.target.value)}>
-                            <option value="mask_blend" style={{ background: '#1c1c1e', color: '#fff' }}>Mask Blend</option>
-                            <option value="mask_only" style={{ background: '#1c1c1e', color: '#fff' }}>Mask Only</option>
-                            <option value="bounds_only" style={{ background: '#1c1c1e', color: '#fff' }}>Bounds Only</option>
-                          </select>
-                        </div>
-                        <div style={styles.blockNote}>
-                          Restores the Crop directly above it — background is the image as it was before that
-                          Crop, so the edges that were cut away come back as real content. With no Crop above,
-                          it restores the chain-start crop early (the end of the chain then skips it).
-                        </div>
-                      </>);
-                    })()}
-                    {(block.type === 'meet' || block.type === 'fit') && (() => {
-                      const mp = block.params as MeetFitBlockParams;
-                      const isMeet = block.type === 'meet';
-                      return (<>
-                        <div style={styles.paramRow}
-                          title={isMeet
-                            ? '目标画幅宽度（ImageMeetNode：0–2048，步长 8）。0 = 沿用进来时的宽度（两维都 0 = 只落格不换画幅）。Meet 是 cover：等比放大到盖满这个画幅，再把超出的部分居中裁掉。'
-                            : '目标画幅宽度（ImageFitNode：0–2048，步长 8）。0 = 沿用进来时的宽度（两维都 0 = 只落格不换画幅）。Fit 是 contain：等比缩到装进这个画幅，空出来的地方补边。'}>
-                          <label style={styles.paramLabel}>Width</label>
-                          <input style={styles.paramInput} type="number" min={0} max={2048} step={8}
-                            value={mp.width ?? 0}
-                            onChange={e => updateBlockParam(block.id, 'width', parseInt(e.target.value) || 0)} />
-                        </div>
-                        <div style={styles.paramRow}
-                          title="目标画幅高度（0–2048，步长 8）。0 = 沿用进来时的高度。">
-                          <label style={styles.paramLabel}>Height</label>
-                          <input style={styles.paramInput} type="number" min={0} max={2048} step={8}
-                            value={mp.height ?? 0}
-                            onChange={e => updateBlockParam(block.id, 'height', parseInt(e.target.value) || 0)} />
-                        </div>
-                        <div style={styles.paramRow} title="缩放用的插值。nearest 最锐但会有锯齿；bicubic 最柔。">
-                          <label style={styles.paramLabel}>Interpolation</label>
-                          <select style={styles.paramSelect} value={mp.interpolation ?? 'bilinear'}
-                            onChange={e => updateBlockParam(block.id, 'interpolation', e.target.value)}>
-                            <option value="nearest" style={{ background: '#1c1c1e', color: '#fff' }}>Nearest</option>
-                            <option value="bilinear" style={{ background: '#1c1c1e', color: '#fff' }}>Bilinear</option>
-                            <option value="bicubic" style={{ background: '#1c1c1e', color: '#fff' }}>Bicubic</option>
-                          </select>
-                        </div>
-                        {!isMeet && (
-                          <div style={styles.paramRow}
-                            title="补出来的边用什么颜色：'255, 255, 255' 或 '#ffffff'。只影响 Fit 出来的那圈边（Recover Fit 之后就不在了）。">
-                            <label style={styles.paramLabel}>Fill Color</label>
-                            <input style={styles.paramInput} type="text" placeholder="255, 255, 255"
-                              value={mp.padding_color ?? '255, 255, 255'}
-                              onChange={e => updateBlockParam(block.id, 'padding_color', e.target.value)} />
-                          </div>
-                        )}
-                        <div style={styles.blockNote}>
-                          {isMeet
-                            ? 'Meet (cover) — scales up until it fills the frame, then centre-crops the overflow. Pair it with Recover Meet.'
-                            : 'Fit (contain) — scales down until it fits the frame, then pads the rest. Pair it with Recover Fit.'}
-                        </div>
-                      </>);
-                    })()}
-                    {(block.type === 'recover_meet' || block.type === 'recover_fit') && (() => {
-                      const rp = block.params as RecoverBlockParams;
-                      const isMeet = block.type === 'recover_meet';
-                      const useBg = rp.use_background ?? true;
-                      return (<>
-                        <div style={styles.paramRow} title="还原那一步用的插值。">
-                          <label style={styles.paramLabel}>Interpolation</label>
-                          <select style={styles.paramSelect} value={rp.interpolation ?? 'bilinear'}
-                            onChange={e => updateBlockParam(block.id, 'interpolation', e.target.value)}>
-                            <option value="nearest" style={{ background: '#1c1c1e', color: '#fff' }}>Nearest</option>
-                            <option value="bilinear" style={{ background: '#1c1c1e', color: '#fff' }}>Bilinear</option>
-                            <option value="bicubic" style={{ background: '#1c1c1e', color: '#fff' }}>Bicubic</option>
-                          </select>
-                        </div>
-                        {isMeet && (<>
-                          <div style={styles.paramRow}
-                            title="开（默认）：用 Meet 之前那张整幅图当背景 —— 被裁掉的边缘是原内容（完美还原），对应节点接了 background。关：不接背景，边缘用 Fill Color 补（有损还原）。">
-                            <label style={styles.paramLabel}>Use Background</label>
-                            <IOSToggle checked={useBg}
-                              onChange={v => updateBlockParam(block.id, 'use_background', v)} />
-                          </div>
-                          {!useBg && (
-                            <div style={styles.paramRow}
-                              title="关掉背景时，被 Meet 裁掉的那圈边用什么颜色：'255, 255, 255' 或 '#ffffff'（ImageRecoverMeetNode 的 Padding Color）。">
-                              <label style={styles.paramLabel}>Fill Color</label>
-                              <input style={styles.paramInput} type="text" placeholder="255, 255, 255"
-                                value={rp.padding_color ?? '255, 255, 255'}
-                                onChange={e => updateBlockParam(block.id, 'padding_color', e.target.value)} />
-                            </div>
-                          )}
-                        </>)}
-                        <div style={styles.blockNote}>
-                          {isMeet
-                            ? (useBg
-                              ? 'Restores the Meet directly above it: the result is scaled back into the region it came from and pasted onto the image as it was before that Meet — the edges Meet cropped away come back from the original.'
-                              : 'Restores the Meet directly above it without a background: the cropped-away edge is filled with Fill Color, so only the centre region is real content.')
-                            : 'Restores the Fit directly above it: takes the inner frame back and scales it to the original size, so the padding is gone.'}
-                        </div>
-                      </>);
-                    })()}
-                    {block.type === 'limit' && (() => {
-                      const lp = block.params as LimitBlockParams;
-                      const capOnly = !!lp.cap_only;
-                      return (<>
-                        <div style={styles.paramRow}
-                          title="目标像素数：链上此刻的工作图按这个预算缩放（与 DEFAULT SETTING 的 Pixels 同一套 limit_pixels）。0 = 沿用 DEFAULT SETTING。">
-                          <label style={styles.paramLabel}>Pixels</label>
-                          <input style={styles.paramInput} type="number" min={0} step={1024}
-                            value={lp.pixels ?? 0}
-                            onChange={e => updateBlockParam(block.id, 'pixels', parseInt(e.target.value) || 0)} />
-                        </div>
-                        <div style={styles.paramRow}
-                          title="缩放后的宽高就近吸附到这个像素格。0 = 沿用 DEFAULT SETTING 的 Align（QwenImage2.1 会自动抬到 32）。">
-                          <label style={styles.paramLabel}>Align</label>
-                          <input style={styles.paramInput} type="number" min={0} max={64} step={1}
-                            value={lp.align ?? 0}
-                            onChange={e => updateBlockParam(block.id, 'align', parseInt(e.target.value) || 0)} />
-                        </div>
-                        <div style={styles.paramRow}
-                          title="开：Pixels 是**上限**（只缩不涨，落格一律向下取整）。关：Pixels 是目标值（大图缩小、小图放大补足）。">
-                          <label style={styles.paramLabel}>Cap Only</label>
-                          <IOSToggle checked={capOnly}
-                            onChange={v => updateBlockParam(block.id, 'cap_only', v)} />
-                        </div>
-                        <div style={styles.blockNote}>
-                          Re-applies the pixel budget mid-chain — pair it with Recover Limit to get the
-                          resolution back afterwards. Without a Recover the run still ends at the input
-                          size (the end-of-chain recovery handles it), it just cannot repaint at the old
-                          resolution in between.
-                        </div>
-                      </>);
-                    })()}
-                    {block.type === 'recover_limit' && (
-                      <div style={styles.blockNote}>
-                        Returns to the resolution from before the last Limit: a Limit block above it, or —
-                        with no Limit block on the chain — the chain-start one (DEFAULT SETTING → Pixels).
-                        Everything after it runs at that resolution, and the end-of-chain recovery is
-                        skipped, so there is no second resize.
-                      </div>
-                    )}
-                    {block.type === 'recover_scale' && (() => {
-                      const rp = block.params as RecoverBlockParams;
-                      return (<>
-                        <div style={styles.paramRow} title="还原那一步用的插值。">
-                          <label style={styles.paramLabel}>Interpolation</label>
-                          <select style={styles.paramSelect} value={rp.interpolation ?? 'bilinear'}
-                            onChange={e => updateBlockParam(block.id, 'interpolation', e.target.value)}>
-                            <option value="nearest" style={{ background: '#1c1c1e', color: '#fff' }}>Nearest</option>
-                            <option value="bilinear" style={{ background: '#1c1c1e', color: '#fff' }}>Bilinear</option>
-                            <option value="bicubic" style={{ background: '#1c1c1e', color: '#fff' }}>Bicubic</option>
-                          </select>
-                        </div>
-                        <div style={styles.blockNote}>
-                          Undoes the Scale block directly above it: everything repainted since then stays,
-                          the rest comes back from the original pixels instead of being resampled twice.
-                        </div>
-                      </>);
-                    })()}
-                    {block.type === 'detect' && (() => {
-                      const dp2 = block.params as DetectBlockParams;
-                      return (<>
-                        <div style={styles.paramRow}
-                          title="掩码表达式，语法与 Detector 小窗完全一致（支持 & | ! 与 name:threshold）。留空 = 整图检测一次。">
-                          <label style={styles.paramLabel}>Expression</label>
-                          <input style={styles.paramInput} type="text" placeholder="(whole image)"
-                            value={dp2.prompt ?? ''}
-                            onChange={e => updateBlockParam(block.id, 'prompt', e.target.value)} />
-                        </div>
-                        <div style={styles.paramRow} title="检测阈值 0–1。">
-                          <label style={styles.paramLabel}>Threshold</label>
-                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.05}
-                            value={dp2.threshold ?? 0.5}
-                            onChange={e => updateBlockParam(block.id, 'threshold', parseFloat(e.target.value))} />
-                        </div>
-                        <div style={styles.paramRow} title="开：结果取反（检出来的地方变成不覆盖）。">
-                          <label style={styles.paramLabel}>Invert</label>
-                          <IOSToggle checked={!!dp2.invert}
-                            onChange={v => updateBlockParam(block.id, 'invert', v)} />
-                        </div>
-                        <div style={styles.paramRow}
-                          title="Replace：检测结果直接成为 pipeline 的 mask。Intersect：与此刻的 mask 取交集（保留上游已有的限制）。">
-                          <label style={styles.paramLabel}>Mode</label>
-                          <select style={styles.paramSelect} value={dp2.mode ?? 'replace'}
-                            onChange={e => updateBlockParam(block.id, 'mode', e.target.value)}>
-                            <option value="replace" style={{ background: '#1c1c1e', color: '#fff' }}>Replace</option>
-                            <option value="intersect" style={{ background: '#1c1c1e', color: '#fff' }}>Intersect</option>
-                          </select>
-                        </div>
-                        <div style={styles.blockNote}>
-                          Runs the node's detector right here and turns the result into the pipeline mask —
-                          every Detailer after it works on that mask. Needs a detector connected to the node.
-                        </div>
-                      </>);
-                    })()}
-                    {block.type === 'query' && (() => {
-                      const qp = block.params as QueryBlockParams;
-                      const bound = !!qp.preset_id;
-                      return (<>
-                        {renderPresetBinding(block, 'Query 弹窗的初始勾选来自这个 preset（与 prompt 块共用同一份）')}
-                        <div style={styles.paramRow}
-                          title={bound
-                            ? '开：Confirm 时把弹窗里的最终选择整体写回绑定的 preset，下次 run / 下次打开弹窗就是它。关：本次修改只活在当前 run 里。'
-                            : '先绑定 preset 才能持久化 —— 没有 preset 就没有可写回的地方。'}>
-                          <label style={styles.paramLabel}>Persistent</label>
-                          <IOSToggle checked={bound && !!qp.persistent} disabled={!bound}
-                            onChange={v => updateBlockParam(block.id, 'persistent', v)} />
-                        </div>
-                      </>);
-                    })()}
-                    {block.type === 'detailer' && (() => {
-                      const dp = block.params as DetailerBlockParams;
-                      return (<>
-                        <div style={styles.paramRow}
-                          title="Random：按采样步数加随机噪声。None：不加噪，从干净 latent 直接进梯子。Invert：不加随机噪声，而是先把本块那截梯子倒着爬回 σ_peak（DDIM 反演），再顺原路解回来——爬出来的就是“这张图配的那份噪声”，往返整段走 euler。">
-                          <label style={styles.paramLabel}>Add Noise</label>
-                          <select style={styles.paramSelect} value={dp.add_noise} onChange={e => updateBlockParam(block.id, 'add_noise', e.target.value)}>
-                            <option value="enable" style={{ background: '#1c1c1e', color: '#fff' }}>Random</option>
-                            <option value="disable" style={{ background: '#1c1c1e', color: '#fff' }}>None</option>
-                            <option value="invert" style={{ background: '#1c1c1e', color: '#fff' }}>Invert</option>
-                          </select>
-                        </div>
-                        <div style={styles.paramRow}>
-                          <label style={styles.paramLabel}>Ctx Regex</label>
-                          <input
-                            style={styles.paramInput}
-                            type="text"
-                            value={dp.context_regex ?? '.+'}
-                            placeholder=".+"
-                            onChange={e => updateBlockParam(block.id, 'context_regex', e.target.value || '.+')}
-                          />
-                        </div>
-                        <div style={styles.paramRow}>
-                          <label style={styles.paramLabel}>Start Step</label>
-                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.start_step_rate} onChange={e => updateBlockParam(block.id, 'start_step_rate', parseFloat(e.target.value))} />
-                        </div>
-                        <div style={styles.paramRow}>
-                          <label style={styles.paramLabel}>End Step</label>
-                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.end_step_rate} onChange={e => updateBlockParam(block.id, 'end_step_rate', parseFloat(e.target.value))} />
-                        </div>
-                        {/* Enable Edit 放在 Enable Text Generate 前面（用户指定顺序） */}
-                        <div style={styles.paramRow} title="Ref images come from the Extra Prompt text (<image_id:...> tokens inserted from the Blend workbench staging strip). Context image is always <image 1>.">
-                          <label style={styles.paramLabel}>Enable Edit</label>
-                          <IOSToggle checked={dp.enable_edit} onChange={v => updateBlockParam(block.id, 'enable_edit', v)} />
-                        </div>
-                        <div style={styles.paramRow} title="块级 Generate Text 开关（默认关）：仅当上游 pipeline 也启用了 Generate Text（PipelineEnableGenerateTextNode）时才生效；生成结果只作用于当前块，不向后续块传递。">
-                          <label style={styles.paramLabel}>Enable Text Generate</label>
-                          <IOSToggle checked={dp.enable_text_generate ?? false} onChange={v => updateBlockParam(block.id, 'enable_text_generate', v)} />
-                        </div>
-                        {(dp.enable_text_generate ?? false) && (
-                          <>
-                            <div style={styles.paramRow} title="开启后本块 Generate Text 的指令用下方输入框的内容临时替代 PipelineEnableGenerateTextNode 的 prompt 参与运算（留空 = 空指令，positive 原样进 CLIP）；仅在本块 Enable Text Generate 生效时有意义。">
-                              <label style={styles.paramLabel}>Override Prompt</label>
-                              <IOSToggle checked={dp.enable_override_prompt ?? false} onChange={v => updateBlockParam(block.id, 'enable_override_prompt', v)} />
-                            </div>
-                            {(dp.enable_override_prompt ?? false) && (
-                              <div style={styles.paramRow} title="重载的 Generate Text 指令：临时替代 PipelineEnableGenerateTextNode 中的 prompt 参数。留空 = 空指令。">
-                                <textarea
-                                  style={{ ...styles.paramInput, resize: 'vertical', minHeight: 56, fontFamily: 'inherit' }}
-                                  rows={3}
-                                  placeholder="Override instruction (empty = no instruction)"
-                                  value={dp.override_prompt ?? ''}
-                                  onChange={e => updateBlockParam(block.id, 'override_prompt', e.target.value)}
-                                />
-                              </div>
-                            )}
-                          </>
-                        )}
-                        {dp.enable_edit && (
-                          <div style={styles.editSubSection}>
-                            {isKrea2 && (
-                              <div style={styles.paramRow}>
-                                <label style={styles.paramLabel}>Edit Mode</label>
-                                <select
-                                  style={styles.paramSelect}
-                                  value={dp.edit_mode ?? 'fit'}
-                                  title="fit: 整图适配目标网格 + stride-1 位置 ID（训练匹配几何，防模糊）。crop: center-crop 到目标宽高比（适合源/目标 AR 差距大的场景）。"
-                                  onChange={e => updateBlockParam(block.id, 'edit_mode', e.target.value)}
-                                >
-                                  <option value="fit" style={{ background: '#1c1c1e', color: '#fff' }}>fit</option>
-                                  <option value="crop" style={{ background: '#1c1c1e', color: '#fff' }}>crop</option>
-                                </select>
-                              </div>
-                            )}
-                            {isKrea2 && (
-                              <>
-                                <div style={styles.paramRow}>
-                                  <label style={styles.paramLabel}>Grounding Px</label>
-                                  <input style={styles.paramInput} type="number" min={0} max={2048} step={64}
-                                    title="Grounded encode 的 VLM 看图分辨率上限（正/负提示词共用同一源图缩放）。更高 = 更清晰的语义理解但更多 vision tokens / 显存; 0 = 不限制。"
-                                    value={dp.grounding_px ?? 768}
-                                    onChange={e => updateBlockParam(block.id, 'grounding_px', parseInt(e.target.value) || 0)} />
-                                </div>
-                                <div style={styles.paramRow}>
-                                  <label style={styles.paramLabel}>Ref Boost</label>
-                                  <input style={styles.paramInput} type="number" min={0} max={1000} step={0.1}
-                                    title="参考保真度: 最后一个参考（源图）的 target->ref 注意力乘数。>1 拉向参考外观, <1 放松。最优值因模型而异。"
-                                    value={dp.ref_boost ?? 4.0}
-                                    onChange={e => updateBlockParam(block.id, 'ref_boost', parseFloat(e.target.value) || 0)} />
-                                </div>
-                                <div style={styles.paramRow}>
-                                  <label style={styles.paramLabel}>Ref Boost A</label>
-                                  <input style={styles.paramInput} type="number" min={0} max={1000} step={0.1}
-                                    title="第一个参考（场景, 仅多参考如 Context Ref 时生效）的注意力乘数。单参考工作流无效果。"
-                                    value={dp.ref_boost_a ?? 1.0}
-                                    onChange={e => updateBlockParam(block.id, 'ref_boost_a', parseFloat(e.target.value) || 0)} />
-                                </div>
-                                <div style={styles.paramRow} title="启用后以 context mask（当前块裁剪区 mask）限定 ref_boost 增强区域 — 仅 mask 内的参考 token 被增强, 保护 mask 外区域。">
-                                  <label style={styles.paramLabel}>Ref Boost Mask</label>
-                                  <IOSToggle checked={dp.enable_ref_boost_mask ?? false}
-                                    onChange={v => updateBlockParam(block.id, 'enable_ref_boost_mask', v)} />
-                                </div>
-                              </>
-                            )}
-                            {/* Ref Image 不再逐块手选：Blend 工作台 Extra Prompt 文本里的
-                                <image_id:...> 标记在 Run 时统一解析（context 图恒为
-                                <image 1>，引用图按出现顺序 = <image 2>+），所有 detailer
-                                block 共用这一组参考图。说明在 Enable Edit 的 tooltip 里。 */}
-                          </div>
-                        )}
-                      </>);
-                    })()}
-                    {block.type === 'interface' && (() => {
-                      const ip = block.params as any;
-                      // 只列开了 Block 模式的 interface（Interface tab 里的开关决定谁上得了链）。
-                      // meta 里还没有标注的旧 interface 保持原判定（1 pipeline 进 + 1 pipeline 出），
-                      // 免得存量 chain 在刷新后突然全部 Missing。
-                      const isBlockCapable = (itf: any) => {
-                        const meta = interfaceMeta[itf?.name];
-                        if (meta?.modes) return !!meta.modes.block;
-                        const inP = itf?.start_ports?.filter((p: any) => p.type === 'PIPELINE_DATA')?.length ?? 0;
-                        const outP = itf?.end_ports?.filter((p: any) => p.type === 'PIPELINE_DATA')?.length ?? 0;
-                        return inP === 1 && outP === 1;
-                      };
-                      const selectableInterfaces = interfaces.filter(isBlockCapable);
-                      const safeInterfaces = selectableInterfaces.length > 0 ? selectableInterfaces : interfaces;
-                      const updateIfaceParam = (key: string, value: any) => updateBlockParam(block.id, key, value);
-                      // 绑定以名字为准（接口包重排/增删不会错绑到别的接口）；旧配置只有
-                      // interface_idx，尽量解析成名字；解析不出 = Missing（运行时自动 bypass）。
-                      const boundName: string | null = ip.interface_name ?? null;
-                      const boundMissing = !!boundName && interfaces.length > 0 && !interfaces.some(i => i.name === boundName);
-                      const resolvedIdx = boundName
-                        ? interfaces.findIndex(i => i.name === boundName)
-                        : (interfaces.length > 0 ? (ip.interface_idx ?? -1) : -1);
-                      const resolvedItf = resolvedIdx >= 0 ? interfaces[resolvedIdx] : undefined;
-                      const iface = resolvedItf ?? safeInterfaces[0];
-                      const opt = { background: '#1c1c1e', color: '#fff' } as React.CSSProperties;
-                      return (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '4px 0' }}>
-                          {selectableInterfaces.length === 0 && (
-                            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
-                              No interface with Block mode on — enable it in the Interface tab.
-                            </div>
-                          )}
-                          {/* Interface sub-graph selection */}
-                          <div style={styles.paramRow}>
-                            <span style={styles.paramLabel}>Interface</span>
-                            <select
-                              style={{ ...styles.paramSelect, ...(boundMissing ? { borderColor: 'rgba(255,159,10,0.6)' } : {}) }}
-                              value={boundMissing ? '__missing__' : (resolvedItf ? String(interfaces.indexOf(resolvedItf)) : '')}
-                              onChange={e => {
-                                const idx = parseInt(e.target.value, 10);
-                                const itf = interfaces[idx];
-                                if (!itf) return;
-                                updateIfaceParam('interface_name', itf.name);
-                                updateIfaceParam('interface_idx', idx);
-                              }}
-                            >
-                              {boundMissing && <option value="__missing__" style={opt}>Missing: {boundName}</option>}
-                              {safeInterfaces.map((itf, idx) => (
-                                <option key={idx} value={String(interfaces.indexOf(itf))} style={opt}>{itf.name || `Interface ${idx + 1}`}</option>
-                              ))}
-                            </select>
-                          </div>
-                          {/* Operation + crop_reserve */}
-                          <div style={styles.paramRow}>
-                            <span style={styles.paramLabel}>Operation</span>
-                            <select
-                              style={styles.paramSelect}
-                              value={ip.operation ?? 'default'}
-                              onChange={e => updateIfaceParam('operation', e.target.value)}
-                            >
-                              <option value="default" style={opt}>default</option>
-                              <option value="crop" style={opt}>crop</option>
-                            </select>
-                            {ip.operation === 'crop' && (
-                              <input
-                                style={{ ...styles.paramInput, width: 64, flex: 'none' }}
-                                type="number"
-                                min={0}
-                                value={ip.crop_reserve ?? 32}
-                                onChange={e => updateIfaceParam('crop_reserve', parseInt(e.target.value, 10) || 0)}
-                              />
-                            )}
-                          </div>
-                          {/* Per-port image selection from staging (exclude auto-injected PIPELINE_DATA input) */}
-                          {iface?.start_ports?.filter((p: any) => p.category === 'inject' && p.type !== 'PIPELINE_DATA').map((port: any) => (
-                            <div style={styles.paramRow} key={port.num}>
-                              <span style={styles.paramLabel}>{port.name || `Port ${port.num}`}</span>
-                              <select
-                                style={styles.paramSelect}
-                                value={(ip.image_keys && ip.image_keys[port.num]) || ''}
-                                onChange={e => {
-                                  const cur = { ...(ip.image_keys || {}) };
-                                  if (e.target.value) cur[port.num] = e.target.value;
-                                  else delete cur[port.num];
-                                  updateIfaceParam('image_keys', cur);
-                                }}
-                              >
-                                <option value="" style={opt}>(none)</option>
-                                {staging.map((s, hi) => (
-                                  <option key={hi} value={s.id} style={opt}>{s.name} ({s.id})</option>
-                                ))}
-                              </select>
-                            </div>
-                          ))}
-                          {/* Optional context image / mask (defaults to pipeline flow) */}
-                          <div style={styles.paramRow}>
-                            <span style={styles.paramLabel}>Ctx Image</span>
-                            <select
-                              style={styles.paramSelect}
-                              value={ip.context_image_key || ''}
-                              onChange={e => updateIfaceParam('context_image_key', e.target.value || null)}
-                            >
-                              <option value="" style={opt}>(use pipeline)</option>
-                              {staging.map((s, hi) => (
-                                <option key={hi} value={s.id} style={opt}>{s.name} ({s.id})</option>
-                              ))}
-                            </select>
-                          </div>
-                          {ip.context_image_key && (() => {
-                            const img = staging.find((s) => s.id === ip.context_image_key);
-                            return img ? (
-                              <div style={{ padding: '0 0 4px 88px' }}>
-                                <img src={img.src} alt={img.name}
-                                  style={{ maxWidth: '100%', maxHeight: 120, borderRadius: 8, border: '0.5px solid rgba(255,255,255,0.12)', display: 'block' }} />
-                              </div>
-                            ) : null;
-                          })()}
-                          <div style={styles.paramRow}>
-                            <span style={styles.paramLabel}>Ctx Mask</span>
-                            <select
-                              style={styles.paramSelect}
-                              value={ip.context_mask_key || ''}
-                              onChange={e => updateIfaceParam('context_mask_key', e.target.value || null)}
-                            >
-                              <option value="" style={opt}>(use pipeline)</option>
-                              {staging.map((s, hi) => (
-                                <option key={hi} value={s.id} style={opt}>{s.name} ({s.id})</option>
-                              ))}
-                            </select>
-                          </div>
-                          {ip.context_mask_key && (() => {
-                            const img = staging.find((s) => s.id === ip.context_mask_key);
-                            return img ? (
-                              <div style={{ padding: '0 0 4px 88px' }}>
-                                <img src={img.src} alt={img.name}
-                                  style={{ maxWidth: '100%', maxHeight: 120, borderRadius: 8, border: '0.5px solid rgba(255,255,255,0.12)', display: 'block' }} />
-                              </div>
-                            ) : null;
-                          })()}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                </div>
-              ))}
+                {/* 撑满这一格：编辑器高度 'fill'，父容器给确定高度（flex 链），画布才不会底下留白 */}
+                <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, height: '100%' }}>
+                  <PipelineGraphEditor graph={activeGraph} onChange={onGraphChange}
+                    interfaces={interfaces} height="fill"
+                    presets={promptPresets.map(p => ({ id: p.id, name: p.name }))}
+                    onCreatePreset={async () => (await createPromptPreset())?.id ?? null}
+                    onRenamePreset={(id, name) => void renamePromptPreset(id, name)}
+                    onEditPreset={id => setEditingPromptPresetId(id)}
+                    onDeletePreset={id => void deletePromptPreset(id)} />
                 </div>
               </>),
             },
             // 几格自带的动作条（Clear All / Add / Undo / Redo）：dock 把它们画在各自正文下面、滚动条之外。
             foots: {
               ...workbenchFoots(uiSend, wbHost),
-              // Pipeline Blocks 的 Add：住进正文下面的动作条，和 Layers 那一格同一个范式（见 MEMORY
-              // 的"动作条范式"）—— 标题条是窗口级动作的地方（关窗/浮出/折叠），往链里加块是**内容**
-              // 动作，挤在 26px 的标题条里既和 ✕/⤢ 抢点击区，菜单还只能往下翻、被块的圆角剪掉。
-              // 摆法照抄 Layers 的 StackHead：右对齐一颗 mini-btn，菜单从它**往上**翻。
-              blocks: (
-                <div className="mini-group">
-                  <button type="button" className="mini-btn" aria-haspopup="menu" aria-expanded={!!addMenu}
-                    title="Append a block to this chain — Detailer / Interface / Prompt / Query / Tagger / Scale"
-                    onClick={e => {
-                      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                      // 与 Layers 头部那颗 Add 同两句：右缘对齐 216px 的菜单、从锚点上沿往上翻。
-                      setAddMenu(addMenu ? null : { x: r.right - 216, y: r.top });
-                    }}>
-                    Add<span className="add-caret">▾</span>
-                  </button>
-                  {addMenu && (
-                    <ContextMenu x={addMenu.x} y={addMenu.y} up onClose={() => setAddMenu(null)}
-                      items={ADD_BLOCK_KINDS.map(opt => ({
-                        label: opt.label, color: opt.color, hint: opt.hint, sep: opt.sep,
-                        onClick: () => { if (opt.kind) onAddBlock(opt.kind); },
-                      }))} />
-                  )}
-                </div>
-              ),
             },
           }} />
 
@@ -3546,11 +2784,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       {/* Prompt preset editor — the FULL prompt_node UI in preset scope. Its selection is
           saved to the SHARED preset (persisted server-side); every block referencing that
           preset picks it up, injected only for the detailers after that block in a run. */}
-      {editingPromptBlockId && (() => {
-        const blk = blocks.find(b => b.id === editingPromptBlockId);
-        const pid = blk ? (blk.params as PromptBlockParams).preset_id : null;
-        const preset = pid ? promptPresets.find(p => p.id === pid) : null;
-        if (!pid) return null;
+      {editingPromptPresetId && (() => {
+        const pid = editingPromptPresetId;
+        const preset = promptPresets.find(p => p.id === pid);
         const params = 'sampler_base=' + encodeURIComponent(window.location.origin)
           + '&scope=prompt_preset&preset_id=' + encodeURIComponent(pid);
         const src = (promptUrl || '/prompt_node.html') + (promptUrl.includes('?') ? '&' : '?') + params;
@@ -3558,7 +2794,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           <div style={{
             position: 'fixed', inset: 0, zIndex: 1000,
             background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }} onClick={() => setEditingPromptBlockId(null)}>
+          }} onClick={() => setEditingPromptPresetId(null)}>
             <div style={{
               width: '94vw', height: '92vh', background: '#0d0d0d', borderRadius: 14,
               border: '0.5px solid rgba(255,255,255,0.12)', display: 'flex', flexDirection: 'column',
@@ -3571,13 +2807,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <div style={{ fontSize: 13, fontWeight: 600, color: '#64d2ff' }}>
                   Prompt Preset — {preset?.name || pid}
                   <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.45)', marginLeft: 8 }}>
-                    共享持久化 · 引用它的块随改随生效
+                    共享持久化 · 引用它的节点随改随生效
                   </span>
                 </div>
                 <button
                   style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}
                   title="Close"
-                  onClick={() => setEditingPromptBlockId(null)}
+                  onClick={() => setEditingPromptPresetId(null)}
                 >✕</button>
               </div>
               <iframe
