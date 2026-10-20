@@ -82,10 +82,56 @@ NODE_SPECS: Dict[str, Dict[str, Any]] = {
     # Switch（倒过来的 switch / gather）：输入多头、输出单头。端口是动态的（见 node_ports）。
     'switch': {'label': 'Switch', 'color': '#ff9f0a', 'hint': 'Gather many exec heads into one exec + N data',
                'inputs': [], 'outputs': []},
+    # 黑板（board）= 画布上那张悬浮的 Preprocess 卡片。**不参与执行**：没有端口、不进执行序、
+    # 也不投影回 blocks。整条链共读它的 params（enable_mask 还决定 Start/End 有没有 Mask 端口）。
+    'board': {'label': 'Preprocess', 'color': '#ff9f0a', 'hint': '整条链的预处理开关',
+              'inputs': [], 'outputs': []},
+}
+
+# 可选输入端口：不连线也合法 —— 那是"这个节点没有这份数据"。数据只沿显式连线流动，
+# 绝不从上一颗执行过的节点隐式顶上来。Detailer / Interface 的 mask 只是"限定工作区"的额外输入。
+OPTIONAL_INPUT_PORTS: Dict[str, set] = {
+    'detailer': {PORT_MASK},
+    'interface': {PORT_MASK},
+    # End 的 mask 纯属图示（执行计划不收 End，收尾直接拿最后一颗执行过的工作图/mask）。
+    'end': {PORT_MASK},
 }
 
 # Switch 端口 id 约定（与前端 pipeline-graph.ts 逐条一致）
 SW_EXEC_OUT = 'eo'
+
+# 黑板节点：每张图恒有且只有一块，id 固定。
+BOARD_ID = 'board'
+
+# 黑板上的 8 个预处理开关 —— 旧格式存在"第一个 detailer 的 params"上，迁移时搬到黑板。
+PREPROCESS_KEYS = ('enable_mask', 'recover_crop', 'enable_fit', 'enable_limit', 'enable_output',
+                   'enable_dynamic_layer', 'dynamic_layer_limit', 'dynamic_layer_ctx')
+PREPROCESS_DEFAULTS: Dict[str, Any] = {
+    'enable_mask': True, 'recover_crop': True, 'enable_fit': False, 'enable_limit': True,
+    'enable_output': False, 'enable_dynamic_layer': False,
+    'dynamic_layer_limit': True, 'dynamic_layer_ctx': True,
+}
+
+
+def is_schedulable(kind: str) -> bool:
+    """参与执行序的节点类型。黑板没有端口，不进执行序，也不投影回 blocks。"""
+    return kind != 'board'
+
+
+def board_params(graph: Dict[str, Any]) -> Dict[str, Any]:
+    """这块黑板的参数（缺黑板 = 全默认）。"""
+    for n in (graph or {}).get('nodes', []) or []:
+        if n.get('kind') == 'board':
+            return {**PREPROCESS_DEFAULTS, **(n.get('params') or {})}
+    return dict(PREPROCESS_DEFAULTS)
+
+
+def graph_enable_mask(graph: Dict[str, Any]) -> bool:
+    """这块黑板的 Enable Mask（缺黑板 / 缺字段 = 开）。"""
+    for n in (graph or {}).get('nodes', []) or []:
+        if n.get('kind') == 'board':
+            return (n.get('params') or {}).get('enable_mask', True) is not False
+    return True
 
 
 def sw_exec_in(b: int) -> str:
@@ -112,9 +158,11 @@ def switch_n(params: Dict[str, Any]) -> int:
     return n
 
 
-def node_ports(node: Dict[str, Any]):
-    """现算一个节点的端口表：(inputs, outputs)，每项 (id, kind, label)。Switch 动态。"""
-    if node.get('kind') == 'switch':
+def node_ports(node: Dict[str, Any], enable_mask: bool = True):
+    """现算一个节点的端口表：(inputs, outputs)，每项 (id, kind, label)。
+    Switch 动态；Start / End 的 Mask 端口随黑板的 Enable Mask 消失。"""
+    kind = str(node.get('kind') or '')
+    if kind == 'switch':
         branches = (node.get('params') or {}).get('branches') or []
         inputs: List[Tuple[str, str, str]] = []
         for b, br in enumerate(branches):
@@ -129,13 +177,18 @@ def node_ports(node: Dict[str, Any]):
         for i in range(switch_n(node.get('params') or {})):
             outputs.append((sw_data_out(i), PORT_ANY, f'Data {i + 1}'))
         return inputs, outputs
-    spec = NODE_SPECS.get(str(node.get('kind') or ''), {})
-    return spec.get('inputs', []), spec.get('outputs', [])
+    spec = NODE_SPECS.get(kind, {})
+    ins, outs = spec.get('inputs', []), spec.get('outputs', [])
+    if kind in ('start', 'end'):
+        f = (lambda lst: [p for p in lst if p[1] != PORT_MASK]) if not enable_mask else (lambda lst: lst)
+        return f(ins), f(outs)
+    return ins, outs
 
 
-def port_kind_node(node: Dict[str, Any], direction: str, port_id: str) -> Optional[str]:
-    """节点级端口 kind 查询（Switch 也能正确解析）。"""
-    inputs, outputs = node_ports(node)
+def port_kind_node(node: Dict[str, Any], direction: str, port_id: str,
+                   enable_mask: bool = True) -> Optional[str]:
+    """节点级端口 kind 查询（Switch / Start / End 的动态端口也能正确解析）。"""
+    inputs, outputs = node_ports(node, enable_mask)
     for pid, kind, _label in (inputs if direction == 'in' else outputs):
         if pid == port_id:
             return kind
@@ -152,15 +205,19 @@ END_ID = 'end'
 _GAP_X = 300
 
 
-def port_kind(kind: str, direction: str, port_id: str) -> Optional[str]:
-    """查某节点某方向某端口的 kind；找不到返回 None。"""
+def port_kind(kind: str, direction: str, port_id: str, enable_mask: bool = True) -> Optional[str]:
+    """查某节点某方向某端口的 kind；找不到返回 None。
+    Start / End 的 Mask 端口随黑板的 Enable Mask 消失（拿得到图时优先用 port_kind_node）。"""
     spec = NODE_SPECS.get(kind)
     if not spec:
         return None
     lst = spec['inputs'] if direction == 'in' else spec['outputs']
     for pid, pkind, _label in lst:
-        if pid == port_id:
-            return pkind
+        if pid != port_id:
+            continue
+        if pkind == PORT_MASK and not enable_mask and kind in ('start', 'end'):
+            return None
+        return pkind
     return None
 
 
@@ -195,6 +252,18 @@ def blocks_to_graph(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_id: Dict[str, Dict[str, Any]] = {}
     seq = [0]
 
+    # 黑板：Preprocess 那 8 个开关原本存在"第一个 detailer 的 params"上（每个 preset 一份），
+    # 迁移时搬到黑板上 —— 黑板是**每张图一块**的配置，语义与"每个 preset 一份"完全同形。
+    first_d = next((b for b in (blocks or []) if str(b.get('type') or '') == 'detailer'), None)
+    dp = ((first_d or {}).get('params') or {}) if isinstance((first_d or {}).get('params'), dict) else {}
+    board_p = dict(PREPROCESS_DEFAULTS)
+    for k in PREPROCESS_KEYS:
+        if dp.get(k) is not None:
+            board_p[k] = dp[k]
+    enable_mask = board_p.get('enable_mask') is not False
+    nodes.append({'id': BOARD_ID, 'kind': 'board', 'name': 'Preprocess', 'x': 0, 'y': -170,
+                  'params': board_p})
+
     start = {'id': START_ID, 'kind': 'start', 'name': 'Start', 'x': 0, 'y': 0, 'params': {}}
     nodes.append(start); by_id[START_ID] = start
 
@@ -208,11 +277,16 @@ def blocks_to_graph(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
         if kind not in NODE_SPECS:
             continue
         nid = str(b.get('id') or f'block-{i + 1}')
+        # interface 的选中目标只有**一个**真源：params['interface_idx']。旧格式把它存在顶层
+        # interface_index 上 —— 迁移时挪进 params，之后顶层那份由 graph_to_blocks 从 params 反算。
+        params = dict(b.get('params') or {})
+        if kind == 'interface' and params.get('interface_idx') is None:
+            params['interface_idx'] = b.get('interface_index') if isinstance(b.get('interface_index'), int) else 0
         node = {
             'id': nid, 'kind': kind,
             'name': b.get('name') or NODE_SPECS[kind]['label'],
             'x': (i + 1) * _GAP_X, 'y': 0,
-            'params': dict(b.get('params') or {}),
+            'params': params,
             'interface_index': b.get('interface_index'),
             'exec_options': b.get('exec_options'),
         }
@@ -228,7 +302,8 @@ def blocks_to_graph(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
             edges.append(make_edge(seq, image_src, 'image', nid, 'image'))
         if _has(kind, 'out', PORT_IMAGE):
             image_src = nid
-        if _has(kind, 'in', PORT_MASK):
+        # Enable Mask 关时 Start 根本没有 Mask 输出，mask 这条线整条不接。
+        if enable_mask and _has(kind, 'in', PORT_MASK):
             edges.append(make_edge(seq, mask_src, 'mask', nid, 'mask'))
         if _has(kind, 'out', PORT_MASK):
             mask_src = nid
@@ -251,7 +326,8 @@ def blocks_to_graph(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
     for p in (('exec_yes', 'exec_no') if prev_kind == 'detect' else (prev_port,)):
         edges.append(make_edge(seq, prev_node, p, END_ID, 'exec'))
     edges.append(make_edge(seq, image_src, 'image', END_ID, 'image'))
-    edges.append(make_edge(seq, mask_src, 'mask', END_ID, 'mask'))
+    if enable_mask:
+        edges.append(make_edge(seq, mask_src, 'mask', END_ID, 'mask'))
 
     return {'nodes': nodes, 'edges': edges}
 
@@ -261,13 +337,16 @@ def blocks_to_graph(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def exec_order(graph: Dict[str, Any]) -> List[str]:
-    """Execute 边上的拓扑排序（Kahn）。分支图同样成立；有环时排不满全部节点。"""
+    """Execute 边上的拓扑排序（Kahn）。分支图同样成立；有环时排不满全部节点。
+    黑板这类不参与执行的节点**不进**这张排序（留着会被当成一颗待执行的节点）。"""
     nodes = {n['id']: n for n in graph.get('nodes', [])}
-    children: Dict[str, List[str]] = {nid: [] for nid in nodes}
-    indeg: Dict[str, int] = {nid: 0 for nid in nodes}
+    children: Dict[str, List[str]] = {nid: [] for nid, n in nodes.items() if is_schedulable(str(n.get('kind') or ''))}
+    indeg: Dict[str, int] = {nid: 0 for nid in children}
     for e in graph.get('edges', []):
         s, t = e.get('source'), e.get('target')
         if s not in nodes or t not in nodes:
+            continue
+        if s not in indeg or t not in indeg:      # 有一端不参与执行：这条边不算
             continue
         if port_kind_node(nodes[s], 'out', e.get('sourcePort')) != PORT_EXEC:
             continue
@@ -297,10 +376,15 @@ def graph_to_blocks(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for nid in exec_order(graph):
         n = nodes.get(nid)
-        if not n or n['kind'] in ('start', 'end'):
+        if not n or n['kind'] in ('start', 'end') or not is_schedulable(n['kind']):
             continue
+        # 顶层 interface_index 从 params 反算 —— 单一真源在节点 params 上。
+        iface_idx = n.get('interface_index')
+        if n['kind'] == 'interface':
+            p = n.get('params') or {}
+            iface_idx = p.get('interface_idx', iface_idx)
         out.append({'id': n['id'], 'type': n['kind'], 'name': n.get('name'),
-                    'params': n.get('params') or {}, 'interface_index': n.get('interface_index'),
+                    'params': n.get('params') or {}, 'interface_index': iface_idx,
                     'exec_options': n.get('exec_options')})
     return out
 
@@ -309,20 +393,27 @@ def validate_graph(graph: Dict[str, Any]) -> List[str]:
     """返回校验问题文案列表（空 = 通过）。"""
     issues: List[str] = []
     nodes = {n['id']: n for n in graph.get('nodes', [])}
+    enable_mask = graph_enable_mask(graph)
     if START_ID not in nodes:
         issues.append('缺少 Start 节点')
     if END_ID not in nodes:
         issues.append('缺少 End 节点')
     connected_in = {(e.get('target'), e.get('targetPort')) for e in graph.get('edges', [])}
+    # Start 必须至少接出去一条 —— 它是链的入口；一条都没接时执行序会从"第一颗没有 exec 输入的
+    # 节点"开始，整条链与画布入口脱钩。
+    if START_ID in nodes and not any(e.get('source') == START_ID for e in graph.get('edges', [])):
+        issues.append('Start 一条线都没接出去 —— 这条链与画布入口脱钩了')
     for n in graph.get('nodes', []):
         spec = NODE_SPECS.get(n['kind'])
         if not spec:
             issues.append(f"未知节点类型 {n['kind']}")
             continue
+        if not is_schedulable(n['kind']):   # 黑板：没有端口，不参与校验
+            continue
         # Switch：动态端口 —— 不逐端口要求"全连"，只要求至少一条 exec 头接了线
         if n['kind'] == 'switch':
             any_exec_in = any(
-                e.get('target') == n['id'] and port_kind_node(n, 'in', e.get('targetPort')) == PORT_EXEC
+                e.get('target') == n['id'] and port_kind_node(n, 'in', e.get('targetPort'), enable_mask) == PORT_EXEC
                 for e in graph.get('edges', []))
             if not any_exec_in:
                 issues.append(f"{n.get('name')} 至少要让一条 Exec 头接上线")
@@ -331,27 +422,149 @@ def validate_graph(graph: Dict[str, Any]) -> List[str]:
             if not out_exec:
                 issues.append(f"{n.get('name')} 的 Execute 输出未连接")
             continue
-        # 逐端口的"未连接"合并成一条（接线是可编辑的中间态，拆成 N 行只会刷屏）
-        missing = [label for pid, _k, label in spec['inputs'] if (n['id'], pid) not in connected_in]
+        # 逐端口的"未连接"合并成一条（接线是可编辑的中间态，拆成 N 行只会刷屏）。
+        # 可选端口（Detailer / Interface / End 的 Mask）不连线也合法；Start / End 的 Mask
+        # 在 Enable Mask 关时取现算端口表（那时它根本不存在）。
+        optional = OPTIONAL_INPUT_PORTS.get(n['kind'], set())
+        in_ports, _out_ports = node_ports(n, enable_mask)
+        missing = [label for pid, _k, label in in_ports
+                   if pid not in optional and (n['id'], pid) not in connected_in]
         if missing:
             issues.append(f"{n.get('name')} 有 {len(missing)} 个输入端口未连接：" + ' / '.join(missing))
-    if len(exec_order(graph)) < len(graph.get('nodes', [])):
+    # 环检测：分母只在**参与执行的节点**里数（黑板之类的要去掉，否则永远"缺一个"）。
+    schedulable = sum(1 for n in graph.get('nodes', []) if is_schedulable(str(n.get('kind') or '')))
+    if len(exec_order(graph)) < schedulable:
         issues.append('Execute 连线成环')
     return issues
 
 
+def _exec_cycle_back_edges(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> set:
+    """DFS 找 exec 环里回指的边，返回要丢掉的边 id 集合。"""
+    by_id = {n['id']: n for n in nodes}
+    is_exec = []
+    for e in edges:
+        s, t = by_id.get(e.get('source')), by_id.get(e.get('target'))
+        if not s or not t:
+            continue
+        if port_kind_node(s, 'out', e.get('sourcePort')) != PORT_EXEC:
+            continue
+        if port_kind_node(t, 'in', e.get('targetPort')) != PORT_EXEC:
+            continue
+        is_exec.append(e)
+    adj: Dict[str, List[Tuple[str, str]]] = {n['id']: [] for n in nodes}
+    for e in is_exec:
+        adj[e['source']].append((e['target'], e['id']))
+    state: Dict[str, int] = {}
+    drop = set()
+
+    def dfs(nid: str):
+        state[nid] = 1
+        for to, eid in adj.get(nid, []):
+            if eid in drop:
+                continue
+            st = state.get(to, 0)
+            if st == 1:
+                drop.add(eid)          # 回边 → 成环 → 丢掉
+            elif st == 0:
+                dfs(to)
+        state[nid] = 2
+
+    for n in nodes:
+        if state.get(n['id'], 0) == 0:
+            dfs(n['id'])
+    return drop
+
+
+def sanitize_graph(graph: Dict[str, Any]) -> Dict[str, Any]:
+    """把图修成**一定合法**：丢未知节点 / 悬空边 / 端口不存在 / kind 不匹配 / 重复边 / exec 环；
+    缺 Start / End 就补。返回新 dict（不改原对象）。加载与执行前都过一遍。"""
+    seen = set()
+    nodes: List[Dict[str, Any]] = []
+    has_board = False
+    for n in (graph or {}).get('nodes', []) or []:
+        if n.get('kind') not in NODE_SPECS or n.get('id') in seen:
+            continue
+        if n.get('kind') == 'board':
+            if has_board:
+                continue          # 黑板只留一块
+            has_board = True
+        seen.add(n['id'])
+        nodes.append(dict(n))
+    if START_ID not in seen:
+        nodes.insert(0, {'id': START_ID, 'kind': 'start', 'name': 'Start', 'x': 0, 'y': 0, 'params': {}})
+    if END_ID not in seen:
+        nodes.append({'id': END_ID, 'kind': 'end', 'name': 'End', 'x': 0, 'y': 0, 'params': {}})
+
+    # 黑板：旧图里还没有（那时 Preprocess 挂在"第一个 detailer 的 params"上）就补一块 ——
+    # 参数从图里第一颗 detailer 的 params 抄过来；已有的那块补齐缺的 key。
+    board_i = next((i for i, n in enumerate(nodes) if n.get('kind') == 'board'), -1)
+    if board_i >= 0:
+        b = nodes[board_i]
+        nodes[board_i] = {**b, 'params': {**PREPROCESS_DEFAULTS, **(b.get('params') or {})}}
+    else:
+        src = next((n for n in nodes if n.get('kind') == 'detailer'), None)
+        sp = (src or {}).get('params') or {}
+        params = dict(PREPROCESS_DEFAULTS)
+        for k in PREPROCESS_KEYS:
+            if sp.get(k) is not None:
+                params[k] = sp[k]
+        nodes.insert(0, {'id': BOARD_ID, 'kind': 'board', 'name': 'Preprocess',
+                         'x': 0, 'y': -170, 'params': params})
+        seen.add(BOARD_ID)
+
+    # Enable Mask 关 = Start 的 Mask 输出 / End 的 Mask 输入不存在 → 指向它们的边在这里
+    # 因为"端口已不存在"被丢掉（与前端选的"端口直接消失"同一条规则）。
+    enable_mask = graph_enable_mask({'nodes': nodes})
+
+    by_id = {n['id']: n for n in nodes}
+    seen_edge = set()
+    used_ids: set = set()
+    edges: List[Dict[str, Any]] = []
+    for e in (graph or {}).get('edges', []) or []:
+        s, t = by_id.get(e.get('source')), by_id.get(e.get('target'))
+        if not s or not t:
+            continue
+        if not is_schedulable(s['kind']) or not is_schedulable(t['kind']):
+            continue              # 黑板没有端口，连着它的边一律不算
+        sk = port_kind_node(s, 'out', e.get('sourcePort'), enable_mask)
+        tk = port_kind_node(t, 'in', e.get('targetPort'), enable_mask)
+        if not sk or not tk:
+            continue
+        if not (sk == tk or sk == PORT_ANY or tk == PORT_ANY):
+            continue
+        key = (e.get('source'), e.get('sourcePort'), e.get('target'), e.get('targetPort'))
+        if key in seen_edge:
+            continue
+        seen_edge.add(key)
+        # 边 id **就在这里**唯一化（在环检测之前）：同 id 的两条边会被 xyflow 当成同一条；
+        # 更要命的是环检测按 id 丢边 —— 同 id 会一丢丢两条，连带误删合法的线。
+        eid = e.get('id')
+        if not eid or eid in used_ids:
+            base = eid or 'e'
+            k = 1
+            while f'{base}-d{k}' in used_ids:
+                k += 1
+            eid = f'{base}-d{k}'
+        used_ids.add(eid)
+        edges.append(e if eid == e.get('id') else {**e, 'id': eid})
+
+    # 环检测。此时 id 已唯一，按 id 丢边不会错杀。
+    drop = _exec_cycle_back_edges(nodes, edges)
+    return {'nodes': nodes, 'edges': [e for e in edges if e.get('id') not in drop]}
+
+
 def graph_from_config(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """从一份 block set / 顶层 config 里取图：优先新字段 `graph`；没有就由旧 `blocks` 迁移。
-    两者都没有时返回 None（调用方自己决定兜底）。"""
+    两者都没有时返回 None。取到的图**先净化**，保证执行器拿到的图合法。"""
     if not isinstance(entry, dict):
         return None
     g = entry.get('graph')
-    if isinstance(g, dict) and isinstance(g.get('nodes'), list):
-        return g
-    blocks = entry.get('blocks')
-    if isinstance(blocks, list):
-        return blocks_to_graph(blocks)
-    return None
+    if not (isinstance(g, dict) and isinstance(g.get('nodes'), list)):
+        blocks = entry.get('blocks')
+        if not isinstance(blocks, list):
+            return None
+        g = blocks_to_graph(blocks)
+    return sanitize_graph(g)
 
 
 # ---------------------------------------------------------------------------
@@ -438,14 +651,18 @@ def exec_plan(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
     plan: List[Dict[str, Any]] = []
     for nid in exec_order(graph):
         n = nodes.get(nid)
-        if not n or n['kind'] in ('start', 'end'):
+        if not n or n['kind'] in ('start', 'end') or not is_schedulable(n['kind']):
             continue
+        params = n.get('params') or {}
+        iface_idx = n.get('interface_index')
+        if n['kind'] == 'interface':
+            iface_idx = params.get('interface_idx', iface_idx)
         plan.append({
             'id': nid,
             'kind': n['kind'],
             'name': n.get('name'),
-            'params': n.get('params') or {},
-            'interface_index': n.get('interface_index'),
+            'params': params,
+            'interface_index': iface_idx,
             'exec_options': n.get('exec_options'),
             'guard': guards.get(nid, []),
             'inputs': sources.get(nid, {}),

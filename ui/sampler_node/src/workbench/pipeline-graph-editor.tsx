@@ -15,15 +15,16 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { createPortal } from 'react-dom';
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap, Handle, Position,
-  useNodesState, useEdgesState, addEdge, reconnectEdge, useReactFlow,
+  useNodesState, useEdgesState, addEdge, reconnectEdge, useReactFlow, useNodesInitialized, useViewport,
   type Node, type Edge, type NodeProps, type Connection, type NodeChange, type EdgeChange,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
   NODE_SPECS, portKindOfNode, nodePorts, validateGraph, defaultParamsFor, defaultNameFor, PARAM_FIELDS,
-  START_ID, END_ID,
-  type PipelineGraph, type NodeKind, type PortKind, type PortSpec, type ParamField,
+  START_ID, END_ID, BOARD_ID, graphEnableMask, isSchedulable,
+  type PipelineGraph, type GraphNode, type NodeKind, type PortKind, type PortSpec, type ParamField,
 } from './pipeline-graph';
+import type { InterfacePort } from '../types';
 
 const KIND_COLOR: Record<PortKind, string> = {
   exec: '#8e8e93', image: '#30d158', mask: '#64d2ff', any: '#ff9f0a',
@@ -39,12 +40,20 @@ interface PipeNodeData extends Record<string, unknown> {
   kind: NodeKind; name: string; params: Record<string, any>;
 }
 
+/** 黑板不是 xyflow 节点（它是一张跟着画布平移缩放的悬浮卡片，见 BoardCard），所以出图时
+ *  要由调用方把它补回来 —— 否则任何一次结构性改动都会把黑板从图里抹掉。 */
 const toRfNodes = (g: PipelineGraph): Node<PipeNodeData>[] =>
-  g.nodes.map(n => ({
-    id: n.id, type: 'pipe',
-    position: { x: n.x ?? 0, y: n.y ?? 0 },
-    data: { kind: n.kind, name: n.name, params: n.params || {} },
-  }));
+  g.nodes.filter(n => isSchedulable(n.kind) || n.kind === 'start' || n.kind === 'end')
+    .map(n => ({
+      id: n.id, type: 'pipe',
+      position: { x: n.x ?? 0, y: n.y ?? 0 },
+      data: { kind: n.kind, name: n.name, params: n.params || {} },
+    }));
+
+/** 黑板那一个节点（缺就现造一块默认的）。 */
+const boardOf = (g: PipelineGraph): GraphNode =>
+  g.nodes.find(n => n.kind === 'board')
+  ?? { id: BOARD_ID, kind: 'board', name: 'Preprocess', x: 0, y: -170, params: defaultParamsFor('board') };
 
 // 边用**内置类型**（bezier/default）：只有这样 xyflow 的官方便携重连手柄（EdgeUpdateAnchors）
 // 才会自动挂上 —— 它由 EdgeWrapper 无条件渲染（与边类型无关，但自定义边容易把命中区搅乱）。
@@ -61,7 +70,7 @@ const toRfEdges = (g: PipelineGraph): Edge[] =>
 
 const portKindOfKind = (g: PipelineGraph, nodeId: string, portId: string): PortKind | undefined => {
   const n = g.nodes.find(x => x.id === nodeId);
-  return n ? portKindOfNode(n, 'out', portId) : undefined;
+  return n ? portKindOfNode(n, 'out', portId, graphEnableMask(g)) : undefined;
 };
 
 /** **结构性**指纹：节点 id/kind/name/params + 边。**不含坐标** —— 拖拽时坐标每帧都在变，
@@ -70,13 +79,16 @@ const structSig = (g: PipelineGraph): string =>
   g.nodes.map(n => `${n.id},${n.kind},${n.name},${JSON.stringify(n.params || {})}`).join('|')
   + '#' + g.edges.map(e => `${e.source}:${e.sourcePort}>${e.target}:${e.targetPort}`).join('|');
 
-/** xyflow 的 nodes/edges → 我们的图模型。 */
-const graphFromRf = (rfNodes: Node<PipeNodeData>[], rfEdges: Edge[]): PipelineGraph => ({
-  nodes: rfNodes.map(n => ({
-    id: n.id, kind: n.data.kind, name: n.data.name,
-    x: Math.round(n.position.x), y: Math.round(n.position.y),
-    params: n.data.params || {},
-  })),
+/** xyflow 的 nodes/edges → 我们的图模型。黑板由 `board` 补回来（它不在画布节点里）。 */
+const graphFromRf = (rfNodes: Node<PipeNodeData>[], rfEdges: Edge[], board: GraphNode): PipelineGraph => ({
+  nodes: [
+    { ...board, params: board.params || {} },
+    ...rfNodes.map(n => ({
+      id: n.id, kind: n.data.kind, name: n.data.name,
+      x: Math.round(n.position.x), y: Math.round(n.position.y),
+      params: n.data.params || {},
+    })),
+  ],
   edges: rfEdges.map(e => ({
     id: e.id, source: e.source, target: e.target,
     sourcePort: String(e.sourceHandle || ''), targetPort: String(e.targetHandle || ''),
@@ -90,13 +102,27 @@ const graphFromRf = (rfNodes: Node<PipeNodeData>[], rfEdges: Edge[]): PipelineGr
 interface GraphEditApi {
   updateParam: (nodeId: string, key: string, value: any) => void;
   renameNode: (nodeId: string, name: string) => void;
+  /** 当前 pipeline 是不是 Krea2 —— Detailer 的 Edit Mode(fit/crop) 只对它有意义。 */
+  krea2: boolean;
+  /** 黑板上的预处理开关（8 个）。 */
+  board: Record<string, any>;
+  updateBoard: (key: string, value: any) => void;
+  /** 黑板的 Enable Mask —— Start 的 Mask 输出 / End 的 Mask 输入在它关掉时不存在。 */
+  enableMask: boolean;
   presets?: { id: string; name: string }[];
-  interfaces?: { name: string }[];
+  /** 可选 interface 列表：内联选择器按名字绑定；带 `start_ports` 时还画每端口的图来源。 */
+  interfaces?: GraphInterfaceInfo[];
+  /** 图池条目 —— interface 节点的端口图 / context 图 mask 从这里选。 */
+  staging?: { id: string; name: string }[];
   onCreatePreset?: () => Promise<string | null>;
   onRenamePreset?: (id: string, name: string) => void;
   onEditPreset?: (id: string) => void;
   onDeletePreset?: (id: string) => void;
 }
+
+/** 编辑器要的 interface 三样：名字（绑定用）、**在 server 包表里的真实下标**（回落 + 选项值，
+ *  列表可能被外面按 block-capable 过滤过，下标必须仍是全表的那一个）、入口端口（画端口图来源）。 */
+export interface GraphInterfaceInfo { name: string; index: number; start_ports?: InterfacePort[] }
 
 const GraphEditCtx = createContext<GraphEditApi | null>(null);
 
@@ -190,22 +216,102 @@ const InlinePresetManager: React.FC<{ nodeId: string; value: string | null | und
   );
 };
 
-/** interface 节点的内联选择：写 interface_idx（名字由 App 侧的一次性迁移补齐）。 */
-const InlineInterfacePicker: React.FC<{ nodeId: string; value: number | undefined }> = ({ nodeId, value }) => {
+/** interface 节点的内联参数面：目标选择（单一真源 = `params.interface_idx`，同一次改动把
+ *  `interface_name` 一并同步 —— 引擎按名字绑定更稳，重排/增删接口不会错绑）、Operation(+crop_reserve)、
+ *  每个入口端口的图来源、可选 context 图 / mask。这几样原本在旧 List 的块卡片里，搬进节点后必须原样
+ *  保留：少了它们 interface 块就配不出输入，整条链的输出无从谈起。 */
+const InterfaceBody: React.FC<{ nodeId: string; params: Record<string, any> }> = ({ nodeId, params }) => {
   const api = useContext(GraphEditCtx);
   if (!api) return null;
-  if (!api.interfaces) return <div style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.4)' }}>idx: {String(value ?? 0)}</div>;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-      <span style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.55)' }}>Interface</span>
-      <select className="nodrag" value={String(value ?? 0)} onChange={e => api.updateParam(nodeId, 'interface_idx', Number(e.target.value))}
-        style={{ ...ctrlStyle, width: 130 }}>
-        {api.interfaces.length === 0
-          ? <option value="0">— none —</option>
-          : api.interfaces.map((it, i) => <option key={i} value={i} style={{ background: '#1c1c1e' }}>{it.name}</option>)}
+  const list = api.interfaces;
+  if (!list) return <div style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.4)' }}>idx: {String(params.interface_idx ?? 0)}</div>;
+  const byName = params.interface_name ? list.findIndex(it => it.name === params.interface_name) : -1;
+  // 当前下标优先按名字解（名字是稳定标识）；解不出才回落到 params 里的下标。
+  const cur = byName >= 0 ? list[byName].index : (typeof params.interface_idx === 'number' ? params.interface_idx : -1);
+  const curListed = list.some(it => it.index === cur);
+  const itf = list.find(it => it.index === cur);
+  const staging = api.staging || [];
+  const set = (k: string, v: any) => api.updateParam(nodeId, k, v);
+  const opt = { background: '#1c1c1e' } as React.CSSProperties;
+  const lbl: React.CSSProperties = { fontSize: 9.5, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap' };
+  const row: React.CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginBottom: 3 };
+  const ports = (itf?.start_ports || []).filter(p => p.category === 'inject' && p.type !== 'PIPELINE_DATA');
+  return (<>
+    <div style={row}><span style={lbl}>Interface</span>
+      <select className="nodrag" value={String(cur)} style={{ ...ctrlStyle, width: 130 }}
+        onChange={e => {
+          const i = Number(e.target.value);
+          set('interface_idx', i);
+          set('interface_name', list.find(it => it.index === i)?.name ?? null);
+        }}>
+        {!curListed && <option value={String(cur)} style={opt}>{cur < 0 ? '— none —' : `idx ${cur}`}</option>}
+        {list.map(it => <option key={it.index} value={it.index} style={opt}>{it.name || `Interface ${it.index + 1}`}</option>)}
       </select>
     </div>
-  );
+    {!!params.interface_name && list.length > 0 && byName < 0 && (
+      <div style={{ fontSize: 9.5, color: '#ff9f0a', marginBottom: 3 }}>Missing: {params.interface_name}</div>
+    )}
+    <div style={row}><span style={lbl}>Operation</span>
+      <div className="nodrag" style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+        <select value={params.operation ?? 'default'} style={{ ...ctrlStyle, width: 78 }}
+          onChange={e => set('operation', e.target.value)}>
+          <option value="default" style={opt}>default</option>
+          <option value="crop" style={opt}>crop</option>
+        </select>
+        {params.operation === 'crop' && (
+          <input type="number" min={0} value={params.crop_reserve ?? 32} style={{ ...ctrlStyle, width: 52 }}
+            title="crop 时在边缘多留的余量"
+            onChange={e => set('crop_reserve', parseInt(e.target.value, 10) || 0)} />
+        )}
+      </div>
+    </div>
+    {ports.map(p => (
+      <div style={row} key={p.num}><span style={lbl}>{p.name || `Port ${p.num}`}</span>
+        <select className="nodrag" value={(params.image_keys && params.image_keys[p.num]) || ''} style={{ ...ctrlStyle, width: 130 }}
+          onChange={e => {
+            const next = { ...(params.image_keys || {}) };
+            if (e.target.value) next[p.num] = e.target.value; else delete next[p.num];
+            set('image_keys', next);
+          }}>
+          <option value="" style={opt}>(none)</option>
+          {staging.map((s, i) => <option key={i} value={s.id} style={opt}>{s.name} ({s.id})</option>)}
+        </select>
+      </div>
+    ))}
+    <div style={row}><span style={lbl}>Ctx Image</span>
+      <select className="nodrag" value={params.context_image_key || ''} style={{ ...ctrlStyle, width: 130 }}
+        onChange={e => set('context_image_key', e.target.value || null)}>
+        <option value="" style={opt}>(use pipeline)</option>
+        {staging.map((s, i) => <option key={i} value={s.id} style={opt}>{s.name} ({s.id})</option>)}
+      </select>
+    </div>
+    <div style={row}><span style={lbl}>Ctx Mask</span>
+      <select className="nodrag" value={params.context_mask_key || ''} style={{ ...ctrlStyle, width: 130 }}
+        onChange={e => set('context_mask_key', e.target.value || null)}>
+        <option value="" style={opt}>(use pipeline)</option>
+        {staging.map((s, i) => <option key={i} value={s.id} style={opt}>{s.name} ({s.id})</option>)}
+      </select>
+    </div>
+  </>);
+};
+
+/** query 节点的内联参数面：绑定的 preset（弹窗初始勾选） + Persistent（Confirm 时是否写回 preset）。
+ *  这两样旧 List 版在块卡片里，节点化后必须保留 —— 少了绑定，Query 弹窗就只能从空白开始。 */
+const QueryBody: React.FC<{ nodeId: string; params: Record<string, any> }> = ({ nodeId, params }) => {
+  const api = useContext(GraphEditCtx);
+  if (!api) return null;
+  const bound = !!params.preset_id;
+  return (<>
+    <InlinePresetManager nodeId={nodeId} value={params.preset_id} />
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginTop: 3 }}>
+      <span title={bound ? '开：Confirm 时把弹窗里的最终选择整体写回绑定的 preset，下次 run / 下次打开弹窗就是它。'
+        : '先绑定 preset 才能持久化 —— 没有 preset 就没有可写回的地方。'}
+        style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.55)' }}>Persistent</span>
+      <input className="nodrag" type="checkbox" disabled={!bound}
+        checked={bound && !!params.persistent}
+        onChange={e => api.updateParam(nodeId, 'persistent', e.target.checked)} />
+    </div>
+  </>);
 };
 
 /** Switch 节点的内联编辑器：每条分枝 = 一个 exec 头 + 它的 data 数量。 */
@@ -239,12 +345,104 @@ const SwitchBody: React.FC<{ params: Record<string, any>; onSet: (v: any) => voi
   );
 };
 
+/** 黑板卡片 —— Preprocess 那 8 个开关。**不是 xyflow 节点**：它摆在自己的图层里，套的是与
+ *  画布视口**完全相同**的 transform（translate + scale，原点 0 0），所以跟着平移缩放，
+ *  而坐标是**流坐标**、随图存盘。标题条担起拖动（控件那一区不碰，免得点开关时挪块）。 */
+const BoardCard: React.FC<{
+  board: GraphNode;
+  enableMask: boolean;
+  onSet: (key: string, value: any) => void;
+  onMove: (x: number, y: number, commit: boolean) => void;
+}> = ({ board, enableMask, onSet, onMove }) => {
+  const vp = useViewport();
+  const drag = useRef<{ px: number; py: number; ox: number; oy: number } | null>(null);
+  const p = board.params || {};
+  const dim = (on: boolean): React.CSSProperties => (on ? {} : { opacity: 0.4, pointerEvents: 'none' });
+  const gTitle: React.CSSProperties = {
+    fontSize: 8.5, letterSpacing: 0.7, textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', margin: '6px 0 2px',
+  };
+  const row: React.CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 2 };
+  const lbl: React.CSSProperties = { fontSize: 10, color: 'rgba(255,255,255,0.72)', whiteSpace: 'nowrap' };
+  const Row: React.FC<{ k: string; label: string; title: string; disabled?: boolean }> = ({ k, label, title, disabled }) => (
+    <div style={row} title={title}>
+      <span style={lbl}>{label}</span>
+      <input type="checkbox" checked={!!p[k]} disabled={disabled} onChange={e => onSet(k, e.target.checked)} />
+    </div>
+  );
+  const endDrag = (e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    drag.current = null;
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
+    onMove(d.ox + (e.clientX - d.px) / vp.zoom, d.oy + (e.clientY - d.py) / vp.zoom, true);
+  };
+  return (
+    <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none', zIndex: 4 }}>
+      <div style={{
+        position: 'absolute', top: 0, left: 0,
+        transform: `translate(${vp.x}px, ${vp.y}px) scale(${vp.zoom})`, transformOrigin: '0 0',
+      }}>
+        <div style={{
+          position: 'absolute', left: board.x, top: board.y, width: 190,
+          pointerEvents: 'auto', userSelect: 'none',
+          background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 10,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.45)', padding: '5px 9px 8px',
+        }}>
+          {/* 标题条 = 拖动把柄 */}
+          <div
+            onPointerDown={e => {
+              (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+              drag.current = { px: e.clientX, py: e.clientY, ox: board.x, oy: board.y };
+            }}
+            onPointerMove={e => {
+              const d = drag.current;
+              if (!d) return;
+              onMove(d.ox + (e.clientX - d.px) / vp.zoom, d.oy + (e.clientY - d.py) / vp.zoom, false);
+            }}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, cursor: 'grab',
+              marginBottom: 2, paddingBottom: 3, borderBottom: '0.5px solid rgba(255,255,255,0.08)',
+            }}>
+            <span style={{ width: 7, height: 7, borderRadius: 999, background: NODE_SPECS.board.color, flexShrink: 0 }} />
+            <span style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(255,255,255,0.9)' }}>Preprocess</span>
+          </div>
+
+          <div style={gTitle}>Mask</div>
+          <Row k="enable_mask" label="Enable Mask" title="开 = mask 预处理全开：扩张/羽化 + 按 mask 裁剪 + recover crop，Start/End 也才有 Mask 端口。关 = 这四步全跳过，Start 的 Mask 输出与 End 的 Mask 输入直接消失。" />
+          <div style={dim(enableMask)}>
+            <Row k="recover_crop" label="Recover Crop" title="开 = 按 crop 几何把产出合成回整幅图。关 = 产出保持 crop 工作区分辨率，作为新图层贴回原位。" disabled={!enableMask} />
+            <Row k="enable_fit" label="Enable Fit" title="开 = 图层 Generate 结束时自动 Fit Mask（缩到 mask 外接框）。" disabled={!enableMask} />
+          </div>
+
+          <div style={gTitle}>Limit</div>
+          <Row k="enable_limit" label="Enable Limit" title="开 = 按 Pixels / Align 限制工作分辨率。关 = 工作分辨率就是裁剪（或整幅）分辨率。" />
+
+          <div style={gTitle}>Output</div>
+          <Row k="enable_output" label="Enable Output" title="开 = 这一趟的最终产出另外存一张 PNG 到 ComfyUI 的 outputs 文件夹。" />
+
+          <div style={gTitle}>Dynamic Layer</div>
+          <Row k="enable_dynamic_layer" label="Dynamic Layer" title="开 = 这个 preset 的 ▶ Run 改为先框选建层再自动 Generate。关 = 保持整幅 Run。" />
+          <div style={dim(!!p.enable_dynamic_layer)}>
+            <Row k="dynamic_layer_limit" label="Layer Limit" title="开 = 建层分辨率按 DEFAULT SETTING 的 Pixels 预算算。" disabled={!p.enable_dynamic_layer} />
+            <Row k="dynamic_layer_ctx" label="Layer Context" title="开 = 自动 Generate 用框下方图层的合成当 context。" disabled={!p.enable_dynamic_layer} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const PipeNode: React.FC<NodeProps<Node<PipeNodeData>>> = ({ id, data, selected }) => {
   const api = useContext(GraphEditCtx);
   const spec = NODE_SPECS[data.kind];
   if (!spec) return <div style={{ color: '#ff6961', fontSize: 11 }}>未知: {String(data.kind)}</div>;
-  const ports = nodePorts({ kind: data.kind, params: data.params });
-  const fields = (PARAM_FIELDS[data.kind] || []).filter(f => !f.when || f.when(data.params));
+  const ports = nodePorts({ kind: data.kind, params: data.params }, api?.enableMask ?? true);
+  // Edit Mode 只在 Krea2 架构下有意义（其余架构只显示 Enable Edit）。
+  const fields = (PARAM_FIELDS[data.kind] || [])
+    .filter(f => !f.when || f.when(data.params))
+    .filter(f => !(data.kind === 'detailer' && f.key === 'edit_mode' && !api?.krea2));
   const setParam = (key: string, v: any) => api?.updateParam(id, key, v);
   return (
     <div style={{
@@ -269,11 +467,12 @@ const PipeNode: React.FC<NodeProps<Node<PipeNodeData>>> = ({ id, data, selected 
         <div className="nowheel" style={{ flex: 1, minWidth: 0, padding: '6px 6px', borderLeft: '0.5px solid rgba(255,255,255,0.06)', borderRight: '0.5px solid rgba(255,255,255,0.06)' }}>
           {data.kind === 'switch' && <SwitchBody params={data.params} onSet={v => setParam('branches', v.branches)} />}
           {data.kind === 'prompt' && <InlinePresetManager nodeId={id} value={data.params.preset_id} />}
-          {data.kind === 'interface' && <InlineInterfacePicker nodeId={id} value={data.params.interface_idx} />}
+          {data.kind === 'query' && <QueryBody nodeId={id} params={data.params} />}
+          {data.kind === 'interface' && <InterfaceBody nodeId={id} params={data.params} />}
           {fields.map(f => (
             <InlineField key={f.key} field={f} value={data.params[f.key]} onSet={v => setParam(f.key, v)} />
           ))}
-          {fields.length === 0 && data.kind !== 'prompt' && data.kind !== 'interface' && data.kind !== 'switch' && (
+          {fields.length === 0 && data.kind !== 'prompt' && data.kind !== 'query' && data.kind !== 'interface' && data.kind !== 'switch' && (
             <div style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.35)' }}>no parameters</div>
           )}
         </div>
@@ -295,24 +494,62 @@ export interface PipelineGraphEditorProps {
   graph: PipelineGraph;
   onChange: (g: PipelineGraph) => void;
   presets?: { id: string; name: string }[];
-  interfaces?: { name: string }[];
+  interfaces?: GraphInterfaceInfo[];
+  /** 图池条目 —— interface 节点的端口图 / context 图 mask 从这里选。 */
+  staging?: { id: string; name: string }[];
   onCreatePreset?: () => Promise<string | null>;
   onRenamePreset?: (id: string, name: string) => void;
   onEditPreset?: (id: string) => void;
   onDeletePreset?: (id: string) => void;
+  /** 当前 pipeline 架构名（'' / null = 未知）—— 用于 Krea2 专属字段的门控。 */
+  architecture?: string | null;
   /** 'fill' = 铺满父容器（父级要给它确定高度）；number = 固定像素高。 */
   height?: number | 'fill';
 }
 
 const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
-  graph, onChange, presets, interfaces,
-  onCreatePreset, onRenamePreset, onEditPreset, onDeletePreset, height = 460,
+  graph, onChange, presets, interfaces, staging,
+  onCreatePreset, onRenamePreset, onEditPreset, onDeletePreset, architecture, height = 460,
 }) => {
   const rf = useReactFlow();
+  // 自定义节点**量到尺寸之后**才算初始化 —— 在那之前 ReactFlow 不知道每个节点多大，
+  // `fitView` 算出来的边界是坏的（这是官方 `fitView` prop 在自定义节点上的经典坑：它只在挂载
+  // 那一次跑，而那时尺寸还没量出来）。所以取景要等这一位翻成 true 再补一次。
+  const nodesInitialized = useNodesInitialized();
+  const krea2 = !!architecture && /krea2/i.test(architecture);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<PipeNodeData>>(toRfNodes(graph));
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(toRfEdges(graph));
+  // 黑板（Preprocess 卡片）：不是画布节点，但**是图里的一个节点**（id 固定 board）——
+  // 出图时由 boardRef 补回去，所以它得跟着图一起被改写、被持久化。
+  const [board, setBoard] = useState<GraphNode>(() => boardOf(graph));
+  const boardRef = useRef<GraphNode>(board);
+  const enableMask = board.params?.enable_mask !== false;
+  const nodesRef = useRef(nodes); nodesRef.current = nodes;
+  const edgesRef = useRef(edges); edgesRef.current = edges;
   const lastSig = useRef<string>(structSig(graph));
+  /** 当前这份图的**节点集合**。 */
+  const lastIds = useRef<string>(graph.nodes.map(n => n.id).join(','));
+  /** 已经**取过景**的节点集合 —— 与 lastIds 分开，是为了让"取景"只发生在换图/换尺寸时，
+   *  用户自己拖动/加节点不会被抢视野。 */
+  const fittedIds = useRef<string>('');
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const seqRef = useRef(0);
+
+  /**
+   * 取景。**容器还没有真实尺寸时一律不取** —— 这是"打开画布只剩一个孤零零的 Start"的正主：
+   * dock 窗口刚挂上时高度还是 0（折起 / 还没布局），此时 fitView 算出来的是一张坏视口，
+   * 而 ReactFlow 的 `fitView` 只在挂载那一次跑，之后再也不会自己补 —— 于是画布永远停在
+   * 原点附近，只有当初落在(0,0)的 Start 在视野里，其余节点全在屏幕外。等尺寸到位再取
+   * （ResizeObserver 会叫这一下），这条就堵住了。
+   */
+  const fitIfNeeded = useCallback(() => {
+    const el = wrapRef.current;
+    if (!el || el.clientWidth < 40 || el.clientHeight < 40) return;   // 没有真实尺寸：等
+    const ids = lastIds.current;
+    if (!ids || ids === fittedIds.current) return;                     // 这份图已经取过景
+    fittedIds.current = ids;
+    rf.fitView({ padding: 0.2 });
+  }, [rf]);
 
   // 外部**结构性**换图（切 tab / 载入 / 别处改参数）才重建内部状态。坐标变化不触发重建 ——
   // 否则拖拽中途父级把图回传，会按旧坐标把节点重置，拖拽就断了。
@@ -320,14 +557,66 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
     const sig = structSig(graph);
     if (sig !== lastSig.current) {
       setNodes(toRfNodes(graph)); setEdges(toRfEdges(graph)); lastSig.current = sig;
+      // 黑板跟着图一起换（切 preset / 载入 / 别处改了开关）。
+      const b = boardOf(graph);
+      boardRef.current = b; setBoard(b);
+      // 节点**集合**变了 = 外部整份换图（切 preset / 载入）→ 该重新取景。不重取景的话，
+      // 新图的节点按各自的旧坐标落位，视口还停在上一份图上，看上去就是"图没了/只剩一个节点"。
+      const ids = graph.nodes.map(n => n.id).join(',');
+      if (ids !== lastIds.current) {
+        lastIds.current = ids;
+        requestAnimationFrame(fitIfNeeded);
+      }
     }
-  }, [graph, setNodes, setEdges]);
+  }, [graph, setNodes, setEdges, fitIfNeeded]);
+
+  // 容器尺寸从"没有"变成"有"（dock 展开 / 窗口调整 / 首次拿到布局）：如果这份图还没取过景，
+  // 现在补一次。尺寸没变的话 fitIfNeeded 会自己早退，不会跟用户抢视野。
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => fitIfNeeded());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fitIfNeeded]);
+
+  // 节点量完尺寸：这时边界才是真的，补一次取景（否则画布会停在原点附近 —— 只有当初落在
+  // (0,0) 的 Start 在视野里，其余节点全在屏幕外，看着就像"图没了"）。
+  useEffect(() => {
+    if (nodesInitialized) requestAnimationFrame(fitIfNeeded);
+  }, [nodesInitialized, fitIfNeeded]);
 
   const emit = useCallback((rfNodes: Node<PipeNodeData>[], rfEdges: Edge[]) => {
-    const g = graphFromRf(rfNodes, rfEdges);
+    const g = graphFromRf(rfNodes, rfEdges, boardRef.current);
     lastSig.current = structSig(g);
+    const ids = g.nodes.map(n => n.id).join(',');
+    // 用户自己挪节点/加节点：算"这份图已经取过景"，别在下一次容器尺寸变化时把视野抢回去。
+    lastIds.current = ids;
+    fittedIds.current = ids;
     onChange(g);
   }, [onChange]);
+
+  // 黑板改开关 / 挪位置：改的是图里那个 board 节点，然后立刻把整张图发出去。
+  const updateBoard = useCallback((key: string, value: any) => {
+    const next: GraphNode = { ...boardRef.current, params: { ...boardRef.current.params, [key]: value } };
+    boardRef.current = next; setBoard(next);
+    // Enable Mask 关 = Start 的 Mask 输出 / End 的 Mask 输入**不存在** → 那两条边当场丢掉
+    // （与净化同一条规则：端口不在，线就不在）。再打开时线不会自己回来，得重接。
+    const nextEdges = (key === 'enable_mask' && value === false)
+      ? edgesRef.current.filter(e => !(
+        (e.source === START_ID && String(e.sourceHandle) === 'mask') ||
+        (e.target === END_ID && String(e.targetHandle) === 'mask')))
+      : edgesRef.current;
+    if (nextEdges !== edgesRef.current) setEdges(nextEdges);
+    emit(nodesRef.current, nextEdges);
+  }, [emit, setEdges]);
+
+  // 挪黑板：拖动途中只动本地（每帧都发会刷爆父级与落盘），松手那一下才落图。
+  const moveBoard = useCallback((x: number, y: number, commit: boolean) => {
+    const next: GraphNode = { ...boardRef.current, x: Math.round(x), y: Math.round(y) };
+    boardRef.current = next; setBoard(next);
+    if (commit) emit(nodesRef.current, edgesRef.current);
+  }, [emit]);
 
   const handleNodesChange = useCallback((changes: NodeChange<Node<PipeNodeData>>[]) => {
     // Start / End 是必需的端点，不允许删掉：把针对它们的 remove 变更拦掉。
@@ -348,17 +637,17 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
       const s = nodes.find(n => n.id === e.source);
       const t = nodes.find(n => n.id === e.target);
       if (!s || !t) return false;
-      const okS = nodePorts({ kind: s.data.kind, params: s.data.params }).outputs.some(p => p.id === e.sourceHandle);
-      const okT = nodePorts({ kind: t.data.kind, params: t.data.params }).inputs.some(p => p.id === e.targetHandle);
+      const okS = nodePorts({ kind: s.data.kind, params: s.data.params }, enableMask).outputs.some(p => p.id === e.sourceHandle);
+      const okT = nodePorts({ kind: t.data.kind, params: t.data.params }, enableMask).inputs.some(p => p.id === e.targetHandle);
       return okS && okT;
     });
     // 剪掉悬空边后**照旧往下走 emit** —— 不能 early return：同一帧里用户删的那条边也要通知父级，
     // 否则父级的图还留着它，稍后一次重渲染就会把删掉的边同步回来（"删不掉"）。
     if (valid.length !== edges.length) setEdges(valid);
-    const g = graphFromRf(nodes, valid);
+    const g = graphFromRf(nodes, valid, boardRef.current);
     if (structSig(g) !== lastSig.current) emit(nodes, valid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges]);
+  }, [nodes, edges, enableMask]);
 
   // 拖拽收尾：把当前坐标（连带全部结构）发一次。
   const handleNodeDragStop = useCallback(() => {
@@ -373,29 +662,39 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
     renameNode: (nodeId, name) => {
       setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, data: { ...n.data, name } } : n));
     },
-    presets, interfaces, onCreatePreset, onRenamePreset, onEditPreset, onDeletePreset,
-  }), [presets, interfaces, onCreatePreset, onRenamePreset, onEditPreset, onDeletePreset, setNodes]);
+    presets, interfaces, staging, onCreatePreset, onRenamePreset, onEditPreset, onDeletePreset, krea2,
+    board: board.params || {}, updateBoard, enableMask,
+  }), [presets, interfaces, staging, onCreatePreset, onRenamePreset, onEditPreset, onDeletePreset, setNodes,
+       krea2, board, updateBoard, enableMask]);
+
+  // 连线合法性查的是**内部实时 nodes**（不是外部的 graph prop —— 那个在 emit 之前是旧快照，
+  // 改完端口后立刻连线会被误拒）。
+  const kindOfRf = useCallback((nodeId: string, dir: 'in' | 'out', portId: string): PortKind | undefined => {
+    const n = nodes.find(x => x.id === nodeId);
+    return n ? portKindOfNode({ kind: n.data.kind, params: n.data.params }, dir, portId, enableMask) : undefined;
+  }, [nodes, enableMask]);
 
   const isValidConnection = useCallback((c: Connection | Edge): boolean => {
-    const sk = portKindOfKind(graph, c.source!, String(c.sourceHandle));
-    const tgt = graph.nodes.find(n => n.id === c.target);
-    const tk = tgt ? portKindOfNode(tgt, 'in', String(c.targetHandle)) : undefined;
+    const sk = kindOfRf(c.source!, 'out', String(c.sourceHandle));
+    const tk = kindOfRf(c.target!, 'in', String(c.targetHandle));
     if (!sk || !tk) return false;
     // 同 kind 可连；任何一端是 any（Switch 的 data）也能连。
     return sk === tk || sk === 'any' || tk === 'any';
-  }, [graph]);
+  }, [kindOfRf]);
 
-  // 新建边：官方 addEdge。id 必须**与迁移生成的不撞车** —— 迁移的边 id 形如 `e-0`、`e-1`
-  // （blocksToGraph 的 eid），所以这里用 `e-n<n>` 前缀；撞 id 会让 xyflow 把它们并成一条，
-  // 表现就是"删不掉 / 删一条剩一条"。
+  // 新建边：官方 addEdge。id 必须**跨会话也不撞车** —— 迁移的边是 `e-0`、`e-1`（blocksToGraph
+  // 的 eid），而本会话的计数器每次刷新都从 0 起，`e-n0`/`e-n1` 会正好撞上**上次会话**存下来的
+  // e-n0/e-n1。撞 id 会被 xyflow 当成同一条边：选中/删除/重连全乱（"删不掉 / 删一条剩一条 /
+  // 拖一条线丢两条"）。所以 id 里带一枚**本会话随机 token**，计数器只在 token 后递增。
+  const edgeToken = useRef(Math.random().toString(36).slice(2, 7));
   const onConnect = useCallback((c: Connection) => {
-    const kind = portKindOfKind(graph, c.source!, String(c.sourceHandle)) || 'exec';
+    const kind = kindOfRf(c.source!, 'out', String(c.sourceHandle)) || 'exec';
     setEdges(els => addEdge({
-      ...c, id: `e-n${seqRef.current++}`,
+      ...c, id: `e-n${edgeToken.current}-${seqRef.current++}`,
       interactionWidth: 24,
       style: { stroke: portColor(kind), strokeWidth: 1.6 },
     }, els) as Edge[]);
-  }, [graph, setEdges]);
+  }, [kindOfRf, setEdges]);
 
   // 重连：官方 `reconnectEdge` 工具（保留原 id 与 style）。**失败（松手在空白/非法处）
   // 不删边** —— 官方语义就是"回到原位"；删除靠官方 deleteKeyCode（选中边 + Delete）。
@@ -417,7 +716,6 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
       data: { kind, name: defaultNameFor(kind), params: defaultParamsFor(kind) },
     }]);
   }, [nodes, setNodes]);
-  const addNode = useCallback((kind: NodeKind) => addNodeAt(kind), [addNodeAt]);
 
   // 右键：先出一个小菜单（Add Node），点它再弹 modal 选类型；落点 = 右键处。
   const [paneMenu, setPaneMenu] = useState<{ x: number; y: number } | null>(null);
@@ -437,11 +735,12 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
   }, [paneMenu]);
 
   const issues = useMemo(() => validateGraph(graph), [graph]);
-  const addKinds = (Object.keys(NODE_SPECS) as NodeKind[]).filter(k => k !== 'start' && k !== 'end');
+  // 黑板不在这张表里 —— 每张图恒有且只有一块（由净化保证），不需要用户再添一座。
+  const addKinds = (Object.keys(NODE_SPECS) as NodeKind[]).filter(k => k !== 'start' && k !== 'end' && k !== 'board');
 
   const fill = height === 'fill';
   const canvasH: React.CSSProperties = fill
-    ? { flex: 1, minHeight: 360 }
+    ? { flex: 1, minHeight: 0 }
     : { height: height as number };
 
   return (
@@ -457,31 +756,12 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
         .pg-flow .react-flow__minimap-mask { fill: rgba(0,0,0,0.55); }
         .pg-flow .react-flow__minimap-node { fill: rgba(255,255,255,0.26); stroke: none; }
       `}</style>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: fill ? 1 : undefined, minHeight: 0, height: fill ? '100%' : undefined }}>
-        <div className="nodrag" style={{ display: 'flex', flexWrap: 'wrap', gap: 5, alignItems: 'center' }}>
-          <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.5)' }}>Add:</span>
-          {addKinds.map(k => (
-            <button key={k} type="button" title={NODE_SPECS[k].hint} onClick={() => addNode(k)}
-              style={{
-                fontSize: 10, padding: '2px 7px', borderRadius: 999, cursor: 'pointer',
-                background: `${NODE_SPECS[k].color}22`, color: 'rgba(255,255,255,0.85)',
-                border: `0.5px solid ${NODE_SPECS[k].color}66`,
-              }}>{NODE_SPECS[k].label}</button>
-          ))}
-          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>· 画布上右键也可加</span>
-        </div>
-
-        {issues.length > 0 && (
-          <div style={{
-            fontSize: 10.5, color: '#ffd60a', background: 'rgba(255,214,10,0.08)',
-            border: '0.5px solid rgba(255,214,10,0.3)', borderRadius: 8, padding: '4px 9px',
-          }}>
-            {issues.slice(0, 3).map((it, i) => <div key={i}>• {it.message}</div>)}
-            {issues.length > 3 && <div>… 共 {issues.length} 处</div>}
-          </div>
-        )}
-
-        <div className="pg-flow" style={{ ...canvasH, borderRadius: 10, overflow: 'hidden', border: '0.5px solid rgba(255,255,255,0.1)' }}>
+      <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: fill ? 1 : undefined, minHeight: 0, height: fill ? '100%' : undefined }}>
+        <div ref={wrapRef} className="pg-flow" style={{
+          ...canvasH, overflow: 'hidden',
+          // 铺满模式什么都不加；固定高度模式才给一圈边框/圆角
+          ...(fill ? {} : { border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 10 }),
+        }}>
           <ReactFlow
             nodes={nodes} edges={edges} nodeTypes={nodeTypes}
             onNodesChange={handleNodesChange} onEdgesChange={handleEdgesChange}
@@ -501,7 +781,23 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
             <Controls showInteractive={false} />
             <MiniMap pannable zoomable nodeColor="rgba(255,255,255,0.26)" maskColor="rgba(0,0,0,0.55)" />
           </ReactFlow>
+          {/* 黑板：画在画布之上、跟着视口平移缩放（不是 xyflow 节点，见 BoardCard） */}
+          <BoardCard board={board} enableMask={enableMask} onSet={updateBoard} onMove={moveBoard} />
         </div>
+
+        {/* 校验提示：**悬浮**在画布左上，不占布局高度、不挡操作（pointerEvents:none） */}
+        {issues.length > 0 && (
+          <div style={{
+            position: 'absolute', left: 10, top: 10, zIndex: 6, maxWidth: 380, pointerEvents: 'none',
+            fontSize: 10.5, color: '#ffd60a', background: 'rgba(42,36,0,0.85)',
+            border: '0.5px solid rgba(255,214,10,0.35)', borderRadius: 8, padding: '4px 9px',
+          }}>
+            {/* 显式接线是唯一的数据通路，"哪几根没接"就是唯一的待办清单 —— 截太狠等于把
+                待办藏起来，所以放宽到 8 条（再长就折成一行计数）。 */}
+            {issues.slice(0, 8).map((it, i) => <div key={i}>• {it.message}</div>)}
+            {issues.length > 8 && <div>… 共 {issues.length} 处</div>}
+          </div>
+        )}
       </div>
 
       {/* 右键小菜单：只一项 Add Node（点它才弹 modal） */}

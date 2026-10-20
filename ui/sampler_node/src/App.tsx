@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
 import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendUiPayloads, BlendUiSend, BlendPen } from './types';
-import { blocksToGraph, graphToBlocks, type PipelineGraph } from './workbench/pipeline-graph';
-import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
+import { blocksToGraph, graphToBlocks, sanitizeGraph, type PipelineGraph } from './workbench/pipeline-graph';
+import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, preprocessFlag } from './types';
 import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendAttrOpen, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUi, setBlendUi } from './workbench/store';
 import { vidStagingOverlay } from './workbench/video/procRun';
@@ -446,11 +446,13 @@ const App: React.FC = () => {
     context_regex: '.+',
   };
   // 每套链都保证带 `graph`：旧数据（只有 blocks）就地迁移；新数据原样用。
-  // `blocks` 始终是 `graph` 沿 Execute 顺序的投影，两条路各写一处、保持一致。
+  // **载入即净化**：sanitizeGraph 把悬空边 / 端口不存在 / kind 不匹配 / 重复边 / exec 环
+  // 全丢掉（缺 Start/End 就补），保证进来的图一定是合法的。
   const normalizeSet = useCallback((s: BlockSet): BlockSet => {
-    const g: PipelineGraph = (s.graph && Array.isArray(s.graph.nodes))
+    const raw: PipelineGraph = (s.graph && Array.isArray(s.graph.nodes))
       ? s.graph
       : blocksToGraph(s.blocks ?? []);
+    const g = sanitizeGraph(raw);
     return { ...s, graph: g, blocks: graphToBlocks(g) };
   }, []);
   // Multi-set Pipeline Blocks ("tabs" in the workbench). The ACTIVE set's blocks ARE the working
@@ -470,6 +472,7 @@ const App: React.FC = () => {
   const activeGraph = useMemo<PipelineGraph>(
     () => blockSets.find(s => s.id === activeBlockSetId)?.graph ?? blocksToGraph(blocks),
     [blockSets, activeBlockSetId, blocks]);
+  const [architecture, setArchitecture] = useState<string | null>(null);
   const [maskGrow, setMaskGrow] = useState(32);
   const [maskBlur, setMaskBlur] = useState(32);
   // DEFAULT SETTING（Settings 页）：所有 preset 共享（server config 持久化）
@@ -530,6 +533,7 @@ const App: React.FC = () => {
         setArchSettings({ rules: archRules });
         archRuleIdCounter.current = Math.max(2, maxIdSuffix(archRules.map(r => r.id), 'arch-') + 1);
         setDetailStatus(data.detail_status);
+        setArchitecture(data.architecture ?? null);
         setPipelineSettings(data.pipeline_settings ?? EMPTY_PIPELINE_SETTINGS);
         setInterfaceMeta(data.interface_meta ?? {});
         setOpenWithApp(!!data.open_with_app);
@@ -729,6 +733,7 @@ const App: React.FC = () => {
         // 一条 preset 绑定的 pipeline 是在 run 循环里现加载的：名字与架构都会跟着变，
         // 轮询顺手同步，前端就不用再拉一次 config。
         if (typeof data.loaded_pipeline_name === 'string') setLoadedPipelineName(data.loaded_pipeline_name);
+        if (data.architecture !== undefined) setArchitecture(data.architecture ?? null);
         // 同一趟 run 里 lora_regex 也可能换了代（后端已经跟着重扫过 lora 了）：Prompt tab 开着
         // 的话这一代当场送过去，别等用户下次进那个 tab。
         if (typeof data.pipeline_lora_epoch === 'number') loraEpochRef.current = data.pipeline_lora_epoch;
@@ -1138,7 +1143,7 @@ const App: React.FC = () => {
           // Detector 工具总闸：节点没连 detector 时，工作台整块 Detector 工具隐藏。
           hasDetector: !!config?.has_detector,
           // 激活 tab 的 Enable Mask 总闸：关 = 整幅是工作区，Run 不要求先画 Mask 层。
-          mask_required: firstDetailerFlag(blockSets, activeBlockSetId, 'enable_mask', true),
+          mask_required: preprocessFlag(blockSets, activeBlockSetId, 'enable_mask', true),
           staging: stagingRef.current,
         }, '*');
         // The Generate dialog's Pipeline Preset enum picks which block set runs the generate, so
@@ -1147,12 +1152,12 @@ const App: React.FC = () => {
           type: 'blend-pipeline-presets',
           presets: blockSets.map((s: BlockSet) => ({
             id: s.id, name: s.name,
-            enable_mask: firstDetailerFlag(blockSets, s.id, 'enable_mask', true),
-            enable_fit: firstDetailerFlag(blockSets, s.id, 'enable_fit', false),
+            enable_mask: preprocessFlag(blockSets, s.id, 'enable_mask', true),
+            enable_fit: preprocessFlag(blockSets, s.id, 'enable_fit', false),
             // Dynamic Layer 三开关：▶ Run 分流到框选→建层→自动 Generate 的工作台侧流程。
-            dynamic_layer: firstDetailerFlag(blockSets, s.id, 'enable_dynamic_layer', false),
-            layer_limit: firstDetailerFlag(blockSets, s.id, 'dynamic_layer_limit', true),
-            layer_ctx: firstDetailerFlag(blockSets, s.id, 'dynamic_layer_ctx', true),
+            dynamic_layer: preprocessFlag(blockSets, s.id, 'enable_dynamic_layer', false),
+            layer_limit: preprocessFlag(blockSets, s.id, 'dynamic_layer_limit', true),
+            layer_ctx: preprocessFlag(blockSets, s.id, 'dynamic_layer_ctx', true),
           })),
           active_id: activeBlockSetId,
         }, '*');
@@ -1378,12 +1383,12 @@ const App: React.FC = () => {
       type: 'blend-pipeline-presets',
       presets: blockSets.map((s: BlockSet) => ({
         id: s.id, name: s.name,
-        enable_mask: firstDetailerFlag(blockSets, s.id, 'enable_mask', true),
-        enable_fit: firstDetailerFlag(blockSets, s.id, 'enable_fit', false),
+        enable_mask: preprocessFlag(blockSets, s.id, 'enable_mask', true),
+        enable_fit: preprocessFlag(blockSets, s.id, 'enable_fit', false),
         // Dynamic Layer 三开关：▶ Run 分流到框选→建层→自动 Generate 的工作台侧流程。
-        dynamic_layer: firstDetailerFlag(blockSets, s.id, 'enable_dynamic_layer', false),
-        layer_limit: firstDetailerFlag(blockSets, s.id, 'dynamic_layer_limit', true),
-        layer_ctx: firstDetailerFlag(blockSets, s.id, 'dynamic_layer_ctx', true),
+        dynamic_layer: preprocessFlag(blockSets, s.id, 'enable_dynamic_layer', false),
+        layer_limit: preprocessFlag(blockSets, s.id, 'dynamic_layer_limit', true),
+        layer_ctx: preprocessFlag(blockSets, s.id, 'dynamic_layer_ctx', true),
       })),
       active_id: activeBlockSetId,
     }, '*');
@@ -1464,6 +1469,7 @@ const App: React.FC = () => {
       if (data.success) {
         // 切换即加载：edit 设置按架构渲染、override 按名字取，两者都要跟着刷新
         fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
+          setArchitecture(cfg.architecture ?? null);
           setLoadedPipelineName(cfg.loaded_pipeline_name ?? '');
           loraEpochRef.current = cfg.pipeline_lora_epoch ?? loraEpochRef.current;
           // 这里以前是 setTimeout(100) 的一次性 post：iframe 还没挂上监听就永久丢在空气里。
@@ -1787,7 +1793,7 @@ const App: React.FC = () => {
         detailStatus={detailStatus}
         staging={staging}
         promptIframeRef={promptIframeRef}
-        blocks={blocks}
+        architecture={architecture}
         maskGrow={maskGrow}
         maskBlur={maskBlur}
         cropReserve={cropReserve}

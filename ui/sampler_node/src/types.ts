@@ -549,21 +549,24 @@ export interface PipelinePackageInfo {
   pipelines: PipelineInfo[];
 }
 
-/** 第一个 detailer block 上的某布尔总闸（Preprocess Settings 的开关都存在它的 params 里）。
+/** 黑板上那枚布尔总闸（Preprocess Settings 的开关现在存在图里那块黑板节点的 params 上）。
  *  Blend 工作台的 Run 预检、preset 行的 ▶ 图标与后端闸门共用同一语义：enable_mask 关 = 不做
- *  围绕 mask 的预处理、整幅就是工作区，Mask 层没画也能跑；enable_fit 开 = 图层 Generate 的产出
- *  继承源 mask 后贴合。
+ *  围绕 mask 的预处理、整幅就是工作区，Mask 层没画也能跑，Start/End 也不再带 Mask 端口；
+ *  enable_fit 开 = 图层 Generate 的产出继承源 mask 后贴合。
  *  setId 解不出链时退回第一套（与后端选链的优先级一致）；默认值由调用方传入，
- *  必须与后端/工作台读同一 key 时的默认一致（enable_mask 后端默认开）。 */
-export function firstDetailerFlag(
+ *  必须与后端/工作台读同一 key 时的默认一致（enable_mask 后端默认开）。
+ *  黑板缺失（旧存档还没迁移）时回落读第一个 detailer 的 params —— 那正是旧格式存它们的地方。 */
+export function preprocessFlag(
   blockSets: BlockSet[], setId: string | null,
   key: 'enable_mask' | 'enable_fit' | 'enable_dynamic_layer' | 'dynamic_layer_limit' | 'dynamic_layer_ctx',
   dflt: boolean,
 ): boolean {
   const set = blockSets.find(s => s.id === setId) || blockSets[0];
-  const fd = set?.blocks.find(b => b.type === 'detailer');
+  const bp = set?.graph?.nodes.find(n => n.kind === 'board')?.params as Record<string, unknown> | undefined;
+  if (bp && typeof bp[key] === 'boolean') return bp[key] as boolean;
+  const fd = set?.blocks?.find(b => b.type === 'detailer');
   const dp = fd ? (fd.params as DetailerBlockParams) : undefined;
-  return dp ? (dp[key] ?? dflt) : dflt;
+  return dp ? ((dp as Record<string, any>)[key] ?? dflt) : dflt;
 }
 
 /** 工作台里打开着的每一份 .cud。文档本体、历史、合成全在 iframe 里，宿主只画它的 dock 窗口：

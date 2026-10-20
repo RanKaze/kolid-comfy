@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi } from '../types';
-import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
+import type { PipelineBlock, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi } from '../types';
+import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, preprocessFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
 import RunStatusSeg from './RunStatusSeg';
@@ -45,15 +45,16 @@ const tabInputStyle: React.CSSProperties = {
 // like any other (it docks, tabs, pops out), only its skin is a row of buttons and it is as tall as
 // that row rather than as tall as the space left to it.
 type SectionKey = UnitId;
-// 宿主自己的五格 + 工作台搬过来的那些格（一块一个文件，由注册表点名）合成这一页的固定集。
-const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'preprocess', 'blocks'];
+// 宿主自己的四格 + 工作台搬过来的那些格（一块一个文件，由注册表点名）合成这一页的固定集。
+// Preprocess 不再是一扇窗 —— 它搬进 Pipeline Graph，成了画布上那块黑板（board 节点）。
+const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'blocks'];
 // vtracks 是**默认提供**的常驻窗（Image 模式=空态卡，Video 模式=时间线）。播放器不单独占窗：
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
 // 标题条上有一颗 Image/Video 切换（见 heads）。
 const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets'];
-const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'preprocess', 'blocks'];
+const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
-  toolbar: 'File', context: 'Context', pipeline: 'Pipeline & Presets', preprocess: 'Preprocess',
+  toolbar: 'File', context: 'Context', pipeline: 'Pipeline & Presets',
   blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets',
   ...WORKBENCH_TITLES,
 };
@@ -131,7 +132,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDocUnit(id),
-    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'vtracks' || id === 'vassets',
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'vtracks' || id === 'vassets' || id === 'blocks',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
     // 时间线与资产库同理：两份会一直长的列表。
@@ -366,7 +367,9 @@ interface EditPhaseProps {
   detailStatus: 'idle' | 'running' | 'done' | 'error';
   staging: StagingItem[];
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
-  blocks: PipelineBlock[];
+  /** 此刻加载的 pipeline 架构名（'' / null = 未知）。Detailer 的 Edit Mode(fit/crop) 只对 Krea2 有意义，
+   *  图编辑器据此决定这颗字段露不露。 */
+  architecture: string | null;
   /** Settings tab 的九个数值旋钮 —— 即 DEFAULT SETTING（server config 持久化）。
    *  它们是没被任何架构规则命中时用的那一组值。 */
   maskGrow: number;
@@ -454,7 +457,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, promptUrl,
   promptReady, detailStatus,
   staging, promptIframeRef,
-  blocks, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal,
+  architecture, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal,
   refPixelsVal, refAlignVal, tgenPixelsVal, tgenAlignVal,
   onDefaultParamChange,
   blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onReorderBlockSets, onSwitchBlockSet,
@@ -2026,16 +2029,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // id (the Tab type, stores and message channels all key on it) — only the display name changed.
   const TAB_LABELS: Record<Tab, string> = { prompt: 'Prompt', draw: 'Workbench', interface: 'Interface', settings: 'Settings' };
 
-  // 参数一律写回**图**（图是唯一真源）：按节点 id 定位并改它的 params。这样 Preprocess /
-  // Settings 这些面板改 first detailer 时，不会把用户在图里搭好的接线（分支/重连）冲掉。
-  const updateBlockParam = (blockId: string, key: string, value: string | number | boolean | Record<string, any> | null) => {
-    onGraphChange({
-      ...activeGraph,
-      nodes: activeGraph.nodes.map(n =>
-        n.id === blockId ? { ...n, params: { ...n.params, [key]: value } } : n),
-    });
-  };
-
   // An interface block is MISSING when its bound interface no longer exists (package removed or
   // renamed). Blocks saved before name-binding only carry interface_idx — fall back to that.
   // Judged only when the interfaces list is actually loaded, so a slow /api/package never
@@ -2047,16 +2040,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     return !(interfaces as InterfaceInfo[])[ip.interface_idx ?? -1];
   };
 
-
-  // limit_pixels 的 pixels/align 为全局参数，取自第一个 detailer block（与后端 first_bp 一致）。
-  const firstDetailer = blocks.find(b => b.type === 'detailer');
-  const firstDp = firstDetailer ? (firstDetailer.params as DetailerBlockParams) : undefined;
-  // Preprocess Settings 的两个总闸也放在第一个 detailer block 上（与 crop_reserve / pixels
-  // / align 同源），所以每个 Pipeline Preset 各自一份，默认开。关掉不只是灰掉 UI —— 后端
-  // 会真的跳过对应步骤。
-  const enableMask = firstDp ? (firstDp.enable_mask ?? true) : true;
-  const enableLimit = firstDp ? (firstDp.enable_limit ?? true) : true;
-  const dynLayer = firstDp ? (firstDp.enable_dynamic_layer ?? false) : false;
+  // 图里 interface 节点能选的包：只列开了 Block 模式的（Interface tab 的开关决定谁上得了链）；
+  // 一枚都标不上时回落到全表（旧 interface 默认 1 进 1 出，免得存量链刷新后突然全 Missing）。
+  // 每一枚都带**全表下标** —— 节点里存的 interface_idx 就是全表下标，选项值必须与它同一套。
+  const graphInterfaces = (() => {
+    const capable = interfaces.map((itf, idx) => ({ itf, idx })).filter(({ itf }) => {
+      const meta = interfaceMeta[itf?.name];
+      if (meta?.modes) return !!meta.modes.block;
+      const inP = itf?.start_ports?.filter(p => p.type === 'PIPELINE_DATA').length ?? 0;
+      const outP = itf?.end_ports?.filter(p => p.type === 'PIPELINE_DATA').length ?? 0;
+      return inP === 1 && outP === 1;
+    });
+    const picked = capable.length > 0 ? capable : interfaces.map((itf, idx) => ({ itf, idx }));
+    return picked.map(({ itf, idx }) => ({ name: itf.name, index: idx, start_ports: itf.start_ports }));
+  })();
+  const graphStaging = staging.map(s => ({ id: s.id, name: s.name }));
 
 
   const toggleFinishSelection = (key: string) => {
@@ -2507,7 +2505,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   const boundNamed = !!bound && bound !== PIPELINE_CURRENT_SELECT;
                   const boundMissing = pipelineIsMissing(bound);
                   // ▶ 的形状读这一套自己的第一个 detailer 块（与后端 / 工作台 Run 预检同一函数）
-                  const runMasked = firstDetailerFlag(blockSets, set.id, 'enable_mask', true);
+                  const runMasked = preprocessFlag(blockSets, set.id, 'enable_mask', true);
                   return (
                     <div key={set.id} style={{
                       display: 'flex', alignItems: 'stretch', borderRadius: 8, overflow: 'hidden',
@@ -2587,118 +2585,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               </>),
 
-              // Preprocess Settings — 每个 Pipeline Preset 独立的开关（存在第一个 detailer
-              // block 的 params 上）。数值参数（Grow/Blur/Crop Reserve/Pixels/Align）都在
-              // Settings 页的 DEFAULT SETTING，不按 preset 区分。
-              preprocess: (<>
-                <div style={styles.dockCard}>
-              {/* Mask — mask 预处理三件套，Enable Mask 是总闸 */}
-              <div style={styles.dockGroup}>
-              <div style={styles.dockGtitle}>Mask</div>
-              <div style={styles.dockGbody}>
-              <div style={styles.paramRow}
-                title="开 = mask 预处理全开：扩张/羽化 + 按 mask 裁剪 + recover crop。关 = 这四步全部跳过（grow/blur 归零、不裁剪、不复原），产出直接落在整幅图坐标系；mask 本身仍然限制重绘区域。">
-                <label style={styles.paramLabel}>Enable Mask</label>
-                <IOSToggle
-                  checked={enableMask}
-                  disabled={!firstDp}
-                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_mask', v)}
-                />
-              </div>
-              <div style={{ opacity: enableMask ? 1 : 0.4, pointerEvents: enableMask ? 'auto' : 'none' }}>
-              <div style={styles.paramRow}
-                title="开 = 按 crop 几何把产出合成回整幅图（原行为）。关 = 不 recover crop（也不 recover resize）：产出保持 crop 工作区分辨率，作为新图层由画布用 transform 贴回原来的位置，可继续微调。">
-                <label style={styles.paramLabel}>Recover Crop</label>
-                <IOSToggle
-                  checked={firstDp ? (firstDp.recover_crop ?? true) : true}
-                  disabled={!enableMask}
-                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'recover_crop', v)}
-                />
-              </div>
-              <div style={styles.paramRow}
-                title="开 = 图层 Generate 结束时自动 Fit Mask：新图层先继承源图层 mask 落在贴回框内的那一块，再把图层框缩到 mask 真正的外接框，grow/feather 涨出来的死区被一并裁掉，覆盖率不变。关 = 产出铺满整个 crop 框，尺寸不动。只对「图层 Generate」生效（Enable Mask 开 + Recover Crop 关）；整幅 Run 不受影响。">
-                <label style={styles.paramLabel}>Enable Fit</label>
-                <IOSToggle
-                  checked={firstDp ? (firstDp.enable_fit ?? false) : false}
-                  disabled={!enableMask}
-                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_fit', v)}
-                />
-              </div>
-              </div>
-              </div>
-              </div>
-              {/* Limit — 工作分辨率上限 */}
-              <div style={styles.dockGroup}>
-              <div style={styles.dockGtitle}>Limit</div>
-              <div style={styles.dockGbody}>
-              <div style={styles.paramRow}
-                title="开 = 按 Pixels / Align 限制工作分辨率。关 = 既不缩放也不对齐，工作分辨率就是裁剪（或整幅）分辨率；Qwen 架构仍会强制 32 对齐，否则 latent / vision token 网格不接受。">
-                <label style={styles.paramLabel}>Enable Limit</label>
-                <IOSToggle
-                  checked={enableLimit}
-                  disabled={!firstDp}
-                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_limit', v)}
-                />
-              </div>
-              </div>
-              </div>
-              {/* Output — 产出落盘 */}
-              <div style={styles.dockGroup}>
-              <div style={styles.dockGtitle}>Output</div>
-              <div style={styles.dockGbody}>
-              <div style={styles.paramRow}
-                title="开 = 这一趟的最终产出另外存一张 PNG 到 ComfyUI 的 outputs 文件夹（detailer_00001_.png 递增命名）——整幅 Run 和图层 Generate 都算「这一趟的最终产出」，落不落盘只看这颗开关，不分流。图里带和 SnapshotPromptNode 的 Cache 完全同形的 prompt 编码（prompt / prompts / lora / prefab / program / custom_prompts / prompt_parsing / filter_* / region），所以这张图能被 Prompt 节点的 Load From Image 原样读回；其中 prompt 一项编的是这次真正生效的用户选择（标签 / 自定义 / prefab 文本——不含 pipeline 自带的 prompt，也不含 lora 触发词：触发词由 lora 条目自己提供，读回后不会重复；Generate Text 的改写只属于那一趟采样，同样不编入），其余各项编的是这次真正生效的合并选择（链里没有 Prompt/Query 块时就是 Prompt 节点的全局选择）。关 = 结果只留在画布里，不落盘。">
-                <label style={styles.paramLabel}>Enable Output</label>
-                <IOSToggle
-                  checked={firstDp ? (firstDp.enable_output ?? false) : false}
-                  disabled={!firstDp}
-                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_output', v)}
-                />
-              </div>
-              </div>
-              </div>
-              {/* Dynamic Layer — ▶ Run 分流到框选建层自动 Generate，Dynamic Layer 是总闸 */}
-              <div style={styles.dockGroup}>
-              <div style={styles.dockGtitle}>Dynamic Layer</div>
-              <div style={styles.dockGbody}>
-              <div style={styles.paramRow}
-                title="开 = 这个 preset 的 ▶ Run 不再直接跑整幅链：工作台进入框选模式，拖完框跳过分辨率弹窗直接建出 Dynamic Layer，并立刻在该层上自动 Generate（跑的就是刚点的这条链）。Esc 取消框选 = 什么也不跑。关 = ▶ Run 保持原来的整幅 Run。">
-                <label style={styles.paramLabel}>Dynamic Layer</label>
-                <IOSToggle
-                  checked={dynLayer}
-                  disabled={!firstDp}
-                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_dynamic_layer', v)}
-                />
-              </div>
-              <div style={{ opacity: dynLayer ? 1 : 0.4, pointerEvents: dynLayer ? 'auto' : 'none' }}>
-              <div style={styles.paramRow}
-                title="开 = 建层分辨率自动按 DEFAULT SETTING 的 Pixels 预算算（rate = √(Pixels ÷ 框面积)，与分辨率弹窗里的 Limit 勾选同一公式）。关 = rate 1，层按框的原生像素建。仅 Dynamic Layer 开时生效。">
-                <label style={styles.paramLabel}>Layer Limit</label>
-                <IOSToggle
-                  checked={firstDp ? (firstDp.dynamic_layer_limit ?? true) : true}
-                  disabled={!dynLayer}
-                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'dynamic_layer_limit', v)}
-                />
-              </div>
-              <div style={styles.paramRow}
-                title="开 = 自动 Generate 用框下方所有图层的合成当 context（img2img）。关 = 新层是空的，context 落到该层分辨率上的噪声（框内纯 txt2img）。仅 Dynamic Layer 开时生效。">
-                <label style={styles.paramLabel}>Layer Context</label>
-                <IOSToggle
-                  checked={firstDp ? (firstDp.dynamic_layer_ctx ?? true) : true}
-                  disabled={!dynLayer}
-                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'dynamic_layer_ctx', v)}
-                />
-              </div>
-              </div>
-              </div>
-              </div>
-                </div>
-              </>),
+              // Preprocess 那批开关（Enable Mask / Recover Crop / Enable Fit / Enable Limit /
+              // Enable Output / Dynamic Layer）已经搬进 Pipeline Graph 的黑板；数值参数
+              // （Grow/Blur/Crop Reserve/Pixels/Align）仍在 Settings 页的 DEFAULT SETTING。
               blocks: (<>
                 {/* 撑满这一格：编辑器高度 'fill'，父容器给确定高度（flex 链），画布才不会底下留白 */}
                 <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, height: '100%' }}>
                   <PipelineGraphEditor graph={activeGraph} onChange={onGraphChange}
-                    interfaces={interfaces} height="fill"
+                    interfaces={graphInterfaces} staging={graphStaging} height="fill" architecture={architecture}
                     presets={promptPresets.map(p => ({ id: p.id, name: p.name }))}
                     onCreatePreset={async () => (await createPromptPreset())?.id ?? null}
                     onRenamePreset={(id, name) => void renamePromptPreset(id, name)}

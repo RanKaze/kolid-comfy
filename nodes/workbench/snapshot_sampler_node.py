@@ -43,7 +43,7 @@ from ...libs.generate_text_utils import apply_generate_text_to_prompt
 from ...libs import debug_trace as dbg
 from ...architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
 from .pipeline_graph import (blocks_to_graph, graph_from_config, exec_plan, port_kind,
-                            OP_INFO_PORT, START_ID, switch_n, sw_data_in, sw_data_out)
+                            OP_INFO_PORT, START_ID, switch_n, sw_data_in, sw_data_out, sanitize_graph)
 import gc
 import uuid
 
@@ -1557,16 +1557,20 @@ class SnapshotDetailerSamplerServer:
                 for s in self.staging_items]
 
     def _first_detailer_enable_mask(self, preset_id=None):
-        """生效链第一个 detailer 的 Enable Mask 总闸（默认开）。
+        """生效链的 Enable Mask 总闸（默认开）。
 
-        preset_id 能解出 block set 时看那套链，否则看激活 tab 的镜像（self.blocks）——
+        这枚开关现在住在**图里那块黑板**（board 节点）上；旧格式存在第一个 detailer 的
+        params 里 —— 黑板没有这枚 key 时回落到那里，存量 preset 不迁移也能跑。
+
+        preset_id 能解出 block set 时看那套链，否则看激活 tab 的镜像（self.blocks / self.graph）——
         与 run_detailer 主循环选链的优先级一致。Enable Mask 关 = 不做围绕 mask 的
         grow/blur/crop 预处理，整幅图就是工作区：Mask 层没画也允许跑（run 的
-        「Mask is required」闸门据此放行，mask 变成可选的重绘限制）。
+        「Mask is required」闸门据此放行，Start/End 也不再有 Mask 端口）。
 
         ★ 类归属：Server（HTTP handler 用 inst.、主循环用 server. 都拿得到 blocks 镜像）。
         """
         blocks = self.blocks or []
+        graph = self.graph
         if preset_id:
             preset_set = next(
                 (s for s in (self.blocks_sets or [])
@@ -1575,6 +1579,12 @@ class SnapshotDetailerSamplerServer:
             )
             if preset_set is not None:
                 blocks = preset_set['blocks']
+                if isinstance(preset_set.get('graph'), dict):
+                    graph = preset_set['graph']
+        board = next((n.get('params') or {} for n in (graph or {}).get('nodes') or []
+                      if isinstance(n, dict) and n.get('kind') == 'board'), {})
+        if isinstance(board.get('enable_mask'), bool):
+            return board['enable_mask']
         bp = next((b.get('params', b) for b in blocks
                    if isinstance(b, dict) and b.get('type') == 'detailer'), None)
         return bool(bp.get('enable_mask', True)) if isinstance(bp, dict) else True
@@ -4600,15 +4610,20 @@ class SnapshotDetailerSamplerNode:
         if user_mask is not None:
             user_mask = user_mask.clone()
             user_mask = (user_mask > 0).float()
-        # First detailer block: Preprocess Settings 的开关存在它的 params 上（recover_crop /
-        # enable_mask / enable_limit），所以这些开关每个 Pipeline Preset 各自一份。
+        # Preprocess 的三枚开关（enable_mask / recover_crop / enable_limit）现在住在图里的黑板
+        # 节点上（旧格式存在第一个 detailer 的 params，黑板缺 key 时回落到那里）；数值参数
         # crop_reserve / pixels / align 是 DEFAULT SETTING（server config → global_params），
-        # 不再按 preset 区分。必须在这里先取 —— mask 扩张也要看 enable_mask。
+        # 不按 preset 区分。必须在这里先取 —— mask 扩张也要看 enable_mask。
         first_detailer = next((b for b in blocks if b.get('type') == 'detailer'), blocks[0])
         first_bp = first_detailer.get('params', first_detailer)
+        # 这三枚开关现在的家在**图里那块黑板**（board 节点）；旧格式存在第一个 detailer 的
+        # params 上 —— 黑板没有该 key 时回落到那里，存量 preset 不迁移也能跑。
+        _pg_pre = graph if isinstance(graph, dict) and graph.get('nodes') else getattr(self, 'graph', None)
+        _board = next((n.get('params') or {} for n in (_pg_pre or {}).get('nodes') or []
+                       if isinstance(n, dict) and n.get('kind') == 'board'), {})
         # Enable Mask 关 = 不做围绕 mask 的三步预处理：grow/blur 归零、不按 mask 裁剪、
-        # 不 recover crop。mask 本身仍然限制重绘区域 —— 关掉的只是它外面那几层。
-        enable_mask = bool(first_bp.get('enable_mask', True))
+        # 不 recover crop（Start / End 也没有 Mask 端口）。mask 本身仍然限制重绘区域。
+        enable_mask = bool(_board.get('enable_mask', first_bp.get('enable_mask', True)))
         if not enable_mask:
             mask_grow = 0
             mask_blur = 0
@@ -4623,10 +4638,10 @@ class SnapshotDetailerSamplerNode:
         # run 之后由 recover 系列复原。interface block 不重算/不操作 mask 的 crop，
         # 但其输出尺寸须与 crop 工作区连贯（由用户/子图保证，pipeline 内不做 resize）。
         first_crop_reserve = int(global_params.get('crop_reserve', 32))
-        # Preprocess Settings 的 Recover Crop 开关（与 crop_reserve 一样取自第一个
-        # detailer block）。关掉时这一趟产出停在 crop 工作区：不 recover_size、不
-        # recover_crop，patch 连同裁剪矩形交给前端，由 Blend 画布用 transform 贴回原位。
-        do_recover_crop = bool(first_bp.get('recover_crop', True))
+        # Preprocess 的 Recover Crop 开关（与 crop_reserve 一样，现在取自黑板）。关掉时这一趟
+        # 产出停在 crop 工作区：不 recover_size、不 recover_crop，patch 连同裁剪矩形交给前端，
+        # 由 Blend 画布用 transform 贴回原位。
+        do_recover_crop = bool(_board.get('recover_crop', first_bp.get('recover_crop', True)))
         if enable_mask and expanded_mask is not None:
             cropped_image, cropped_mask, crop_info = crop_mask(
                 image=original_image,
@@ -4668,7 +4683,7 @@ class SnapshotDetailerSamplerNode:
         needs_grid_align = bool(arch_qwen_image21.matches(next_pipeline.config))
         if needs_grid_align:
             limit_align = arch_qwen_image21.adjust_align(limit_align)
-        enable_limit = bool(first_bp.get('enable_limit', True))
+        enable_limit = bool(_board.get('enable_limit', first_bp.get('enable_limit', True)))
         if not enable_limit and not needs_grid_align:
             # Enable Limit 关：不缩放也不对齐，工作分辨率 = 裁剪（或整幅）分辨率。
             resized_image, resized_mask, resize_info = cropped_image, cropped_mask, None
@@ -4806,6 +4821,9 @@ class SnapshotDetailerSamplerNode:
             _pg = graph if isinstance(graph, dict) and graph.get('nodes') else getattr(self, 'graph', None)
             if isinstance(_pg, dict) and _pg.get('nodes'):
                 try:
+                    # 执行前先净化：把不合法的东西（悬空边/端口不存在/kind 不匹配/环…）丢掉，
+                    # 保证执行计划一定建立在合法的图上 —— 与前端载入时的净化同一套规则。
+                    _pg = sanitize_graph(_pg)
                     _expected = blocks_to_graph(blocks)
                     _sig = lambda g: sorted(
                         (e.get('source'), e.get('sourcePort'), e.get('target'), e.get('targetPort'))
@@ -4883,11 +4901,17 @@ class SnapshotDetailerSamplerNode:
                               f"(detect branch not taken)")
                         continue
 
-                # (3) 显式取数：从连线指向的源端口拿 image / mask
+                # (3) 显式取数：从连线指向的源端口拿 image / mask。
+                # **数据只沿显式连线流动** —— 没给某类输入接线，这颗就拿不到那份数据，
+                # 绝不沿用上一颗执行过的节点的工作图/mask（那种隐式流转语义不确定、也无法校验）。
                 _step_inputs = step.get('inputs') if graph_mode else None
-                if _step_inputs:
-                    _isrc = _step_inputs.get('image')
-                    if _isrc is not None:
+                if graph_mode:
+                    if port_kind(_kind, 'in', 'image') == 'image':
+                        _isrc = (_step_inputs or {}).get('image')
+                        if _isrc is None:
+                            print(f"[PipelineBlock {i+1}/{len(steps)}] {block.get('name') or _kind} skipped "
+                                  f"(Image input is not connected)")
+                            continue
                         _iv = _values.get((_isrc[0], _isrc[1]))
                         if _iv is None:
                             print(f"[PipelineBlock {i+1}/{len(steps)}] {block.get('name') or _kind} skipped "
@@ -4895,11 +4919,10 @@ class SnapshotDetailerSamplerNode:
                             continue
                         current_image = _iv
                         next_pipeline.image = _iv
-                    _msrc = _step_inputs.get('mask')
-                    if _msrc is not None:
-                        _mv = _values.get((_msrc[0], _msrc[1]))
-                        if _mv is not None:
-                            current_mask = _mv
+                    if port_kind(_kind, 'in', 'mask') == 'mask':
+                        _msrc = (_step_inputs or {}).get('mask')
+                        # 没接线（可选端口未连，或连线缺失）= 这颗没有 mask。
+                        current_mask = _values.get((_msrc[0], _msrc[1])) if _msrc is not None else None
 
                 det_hit = True
                 _prev = {'id': block['id'], 'kind': _kind, 'index': i}
@@ -7243,15 +7266,16 @@ class SnapshotDetailerSamplerNode:
                         # 更新 pipeline（保留 model/vae/latent 等流转状态）
                         self._current_pipeline = next_pipeline
 
-                        # Enable Output（Preprocess Settings 的开关，存在生效链第一个 detailer
-                        # 的 params 上 —— 与 Enable Mask / Recover Crop 同一份「每个 preset
-                        # 各自一份」的作用域）。落不落盘只看这一颗开关：整幅 Run 与一趟
-                        # 图层 Generate 都走这条，不分流。
+                        # Enable Output（Preprocess 的开关，现在住在图里的黑板节点上；旧格式存在
+                        # 生效链第一个 detailer 的 params —— 黑板缺 key 时回落到那里）。落不落盘
+                        # 只看这一颗开关：整幅 Run 与一趟图层 Generate 都走这条，不分流。
                         # 必须排在下面剥离 program 项之前 —— 那时 selected_* 还是这次的真值。
+                        _board_eo = next((n.get('params') or {} for n in (run_graph or {}).get('nodes') or []
+                                          if isinstance(n, dict) and n.get('kind') == 'board'), {})
                         first_d = next((b for b in blocks
                                         if isinstance(b, dict) and b.get('type') == 'detailer'), None)
-                        if (first_d is not None
-                                and bool((first_d.get('params', first_d) or {}).get('enable_output', False))):
+                        _first_dp = (first_d.get('params', first_d) or {}) if first_d is not None else {}
+                        if bool(_board_eo.get('enable_output', _first_dp.get('enable_output', False))):
                             self._save_run_output_png(server, detailed_image)
 
                         # 清理 prompt 中的 program-sourced 项（parsing tag 保留，在 tag 阶段转换）

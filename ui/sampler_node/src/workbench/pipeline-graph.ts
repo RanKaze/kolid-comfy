@@ -38,9 +38,13 @@ export interface PortSpec {
   kind: PortKind;
   /** 画在 handle 旁的小字 */
   label: string;
+  /** 可选端口：不连线也合法（校验不报缺）；不连线就是"这个节点没有这份数据"，
+   *  绝不从别处隐式顶上来 —— 数据只沿显式连线流动。 */
+  optional?: boolean;
 }
 
 const P = (id: string, kind: PortKind, label: string): PortSpec => ({ id, kind, label });
+const PO = (id: string, kind: PortKind, label: string): PortSpec => ({ id, kind, label, optional: true });
 
 const EXEC = P('exec', 'exec', 'Execute');
 /** detect 的两条 exec 输出：命中（有 mask）/ 未命中（无 mask），运行时二选一。 */
@@ -48,6 +52,8 @@ const EXEC_YES = P('exec_yes', 'exec', 'Has Mask');
 const EXEC_NO = P('exec_no', 'exec', 'No Mask');
 const IMAGE = P('image', 'image', 'Image');
 const MASK = P('mask', 'mask', 'Mask');
+/** 可选 Mask：Detailer / Interface 的 mask 只是"限定工作区"的额外输入，不接就是没有。 */
+const MASK_OPT = PO('mask', 'mask', 'Mask');
 const CROP_INFO = P('crop_info', 'crop_info', 'Crop Info');
 const SCALE_INFO = P('scale_info', 'scale_info', 'Scale Info');
 const LIMIT_INFO = P('limit_info', 'limit_info', 'Limit Info');
@@ -67,8 +73,8 @@ export const RECOVER_INFO_KIND: Partial<Record<PipelineBlockKind, PortKind>> = {
   recover_fit: 'fit_info',
 };
 
-/** 图里的节点 kind：两个端点 + Switch + 全部 block 类型。 */
-export type NodeKind = 'start' | 'end' | 'switch' | PipelineBlockKind;
+/** 图里的节点 kind：两个端点 + Switch + 黑板 + 全部 block 类型。 */
+export type NodeKind = 'start' | 'end' | 'switch' | 'board' | PipelineBlockKind;
 
 export interface NodeSpec {
   label: string;
@@ -93,17 +99,19 @@ export const NODE_SPECS: Record<NodeKind, NodeSpec> = {
   end: {
     label: 'End', color: '#ff453a',
     hint: '链的出口 —— 收下最终的 Image 与 Mask，交给工作台收尾（recover / 落盘）。',
-    inputs: [IMAGE, MASK, EXEC],
+    // Mask 可选：执行计划不收 End（收尾直接拿最后一颗执行过的工作图/mask），所以这条边
+    // 纯属图示。要求它会让**每一条**链常年挂着一条"End Mask 未连接"的假待办。
+    inputs: [IMAGE, MASK_OPT, EXEC],
     outputs: [],
   },
   detailer: {
     label: 'Detailer', color: '#30d158',
-    hint: 'Refine the masked region', inputs: [EXEC, IMAGE, MASK],
+    hint: 'Refine the region the Mask covers', inputs: [EXEC, IMAGE, MASK_OPT],
     outputs: [EXEC, IMAGE],
   },
   interface: {
     label: 'Interface', color: '#bf5af2',
-    hint: 'Run an interface sub-graph inside the chain', inputs: [EXEC, IMAGE, MASK],
+    hint: 'Run an interface sub-graph inside the chain', inputs: [EXEC, IMAGE, MASK_OPT],
     outputs: [EXEC, IMAGE, MASK],
   },
   prompt: {
@@ -184,6 +192,13 @@ export const NODE_SPECS: Record<NodeKind, NodeSpec> = {
     hint: 'Gather: many exec heads (each with its own untyped data), merge index-wise into one exec + N data',
     inputs: [], outputs: [],
   },
+  // 黑板（board）= 画布上那张悬浮的 Preprocess 卡片。它**不参与执行**：没有端口、不进执行序、
+  // 也不投影回 blocks —— 只是一块挂在图上的配置。整条链共读它的 params。
+  board: {
+    label: 'Preprocess', color: '#ff9f0a',
+    hint: '整条链的预处理开关（Enable Mask / Recover Crop / Limit / Output / Dynamic Layer）',
+    inputs: [], outputs: [],
+  },
 };
 
 /** Switch 节点的端口 id 约定（前后端镜像必须一致）：
@@ -205,8 +220,13 @@ export function switchN(params: Record<string, any>): number {
   return branches.reduce((m, br) => Math.max(m, Math.max(0, Number(br?.data) || 0)), 0);
 }
 
-/** 现算一个节点的端口表：Switch 动态，其余取静态 NODE_SPECS。 */
-export function nodePorts(node: Pick<GraphNode, 'kind' | 'params'>): { inputs: PortSpec[]; outputs: PortSpec[] } {
+/** 现算一个节点的端口表：Switch / Start / End 动态，其余取静态 NODE_SPECS。
+ *  `enableMask`（= 黑板上的 Enable Mask）关掉时，Start 的 Mask 输出与 End 的 Mask 输入
+ *  **直接消失** —— 图上再也接不出画布 mask 这条线，"要不要 mask"由图结构本身说了算。 */
+export function nodePorts(
+  node: Pick<GraphNode, 'kind' | 'params'>,
+  enableMask = true,
+): { inputs: PortSpec[]; outputs: PortSpec[] } {
   if (node.kind === 'switch') {
     const branches = (node.params?.branches as SwitchBranch[]) || [];
     const inputs: PortSpec[] = [];
@@ -221,12 +241,19 @@ export function nodePorts(node: Pick<GraphNode, 'kind' | 'params'>): { inputs: P
     return { inputs, outputs };
   }
   const spec = NODE_SPECS[node.kind];
-  return { inputs: spec?.inputs || [], outputs: spec?.outputs || [] };
+  if (!spec) return { inputs: [], outputs: [] };
+  if (node.kind === 'start' || node.kind === 'end') {
+    const f = (list: PortSpec[]) => (enableMask ? list : list.filter(p => p.kind !== 'mask'));
+    return { inputs: f(spec.inputs), outputs: f(spec.outputs) };
+  }
+  return { inputs: spec.inputs, outputs: spec.outputs };
 }
 
-/** 节点级端口 kind 查询（Switch 也能正确解析）。 */
-export function portKindOfNode(node: Pick<GraphNode, 'kind' | 'params'>, dir: 'in' | 'out', portId: string): PortKind | undefined {
-  const { inputs, outputs } = nodePorts(node);
+/** 节点级端口 kind 查询（Switch / Start / End 的动态端口都能正确解析）。 */
+export function portKindOfNode(
+  node: Pick<GraphNode, 'kind' | 'params'>, dir: 'in' | 'out', portId: string, enableMask = true,
+): PortKind | undefined {
+  const { inputs, outputs } = nodePorts(node, enableMask);
   return (dir === 'in' ? inputs : outputs).find(p => p.id === portId)?.kind;
 }
 
@@ -273,12 +300,38 @@ export interface PipelineGraph {
 
 export const START_ID = 'start';
 export const END_ID = 'end';
+/** 黑板（Preprocess 卡片）在每张图里**恒有且只有一个**，用固定 id。 */
+export const BOARD_ID = 'board';
 
-/** 查一个**静态**节点类型某端口的 kind（Switch 请用 portKindOfNode）。 */
-export function portKindOf(kind: NodeKind, dir: 'in' | 'out', portId: string): PortKind | undefined {
+/** 黑板上的 8 个预处理开关 —— 旧格式存在"第一个 detailer 的 params"上，迁移时搬到黑板。 */
+export const PREPROCESS_KEYS = [
+  'enable_mask', 'recover_crop', 'enable_fit', 'enable_limit', 'enable_output',
+  'enable_dynamic_layer', 'dynamic_layer_limit', 'dynamic_layer_ctx',
+] as const;
+/** 黑板参数的默认值（与后端读同一 key 时的默认一致：enable_mask / recover_crop / enable_limit 默认开）。 */
+export const PREPROCESS_DEFAULTS: Record<string, any> = {
+  enable_mask: true, recover_crop: true, enable_fit: false, enable_limit: true,
+  enable_output: false, enable_dynamic_layer: false, dynamic_layer_limit: true, dynamic_layer_ctx: true,
+};
+
+/** 图里所有节点都**不参与执行**：黑板没有端口，不进执行序，也不投影回 blocks
+ *  （"画布助手"那类节点将来加进来时，也回这里判定）。 */
+export function isSchedulable(kind: NodeKind): boolean {
+  return kind !== 'board';
+}
+
+/** 这块黑板的 Enable Mask（缺黑板 / 缺字段 = 开，与默认一致）。 */
+export function graphEnableMask(graph: PipelineGraph): boolean {
+  const b = graph.nodes.find(n => n.kind === 'board');
+  return b ? b.params?.enable_mask !== false : true;
+}
+
+/** 查一个节点类型的某端口 kind。Start / End 的 Mask 端口随 Enable Mask 消失 —— 调用方
+ *  手里有图时**优先用 portKindOfNode + graphEnableMask**，这里只给拿不到图的静态场合兜底。 */
+export function portKindOf(kind: NodeKind, dir: 'in' | 'out', portId: string, enableMask = true): PortKind | undefined {
   const spec = NODE_SPECS[kind];
   if (!spec) return undefined;
-  const list = dir === 'in' ? spec.inputs : spec.outputs;
+  const list = (dir === 'in' ? spec.inputs : spec.outputs).filter(p => enableMask || p.kind !== 'mask');
   return list.find(p => p.id === portId)?.kind;
 }
 
@@ -313,6 +366,7 @@ export function defaultParamsFor(kind: NodeKind): Record<string, any> {
     case 'limit': return { pixels: 0, align: 0, cap_only: false };
     case 'detect': return { prompt: '', threshold: 0.5, invert: false };
     case 'switch': return { branches: [{ data: 1 }] };
+    case 'board': return { ...PREPROCESS_DEFAULTS };
     default: return {};
   }
 }
@@ -346,8 +400,18 @@ export function blocksToGraph(blocks: PipelineBlock[]): PipelineGraph {
   const edges: GraphEdge[] = [];
   const byId = new Map<string, GraphNode>();
 
+  // 黑板：Preprocess 的 8 个开关原本存在"第一个 detailer 的 params"上（每个 preset 一份），
+  // 迁移时搬到黑板上 —— 黑板是**每张图一块**的配置，语义与"每个 preset 一份"完全同形。
+  const firstDetailer = blocks.find(b => b.type === 'detailer');
+  const dp = (firstDetailer?.params || {}) as Record<string, any>;
+  const boardParams: Record<string, any> = { ...PREPROCESS_DEFAULTS };
+  for (const k of PREPROCESS_KEYS) if (dp[k] !== undefined) boardParams[k] = dp[k];
+  const enableMask = boardParams.enable_mask !== false;
+  nodes.push({ id: BOARD_ID, kind: 'board', name: 'Preprocess', x: 0, y: -170, params: boardParams });
+  byId.set(BOARD_ID, nodes[0]);
+
   nodes.push({ id: START_ID, kind: 'start', name: 'Start', x: 0, y: 0, params: {} });
-  byId.set(START_ID, nodes[0]);
+  byId.set(START_ID, nodes[1]);
 
   let imageSrc = START_ID;
   let maskSrc = START_ID;
@@ -361,9 +425,16 @@ export function blocksToGraph(blocks: PipelineBlock[]): PipelineGraph {
     const spec = NODE_SPECS[kind];
     if (!spec) return; // 未知 kind：跳过
     const id = b.id || `block-${i + 1}`;
+    // interface 的选中目标只有**一个**真源：`params.interface_idx`。旧格式把它存在顶层
+    // `interface_index` 上 —— 迁移时挪进 params，之后顶层那份由 `graphToBlocks` 从 params 反算，
+    // 内联选择器也只写 params（顺带同步 interface_name 供引擎按名字绑定）。
+    const params: Record<string, any> = { ...(b.params || {}) };
+    if (kind === 'interface' && params.interface_idx === undefined) {
+      params.interface_idx = typeof b.interface_index === 'number' ? b.interface_index : 0;
+    }
     const node: GraphNode = {
       id, kind, name: b.name || spec.label,
-      x: (i + 1) * GAP_X, y: 0, params: { ...(b.params || {}) },
+      x: (i + 1) * GAP_X, y: 0, params,
       interface_index: b.interface_index, exec_options: b.exec_options,
     };
     nodes.push(node); byId.set(id, node);
@@ -382,12 +453,13 @@ export function blocksToGraph(blocks: PipelineBlock[]): PipelineGraph {
     const has = (dir: 'in' | 'out', k: PortKind) =>
       (dir === 'in' ? spec.inputs : spec.outputs).some(p => p.kind === k);
 
-    // Image / Mask 数据边（只消费不产出的节点，数据源不更新 —— 下游自动接到更上游）
+    // Image / Mask 数据边（只消费不产出的节点，数据源不更新 —— 下游自动接到更上游）。
+    // Enable Mask 关时 Start 根本没有 Mask 输出，mask 这条线整条不接。
     if (has('in', 'image')) {
       edges.push({ id: eid(), source: imageSrc, sourcePort: 'image', target: id, targetPort: 'image' });
     }
     if (has('out', 'image')) imageSrc = id;
-    if (has('in', 'mask')) {
+    if (enableMask && has('in', 'mask')) {
       edges.push({ id: eid(), source: maskSrc, sourcePort: 'mask', target: id, targetPort: 'mask' });
     }
     if (has('out', 'mask')) maskSrc = id;
@@ -401,7 +473,7 @@ export function blocksToGraph(blocks: PipelineBlock[]): PipelineGraph {
     if (wantInfo) {
       for (let j = openFrames.length - 1; j >= 0; j--) {
         const cand = byId.get(openFrames[j]);
-        if (cand && portKindOf(cand.kind, 'out', wantInfo) === wantInfo) {
+        if (cand && portKindOfNode(cand, 'out', wantInfo) === wantInfo) {
           edges.push({ id: eid(), source: cand.id, sourcePort: wantInfo, target: id, targetPort: wantInfo });
           openFrames.splice(j, 1);
           break;
@@ -418,7 +490,7 @@ export function blocksToGraph(blocks: PipelineBlock[]): PipelineGraph {
     edges.push({ id: eid(), source: prevExec.node, sourcePort: _p, target: END_ID, targetPort: EXEC.id });
   }
   edges.push({ id: eid(), source: imageSrc, sourcePort: 'image', target: END_ID, targetPort: 'image' });
-  edges.push({ id: eid(), source: maskSrc, sourcePort: 'mask', target: END_ID, targetPort: 'mask' });
+  if (enableMask) edges.push({ id: eid(), source: maskSrc, sourcePort: 'mask', target: END_ID, targetPort: 'mask' });
 
   return { nodes, edges };
 }
@@ -436,10 +508,15 @@ export function execOrder(graph: PipelineGraph): string[] {
   const nodes = new Map(graph.nodes.map(n => [n.id, n]));
   const children = new Map<string, string[]>();
   const indeg = new Map<string, number>();
-  for (const n of graph.nodes) { children.set(n.id, []); indeg.set(n.id, 0); }
+  // 黑板 / 画布助手不进执行序（它们没有端口，留在里面会被当成一颗待执行的节点）。
+  for (const n of graph.nodes) {
+    if (!isSchedulable(n.kind)) continue;
+    children.set(n.id, []); indeg.set(n.id, 0);
+  }
   for (const e of graph.edges) {
     const sN = nodes.get(e.source); const tN = nodes.get(e.target);
     if (!sN || !tN) continue;
+    if (!indeg.has(e.source) || !indeg.has(e.target)) continue;   // 有一端不参与执行：这条边不算
     const sk = portKindOfNode(sN, 'out', e.sourcePort);
     const tk = portKindOfNode(tN, 'in', e.targetPort);
     if (sk !== 'exec' || tk !== 'exec') continue;
@@ -472,10 +549,14 @@ export function graphToBlocks(graph: PipelineGraph): PipelineBlock[] {
   const out: PipelineBlock[] = [];
   for (const id of order) {
     const n = byId.get(id);
-    if (!n || n.kind === 'start' || n.kind === 'end' || n.kind === 'switch') continue;
+    if (!n || n.kind === 'start' || n.kind === 'end' || n.kind === 'switch' || !isSchedulable(n.kind)) continue;
+    // 顶层 interface_index 从 params 反算 —— 单一真源在节点 params 上。
+    const ifaceIdx = n.kind === 'interface'
+      ? ((n.params as any)?.interface_idx ?? n.interface_index)
+      : n.interface_index;
     out.push({
       id: n.id, type: n.kind as PipelineBlockKind, name: n.name,
-      params: n.params as any, interface_index: n.interface_index, exec_options: n.exec_options as any,
+      params: n.params as any, interface_index: ifaceIdx, exec_options: n.exec_options as any,
     });
   }
   return out;
@@ -491,19 +572,28 @@ export interface GraphIssue { nodeId: string; port?: string; message: string; }
 export function validateGraph(graph: PipelineGraph): GraphIssue[] {
   const issues: GraphIssue[] = [];
   const byId = new Map(graph.nodes.map(n => [n.id, n]));
+  const enableMask = graphEnableMask(graph);
   if (!byId.has(START_ID)) issues.push({ nodeId: START_ID, message: '缺少 Start 节点' });
   if (!byId.has(END_ID)) issues.push({ nodeId: END_ID, message: '缺少 End 节点' });
 
   const connectedIn = new Set<string>();   // `${node}:${portId}`
   for (const e of graph.edges) connectedIn.add(`${e.target}:${e.targetPort}`);
 
+  // Start 必须至少接出去一条 —— 它是链的入口。一条都没接时执行序会从"第一颗没有 exec 输入的
+  // 节点"开始跑，整条链与画布入口脱钩；画布上就是 Start 孤零零挂在一边（节点都在屏幕外的
+  // 那种"只剩一个 Start"多半也是它）。说得明白一点，好过让人盯着一个空节点猜。
+  if (byId.has(START_ID) && !graph.edges.some(e => e.source === START_ID)) {
+    issues.push({ nodeId: START_ID, message: 'Start 一条线都没接出去 —— 这条链与画布入口脱钩了' });
+  }
+
   for (const n of graph.nodes) {
     const spec = NODE_SPECS[n.kind];
     if (!spec) { issues.push({ nodeId: n.id, message: `未知节点类型 ${n.kind}` }); continue; }
+    if (!isSchedulable(n.kind)) continue;   // 黑板：没有端口，不参与校验
 
     // Switch：动态端口 —— 不逐端口要求"全连"，只要求至少一条 exec 头接了线
     if (n.kind === 'switch') {
-      const anyExecIn = graph.edges.some(e => e.target === n.id && portKindOfNode(n, 'in', e.targetPort) === 'exec');
+      const anyExecIn = graph.edges.some(e => e.target === n.id && portKindOfNode(n, 'in', e.targetPort, enableMask) === 'exec');
       if (!anyExecIn) issues.push({ nodeId: n.id, port: 'ei:0', message: `${n.name} 至少要让一条 Exec 头接上线` });
       const outExec = graph.edges.some(e => e.source === n.id && e.sourcePort === SW_EXEC_OUT);
       if (!outExec) issues.push({ nodeId: n.id, port: SW_EXEC_OUT, message: `${n.name} 的 Execute 输出未连接` });
@@ -511,7 +601,10 @@ export function validateGraph(graph: PipelineGraph): GraphIssue[] {
     }
 
     // 逐端口的"未连接"合并成**一条**：接线是可编辑的中间态，拆成 N 行只会刷屏。
-    const missing = spec.inputs.filter(port => !connectedIn.has(`${n.id}:${port.id}`));
+    // 可选端口（Detailer / Interface 的 Mask）不连线也合法 —— 那是"这个节点没有这份数据"。
+    // Start / End 的 Mask 端口在 Enable Mask 关时**根本不存在**，所以取现算的端口表。
+    const ports = nodePorts(n, enableMask);
+    const missing = ports.inputs.filter(port => !port.optional && !connectedIn.has(`${n.id}:${port.id}`));
     if (missing.length) {
       issues.push({
         nodeId: n.id, port: missing[0].id,
@@ -524,7 +617,7 @@ export function validateGraph(graph: PipelineGraph): GraphIssue[] {
       const ie = graph.edges.find(e => e.target === n.id && e.targetPort === wantKind);
       if (ie) {
         const src = byId.get(ie.source);
-        if (!src || portKindOfNode(src, 'out', ie.sourcePort) !== wantKind) {
+        if (!src || portKindOfNode(src, 'out', ie.sourcePort, enableMask) !== wantKind) {
           issues.push({ nodeId: n.id, port: wantKind, message: `${n.name} 的 Info 必须来自对应类型（${wantKind}）的几何操作` });
         }
       }
@@ -537,9 +630,10 @@ export function validateGraph(graph: PipelineGraph): GraphIssue[] {
     }
   }
 
-  // Execute 环检测：execOrder 是一张覆盖全部节点的 Execute 拓扑排序，
-  // 有环时 Kahn 无法把所有节点排完 → 排序长度 < 节点总数。
-  if (execOrder(graph).length < graph.nodes.length) {
+  // Execute 环检测：execOrder 覆盖的是**所有参与执行的节点**，有环时 Kahn 排不完 → 排序更短。
+  // （黑板这类不进执行序的节点要从分母里去掉，否则永远"缺一个"。）
+  const schedulable = graph.nodes.filter(n => isSchedulable(n.kind)).length;
+  if (execOrder(graph).length < schedulable) {
     issues.push({ nodeId: '', message: 'Execute 连线成环' });
   }
   return issues;
@@ -571,16 +665,24 @@ const INTERP = [
 /** 每种节点在 inspector 里可编辑的字段。prompt / query / interface 走各自专用渲染（见编辑器）。 */
 export const PARAM_FIELDS: Partial<Record<NodeKind, ParamField[]>> = {
   detailer: [
-    { key: 'add_noise', label: 'Add Noise', kind: 'select', options: [{ value: 'enable', label: 'enable' }, { value: 'disable', label: 'disable' }] },
-    { key: 'start_step_rate', label: 'Start', kind: 'number', min: 0, max: 1, step: 0.01, title: '采样起始步比例' },
-    { key: 'end_step_rate', label: 'End', kind: 'number', min: 0, max: 1, step: 0.01, title: '采样结束步比例' },
+    { key: 'add_noise', label: 'Add Noise', kind: 'select', options: [
+      { value: 'enable', label: 'Random' }, { value: 'disable', label: 'None' }, { value: 'invert', label: 'Invert' }] },
+    { key: 'context_regex', label: 'Ctx Regex', kind: 'text', title: '解 pipeline.context 的 lora/prompt 时用的正则' },
+    { key: 'start_step_rate', label: 'Start Step', kind: 'number', min: 0, max: 1, step: 0.01, title: '采样起始步比例' },
+    { key: 'end_step_rate', label: 'End Step', kind: 'number', min: 0, max: 1, step: 0.01, title: '采样结束步比例' },
     { key: 'enable_edit', label: 'Enable Edit', kind: 'bool' },
-    { key: 'edit_mode', label: 'Edit Mode', kind: 'select', options: [{ value: 'fit', label: 'fit' }, { value: 'crop', label: 'crop' }] },
-    { key: 'ref_boost', label: 'Ref Boost', kind: 'number', step: 0.1 },
-    { key: 'ref_boost_a', label: 'Ref Boost A', kind: 'number', step: 0.1 },
-    { key: 'enable_ref_boost_mask', label: 'Ref Boost Mask', kind: 'bool' },
-    { key: 'grounding_px', label: 'Grounding px', kind: 'number', step: 8 },
-    { key: 'context_regex', label: 'Context Regex', kind: 'text' },
+    { key: 'enable_text_generate', label: 'Text Generate', kind: 'bool',
+      title: '块级 Generate Text（默认关）：仅当 pipeline 也启用了才生效，结果只作用于本块' },
+    { key: 'enable_override_prompt', label: 'Override Prompt', kind: 'bool', when: p => !!p.enable_text_generate,
+      title: '开着时本块 Generate Text 指令用下面的文本替代 pipeline 的 prompt（空 = 空指令）' },
+    { key: 'override_prompt', label: 'Instruction', kind: 'text', when: p => !!p.enable_text_generate && !!p.enable_override_prompt,
+      title: '重载的 Generate Text 指令：临时替代 pipeline 的 prompt。留空 = 空指令' },
+    { key: 'edit_mode', label: 'Edit Mode', kind: 'select', options: [{ value: 'fit', label: 'fit' }, { value: 'crop', label: 'crop' }],
+      when: p => !!p.enable_edit },
+    { key: 'grounding_px', label: 'Grounding px', kind: 'number', step: 8, when: p => !!p.enable_edit },
+    { key: 'ref_boost', label: 'Ref Boost', kind: 'number', step: 0.1, when: p => !!p.enable_edit },
+    { key: 'ref_boost_a', label: 'Ref Boost A', kind: 'number', step: 0.1, when: p => !!p.enable_edit },
+    { key: 'enable_ref_boost_mask', label: 'Ref Boost Mask', kind: 'bool', when: p => !!p.enable_edit },
   ],
   tagger: [
     { key: 'mode', label: 'Mode', kind: 'select', options: [
@@ -628,6 +730,106 @@ export const PARAM_FIELDS: Partial<Record<NodeKind, ParamField[]>> = {
     { key: 'invert', label: 'Invert', kind: 'bool' },
   ],
 };
+
+// ---------------------------------------------------------------------------
+// 净化：把一张图修成"一定合法"的图（加载时/执行前用）
+// ---------------------------------------------------------------------------
+
+/** 删掉 exec 环里回指的那条边（DFS 找 back edge）。返回要丢弃的边 id 集合。 */
+function execCycleBackEdges(nodes: GraphNode[], edges: GraphEdge[]): Set<string> {
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const isExec = (e: GraphEdge) => {
+    const s = byId.get(e.source); const t = byId.get(e.target);
+    return !!s && !!t
+      && portKindOfNode(s, 'out', e.sourcePort) === 'exec'
+      && portKindOfNode(t, 'in', e.targetPort) === 'exec';
+  };
+  const adj = new Map<string, { to: string; id: string }[]>();
+  nodes.forEach(n => adj.set(n.id, []));
+  edges.filter(isExec).forEach(e => adj.get(e.source)!.push({ to: e.target, id: e.id }));
+  const state = new Map<string, 0 | 1 | 2>();
+  const drop = new Set<string>();
+  const dfs = (id: string) => {
+    state.set(id, 1);
+    for (const { to, id: eid } of adj.get(id) || []) {
+      if (drop.has(eid)) continue;
+      const s = state.get(to) || 0;
+      if (s === 1) drop.add(eid);            // 回边 → 成环 → 丢掉它
+      else if (s === 0) dfs(to);
+    }
+    state.set(id, 2);
+  };
+  nodes.forEach(n => { if ((state.get(n.id) || 0) === 0) dfs(n.id); });
+  return drop;
+}
+
+/** 把图修成合法的：丢未知节点 / 悬空的边 / kind 不匹配的边 / 重复边 / exec 环；
+ *  缺 Start / End 就补上。返回**新**图（不改原对象）。 */
+export function sanitizeGraph(input: PipelineGraph): PipelineGraph {
+  const seenIds = new Set<string>();
+  const nodes: GraphNode[] = [];
+  for (const n of input.nodes || []) {
+    if (!NODE_SPECS[n.kind] || seenIds.has(n.id)) continue;   // 未知类型 / 重复 id
+    if (n.kind === 'board' && nodes.some(x => x.kind === 'board')) continue;   // 黑板只留一块
+    seenIds.add(n.id); nodes.push(n);
+  }
+  if (!seenIds.has(START_ID)) nodes.unshift({ id: START_ID, kind: 'start', name: 'Start', x: 0, y: 0, params: {} });
+  if (!seenIds.has(END_ID)) nodes.push({ id: END_ID, kind: 'end', name: 'End', x: 0, y: 0, params: {} });
+
+  // 黑板：旧图里还没有（那时 Preprocess 挂在"第一个 detailer 的 params"上）就补一块 ——
+  // 参数从图里第一颗 detailer 的 params 抄过来，迁移与旧存档两条路都能把老值带上；
+  // 已有的那块补齐缺的 key（缺 = 用默认值，与后端读同一 key 时的默认一致）。
+  const boardIdx = nodes.findIndex(n => n.kind === 'board');
+  if (boardIdx >= 0) {
+    const b = nodes[boardIdx];
+    nodes[boardIdx] = { ...b, params: { ...PREPROCESS_DEFAULTS, ...(b.params || {}) } };
+  } else {
+    const src = nodes.find(n => n.kind === 'detailer');
+    const sp = (src?.params || {}) as Record<string, any>;
+    const params: Record<string, any> = { ...PREPROCESS_DEFAULTS };
+    for (const k of PREPROCESS_KEYS) if (sp[k] !== undefined) params[k] = sp[k];
+    nodes.unshift({ id: BOARD_ID, kind: 'board', name: 'Preprocess', x: 0, y: -170, params });
+    seenIds.add(BOARD_ID);
+  }
+
+  // Enable Mask 关 = Start 的 Mask 输出 / End 的 Mask 输入不存在 → 指向它们的两条边在这里
+  // 因为"端口已不存在"被丢掉（与用户选的"端口直接消失"同一条规则）。
+  const enableMask = nodes.find(n => n.kind === 'board')?.params?.enable_mask !== false;
+
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const seenEdge = new Set<string>();
+  const usedEdgeIds = new Set<string>();
+  const edges: GraphEdge[] = [];
+  for (const e of input.edges || []) {
+    const s = byId.get(e.source); const t = byId.get(e.target);
+    if (!s || !t) continue;                                   // 悬空（节点已删）
+    if (!isSchedulable(s.kind) || !isSchedulable(t.kind)) continue;  // 黑板没有端口，连着它的边一律不算
+    const sk = portKindOfNode(s, 'out', e.sourcePort, enableMask);
+    const tk = portKindOfNode(t, 'in', e.targetPort, enableMask);
+    if (!sk || !tk) continue;                                 // 端口已不存在
+    if (!(sk === tk || sk === 'any' || tk === 'any')) continue; // kind 不匹配
+    const key = `${e.source}:${e.sourcePort}>${e.target}:${e.targetPort}`;
+    if (seenEdge.has(key)) continue;                           // 重复边
+    seenEdge.add(key);
+    // 边 id **就在这里**唯一化（在环检测之前）—— 旧数据里本会话刚建的 `e-n0` 与上次会话
+    // 存下的 `e-n0` 会撞车：xyflow 把同 id 的边当成同一条（删不掉 / 删一条剩一条 / 拖一条
+    // 丢两条），更要命的是环检测按 id 丢边 —— 同 id 的两条边会**一丢丢两条**，连带把一条
+    // 合法的线也删掉。撞了就改名：没有别处引用边 id。
+    let id = e.id;
+    if (!id || usedEdgeIds.has(id)) {
+      const base = id || 'e';
+      let k = 1;
+      while (usedEdgeIds.has(`${base}-d${k}`)) k++;
+      id = `${base}-d${k}`;
+    }
+    usedEdgeIds.add(id);
+    edges.push(id === e.id ? e : { ...e, id });
+  }
+
+  // 环检测。此时 id 已唯一，按 id 丢边不会错杀。
+  const dropIds = execCycleBackEdges(nodes, edges);
+  return { nodes, edges: edges.filter(e => !dropIds.has(e.id)) };
+}
 
 // ---------------------------------------------------------------------------
 // 兼容别名
