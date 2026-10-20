@@ -158,6 +158,15 @@ const Preprocess: UnitIcon = p => <Svg {...p}>
   <circle cx="5.8" cy="5.2" r="1.7" fill="#232325" />
   <circle cx="10.2" cy="10.8" r="1.7" fill="#232325" />
 </Svg>;
+export const PREPROCESS_ICON = Preprocess;
+// Pipeline Presets：一摞命名的链（三条横排 + 每行左端一个序号点），与 Pipeline 那张"拓扑图"
+// 区分开 —— 拆成两扇窗之后，toolbar 条上是并排两颗按钮，记号必须能一眼分出"选哪条管线"和"跑哪套链"。
+const Presets: UnitIcon = p => <Svg {...p}>
+  <path d="M2.4 3.6h11.2M2.4 8h11.2M2.4 12.4h11.2" />
+  <circle cx="1.2" cy="3.6" r="0.55" fill="currentColor" />
+  <circle cx="1.2" cy="8" r="0.55" fill="currentColor" />
+  <circle cx="1.2" cy="12.4" r="0.55" fill="currentColor" />
+</Svg>;
 const Blocks: UnitIcon = p => <Svg {...p}>
   <rect x="1.9" y="2.4" width="5.3" height="4.5" rx="0.9" />
   <rect x="8.8" y="2.4" width="5.3" height="4.5" rx="0.9" />
@@ -184,7 +193,7 @@ export const UNIT_ICONS: Record<string, UnitIcon> = {
   // Video 模式
   vplayer: VPlayer, vtracks: VTracks, vassets: VAssets,
   // 宿主
-  toolbar: File, context: Context, pipeline: Pipeline, preprocess: Preprocess, blocks: Blocks,
+  toolbar: File, context: Context, pipeline: Pipeline, presets: Presets, blocks: Blocks,
 };
 export const DOC_ICON: UnitIcon = Document;
 

@@ -390,6 +390,13 @@ export function fitLayout(rules: DockRules, value: unknown): LayoutFit | null {
   // 缺的面板进"最长的那个块"：一块里单元最多的地方就是用户心里的那一列，而"它当初放哪儿"这份
   // 布局并没有说（那正是它缺着的原因）。
   const present = () => dockUnits(tree).concat(floats.map(f => f.id));
+  // **拆分**（不是新增）：Pipeline 与 Pipeline Presets 原本是同一扇窗（"Pipeline & Presets"），
+  // 现在各占一扇。老存档里只有 `pipeline`，走下面那条通用规则会把它变成同一块里的另一张 tab ——
+  // 那只是把第二扇窗藏起来，不是拆分。所以在它**下面**劈开一块。
+  if (present().includes('pipeline') && !present().includes('presets')) {
+    tree = dropInDock({ tree, floats }, 'presets', 'pipeline', 'bottom').tree;
+    added.push('presets');
+  }
   for (const id of rules.panels) {
     if (present().includes(id)) continue;
     const b = biggestBlock(tree);

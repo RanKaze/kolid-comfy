@@ -15,7 +15,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { createPortal } from 'react-dom';
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap, Handle, Position,
-  useNodesState, useEdgesState, addEdge, reconnectEdge, useReactFlow, useNodesInitialized, useViewport,
+  useNodesState, useEdgesState, addEdge, reconnectEdge, useReactFlow, useNodesInitialized,
   type Node, type Edge, type NodeProps, type Connection, type NodeChange, type EdgeChange,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -40,8 +40,9 @@ interface PipeNodeData extends Record<string, unknown> {
   kind: NodeKind; name: string; params: Record<string, any>;
 }
 
-/** 黑板不是 xyflow 节点（它是一张跟着画布平移缩放的悬浮卡片，见 BoardCard），所以出图时
- *  要由调用方把它补回来 —— 否则任何一次结构性改动都会把黑板从图里抹掉。 */
+/** 黑板不是 xyflow 节点（它是一张悬浮在画布上的**屏幕坐标**面板，不吃视口 transform，
+ *  见 BoardCard），所以出图时要由调用方把它补回来 —— 否则任何一次结构性改动都会把
+ *  黑板从图里抹掉。 */
 const toRfNodes = (g: PipelineGraph): Node<PipeNodeData>[] =>
   g.nodes.filter(n => isSchedulable(n.kind) || n.kind === 'start' || n.kind === 'end')
     .map(n => ({
@@ -50,7 +51,8 @@ const toRfNodes = (g: PipelineGraph): Node<PipeNodeData>[] =>
       data: { kind: n.kind, name: n.name, params: n.params || {} },
     }));
 
-/** 黑板那一个节点（缺就现造一块默认的）。 */
+/** 黑板那一个节点（缺就现造一块默认的）。x/y 只是数据模型里的老坐标字段 —— 卡片自身的
+ *  位置是编辑器内的屏幕坐标 UI 状态（见 boardPos），跟视口无关，也不随图存盘。 */
 const boardOf = (g: PipelineGraph): GraphNode =>
   g.nodes.find(n => n.kind === 'board')
   ?? { id: BOARD_ID, kind: 'board', name: 'Preprocess', x: 0, y: -170, params: defaultParamsFor('board') };
@@ -345,17 +347,22 @@ const SwitchBody: React.FC<{ params: Record<string, any>; onSet: (v: any) => voi
   );
 };
 
-/** 黑板卡片 —— Preprocess 那 8 个开关。**不是 xyflow 节点**：它摆在自己的图层里，套的是与
- *  画布视口**完全相同**的 transform（translate + scale，原点 0 0），所以跟着平移缩放，
- *  而坐标是**流坐标**、随图存盘。标题条担起拖动（控件那一区不碰，免得点开关时挪块）。 */
+/** 黑板卡片 —— Preprocess 那 8 个开关。**不是 xyflow 节点**：它摆在自己的图层里，是一张
+ *  **屏幕坐标**的悬浮面板（就像左上角那条校验横幅）—— 位置是画布容器内的像素坐标，不套
+ *  视口 transform，所以用户平移/缩放节点图时它原地不动、大小也不变。标题条担起拖动（控件
+ *  那一区不碰，免得点开关时挪面板）；拖的是面板自己的坐标，与画布 zoom 无关，也不随图存盘。 */
 const BoardCard: React.FC<{
   board: GraphNode;
   enableMask: boolean;
   onSet: (key: string, value: any) => void;
-  onMove: (x: number, y: number, commit: boolean) => void;
-}> = ({ board, enableMask, onSet, onMove }) => {
-  const vp = useViewport();
-  const drag = useRef<{ px: number; py: number; ox: number; oy: number } | null>(null);
+  /** 面板左上角在画布容器内的像素坐标；null = 还没落位（先以右上角待命，用户一拖就固定成坐标）。 */
+  pos: { x: number; y: number } | null;
+  onPos: (x: number, y: number) => void;
+  /** 画布容器 —— 拖拽边界与"拉回视野"都按它的真实尺寸算。 */
+  wrapRef: React.RefObject<HTMLDivElement | null>;
+}> = ({ board, enableMask, onSet, pos, onPos, wrapRef }) => {
+  const drag = useRef<{ px: number; py: number; ox: number; oy: number; cw: number; ch: number } | null>(null);
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const p = board.params || {};
   const dim = (on: boolean): React.CSSProperties => (on ? {} : { opacity: 0.4, pointerEvents: 'none' });
   const gTitle: React.CSSProperties = {
@@ -369,45 +376,62 @@ const BoardCard: React.FC<{
       <input type="checkbox" checked={!!p[k]} disabled={disabled} onChange={e => onSet(k, e.target.checked)} />
     </div>
   );
+  /** 把面板夹在画布容器里（容器比卡还小时贴左上角）—— 不然窗口一缩小，面板就被裁掉或拖飞出视野。 */
+  const clamp = (x: number, y: number, cw: number, ch: number): { x: number; y: number } => {
+    const wrap = wrapRef.current;
+    const w = wrap?.clientWidth ?? 0, h = wrap?.clientHeight ?? 0;
+    return {
+      x: w > cw ? Math.min(Math.max(0, x), w - cw) : 0,
+      y: h > ch ? Math.min(Math.max(0, y), h - ch) : 0,
+    };
+  };
   const endDrag = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d) return;
     drag.current = null;
     try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
-    onMove(d.ox + (e.clientX - d.px) / vp.zoom, d.oy + (e.clientY - d.py) / vp.zoom, true);
   };
   return (
     <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none', zIndex: 4 }}>
-      <div style={{
-        position: 'absolute', top: 0, left: 0,
-        transform: `translate(${vp.x}px, ${vp.y}px) scale(${vp.zoom})`, transformOrigin: '0 0',
+      <div ref={cardRef} data-board-card style={{
+        position: 'absolute',
+        // 落过位用 left/top；没落位先用右上角待命（避开左上角的校验横幅）
+        left: pos ? pos.x : undefined,
+        right: pos ? undefined : 10,
+        top: pos ? pos.y : 10,
+        width: 190,
+        pointerEvents: 'auto', userSelect: 'none',
+        background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 10,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.45)', padding: '5px 9px 8px',
       }}>
-        <div style={{
-          position: 'absolute', left: board.x, top: board.y, width: 190,
-          pointerEvents: 'auto', userSelect: 'none',
-          background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 10,
-          boxShadow: '0 4px 16px rgba(0,0,0,0.45)', padding: '5px 9px 8px',
-        }}>
-          {/* 标题条 = 拖动把柄 */}
-          <div
-            onPointerDown={e => {
-              (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-              drag.current = { px: e.clientX, py: e.clientY, ox: board.x, oy: board.y };
-            }}
-            onPointerMove={e => {
-              const d = drag.current;
-              if (!d) return;
-              onMove(d.ox + (e.clientX - d.px) / vp.zoom, d.oy + (e.clientY - d.py) / vp.zoom, false);
-            }}
-            onPointerUp={endDrag}
-            onPointerCancel={endDrag}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 6, cursor: 'grab',
-              marginBottom: 2, paddingBottom: 3, borderBottom: '0.5px solid rgba(255,255,255,0.08)',
-            }}>
-            <span style={{ width: 7, height: 7, borderRadius: 999, background: NODE_SPECS.board.color, flexShrink: 0 }} />
-            <span style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(255,255,255,0.9)' }}>Preprocess</span>
-          </div>
+        {/* 标题条 = 拖动把柄。**屏幕坐标直算、不除 zoom** —— 面板不随画布缩放/平移。 */}
+        <div
+          onPointerDown={e => {
+            const card = cardRef.current, wrap = wrapRef.current;
+            if (!card || !wrap) return;
+            const wr = wrap.getBoundingClientRect();
+            const cr = card.getBoundingClientRect();
+            // 从当前视觉位置接续（右上角待命时先换算成 left/top，整个拖动过程同一坐标系）
+            const x = cr.left - wr.left, y = cr.top - wr.top;
+            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+            drag.current = { px: e.clientX, py: e.clientY, ox: x, oy: y, cw: cr.width, ch: cr.height };
+            onPos(x, y);
+          }}
+          onPointerMove={e => {
+            const d = drag.current;
+            if (!d) return;
+            const q = clamp(d.ox + (e.clientX - d.px), d.oy + (e.clientY - d.py), d.cw, d.ch);
+            onPos(q.x, q.y);
+          }}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6, cursor: 'grab',
+            marginBottom: 2, paddingBottom: 3, borderBottom: '0.5px solid rgba(255,255,255,0.08)',
+          }}>
+          <span style={{ width: 7, height: 7, borderRadius: 999, background: NODE_SPECS.board.color, flexShrink: 0 }} />
+          <span style={{ fontSize: 11.5, fontWeight: 600, color: 'rgba(255,255,255,0.9)' }}>Preprocess</span>
+        </div>
 
           <div style={gTitle}>Mask</div>
           <Row k="enable_mask" label="Enable Mask" title="开 = mask 预处理全开：扩张/羽化 + 按 mask 裁剪 + recover crop，Start/End 也才有 Mask 端口。关 = 这四步全跳过，Start 的 Mask 输出与 End 的 Mask 输入直接消失。" />
@@ -429,7 +453,6 @@ const BoardCard: React.FC<{
             <Row k="dynamic_layer_ctx" label="Layer Context" title="开 = 自动 Generate 用框下方图层的合成当 context。" disabled={!p.enable_dynamic_layer} />
           </div>
         </div>
-      </div>
     </div>
   );
 };
@@ -520,9 +543,15 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<PipeNodeData>>(toRfNodes(graph));
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(toRfEdges(graph));
   // 黑板（Preprocess 卡片）：不是画布节点，但**是图里的一个节点**（id 固定 board）——
-  // 出图时由 boardRef 补回去，所以它得跟着图一起被改写、被持久化。
+  // 出图时由 boardRef 补回去，所以它得跟着图一起被改写、被持久化。注意：**面板自己的
+  // 位置不在这棵树里**（那是屏幕坐标 UI 状态，见 boardPos）。
   const [board, setBoard] = useState<GraphNode>(() => boardOf(graph));
   const boardRef = useRef<GraphNode>(board);
+  // 黑板面板的**屏幕坐标**（画布容器内的像素）：不随图存、不吃视口 transform —— 用户
+  // 平移/缩放节点图时它原地不动，本身是一张可单独拖拽的悬浮面板。null = 还没落位
+  // （先以右上角待命，用户一拖就固定成坐标）。
+  const [boardPos, setBoardPos] = useState<{ x: number; y: number } | null>(null);
+  const boardPosRef = useRef(boardPos); boardPosRef.current = boardPos;
   const enableMask = board.params?.enable_mask !== false;
   const nodesRef = useRef(nodes); nodesRef.current = nodes;
   const edgesRef = useRef(edges); edgesRef.current = edges;
@@ -571,11 +600,21 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
   }, [graph, setNodes, setEdges, fitIfNeeded]);
 
   // 容器尺寸从"没有"变成"有"（dock 展开 / 窗口调整 / 首次拿到布局）：如果这份图还没取过景，
-  // 现在补一次。尺寸没变的话 fitIfNeeded 会自己早退，不会跟用户抢视野。
+  // 现在补一次。尺寸没变的话 fitIfNeeded 会自己早退，不会跟用户抢视野。顺带把黑板面板
+  // 拉回视野：容器变小后它可能已被裁到外面，用户摆好的位置不动，除非已经看不见。
   useEffect(() => {
     const el = wrapRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => fitIfNeeded());
+    const ro = new ResizeObserver(() => {
+      fitIfNeeded();
+      const cur = boardPosRef.current;
+      const card = el.querySelector<HTMLElement>('[data-board-card]');
+      if (cur && card) {
+        const x = Math.min(cur.x, Math.max(0, el.clientWidth - card.offsetWidth));
+        const y = Math.min(cur.y, Math.max(0, el.clientHeight - card.offsetHeight));
+        if (x !== cur.x || y !== cur.y) setBoardPos({ x, y });
+      }
+    });
     ro.observe(el);
     return () => ro.disconnect();
   }, [fitIfNeeded]);
@@ -611,12 +650,8 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
     emit(nodesRef.current, nextEdges);
   }, [emit, setEdges]);
 
-  // 挪黑板：拖动途中只动本地（每帧都发会刷爆父级与落盘），松手那一下才落图。
-  const moveBoard = useCallback((x: number, y: number, commit: boolean) => {
-    const next: GraphNode = { ...boardRef.current, x: Math.round(x), y: Math.round(y) };
-    boardRef.current = next; setBoard(next);
-    if (commit) emit(nodesRef.current, edgesRef.current);
-  }, [emit]);
+  // 挪黑板：现在搬的是**屏幕坐标 UI 状态**（不落图、不触发父级回传、松手也不用 commit ——
+  // 位置本来就不随 preset 存盘）。拖动全程只动这一个 state，重渲染成本极低。
 
   const handleNodesChange = useCallback((changes: NodeChange<Node<PipeNodeData>>[]) => {
     // Start / End 是必需的端点，不允许删掉：把针对它们的 remove 变更拦掉。
@@ -781,8 +816,11 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
             <Controls showInteractive={false} />
             <MiniMap pannable zoomable nodeColor="rgba(255,255,255,0.26)" maskColor="rgba(0,0,0,0.55)" />
           </ReactFlow>
-          {/* 黑板：画在画布之上、跟着视口平移缩放（不是 xyflow 节点，见 BoardCard） */}
-          <BoardCard board={board} enableMask={enableMask} onSet={updateBoard} onMove={moveBoard} />
+          {/* 黑板：悬浮在画布之上的一张**屏幕坐标**面板 —— 不随视口平移/缩放，
+              单独拖它自己（不是 xyflow 节点，见 BoardCard） */}
+          <BoardCard board={board} enableMask={enableMask} onSet={updateBoard}
+            pos={boardPos} onPos={(x, y) => setBoardPos({ x: Math.round(x), y: Math.round(y) })}
+            wrapRef={wrapRef} />
         </div>
 
         {/* 校验提示：**悬浮**在画布左上，不占布局高度、不挡操作（pointerEvents:none） */}

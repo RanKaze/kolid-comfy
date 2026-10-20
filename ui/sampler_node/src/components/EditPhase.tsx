@@ -45,16 +45,17 @@ const tabInputStyle: React.CSSProperties = {
 // like any other (it docks, tabs, pops out), only its skin is a row of buttons and it is as tall as
 // that row rather than as tall as the space left to it.
 type SectionKey = UnitId;
-// 宿主自己的四格 + 工作台搬过来的那些格（一块一个文件，由注册表点名）合成这一页的固定集。
+// 宿主自己的五格 + 工作台搬过来的那些格（一块一个文件，由注册表点名）合成这一页的固定集。
 // Preprocess 不再是一扇窗 —— 它搬进 Pipeline Graph，成了画布上那块黑板（board 节点）。
-const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'blocks'];
+// Pipeline 与 Pipeline Presets 各占一扇窗：前者只选 pipeline，后者只列 preset（Add 在动作条里）。
+const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', 'blocks'];
 // vtracks 是**默认提供**的常驻窗（Image 模式=空态卡，Video 模式=时间线）。播放器不单独占窗：
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
 // 标题条上有一颗 Image/Video 切换（见 heads）。
 const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets'];
-const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'blocks'];
+const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'presets', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
-  toolbar: 'File', context: 'Context', pipeline: 'Pipeline & Presets',
+  toolbar: 'File', context: 'Context', pipeline: 'Pipeline', presets: 'Pipeline Presets',
   blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets',
   ...WORKBENCH_TITLES,
 };
@@ -249,18 +250,6 @@ const DEFAULT_PARAM_META: Record<OverrideKey, ParamMeta> = {
   tgen_align: { label: 'TGen Align', min: 1, max: 64, step: 1,
     title: 'Grid a capped Generate Text image is snapped DOWN to (never up).' },
 };
-
-// The "Add +" both section headers share: a pill whose colour tracks the menu it drops, the click-out
-// layer that dismisses it, and the panel/rows. Writing it once is what keeps Pipeline Presets and
-// Pipeline Blocks identical in look and behaviour instead of two near-copies drifting apart.
-const addPillStyle = (open: boolean): React.CSSProperties => ({
-  background: open ? 'rgba(10,132,255,0.18)' : 'rgba(255,255,255,0.06)',
-  border: '0.5px solid ' + (open ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.12)'),
-  borderRadius: 999, color: open ? '#fff' : 'rgba(255,255,255,0.7)',
-  fontSize: 11.5, fontWeight: 600, padding: '3px 10px', cursor: 'pointer', lineHeight: 1,
-});
-// A menu, not a modal: both Add menus are the shared ContextMenu (see Pipeline Presets).
-
 
 const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
   // SF Symbol style SVG icons (iOS style, 24x24, stroke-based)
@@ -2430,58 +2419,40 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               </>),
 
-              // PIPELINE SETTINGS — 原先左侧的 Pipeline tab 收进这里。
-              // 只剩一颗 enum 选 pipeline（选中即切换 —— 昂贵的是加载，不是选择）；
-              // 数值覆盖搬去了 Settings 页的架构规则，按 architecture 命中。
+              // PIPELINE — 这一格只有那一个下拉框：窗名已经说了它在选什么，再挂一枚
+              // "Pipeline" 标签是同一句话说两遍；也不套内框（窗本身就是它的框）。
               pipeline: (<>
-                <div style={styles.dockCard}>
-                <div style={styles.paramRow}
+                <select
                   title={'Which pipeline is loaded on the node. Picking one switches it immediately.\n'
                     + PIPELINE_DEFAULT + ' = the pipeline wired into the node input — the workbench never learns its identity, '
                     + 'so this option only exists until you pick something else.\n'
-                    + PIPELINE_CURRENT_SELECT + ' = keep whatever is loaded now, no reload.'}>
-                  <label style={styles.paramLabel}>Pipeline</label>
-                  <select
-                    style={styles.paramSelect}
-                    value={isDefaultPipeline ? '' : selectedPipeline}
-                    onChange={e => choosePipeline(e.target.value)}
-                  >
-                    {isDefaultPipeline && <option value="" style={{ background: '#1c1c1e' }}>{PIPELINE_DEFAULT}</option>}
-                    <option value={PIPELINE_CURRENT_SELECT} style={{ background: '#1c1c1e' }}>
-                      {PIPELINE_CURRENT_SELECT}{loadedPipelineName ? ` (${loadedPipelineName})` : ''}
+                    + PIPELINE_CURRENT_SELECT + ' = keep whatever is loaded now, no reload.'}
+                  style={{ ...styles.paramSelect, width: '100%', flex: 'none' }}
+                  value={isDefaultPipeline ? '' : selectedPipeline}
+                  onChange={e => choosePipeline(e.target.value)}
+                >
+                  {isDefaultPipeline && <option value="" style={{ background: '#1c1c1e' }}>{PIPELINE_DEFAULT}</option>}
+                  <option value={PIPELINE_CURRENT_SELECT} style={{ background: '#1c1c1e' }}>
+                    {PIPELINE_CURRENT_SELECT}{loadedPipelineName ? ` (${loadedPipelineName})` : ''}
+                  </option>
+                  {pipelineNames.map(n => (
+                    <option key={n} value={n} style={{ background: '#1c1c1e' }}>{n}</option>
+                  ))}
+                  {selectedUnresolved && (
+                    <option value={selectedPipeline} style={{ background: '#1c1c1e' }}>
+                      {selectedPipeline} — {pipelinePackages.length > 0 ? 'Missing' : '(not loaded)'}
                     </option>
-                    {pipelineNames.map(n => (
-                      <option key={n} value={n} style={{ background: '#1c1c1e' }}>{n}</option>
-                    ))}
-                    {selectedUnresolved && (
-                      <option value={selectedPipeline} style={{ background: '#1c1c1e' }}>
-                        {selectedPipeline} — {pipelinePackages.length > 0 ? 'Missing' : '(not loaded)'}
-                      </option>
-                    )}
-                  </select>
-                </div>
-                </div>
-              {/* Pipeline Blocks tab bar — 多套 blocks 以 tabs 切换（可重命名/复制/删除，持久化在后端
-                  config）；只有激活 tab 的 chain 会运行、会被发给 Blend 工作台。块列表本体在
-                  Preprocess Settings 下方，随激活 tab 联动。每个 tab 就是一个 Pipeline Preset，
-                  也是 Blend 工作台 Generate 弹窗里那个 enum 的选项。 */}
-              <div style={{ ...styles.dockSubrow, position: 'relative' }}>
-                <span>Pipeline Presets</span>
-                <button
-                  title="Add a pipeline preset"
-                  onClick={e => {
-                    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                    setPresetAddMenu(presetAddMenu ? null : { x: r.left, y: r.bottom + 4 });
-                  }}
-                  style={addPillStyle(!!presetAddMenu)}>Add +</button>
-                {presetAddMenu && (
-                  <ContextMenu x={presetAddMenu.x} y={presetAddMenu.y} onClose={() => setPresetAddMenu(null)}
-                    items={[{ label: 'New Preset', color: '#0a84ff', hint: 'An empty preset — add blocks to it below', onClick: onAddBlockSet }]} />
-                )}
-              </div>
-                <div style={styles.dockCard}>
-              {/* 一个 preset 一行：名字吃满整行，右边一个 ▶ 立刻能跑这一套。 */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  )}
+                </select>
+              </>),
+
+              // PIPELINE PRESETS — 一扇窗只列 preset（多套 blocks 以行切换，可重命名/复制/删除，
+              // 持久化在后端 config）；只有激活那一套会运行、会被发给 Blend 工作台。
+              // Add 搬进了这一格**正文下面那条动作条**（与 Layers 同一范式：标题条是窗级动作的地方，
+              // 往列表里加东西是内容动作，菜单从按钮往上翻、不会被 scroller 剪掉）。
+              // 同样不套内框：每一行自己就是一张卡（有高亮/绑定徽标），外面再加一圈就是三重边框。
+              presets: (<>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {blockSets.map((set, setIdx) => {
                   const missing = set.blocks.filter(b => ifaceIsMissing(b)).length;
                   const isActive = set.id === activeBlockSetId;
@@ -2582,7 +2553,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   { label: 'Delete', color: '#ff6961', onClick: () => onRemoveBlockSet(target.id) },
                 ]} />;
               })()}
-                </div>
               </>),
 
               // Preprocess 那批开关（Enable Mask / Recover Crop / Enable Fit / Enable Limit /
@@ -2604,6 +2574,25 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             // 几格自带的动作条（Clear All / Add / Undo / Redo）：dock 把它们画在各自正文下面、滚动条之外。
             foots: {
               ...workbenchFoots(uiSend, wbHost),
+              // Pipeline Presets 的 Add：住进正文下面的动作条，与 Layers 那一格同一范式 ——
+              // 标题条是窗级动作的地方（关窗/浮出/折叠），往列表里加 preset 是**内容**动作。
+              // 菜单从这颗按钮**往上**翻（up），不然会被这一格的下边界剪掉。
+              presets: (
+                <div className="mini-group">
+                  <button type="button" className="mini-btn" aria-haspopup="menu" aria-expanded={!!presetAddMenu}
+                    title="Add a pipeline preset — a new, empty chain"
+                    onClick={e => {
+                      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                      setPresetAddMenu(presetAddMenu ? null : { x: r.left - 60, y: r.top });
+                    }}>
+                    Add<span className="add-caret">▾</span>
+                  </button>
+                  {presetAddMenu && (
+                    <ContextMenu x={presetAddMenu.x} y={presetAddMenu.y} up onClose={() => setPresetAddMenu(null)}
+                      items={[{ label: 'New Preset', color: '#0a84ff', hint: 'An empty preset — add blocks to it in the graph below', onClick: onAddBlockSet }]} />
+                  )}
+                </div>
+              ),
             },
           }} />
 
@@ -3631,7 +3620,6 @@ const styles: Record<string, React.CSSProperties> = {
   // The dock's own frame (its boxes, bars, handles and windows) is styled in src/dock/DockView.tsx —
   // this is what a unit's BODY uses: interior cards and rows, same skin as the Settings page.
   dockCard: { background: 'rgba(28,28,30,0.72)', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 10, padding: '2px 10px', display: 'flex', flexDirection: 'column', gap: 8 },
-  dockSubrow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: '#8e8e93', padding: '2px 2px 0' },
   dockGtitle: { fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.42)', borderBottom: '0.5px solid rgba(84,84,88,0.55)', paddingBottom: 3 },
   dockGbody: { display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.10)' },
   dockGroup: { display: 'flex', flexDirection: 'column', gap: 6 },
