@@ -1103,6 +1103,288 @@ def recover_size(image, resize_info, mask=None):
     except Exception as e:
         raise Exception(f"Failed to recover image size: {e}")
     
+# ---------------------------------------------------------------------------
+# Meet / Fit —— 两个"换画幅"的几何对，各配一个恢复函数
+#
+#   Meet = cover：等比放大到**盖满**目标的 w×h，居中裁掉溢出（比例不变、不留边）
+#   Fit  = contain：等比缩到**装进**目标的 w×h，居中补边（比例不变、不裁内容）
+#
+# 算法与 ImageMeetNode / ImageFitNode 逐字同源（nodes/image/fit_node.py），区别只有两处：
+# ① image 与 mask 一起走（链上 mask 必须跟着图变形）；② recover 一律吃**那一步之前的图**
+# 当背景 —— 链里天然拿得到，所以 Meet 裁掉的边缘、Fit 补出来的边都从背景取回，没有色块。
+# 返回的 info 是纯 python dict（不依赖节点类型的 FIT_INFO / MEET_INFO），链上就地存着。
+# ---------------------------------------------------------------------------
+
+def _fit_color_list(padding_color):
+    """'255, 255, 255' 或 '#ffffff' → [r, g, b]（0..1）。"""
+    s = str(padding_color or '').strip()
+    try:
+        if ',' in s:
+            vals = [float(x) for x in s.split(',')[:3]]
+            while len(vals) < 3:
+                vals.append(255.0)
+            return [min(1.0, max(0.0, v / 255.0)) for v in vals]
+        s = s.lstrip('#')
+        if len(s) == 3:
+            s = ''.join(ch * 2 for ch in s)
+        return [int(s[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
+    except Exception:
+        return [1.0, 1.0, 1.0]
+
+
+def _geo_interp(image, size, interpolation):
+    """[B,H,W,C] → [B,h,w,C]。nearest 不收 align_corners。"""
+    mode = interpolation if interpolation in ('nearest', 'bilinear', 'bicubic', 'area') else 'bilinear'
+    kw = {} if mode == 'nearest' else {'align_corners': False}
+    out = F.interpolate(image.permute(0, 3, 1, 2), size=size, mode=mode, **kw)
+    return out.permute(0, 2, 3, 1)
+
+
+def _geo_interp_mask(mask, size, interpolation):
+    """[B,H,W] → [B,h,w]，clamp 回 0..1。mask 走同一档插值（与节点同口径）。"""
+    if mask is None:
+        return None
+    mode = interpolation if interpolation in ('nearest', 'bilinear', 'bicubic', 'area') else 'bilinear'
+    kw = {} if mode == 'nearest' else {'align_corners': False}
+    out = F.interpolate(mask.unsqueeze(1), size=size, mode=mode, **kw)
+    return out.squeeze(1).clamp_(0.0, 1.0)
+
+
+def _as_mask_bhw(mask, batch, height, width):
+    """把各种形状的 mask 收敛成 [B,H,W]；尺寸对不上 = 明确报错（不静默缩放）。"""
+    if mask is None:
+        return None
+    m = mask
+    if m.dim() == 4:
+        m = m.squeeze(1) if m.shape[1] == 1 else m.mean(dim=1)
+    if m.dim() == 2:
+        m = m.unsqueeze(0)
+    if m.shape[0] != batch:
+        m = m.expand(batch, -1, -1) if m.shape[0] == 1 else m
+    if int(m.shape[1]) != height or int(m.shape[2]) != width:
+        raise ValueError(f'mask {tuple(m.shape)} does not match image spatial size {height}x{width}')
+    return m
+
+
+def meet_image(image, mask=None, width=0, height=0, interpolation='bilinear'):
+    """等比缩放到**盖满** width×height 再居中裁 —— 比例不变，不留边。
+
+    width/height 传 0 = 沿用该维进来时的尺寸（一维为 0 就是只按另一维换比例）。
+    返回 (image, mask, meet_info)；info 里带着回原图坐标系要用的 region 与补边偏移。
+    """
+    B, H, W, _C = image.shape
+    mask = _as_mask_bhw(mask, B, int(H), int(W))
+    tw = int(width or 0) or int(W)
+    th = int(height or 0) or int(H)
+    tw, th = max(1, tw), max(1, th)
+
+    rate = max(tw / float(W), th / float(H))
+    target_w = max(1, int(W * rate))
+    target_h = max(1, int(H * rate))
+
+    tmp_img = _geo_interp(image, (target_h, target_w), interpolation)
+    tmp_mask = _geo_interp_mask(mask, (target_h, target_w), interpolation)
+
+    offset_x = int((target_w - tw) / 2)
+    offset_y = int((target_h - th) / 2)
+    new_image = tmp_img[:, offset_y:offset_y + th, offset_x:offset_x + tw, :]
+    new_mask = (tmp_mask[:, offset_y:offset_y + th, offset_x:offset_x + tw]
+                if tmp_mask is not None else None)
+
+    # 换算回原图坐标系的内容区 —— Recover Meet 要把这一块缩回去贴回背景。
+    recover_rate = W / float(target_w)
+    region_x = int(offset_x * recover_rate)
+    region_y = int(offset_y * float(H) / float(target_h))
+    region_w = max(1, int(tw * recover_rate))
+    region_h = max(1, int(th * float(H) / float(target_h)))
+
+    info = {
+        'x': offset_x, 'y': offset_y,
+        'originalWidth': int(W), 'originalHeight': int(H),
+        'targetWidth': int(target_w), 'targetHeight': int(target_h),
+        'regionX': region_x, 'regionY': region_y,
+        'regionWidth': region_w, 'regionHeight': region_h,
+        'outWidth': int(tw), 'outHeight': int(th),
+    }
+    print(f'[meet_image] {W}x{H} → {tw}x{th} (cover rate={rate:.4f}, region='
+          f'{region_w}x{region_h}@{region_x},{region_y})')
+    return new_image.contiguous(), new_mask, info
+
+
+def recover_meet_image(image, mask, info, background, interpolation='bilinear',
+                       padding_color='255, 255, 255'):
+    """把处理过的 Meet 图缩回 region 尺寸，贴回 background —— 被裁掉的边缘是原图内容。
+
+    background=None 时退回 ImageRecoverMeetNode 的**有损**口径：被裁掉的那圈边用
+    padding_color 填（节点在没有接 background 时就是这么做的 —— 两种还原方式的差别
+    只在边缘，中间的 region 一样）。
+    """
+    B, _h, _w, C = image.shape
+    original_w = int(info['originalWidth'])
+    original_h = int(info['originalHeight'])
+    rx, ry = int(info['regionX']), int(info['regionY'])
+    rw, rh = max(1, int(info['regionWidth'])), max(1, int(info['regionHeight']))
+
+    tmp_img = _geo_interp(image, (rh, rw), interpolation)
+    tmp_mask = _geo_interp_mask(mask, (rh, rw), interpolation)
+
+    if background is not None:
+        bg = background
+        if int(bg.shape[1]) != original_h or int(bg.shape[2]) != original_w:
+            raise ValueError(f'Recover Meet background is {int(bg.shape[2])}x{int(bg.shape[1])} '
+                             f'but the Meet ran on {original_w}x{original_h}')
+        new_image = bg.clone().to(dtype=torch.float32)
+    else:
+        new_image = torch.zeros((B, original_h, original_w, C), dtype=torch.float32)
+        cols = _fit_color_list(padding_color)
+        for _ci in range(min(3, C)):
+            new_image[..., _ci] = cols[_ci]
+        if C > 3:
+            new_image[..., 3] = 1.0
+        print(f"[recover_meet_image] no background — padding the cropped edge with {padding_color}")
+
+    rx = max(0, min(rx, original_w - 1))
+    ry = max(0, min(ry, original_h - 1))
+    rw = min(rw, original_w - rx)
+    rh = min(rh, original_h - ry)
+    patch = tmp_img[:, :rh, :rw, :]
+    if int(patch.shape[3]) != int(new_image.shape[3]):
+        patch = patch[..., :int(new_image.shape[3])]
+    new_image[:, ry:ry + rh, rx:rx + rw, :] = patch
+
+    new_mask = None
+    if tmp_mask is not None:
+        new_mask = torch.zeros((B, original_h, original_w), dtype=torch.float32)
+        new_mask[:, ry:ry + rh, rx:rx + rw] = tmp_mask[:, :rh, :rw]
+
+    print(f'[recover_meet_image] → {original_w}x{original_h} (region {rw}x{rh}@{rx},{ry}, '
+          f'background={"yes" if background is not None else "no"})')
+    return new_image.contiguous(), new_mask
+
+
+def fit_image(image, mask=None, width=0, height=0, interpolation='bilinear',
+              padding_color='255, 255, 255'):
+    """等比缩放到**装进** width×height 再居中补边 —— 比例不变，不裁内容。"""
+    B, H, W, C = image.shape
+    mask = _as_mask_bhw(mask, B, int(H), int(W))
+    tw = int(width or 0) or int(W)
+    th = int(height or 0) or int(H)
+    tw, th = max(1, tw), max(1, th)
+
+    color = _fit_color_list(padding_color)
+    new_image = torch.zeros((B, th, tw, C), dtype=torch.float32, device=image.device)
+    for c in range(min(3, C)):
+        new_image[..., c] = color[c]
+    if C > 3:                      # alpha 通道（如果有）：补出来的边完全不透明
+        new_image[..., 3] = 1.0
+
+    height_rate = th / float(H)
+    width_rate = tw / float(W)
+    if height_rate < width_rate:
+        target_h, target_w = th, max(1, int(W * height_rate))
+        pad_width = True
+    else:
+        target_h, target_w = max(1, int(H * width_rate)), tw
+        pad_width = False
+
+    tmp_img = _geo_interp(image, (target_h, target_w), interpolation)
+    tmp_mask = _geo_interp_mask(mask, (target_h, target_w), interpolation)
+
+    if pad_width:
+        offset = int((tw - target_w) / 2)
+        new_image[:, :, offset:offset + target_w, :] = tmp_img
+        new_mask = None
+        if tmp_mask is not None:
+            new_mask = torch.zeros((B, th, tw), dtype=torch.float32, device=image.device)
+            new_mask[:, :, offset:offset + target_w] = tmp_mask
+    else:
+        offset = int((th - target_h) / 2)
+        new_image[:, offset:offset + target_h, :, :] = tmp_img
+        new_mask = None
+        if tmp_mask is not None:
+            new_mask = torch.zeros((B, th, tw), dtype=torch.float32, device=image.device)
+            new_mask[:, offset:offset + target_h, :] = tmp_mask
+
+    info = {
+        'x': offset if pad_width else 0,
+        'y': 0 if pad_width else offset,
+        'originalWidth': int(W), 'originalHeight': int(H),
+        'targetWidth': int(target_w), 'targetHeight': int(target_h),
+        'canvasWidth': int(tw), 'canvasHeight': int(th),
+    }
+    print(f'[fit_image] {W}x{H} → {tw}x{th} (contain, inner {target_w}x{target_h} @'
+          f'{info["x"]},{info["y"]})')
+    return new_image.contiguous(), new_mask, info
+
+
+def recover_fit_image(image, mask, info, interpolation='bilinear'):
+    """取内框，缩回原尺寸。补出来的边在这里自然丢掉（它们本来就不是内容）。"""
+    B, H, W, _C = image.shape
+    original_w = int(info['originalWidth'])
+    original_h = int(info['originalHeight'])
+    x, y = int(info['x']), int(info['y'])
+    tw, th = max(1, int(info['targetWidth'])), max(1, int(info['targetHeight']))
+
+    x = max(0, min(x, W - 1))
+    y = max(0, min(y, H - 1))
+    tw = min(tw, W - x)
+    th = min(th, H - y)
+
+    tmp_img = image[:, y:y + th, x:x + tw, :]
+    new_image = _geo_interp(tmp_img, (original_h, original_w), interpolation)
+    new_mask = None
+    if mask is not None:
+        m = _as_mask_bhw(mask, B, int(H), int(W))
+        new_mask = _geo_interp_mask(m[:, y:y + th, x:x + tw], (original_h, original_w), interpolation)
+
+    print(f'[recover_fit_image] → {original_w}x{original_h} (inner {tw}x{th}@{x},{y})')
+    return new_image.contiguous(), new_mask
+
+
+def recover_scale_image(image, mask, info, background=None, interpolation='bilinear'):
+    """把缩放后的工作图缩回 `info` 记下的原尺寸，再按 mask 覆盖率与背景合成。
+
+    Scale / Limit 只改分辨率（不裁、不补、不挪坐标），所以「还原」= 缩回原尺寸；
+    但这两步之间可能已经有 detailer 重绘过 —— 重绘处用当前像素、其余用**背景原像素**
+    （与 recover_crop 的 mask_blend 同一口径：不吃二次重采样，也不会把没动过的地方
+    糊一遍）。
+
+    info 认两种写法：`original_width/original_height`（limit_pixels 的 resize_info）
+    与 `width/height`（Scale 帧自带的读数）。background 尺寸对不上 = 明确报错。
+    """
+    B, _h, _w, C = image.shape
+    orig_w = int(info.get('original_width') or info.get('width') or 0)
+    orig_h = int(info.get('original_height') or info.get('height') or 0)
+    if orig_w <= 0 or orig_h <= 0:
+        raise ValueError('recover_scale_image needs the size the step started from')
+
+    mask = _as_mask_bhw(mask, B, int(image.shape[1]), int(image.shape[2]))
+    resized = _geo_interp(image, (orig_h, orig_w), interpolation)
+    r_mask = _geo_interp_mask(mask, (orig_h, orig_w), interpolation)
+
+    print(f'[recover_scale_image] {int(image.shape[2])}x{int(image.shape[1])} → '
+          f'{orig_w}x{orig_h} (background={"yes" if background is not None else "no"})')
+
+    if background is None:
+        return resized.contiguous(), r_mask
+
+    bg = background
+    if int(bg.shape[1]) != orig_h or int(bg.shape[2]) != orig_w:
+        raise ValueError(f'Recover Scale background is {int(bg.shape[2])}x{int(bg.shape[1])} '
+                         f'but the step ran on {orig_w}x{orig_h}')
+    bg = bg.to(dtype=resized.dtype, device=resized.device)
+    if int(bg.shape[0]) != B:
+        bg = bg[:1].expand(B, -1, -1, -1) if int(bg.shape[0]) == 1 else bg[:B]
+    if int(bg.shape[3]) != C:
+        bg = bg[..., :C]
+    if r_mask is None:
+        return resized.contiguous(), None
+
+    alpha = r_mask.unsqueeze(-1).to(dtype=resized.dtype)
+    out = bg * (1.0 - alpha) + resized * alpha
+    return out.contiguous(), r_mask
+
+
 def draw_mask_on_image(image, mask, color=(0, 255, 0, 128)):
     """
     将 mask 绘制到 image 上，返回适合 ui.PreviewImage 的 Tensor

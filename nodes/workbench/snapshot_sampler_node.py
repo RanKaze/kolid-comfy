@@ -34,7 +34,7 @@ except ImportError as e:
     SnapshotPromptServer = None
     SnapshotPromptNode = None
 
-from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl, merge_mask_alpha
+from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl, merge_mask_alpha, meet_image, recover_meet_image, fit_image, recover_fit_image, recover_scale_image
 from ...libs.mask_utils import expand_mask
 from ...libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
@@ -74,6 +74,64 @@ def debug_lora_entries(loras):
     if isinstance(loras, str):
         return get_loras_from_string(loras)
     return list(loras or [])
+
+
+# =============================================================================
+# 链上的几何帧（Crop / Meet / Fit 压帧，Recover 块弹帧）
+# =============================================================================
+# 一条链里几何步骤天生是**嵌套**的：Crop 把坐标系缩到一块，Recover Crop 才把它还回去。
+# 中间再插一个 Meet，就必须先还 Meet 才能还 Crop —— 跨种类恢复会用错坐标系，产出静默
+# 变形（看着只是"缩放怪怪的"），所以这里把「只能弹栈顶、且种类要对上」写成唯一判据。
+GEO_RECOVER_LABEL = {
+    'crop': 'Recover Crop',
+    'meet': 'Recover Meet',
+    'fit': 'Recover Fit',
+    'scale': 'Recover Scale',
+    'limit': 'Recover Limit',
+}
+
+# 「软帧」：Scale / Limit 只改分辨率 —— 不裁、不补边、不挪坐标。它们的帧压上栈是为了让
+# 显式的 Recover Scale / Recover Limit 能**完美还原**（吃那一步之前的图当背景），但如果
+# 没恢复也不会让产出落错位置（链尾的 recover_size 会把它带回原始落点）。所以：
+#   ① 链尾不算漏（否则所有带 Scale 块的老链都要补一颗 Recover Scale）；
+#   ② 上方的 Crop/Meet/Fit 要恢复时，先把软帧自动收掉（还原无歧义，不该逼用户补块）。
+# 反过来 Crop/Meet/Fit 是**硬帧**：没恢复就是坐标系统错位，链尾必须报错。
+GEO_SOFT_KINDS = ('scale', 'limit')
+
+
+def _geo_kind_label(kind):
+    return str(kind or '').replace('_', ' ').title() or 'nothing'
+
+
+def geo_pop_frame(geo_open, kind, block_no):
+    """弹栈顶那一帧；栈顶不是同类 = 报错（并把帧放回去，栈保持原样）。"""
+    frame = geo_open.pop() if geo_open else None
+    if frame is not None and frame.get('kind') == kind:
+        return frame
+    if frame is not None:
+        geo_open.append(frame)
+    raise RuntimeError(
+        f"{GEO_RECOVER_LABEL.get(kind, _geo_kind_label(kind))} block (block {block_no}) found "
+        f"{_geo_kind_label(frame.get('kind')) if frame else 'nothing'} still open above it — "
+        f"close that one first (a Recover block only restores the step directly above it).")
+
+
+def geo_leftover_error(geo_open):
+    """链尾还开着**硬**几何帧 = 漏了 Recover 块。返回要抛的错（None = 干净收尾）。
+
+    **不自动兜底**：链尾那两步隐式恢复只认链首那次 crop，拿内层裁剪的结果去贴外层，
+    产出会静默变形 —— 报错比"看起来对了一点"好查得多。
+    软帧（Scale / Limit）不算漏：它们的帧只是"还能不能完美还原"的凭据，不收也不落错位置。
+    """
+    hard = [f for f in geo_open if f.get('kind') not in GEO_SOFT_KINDS]
+    if not hard:
+        return None
+    left = ', '.join(f"{_geo_kind_label(f.get('kind'))} (block {f.get('block')})" for f in hard)
+    need = ' → '.join(GEO_RECOVER_LABEL.get(f.get('kind'), 'Recover') for f in reversed(hard))
+    return RuntimeError(
+        f'The chain ends with geometry still open: {left}. Add the matching recover block after '
+        f'each one ({need}) — otherwise the result keeps that step\'s coordinate system and '
+        f'cannot be placed back on the canvas.')
 
 
 # =============================================================================
@@ -1511,6 +1569,28 @@ class SnapshotDetailerSamplerServer:
         bp = next((b.get('params', b) for b in blocks
                    if isinstance(b, dict) and b.get('type') == 'detailer'), None)
         return bool(bp.get('enable_mask', True)) if isinstance(bp, dict) else True
+
+    def _chain_makes_own_mask(self, preset_id=None):
+        """这条链会不会**自己造 mask**：在第一个 detailer 之前（或整条链里没有 detailer 时，
+        任何一个位置）出现过 Detect 块。
+
+        有这个块时，Run 的「Mask is required」闸门要放行 —— 用户完全可以什么都不画，
+        让检测结果当 mask 用。选链优先级与 _first_detailer_enable_mask 一致。
+        """
+        blocks = self.blocks or []
+        if preset_id:
+            preset_set = next(
+                (s for s in (self.blocks_sets or [])
+                 if isinstance(s, dict) and s.get('id') == preset_id and s.get('blocks')),
+                None,
+            )
+            if preset_set is not None:
+                blocks = preset_set['blocks']
+        first_detailer = next(
+            (i for i, b in enumerate(blocks)
+             if isinstance(b, dict) and b.get('type') == 'detailer'), len(blocks))
+        return any(isinstance(b, dict) and b.get('type') == 'detect'
+                   for b in list(blocks)[:first_detailer])
 
     def _run_enable_edit(self, preset_id=None):
         """生效链里是否有任一 detailer 块开了 Enable Edit。
@@ -4524,12 +4604,21 @@ class SnapshotDetailerSamplerNode:
         # detailer block）。关掉时这一趟产出停在 crop 工作区：不 recover_size、不
         # recover_crop，patch 连同裁剪矩形交给前端，由 Blend 画布用 transform 贴回原位。
         do_recover_crop = bool(first_bp.get('recover_crop', True))
-        if enable_mask:
+        if enable_mask and expanded_mask is not None:
             cropped_image, cropped_mask, crop_info = crop_mask(
                 image=original_image,
                 mask=expanded_mask,
                 reserve=first_crop_reserve
             )
+        elif enable_mask:
+            # Enable Mask 开着但**没有 mask**：链上有 Detect 块时这是合法状态 —— 整幅就是
+            # 工作区，mask 由 Detect 在链里现造（没有 Detect 的话 run_detailer 的闸门早拦了，
+            # 走不到这里）。没有裁剪矩形，链尾也就不贴、不做 patch 回贴。
+            cropped_image, cropped_mask, crop_info = original_image, None, None
+            print("[Detailer] Enable Mask on but no mask was given — workspace = the full image; "
+                  "a Detect block has to supply the mask")
+            dbg.record_stage('裁剪跳过（没有 mask，等 Detect 造）',
+                             f'工作区 = 整幅图 {tuple(original_image.shape)}', block=0)
         else:
             # Enable Mask 关：整幅图就是工作区。没有裁剪矩形（crop_info=None），收尾
             # 也就不走 recover 与「patch 贴回」两条路 —— 产出本身就是整幅结果。
@@ -4573,7 +4662,12 @@ class SnapshotDetailerSamplerNode:
 
         current_image = resized_image
         current_mask = resized_mask
-        last_resize_info = None
+        # 链首 Limit 的那一份 resize_info 就是「还没还掉的那次缩放」。以前这里是 None、
+        # 只有 detailer 跑完才把它接过来（见 block 循环末尾），于是**一条没有 detailer 的
+        # 链**（纯几何链）链尾既不 recover_size 也不贴得回去，recover_crop 会因为尺寸不匹配
+        # 直接抛。现在开局就认它 —— 有 detailer 的链随后会把它覆盖成同一个值，行为不变。
+        last_resize_info = resize_info
+        last_resized_mask = resized_mask
         # 工作分辨率是被哪颗像素旋钮定下来的（None = Enable Limit 关，尺寸就是裁剪结果）。
         # interface 块会把 current_image 换成子图产物 —— 那张没被 limit 过，届时置 None。
         work_pixel_limit = limit_pixels_val if enable_limit else None
@@ -4591,7 +4685,45 @@ class SnapshotDetailerSamplerNode:
                          pixel_limit=work_pixel_limit, align=work_align)
         dbg.record_mask('裁剪 / 缩放后工作 mask', resized_mask, block=0,
                         pixel_limit=work_pixel_limit, align=work_align)
-        last_resized_mask = None
+
+        # ── 链上的几何帧（Crop / Meet / Fit 各压一帧，Recover 块按类弹栈）─────────────
+        # 两个口径：①**总闸照旧**工作 —— 链首那次隐式 crop 不因为这个新机制搬家，
+        # 它只是把 crop_info 记成「开着的」，于是链中的 Recover Crop 块也能提前把它消费掉
+        # （消费后链尾就不再贴第二遍）；②显式块是**额外一层**，Crop/Meet/Fit 各自压帧，
+        # Recover 只弹**栈顶且同类**的那一帧 —— 跨种类恢复会把坐标算错，所以宁可报错。
+        # 没放任何新块时 geo_open 恒空、crop_info_open 恒等于 crop_info ⇒ 老链路一字不差。
+        crop_info_open = crop_info
+        geo_open = []
+
+        # ── 软帧收尾（Scale / Limit）─────────────────────────────────────────────
+        # Crop/Meet/Fit 的 Recover 要弹自己那帧时，如果上面压着 Scale/Limit，**先按背景把
+        # 尺寸还原回去**再弹 —— 那两步只改分辨率，还原没有歧义，没道理逼用户多补两颗块。
+        # keep = 别收同类的软帧（Recover Scale 要弹的就是它自己那一帧）。
+        # 用闭包是因为它要改 current_image / current_mask 这一对工作值（与各分支同源）。
+        def _close_soft_frames(_geo, keep=None):
+            nonlocal current_image, current_mask, last_resize_info, last_resized_mask
+            while (_geo and _geo[-1].get('kind') in GEO_SOFT_KINDS
+                   and _geo[-1].get('kind') != keep):
+                _f = _geo.pop()
+                _bg = _f.get('bg')
+                _before = f'{int(current_image.shape[2])}x{int(current_image.shape[1])}'
+                current_image, current_mask = recover_scale_image(
+                    current_image, current_mask,
+                    {'original_width': int(_bg.shape[2]), 'original_height': int(_bg.shape[1])},
+                    background=_bg)
+                # 记账跟着回到那一档：original_* 仍是链首的原始落点，只有 resized_* 换掉。
+                if last_resize_info is not None:
+                    last_resize_info = {
+                        **last_resize_info,
+                        'resized_width': int(current_image.shape[2]),
+                        'resized_height': int(current_image.shape[1]),
+                        'scale_factor': int(current_image.shape[2]) / max(
+                            1, int(last_resize_info.get('original_width') or 1)),
+                    }
+                last_resized_mask = current_mask
+                print(f'[PipelineBlock] auto-closed {_geo_kind_label(_f.get("kind"))} frame from '
+                      f'block {_f.get("block")} ({_before} → '
+                      f'{int(current_image.shape[2])}x{int(current_image.shape[1])})')
 
         # Save original pipeline state for restoration after each block
         _orig_enable_edit = next_pipeline.config.get("enable_edit") if next_pipeline.config else None
@@ -4843,6 +4975,7 @@ class SnapshotDetailerSamplerNode:
                         if arch_qwen_image21.matches(next_pipeline.config):
                             scale_align = arch_qwen_image21.adjust_align(scale_align)
                     in_h, in_w = int(current_image.shape[1]), int(current_image.shape[2])
+                    scale_bg = current_image          # 压帧要的是**缩放前**那张（Recover Scale 吃它）
                     scaled_image, scaled_mask, scale_info = limit_pixels(
                         current_image, mask=current_mask, align=scale_align, scale=scale_val)
 
@@ -4851,6 +4984,13 @@ class SnapshotDetailerSamplerNode:
                     current_image = scaled_image
                     current_mask = scaled_mask
                     if scale_info is not None:
+                        # 帧：Scale 只改分辨率，恢复 = 缩回这张 bg 的尺寸再按 mask 合成。
+                        # 没恢复也**不算漏**（软帧），链尾的 recover_size 会带回原始落点。
+                        geo_open.append({'kind': 'scale', 'info': {
+                            'original_width': in_w, 'original_height': in_h,
+                            'resized_width': int(scale_info['resized_width']),
+                            'resized_height': int(scale_info['resized_height']),
+                        }, 'bg': scale_bg, 'bg_mask': None, 'block': i + 1})
                         # resize_info.original_* = 复原落点（crop 前尺寸，Enable Mask 关
                         # 时 = 整幅），沿用链首记录，不随缩放移动；只有 resized_* 换成
                         # 新工作分辨率。scale_factor 保留 scale_info 的实测值（落格后
@@ -4887,6 +5027,436 @@ class SnapshotDetailerSamplerNode:
                     if scaled_mask is not None:
                         dbg.record_mask(f'Block {i+1} · Scale 输出 mask', scaled_mask, block=i + 1,
                                         align=(scale_align if scale_align > 1 else None))
+                    continue
+
+                # ── Limit：链中按像素预算再限一次分辨率 ───────────────────────────
+                # 语义与链首那次隐式 limit 完全同源（limit_pixels），区别只是位置由用户摆：
+                # 想在几块之前降分辨率、后面再还回去，就 Limit + Recover Limit 成对用。
+                # Pixels / Align 填 0 = 跟随 DEFAULT SETTING（与 Scale 的 Use Pipeline Align
+                # 同一口径）；Cap Only 开 = pixels 是上限（只缩不涨，也就不需要恢复）。
+                if block.get('type') == 'limit':
+                    bp = block.get('params', block)
+                    limit_block_pixels = int(bp.get('pixels', 0) or 0) or int(limit_pixels_val or 0)
+                    limit_block_align = int(bp.get('align', 0) or 0) or limit_align
+                    if arch_qwen_image21.matches(next_pipeline.config):
+                        limit_block_align = arch_qwen_image21.adjust_align(limit_block_align)
+                    limit_cap_only = bool(bp.get('cap_only', False))
+                    before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
+                    limit_bg = current_image
+                    l_img, l_mask, l_info = limit_pixels(
+                        current_image, limit_block_pixels, current_mask,
+                        limit_block_align, cap_only=limit_cap_only)
+                    next_pipeline.image = l_img
+                    next_pipeline.mask = l_mask
+                    current_image, current_mask = l_img, l_mask
+                    if l_info is not None:
+                        geo_open.append({'kind': 'limit', 'info': dict(l_info), 'bg': limit_bg,
+                                         'bg_mask': None, 'block': i + 1})
+                        # 与 Scale 分支同一套记账：original_* = 链首那个复原落点（不随本块
+                        # 移动），resized_* = 新的工作分辨率 —— 链尾 recover_size 据此还原。
+                        resize_info = {
+                            "original_width": int(cropped_image.shape[2]),
+                            "original_height": int(cropped_image.shape[1]),
+                            "resized_width": int(l_info["resized_width"]),
+                            "resized_height": int(l_info["resized_height"]),
+                            "aspect_ratio": l_info["aspect_ratio"],
+                            "scale_factor": l_info["scale_factor"],
+                            "align": limit_block_align,
+                            "was_upscaled": l_info["was_upscaled"],
+                        }
+                        last_resize_info = resize_info
+                        last_resized_mask = l_mask
+                    work_pixel_limit = None if limit_cap_only else limit_block_pixels
+                    work_align = limit_block_align if limit_block_align > 1 else None
+                    after_w, after_h = int(l_img.shape[2]), int(l_img.shape[1])
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Limit block: {before_w}x{before_h} → "
+                          f"{after_w}x{after_h} (pixels={limit_block_pixels}, align={limit_block_align}"
+                          + (", cap_only)" if limit_cap_only else ")"))
+                    dbg.record_block(i + 1, f'Block {i+1} · Limit',
+                                     f'{before_w}x{before_h} → {after_w}x{after_h}',
+                                     pixels=limit_block_pixels, align=limit_block_align,
+                                     cap_only=limit_cap_only,
+                                     from_size=[before_w, before_h],
+                                     to_size=[after_w, after_h])
+                    dbg.record_image(f'Block {i+1} · Limit 输出图', l_img, block=i + 1)
+                    if l_mask is not None:
+                        dbg.record_mask(f'Block {i+1} · Limit 输出 mask', l_mask, block=i + 1)
+                    continue
+
+                # ── Crop：按当前 mask 的外接框把工作区裁掉一层 ─────────────────────
+                # 与链首那次隐式 crop 完全同一套算法（crop_mask + reserve），区别只是它发生
+                # 在链的**中间**：裁完 mask 也跟着裁，后续 detailer 按这块更小的区域采样。
+                # 这一帧压进 geo_open，谁恢复谁弹 —— 没恢复就在链尾报错（见链尾那段）。
+                if block.get('type') == 'crop':
+                    bp = block.get('params', block)
+                    use_pipe_reserve = bool(bp.get('use_pipeline_reserve', True)) if isinstance(bp, dict) else True
+                    # 块自己的 reserve 缺省 0 —— 与 ImageCropMaskNode 的默认值一致（开
+                    # Use Pipeline Reserve 时才换成 DEFAULT SETTING 那一份）。
+                    crop_block_reserve = (int(global_params.get('crop_reserve', 32)) if use_pipe_reserve
+                                          else max(0, int(bp.get('reserve', 0) or 0)))
+                    if current_mask is None or float(current_mask.sum()) <= 0:
+                        raise RuntimeError(
+                            f"Crop block (block {i+1}) needs a mask at this point in the chain — nothing "
+                            f"is painted on the Mask layer, so there is no box to crop to. Paint one, "
+                            f"put a Detect block above it, or drop this Crop block.")
+                    # crop_mask 只认 [B,H,W]；interface 子图可能回一张 2D 的 mask。
+                    crop_input_mask = current_mask
+                    if crop_input_mask.dim() == 4:
+                        crop_input_mask = crop_input_mask.squeeze(1)
+                    if crop_input_mask.dim() == 2:
+                        crop_input_mask = crop_input_mask.unsqueeze(0)
+                    before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
+                    c_img, c_mask, c_info = crop_mask(image=current_image, mask=crop_input_mask,
+                                                      reserve=crop_block_reserve)
+                    geo_open.append({'kind': 'crop', 'info': c_info, 'bg': current_image,
+                                     'bg_mask': crop_input_mask, 'block': i + 1})
+                    next_pipeline.image = c_img
+                    next_pipeline.mask = c_mask
+                    current_image, current_mask = c_img, c_mask
+                    work_pixel_limit = None
+                    work_align = None
+                    after_w, after_h = int(c_img.shape[2]), int(c_img.shape[1])
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Crop block: {before_w}x{before_h} → "
+                          f"{after_w}x{after_h} (reserve={crop_block_reserve}"
+                          + (" pipeline)" if use_pipe_reserve else " block)"))
+                    dbg.record_block(i + 1, f'Block {i+1} · Crop',
+                                     f'{before_w}x{before_h} → {after_w}x{after_h}',
+                                     reserve=crop_block_reserve,
+                                     use_pipeline_reserve=use_pipe_reserve,
+                                     crop_info=({k: (list(v) if isinstance(v, tuple) else v)
+                                                 for k, v in c_info.items()}
+                                                if isinstance(c_info, dict) else c_info),
+                                     from_size=[before_w, before_h],
+                                     to_size=[after_w, after_h])
+                    dbg.record_image(f'Block {i+1} · Crop 输出图', c_img, block=i + 1)
+                    dbg.record_mask(f'Block {i+1} · Crop 输出 mask', c_mask, block=i + 1)
+                    continue
+
+                # ── Recover Crop：把最近一次 Crop 贴回去 ───────────────────────────
+                # 背景就是 Crop 那一刻的图 —— 所以裁掉的边缘是原内容，不是色块。
+                # 栈上没显式 Crop 时，它消费的是**链首那次隐式 crop**（提前恢复：后面的块
+                # 就在整幅坐标系里跑，链尾也不会再贴第二遍）。
+                if block.get('type') == 'recover_crop':
+                    # Recover Method 与 ImageRecoverCropNode 同三档：
+                    #   mask_blend（默认）羽化混合 —— 裁掉的边缘留背景，内容按 mask 覆盖度过渡
+                    #   mask_only        只把 mask 覆盖到的像素贴回来（硬抠图）
+                    #   bounds_only      整块硬覆盖，不需要 mask
+                    rc_bp = block.get('params', block)
+                    rc_method = str(rc_bp.get('recover_method') or 'mask_blend') if isinstance(rc_bp, dict) else 'mask_blend'
+                    if rc_method not in ('mask_blend', 'mask_only', 'bounds_only'):
+                        rc_method = 'mask_blend'
+                    # 栈上还有显式帧就必须弹栈顶（且得是 Crop）；栈空才回落到链首那次隐式 crop。
+                    # 上方压着 Scale / Limit（只改分辨率）时先自动收掉 —— 否则
+                    # 「Crop → Scale → Recover Crop」会因为中间夹了个 Scale 就报错。
+                    _close_soft_frames(geo_open)
+                    frame = geo_pop_frame(geo_open, 'crop', i + 1) if geo_open else None
+                    if (rc_method != 'bounds_only'
+                            and current_mask is None
+                            and (frame is None or frame.get('bg_mask') is None)):
+                        raise RuntimeError(
+                            f"Recover Crop block (block {i+1}) uses Recover Method '{rc_method}', which "
+                            f"needs a mask — the chain has none at this point. Use 'bounds_only', or put "
+                            f"a Detect block above it to make one.")
+                    before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
+                    if frame is not None:
+                        r_img, r_mask = recover_crop(
+                            background=frame['bg'], image=current_image, crop_info=frame['info'],
+                            recover_method=rc_method,
+                            mask=current_mask if current_mask is not None else frame.get('bg_mask'))
+                        src = f'block {frame["block"]}'
+                    elif crop_info_open is not None:
+                        # 链首那两步是**隐式**的（Crop 在外、Limit 在内）。要回到整幅，就得
+                        # 先把 Limit 那层缩放还掉 —— 用户看不见那一步，不该让他再放一个
+                        # Recover Limit 才让 Recover Crop 生效，这里顺手关掉。
+                        if last_resize_info is not None:
+                            current_image, current_mask = recover_size(
+                                image=current_image, resize_info=last_resize_info,
+                                mask=(last_resized_mask if last_resized_mask is not None
+                                      else current_mask))
+                            last_resize_info = None
+                            last_resized_mask = None
+                            print(f"[PipelineBlock {i+1}] Recover Crop also closed the chain-start "
+                                  f"Limit (working res → crop res)")
+                        r_img, r_mask = recover_crop(
+                            background=original_image, image=current_image, crop_info=crop_info_open,
+                            recover_method=rc_method, mask=current_mask)
+                        crop_info_open = None
+                        src = 'the chain-start crop'
+                    else:
+                        raise RuntimeError(
+                            f"Recover Crop block (block {i+1}) has nothing to restore — there is no "
+                            f"Crop block above it and the chain-start crop was already recovered.")
+                    next_pipeline.image = r_img
+                    next_pipeline.mask = r_mask
+                    current_image, current_mask = r_img, r_mask
+                    work_pixel_limit = None
+                    work_align = None
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Recover Crop block: {before_w}x{before_h} → "
+                          f"{int(r_img.shape[2])}x{int(r_img.shape[1])} (restored {src}, method={rc_method})")
+                    dbg.record_block(i + 1, f'Block {i+1} · Recover Crop', f'restored {src}',
+                                     recover_method=rc_method)
+                    dbg.record_image(f'Block {i+1} · Recover Crop 输出图', r_img, block=i + 1)
+                    if r_mask is not None:
+                        dbg.record_mask(f'Block {i+1} · Recover Crop 输出 mask', r_mask, block=i + 1)
+                    continue
+
+                # ── Meet（cover）/ Recover Meet：换画幅的成对几何 ──────────────────
+                # Meet = 等比放大到盖满 W×H 再居中裁；Recover Meet 把结果缩回原图坐标系的
+                # 内容区、贴回 Meet 之前的整幅图（裁掉的边缘因此是原内容）。
+                if block.get('type') == 'meet':
+                    bp = block.get('params', block)
+                    meet_w = int(bp.get('width', 0) or 0)
+                    meet_h = int(bp.get('height', 0) or 0)
+                    meet_interp = str(bp.get('interpolation') or 'bilinear')
+                    before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
+                    m_img, m_mask, m_info = meet_image(
+                        current_image, current_mask, width=meet_w, height=meet_h,
+                        interpolation=meet_interp)
+                    geo_open.append({'kind': 'meet', 'info': m_info, 'bg': current_image,
+                                     'bg_mask': current_mask, 'block': i + 1})
+                    next_pipeline.image = m_img
+                    next_pipeline.mask = m_mask
+                    current_image, current_mask = m_img, m_mask
+                    work_pixel_limit = None
+                    work_align = None
+                    after_w, after_h = int(m_img.shape[2]), int(m_img.shape[1])
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Meet block: {before_w}x{before_h} → "
+                          f"{after_w}x{after_h} (cover {meet_w or 'auto'}x{meet_h or 'auto'})")
+                    dbg.record_block(i + 1, f'Block {i+1} · Meet',
+                                     f'{before_w}x{before_h} → {after_w}x{after_h}',
+                                     width=meet_w, height=meet_h, interpolation=meet_interp,
+                                     meet_info=dict(m_info),
+                                     from_size=[before_w, before_h],
+                                     to_size=[after_w, after_h])
+                    dbg.record_image(f'Block {i+1} · Meet 输出图', m_img, block=i + 1)
+                    if m_mask is not None:
+                        dbg.record_mask(f'Block {i+1} · Meet 输出 mask', m_mask, block=i + 1)
+                    continue
+
+                if block.get('type') == 'recover_meet':
+                    _close_soft_frames(geo_open)
+                    frame = geo_pop_frame(geo_open, 'meet', i + 1)
+                    bp = block.get('params', block)
+                    rm_interp = str(bp.get('interpolation') or 'bilinear') if isinstance(bp, dict) else 'bilinear'
+                    # 与 ImageRecoverMeetNode 对齐：background 是**可选输入**，不接就是有损还原
+                    # （被裁掉的边缘填 padding_color）。链上那一步之前的整幅图天然就在帧里，
+                    # 所以默认还是用背景 —— 关掉它才走补色那条路。
+                    rm_use_bg = bool(bp.get('use_background', True)) if isinstance(bp, dict) else True
+                    rm_pad = str(bp.get('padding_color') or '255, 255, 255') if isinstance(bp, dict) else '255, 255, 255'
+                    before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
+                    r_img, r_mask = recover_meet_image(
+                        current_image, current_mask, frame['info'],
+                        background=(frame['bg'] if rm_use_bg else None),
+                        interpolation=rm_interp, padding_color=rm_pad)
+                    next_pipeline.image = r_img
+                    next_pipeline.mask = r_mask
+                    current_image, current_mask = r_img, r_mask
+                    work_pixel_limit = None
+                    work_align = None
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Recover Meet block: {before_w}x{before_h} → "
+                          f"{int(r_img.shape[2])}x{int(r_img.shape[1])} (restored block {frame['block']}, "
+                          f"{'background' if rm_use_bg else 'padding ' + rm_pad})")
+                    dbg.record_block(i + 1, f'Block {i+1} · Recover Meet',
+                                     f'restored block {frame["block"]}', interpolation=rm_interp,
+                                     use_background=rm_use_bg, padding_color=rm_pad)
+                    dbg.record_image(f'Block {i+1} · Recover Meet 输出图', r_img, block=i + 1)
+                    if r_mask is not None:
+                        dbg.record_mask(f'Block {i+1} · Recover Meet 输出 mask', r_mask, block=i + 1)
+                    continue
+
+                # ── Fit（contain）/ Recover Fit：等比装进 W×H，居中补边 ─────────────
+                if block.get('type') == 'fit':
+                    bp = block.get('params', block)
+                    fit_w = int(bp.get('width', 0) or 0)
+                    fit_h = int(bp.get('height', 0) or 0)
+                    fit_interp = str(bp.get('interpolation') or 'bilinear')
+                    fit_pad = str(bp.get('padding_color') or '255, 255, 255')
+                    before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
+                    f_img, f_mask, f_info = fit_image(
+                        current_image, current_mask, width=fit_w, height=fit_h,
+                        interpolation=fit_interp, padding_color=fit_pad)
+                    geo_open.append({'kind': 'fit', 'info': f_info, 'bg': current_image,
+                                     'bg_mask': current_mask, 'block': i + 1})
+                    next_pipeline.image = f_img
+                    next_pipeline.mask = f_mask
+                    current_image, current_mask = f_img, f_mask
+                    work_pixel_limit = None
+                    work_align = None
+                    after_w, after_h = int(f_img.shape[2]), int(f_img.shape[1])
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Fit block: {before_w}x{before_h} → "
+                          f"{after_w}x{after_h} (contain {fit_w or 'auto'}x{fit_h or 'auto'}, pad={fit_pad})")
+                    dbg.record_block(i + 1, f'Block {i+1} · Fit',
+                                     f'{before_w}x{before_h} → {after_w}x{after_h}',
+                                     width=fit_w, height=fit_h, interpolation=fit_interp,
+                                     padding_color=fit_pad, fit_info=dict(f_info),
+                                     from_size=[before_w, before_h],
+                                     to_size=[after_w, after_h])
+                    dbg.record_image(f'Block {i+1} · Fit 输出图', f_img, block=i + 1)
+                    if f_mask is not None:
+                        dbg.record_mask(f'Block {i+1} · Fit 输出 mask', f_mask, block=i + 1)
+                    continue
+
+                if block.get('type') == 'recover_fit':
+                    _close_soft_frames(geo_open)
+                    frame = geo_pop_frame(geo_open, 'fit', i + 1)
+                    bp = block.get('params', block)
+                    rf_interp = str(bp.get('interpolation') or 'bilinear') if isinstance(bp, dict) else 'bilinear'
+                    before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
+                    r_img, r_mask = recover_fit_image(current_image, current_mask, frame['info'],
+                                                      interpolation=rf_interp)
+                    next_pipeline.image = r_img
+                    next_pipeline.mask = r_mask
+                    current_image, current_mask = r_img, r_mask
+                    work_pixel_limit = None
+                    work_align = None
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Recover Fit block: {before_w}x{before_h} → "
+                          f"{int(r_img.shape[2])}x{int(r_img.shape[1])} (restored block {frame['block']})")
+                    dbg.record_block(i + 1, f'Block {i+1} · Recover Fit',
+                                     f'restored block {frame["block"]}', interpolation=rf_interp)
+                    dbg.record_image(f'Block {i+1} · Recover Fit 输出图', r_img, block=i + 1)
+                    if r_mask is not None:
+                        dbg.record_mask(f'Block {i+1} · Recover Fit 输出 mask', r_mask, block=i + 1)
+                    continue
+
+                # ── Recover Scale / Recover Limit：把一次改分辨率还原回去 ──────────
+                # 两种块共用一套帧（Scale/Limit 各压一帧、带那一步之前的图），所以还原是
+                # **完美**的：重绘过的地方用当前像素，其余用背景原像素（不吃二次重采样）。
+                #
+                # Recover Limit 有两条路：
+                #   ① 栈顶是 Limit 帧 → 弹它（链中的 Limit 块）；
+                #   ② 栈里没有 Limit 帧 → 回落成老口径：还掉链首那次隐式 Limit
+                #      （Scale 块会改写 last_resize_info，所以吃的永远是当前生效的那一份）。
+                if block.get('type') in ('recover_scale', 'recover_limit'):
+                    kind = 'scale' if block.get('type') == 'recover_scale' else 'limit'
+                    bp = block.get('params', block)
+                    r_interp = str(bp.get('interpolation') or 'bilinear') if isinstance(bp, dict) else 'bilinear'
+                    before_w, before_h = int(current_image.shape[2]), int(current_image.shape[1])
+                    frame = None
+                    # 顶上若是另一种软帧（Scale ↔ Limit）先收掉：两者都只改分辨率，
+                    # 跨着收没有歧义，不该为了顺序问题逼用户再补一颗块。
+                    _close_soft_frames(geo_open, keep=kind)
+                    if geo_open and geo_open[-1].get('kind') == kind:
+                        frame = geo_open.pop()
+                    if frame is None and kind == 'limit' and last_resize_info is not None:
+                        # 老口径：栈上没有 Limit 帧时，还掉链首那次隐式 Limit（顶上是
+                        # Crop/Meet/Fit 也照旧这么办 —— 这颗块本来就是"还缩放"的兜底）。
+                        r_img, r_mask = recover_size(
+                            image=current_image, resize_info=last_resize_info,
+                            mask=(last_resized_mask if last_resized_mask is not None else current_mask))
+                        last_resize_info = None
+                        last_resized_mask = None
+                        src = 'the chain-start Limit'
+                    elif frame is not None:
+                        r_img, r_mask = recover_scale_image(
+                            current_image, current_mask, frame['info'],
+                            background=frame.get('bg'), interpolation=r_interp)
+                        src = f"block {frame['block']}"
+                        # 已回到那一步之前的尺寸：记账跟着回到那一档（original_* 不动）。
+                        if last_resize_info is not None:
+                            last_resize_info = {
+                                **last_resize_info,
+                                'resized_width': int(r_img.shape[2]),
+                                'resized_height': int(r_img.shape[1]),
+                            }
+                        last_resized_mask = r_mask
+                    elif geo_open:
+                        # 顶上是 Crop/Meet/Fit（硬帧）：直接交给统一文案报"先收哪一个"
+                        # （这一句必然抛，geo_pop_frame 不会静默返回）。
+                        geo_pop_frame(geo_open, kind, i + 1)
+                        raise RuntimeError('unreachable')
+                    else:
+                        raise RuntimeError(
+                            f"{GEO_RECOVER_LABEL[kind]} block (block {i+1}) has nothing to restore — "
+                            f"there is no {_geo_kind_label(kind)} step above it and the chain-start "
+                            f"Limit is already recovered or never applied.")
+                    next_pipeline.image = r_img
+                    next_pipeline.mask = r_mask
+                    current_image, current_mask = r_img, r_mask
+                    work_pixel_limit = None
+                    work_align = None
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] {GEO_RECOVER_LABEL[kind]} block: "
+                          f"{before_w}x{before_h} → {int(r_img.shape[2])}x{int(r_img.shape[1])} "
+                          f"(restored {src})")
+                    dbg.record_block(i + 1, f'Block {i+1} · {GEO_RECOVER_LABEL[kind]}',
+                                     f'restored {src}', interpolation=r_interp)
+                    dbg.record_image(f'Block {i+1} · {GEO_RECOVER_LABEL[kind]} 输出图', r_img, block=i + 1)
+                    if r_mask is not None:
+                        dbg.record_mask(f'Block {i+1} · {GEO_RECOVER_LABEL[kind]} 输出 mask', r_mask,
+                                        block=i + 1)
+                    continue
+
+                # ── Detect：run 到这里现跑一次 detector，结果当作 pipeline 的 mask ──
+                # 表达式语法与 Detector 小窗完全同一套（parse/collect/eval），空表达式 = 整图
+                # 检测一次。产出是 [1,H,W] 的「白=覆盖」，尺寸对不上当前工作图就插值对齐
+                # （detector 内部会缩到自己的分辨率，这一步不能省）。
+                if block.get('type') == 'detect':
+                    bp = block.get('params', block)
+                    if server is None or getattr(server, 'detector', None) is None:
+                        raise RuntimeError(
+                            f"Detect block (block {i+1}) needs a detector — connect one to the node's "
+                            f"detector input, or remove this block.")
+                    from ...libs.detect_utils import detect_mask as _detect_mask
+                    from ...libs.mask_utils import combine_masks as _combine_masks
+                    from ...libs.mask_expression import (
+                        parse_mask_expression as _parse_expr,
+                        collect_terms as _collect_terms,
+                        eval_expression as _eval_expr,
+                    )
+                    det_prompt = str(bp.get('prompt') or '').strip()
+                    try:
+                        det_threshold = float(bp.get('threshold', 0.5))
+                    except (TypeError, ValueError):
+                        det_threshold = 0.5
+                    det_threshold = min(1.0, max(0.0, det_threshold))
+                    det_invert = bool(bp.get('invert'))
+                    det_mode = str(bp.get('mode') or 'replace')
+                    det_img = current_image[0] if current_image.dim() == 4 else current_image
+                    dbg.record_block(i + 1, f'Block {i+1} · Detect',
+                                     det_prompt or '(whole image)',
+                                     prompt=det_prompt, threshold=det_threshold,
+                                     invert=det_invert, mode=det_mode)
+                    dbg.record_image(f'Block {i+1} · Detect 输入图', current_image, block=i + 1)
+                    if det_prompt:
+                        _root = _parse_expr(det_prompt, det_threshold)
+                        _term_masks = {}
+                        for _name, _t in _collect_terms(_root):
+                            _hits = _detect_mask(detector=server.detector, image=det_img,
+                                                 threshold=float(_t), prompt=_name)
+                            _combined = _combine_masks(_hits, mode='max')
+                            _term_masks[(_name, float(_t))] = _combined
+                            dbg.record_mask(f"Block {i+1} · 术语 '{_name}' @ {_t}", _combined,
+                                            block=i + 1, detail=f'{len(_hits)} 个实例')
+                        det_mask = _eval_expr(_root, _term_masks)
+                    else:
+                        det_mask = _combine_masks(
+                            _detect_mask(detector=server.detector, image=det_img,
+                                         threshold=det_threshold, prompt=''),
+                            mode='max')
+                    if det_invert:
+                        det_mask = 1.0 - det_mask
+                    # 对齐到当前工作图的网格：detector 自己那一档分辨率与链上的不同。
+                    if det_mask.dim() == 2:
+                        det_mask = det_mask.unsqueeze(0)
+                    if det_mask.dim() == 4:
+                        det_mask = det_mask.squeeze(1)
+                    if (int(det_mask.shape[1]) != int(current_image.shape[1])
+                            or int(det_mask.shape[2]) != int(current_image.shape[2])):
+                        det_mask = torch.nn.functional.interpolate(
+                            det_mask.unsqueeze(1).float(),
+                            size=(int(current_image.shape[1]), int(current_image.shape[2])),
+                            mode='bilinear', align_corners=False,
+                        ).squeeze(1)
+                    det_mask = det_mask.float().clamp_(0.0, 1.0)
+                    if det_mode == 'intersect' and current_mask is not None:
+                        det_mask = det_mask * current_mask.float()
+                    next_pipeline.mask = det_mask
+                    current_mask = det_mask
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Detect block: "
+                          f"{det_prompt or '(whole image)'} → mask {tuple(det_mask.shape)} "
+                          f"(sum={float(det_mask.sum()):.0f}, mode={det_mode})")
+                    dbg.record_mask(f'Block {i+1} · Detect 结果（新 pipeline mask）', det_mask,
+                                    block=i + 1, mode=det_mode,
+                                    detail=f'sum={float(det_mask.sum()):.0f}')
                     continue
 
                 # Detailer block params (support both nested 'params' dict and flat)
@@ -5433,6 +6003,17 @@ class SnapshotDetailerSamplerNode:
         # 连同裁剪矩形一起交给前端，由 Blend 画布作为新图层用 transform 贴回原位 ——
         # transform 的缩放本身就承担了 recover_size 的职责，所以可以一起省掉。
         detail_meta = None
+        # 还开着的显式几何帧 = 用户漏了 Recover 块（判据与措辞见 geo_leftover_error）。
+        _leftover = geo_leftover_error(geo_open)
+        if _leftover is not None:
+            raise _leftover
+        # 只剩软帧（Scale / Limit）就丢掉：链尾这两步本来就会把分辨率带回原始落点，
+        # 它们只是"还能不能完美还原"的凭据，不收也不会让产出落错位置。
+        if geo_open:
+            print('[Detailer] chain ends with un-recovered '
+                  + ', '.join(f"{_geo_kind_label(f.get('kind'))}(block {f.get('block')})"
+                              for f in geo_open)
+                  + ' — the end-of-chain recover_size handles the resolution, dropping those frames')
         if not enable_mask:
             # Enable Mask 关：整幅工作区即产出，没有裁剪矩形可复原。但 align 落格
             # （Qwen2.1 + Limit 关）仍动过尺寸 —— resize_info 非 None 时必须按它把
@@ -5456,28 +6037,39 @@ class SnapshotDetailerSamplerNode:
             else:
                 recovered_image, recovered_mask = current_image, current_mask
 
-            final_image, final_mask = recover_crop(
-                background=original_image,
-                image=recovered_image,
-                crop_info=crop_info,
-                recover_method='mask_blend',
-                mask=recovered_mask
-            )
+            if crop_info_open is not None:
+                final_image, final_mask = recover_crop(
+                    background=original_image,
+                    image=recovered_image,
+                    crop_info=crop_info_open,
+                    recover_method='mask_blend',
+                    mask=recovered_mask
+                )
+            else:
+                # 链中已经有 Recover Crop 块把（隐式那次）crop 贴回去了：此刻工作图就在
+                # 整幅坐标系里，链尾再贴一遍等于贴错位置 —— 直接用当前结果。
+                final_image, final_mask = recovered_image, recovered_mask
+                print('[Detailer] chain-start crop was already restored by a Recover Crop block '
+                      '— skipping the end-of-chain paste')
         else:
             # 工作区 mask 合进产出图的 alpha：这张 RGBA 就是「要贴回原位的新图层」本身。
             # 前端不再需要额外的 mask 字段 —— 图层自带的 alpha 就承担了裁剪，
             # 贴回去的观感与 recover_crop(mask_blend) 一致，而这次得到的是一个
             # 普通图层，可以继续改 transform / 继续画。
             work_mask = last_resized_mask if last_resized_mask is not None else current_mask
-            # place 用 merge 之前的 current_image 量 patch 尺寸 —— merge 不动空间尺寸，
-            # 但这样就不依赖 merge 的返回形状。
-            place = detail_place_rect(crop_info, current_image)
-            final_image = merge_mask_alpha(current_image, work_mask)
-            detail_meta = {'place': place}
-            print(f"[Detailer] Recover Crop off — returning the RGBA crop-workspace patch "
-                  f"{tuple(final_image.shape)} covering the crop rect "
-                  f"({place['x']},{place['y']}) {place['w']}x{place['h']} of {place['ow']}x{place['oh']} "
-                  f"(patch scale sx={place['sx']:.4f} sy={place['sy']:.4f})")
+            if crop_info_open is not None:
+                # place 用 merge 之前的 current_image 量 patch 尺寸 —— merge 不动空间尺寸，
+                # 但这样就不依赖 merge 的返回形状。
+                place = detail_place_rect(crop_info_open, current_image)
+                final_image = merge_mask_alpha(current_image, work_mask)
+                detail_meta = {'place': place}
+                print(f"[Detailer] Recover Crop off — returning the RGBA crop-workspace patch "
+                      f"{tuple(final_image.shape)} covering the crop rect "
+                      f"({place['x']},{place['y']}) {place['w']}x{place['h']} of {place['ow']}x{place['oh']} "
+                      f"(patch scale sx={place['sx']:.4f} sy={place['sy']:.4f})")
+            else:
+                # 同上：crop 已被 Recover Crop 块提前贴回，产出就是整幅结果，没有 place 可给。
+                final_image = merge_mask_alpha(current_image, work_mask)
 
         detailed_image = final_image
         dbg.record_stage('收尾 / 恢复',
@@ -5486,7 +6078,12 @@ class SnapshotDetailerSamplerNode:
                                 else 'Recover Crop 关 → 保持工作分辨率，产出为 RGBA patch')),
                          block=0,
                          enable_mask=enable_mask,
-                         do_recover_crop=do_recover_crop)
+                         do_recover_crop=do_recover_crop,
+                         crop_still_open=bool(crop_info_open is not None),
+                         geometry_frames_closed=bool(not any(
+                             f.get('kind') not in GEO_SOFT_KINDS for f in geo_open)),
+                         soft_frames_dropped=[f.get('block') for f in geo_open
+                                              if f.get('kind') in GEO_SOFT_KINDS])
         dbg.record_image('链条最终产出（recover 之后）', final_image, block=0)
 
         # Context 就是 Blend 画布合成图，detailer 产出不再接管；关掉 Recover Crop 时产出
@@ -6336,8 +6933,11 @@ class SnapshotDetailerSamplerNode:
                         # （生效链第一个 detailer 的 params.enable_mask）时整幅都是工作区，
                         # Mask 层没画也允许跑。闸门与主循环共用 _first_detailer_enable_mask，
                         # 两条路的选链优先级保持一致。
+                        # 第二个例外：链上有 Detect 块（且在第一个 detailer 之前）—— mask 由
+                        # 它现造，用户不必先画一层。
                         if current_mask is None or (hasattr(current_mask, 'sum') and current_mask.sum().item() == 0):
-                            if server._first_detailer_enable_mask(preset_id):
+                            if (server._first_detailer_enable_mask(preset_id)
+                                    and not server._chain_makes_own_mask(preset_id)):
                                 server.detail_status = 'error'
                                 server.detail_error = 'Mask is required — paint the mask layer before running the detailer'
                                 continue

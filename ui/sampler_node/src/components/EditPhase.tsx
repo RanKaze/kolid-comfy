@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi } from '../types';
+import type { PipelineBlock, PipelineBlockKind, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, CropBlockParams, MeetFitBlockParams, RecoverBlockParams, RecoverCropBlockParams, DetectBlockParams, LimitBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
@@ -185,7 +185,8 @@ function loadSections(): Record<SectionKey, boolean> {
 // Right-click actions for one preset row. The full-screen backdrop is what dismisses it (click or a
 // second right-click anywhere), which beats wiring window listeners inside an iframe.
 const ContextMenu: React.FC<{
-  x: number; y: number; up?: boolean; items: { label: string; color?: string; hint?: string; onClick: () => void }[];
+  x: number; y: number; up?: boolean;
+  items: { label: string; color?: string; hint?: string; onClick: () => void; sep?: boolean }[];
   onClose: () => void;
 }> = ({ x, y, up, items, onClose }) => (
   <div style={{ position: 'fixed', inset: 0, zIndex: 80 }}
@@ -203,34 +204,52 @@ const ContextMenu: React.FC<{
       border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 9,
       boxShadow: '0 8px 28px rgba(0,0,0,0.55)',
     }} onClick={e => e.stopPropagation()}>
-      {items.map(it => (
-        <button key={it.label} title={it.hint} onClick={() => { it.onClick(); onClose(); }}
-          style={{
-            display: 'block', width: '100%', textAlign: 'left', padding: '5px 9px',
-            background: 'none', border: 'none', borderRadius: 6, cursor: 'pointer',
-            color: it.color || 'rgba(255,255,255,0.85)', fontSize: 12, fontWeight: 600,
-          }}>{it.label}</button>
-      ))}
+      {items.map(it => it.sep
+        // 分组线：Add 菜单里"处理链"那六种与"几何/检测"那八种隔开 —— 十四项一条平列，
+        // 用户会在中间找不着 Scale 与 Crop 的边界。
+        ? <div key={`sep:${it.label}`} style={{ height: 1, margin: '3px 6px', background: 'rgba(255,255,255,0.10)' }} />
+        : (
+          <button key={it.label} title={it.hint} onClick={() => { it.onClick(); onClose(); }}
+            style={{
+              display: 'block', width: '100%', textAlign: 'left', padding: '5px 9px',
+              background: 'none', border: 'none', borderRadius: 6, cursor: 'pointer',
+              color: it.color || 'rgba(255,255,255,0.85)', fontSize: 12, fontWeight: 600,
+            }}>{it.label}</button>
+        ))}
     </div>
   </div>
 );
 
 // What the "Add +" dropdown offers. Query is the only kind that interacts with the user
 // mid-run: the chain stops there and waits for a prompt choice.
-const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale'; label: string; color: string; hint: string }[] = [
+// 前六种是"处理链"（改的是 prompt/子图/模型那一趟），后十种是"几何 / 检测"（改的是链上
+// 此刻的工作图与 mask）。两组的 `sep` 会把菜单分成两段 —— 十六项一条平列时，Scale 与
+// Crop 在视觉上会连成一片，用户找不着边界。
+const ADD_BLOCK_KINDS: { kind: PipelineBlockKind | ''; label: string; color: string; hint: string; sep?: boolean }[] = [
   { kind: 'detailer', label: 'Detailer', color: '#30d158', hint: 'Refine the masked region' },
   { kind: 'interface', label: 'Interface', color: '#bf5af2', hint: 'Run an interface sub-graph inside the chain' },
   { kind: 'prompt', label: 'Prompt', color: '#64d2ff', hint: 'Inject a shared prompt preset for the blocks after it' },
   { kind: 'query', label: 'Query', color: '#ffd60a', hint: 'Stop the run here and ask you for a prompt' },
   { kind: 'tagger', label: 'Tagger', color: '#ff9f0a', hint: 'Tag the current image and append the tag to the prompt for the blocks after it' },
   { kind: 'scale', label: 'Scale', color: '#5e5ce6', hint: 'Resize the working image by a ratio and snap it to the align grid (limit_pixels semantics)' },
+  { kind: '', label: 'geometry', color: '', hint: '', sep: true },
+  { kind: 'crop', label: 'Crop', color: '#ff375f', hint: 'Crop the working area to the Mask bounding box — pair it with Recover Crop' },
+  { kind: 'recover_crop', label: 'Recover Crop', color: '#ff375f', hint: 'Paste the last Crop back into the image it came from' },
+  { kind: 'meet', label: 'Meet', color: '#0a84ff', hint: 'Cover: scale until it fills the target frame, then centre-crop the overflow' },
+  { kind: 'recover_meet', label: 'Recover Meet', color: '#0a84ff', hint: 'Put a Meet back — the cropped-away edges come back from the original' },
+  { kind: 'fit', label: 'Fit', color: '#64d2ff', hint: 'Contain: scale until it fits the target frame, then pad the rest' },
+  { kind: 'recover_fit', label: 'Recover Fit', color: '#64d2ff', hint: 'Take a Fit back — inner frame scaled to the original size, padding gone' },
+  { kind: 'limit', label: 'Limit', color: '#8e8e93', hint: 'Re-apply the pixel budget mid-chain — pair it with Recover Limit' },
+  { kind: 'recover_limit', label: 'Recover Limit', color: '#8e8e93', hint: 'Return to the resolution from before the last Limit (a Limit block, or the chain-start one)' },
+  { kind: 'recover_scale', label: 'Recover Scale', color: '#5e5ce6', hint: 'Undo the last Scale block — repainted pixels stay, the rest comes back from the original' },
+  { kind: 'detect', label: 'Detect', color: '#ffd60a', hint: 'Run the node detector here and use the result as the pipeline mask' },
 ];
 
 
 // One palette per block kind: the Add menu's row and the card's dot read the same entry, so a kind
 // can never be one colour in the menu and another on its card.
 const BLOCK_TINT: Record<string, string> = ADD_BLOCK_KINDS.reduce(
-  (a, o) => ({ ...a, [o.kind]: o.color }), {} as Record<string, string>);
+  (a, o) => (o.kind ? { ...a, [o.kind]: o.color } : a), {} as Record<string, string>);
 // What a Query block does — hover the card's type label for it. It used to be a paragraph inside the
 // card, which pushed the real parameters down for information you read once.
 const QUERY_BLOCK_HINT = '执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。';
@@ -408,7 +427,7 @@ interface EditPhaseProps {
   tgenAlignVal: number;
   onBlocksChange: (blocks: PipelineBlock[]) => void;
   onDefaultParamChange: (key: OverrideKey, value: number) => void;
-  onAddBlock: (type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale') => void;
+  onAddBlock: (type: PipelineBlockKind) => void;
   /** 一个正等用户回答的 Query 块（run 停在它上面），由 /api/status 下发 */
   pendingQuery: PendingQuery | null;
   /** 立刻以某个 pipeline preset 跑一趟（画布在 Blend 工作台里，由工作台发起） */
@@ -2801,6 +2820,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <div style={styles.dockCard}>
               {blocks.map((block, blockIdx) => (
                 <div key={block.id}
+                  // 探针钩子：卡片根上留一颗"我是哪一块"。没有它，界面探针只能靠内文猜卡
+                  // （十四种块的卡长得几乎一样，靠 label 文案找卡会在中英文/换行上翻车）。
+                  data-block-id={block.id}
+                  data-block-kind={block.type}
                   // 整张卡都是落点，不是只有那颗 28px 的六点把手：把手是**拖起处**，人把块拖到
                   // 目标卡片上松手时压的是卡身 —— 只有把手接 drop 的那一版，松手落在卡身上就是
                   // "未授权的拖拽"（最后一次 dragenter/dragover 没被取消），浏览器直接取消整个
@@ -2915,6 +2938,236 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                               onChange={e => updateBlockParam(block.id, 'align', parseInt(e.target.value) || 1)} />
                           </div>
                         )}
+                      </>);
+                    })()}
+                    {/* ── 几何块 / 检测块 ────────────────────────────────────────── */}
+                    {/* 这一档与 scale 同形：改的是链上此刻的工作图与 mask，只影响它后面的块。
+                        三个成对的几何块（Crop / Meet / Fit）在链上压一帧，Recover 块把
+                        **直接压在自己下面**的那一帧还回去 —— 所以卡片上只说"我吃哪一步"，
+                        真正的配对判据在后端那条帧栈里（漏了恢复会在链尾报错）。 */}
+                    {block.type === 'crop' && (() => {
+                      const cp = block.params as CropBlockParams;
+                      const followPipeline = cp.use_pipeline_reserve ?? true;
+                      return (<>
+                        <div style={styles.paramRow}
+                          title="开：沿用 DEFAULT SETTING 的 Crop Reserve（与链首那次隐式 crop 同一颗旋钮）。关：用块自己的 Reserve。">
+                          <label style={styles.paramLabel}>Use Pipeline Reserve</label>
+                          <IOSToggle checked={followPipeline}
+                            onChange={v => updateBlockParam(block.id, 'use_pipeline_reserve', v)} />
+                        </div>
+                        {!followPipeline && (
+                          <div style={styles.paramRow}
+                            title="在 mask 外接框四周多留这么多像素的上下文再裁（ImageCropMaskNode 的 Reserve，范围 0–1000）。">
+                            <label style={styles.paramLabel}>Reserve</label>
+                            <input style={styles.paramInput} type="number" min={0} max={1000} step={1}
+                              value={cp.reserve ?? 0}
+                              onChange={e => updateBlockParam(block.id, 'reserve', parseInt(e.target.value) || 0)} />
+                          </div>
+                        )}
+                        <div style={styles.blockNote}>
+                          Crops the working area to the Mask's bounding box. Nothing painted = this block
+                          stops the run (put a Detect block above it if you want the box from a detector).
+                        </div>
+                      </>);
+                    })()}
+                    {block.type === 'recover_crop' && (() => {
+                      const rcp = block.params as RecoverCropBlockParams;
+                      const method = rcp.recover_method ?? 'mask_blend';
+                      return (<>
+                        <div style={styles.paramRow}
+                          title="Mask Blend：按 mask 覆盖度羽化混合（默认）。Mask Only：只贴 mask 覆盖到的像素，边缘硬。Bounds Only：整块硬覆盖，不需要 mask。">
+                          <label style={styles.paramLabel}>Recover Method</label>
+                          <select style={styles.paramSelect} value={method}
+                            onChange={e => updateBlockParam(block.id, 'recover_method', e.target.value)}>
+                            <option value="mask_blend" style={{ background: '#1c1c1e', color: '#fff' }}>Mask Blend</option>
+                            <option value="mask_only" style={{ background: '#1c1c1e', color: '#fff' }}>Mask Only</option>
+                            <option value="bounds_only" style={{ background: '#1c1c1e', color: '#fff' }}>Bounds Only</option>
+                          </select>
+                        </div>
+                        <div style={styles.blockNote}>
+                          Restores the Crop directly above it — background is the image as it was before that
+                          Crop, so the edges that were cut away come back as real content. With no Crop above,
+                          it restores the chain-start crop early (the end of the chain then skips it).
+                        </div>
+                      </>);
+                    })()}
+                    {(block.type === 'meet' || block.type === 'fit') && (() => {
+                      const mp = block.params as MeetFitBlockParams;
+                      const isMeet = block.type === 'meet';
+                      return (<>
+                        <div style={styles.paramRow}
+                          title={isMeet
+                            ? '目标画幅宽度（ImageMeetNode：0–2048，步长 8）。0 = 沿用进来时的宽度（两维都 0 = 只落格不换画幅）。Meet 是 cover：等比放大到盖满这个画幅，再把超出的部分居中裁掉。'
+                            : '目标画幅宽度（ImageFitNode：0–2048，步长 8）。0 = 沿用进来时的宽度（两维都 0 = 只落格不换画幅）。Fit 是 contain：等比缩到装进这个画幅，空出来的地方补边。'}>
+                          <label style={styles.paramLabel}>Width</label>
+                          <input style={styles.paramInput} type="number" min={0} max={2048} step={8}
+                            value={mp.width ?? 0}
+                            onChange={e => updateBlockParam(block.id, 'width', parseInt(e.target.value) || 0)} />
+                        </div>
+                        <div style={styles.paramRow}
+                          title="目标画幅高度（0–2048，步长 8）。0 = 沿用进来时的高度。">
+                          <label style={styles.paramLabel}>Height</label>
+                          <input style={styles.paramInput} type="number" min={0} max={2048} step={8}
+                            value={mp.height ?? 0}
+                            onChange={e => updateBlockParam(block.id, 'height', parseInt(e.target.value) || 0)} />
+                        </div>
+                        <div style={styles.paramRow} title="缩放用的插值。nearest 最锐但会有锯齿；bicubic 最柔。">
+                          <label style={styles.paramLabel}>Interpolation</label>
+                          <select style={styles.paramSelect} value={mp.interpolation ?? 'bilinear'}
+                            onChange={e => updateBlockParam(block.id, 'interpolation', e.target.value)}>
+                            <option value="nearest" style={{ background: '#1c1c1e', color: '#fff' }}>Nearest</option>
+                            <option value="bilinear" style={{ background: '#1c1c1e', color: '#fff' }}>Bilinear</option>
+                            <option value="bicubic" style={{ background: '#1c1c1e', color: '#fff' }}>Bicubic</option>
+                          </select>
+                        </div>
+                        {!isMeet && (
+                          <div style={styles.paramRow}
+                            title="补出来的边用什么颜色：'255, 255, 255' 或 '#ffffff'。只影响 Fit 出来的那圈边（Recover Fit 之后就不在了）。">
+                            <label style={styles.paramLabel}>Fill Color</label>
+                            <input style={styles.paramInput} type="text" placeholder="255, 255, 255"
+                              value={mp.padding_color ?? '255, 255, 255'}
+                              onChange={e => updateBlockParam(block.id, 'padding_color', e.target.value)} />
+                          </div>
+                        )}
+                        <div style={styles.blockNote}>
+                          {isMeet
+                            ? 'Meet (cover) — scales up until it fills the frame, then centre-crops the overflow. Pair it with Recover Meet.'
+                            : 'Fit (contain) — scales down until it fits the frame, then pads the rest. Pair it with Recover Fit.'}
+                        </div>
+                      </>);
+                    })()}
+                    {(block.type === 'recover_meet' || block.type === 'recover_fit') && (() => {
+                      const rp = block.params as RecoverBlockParams;
+                      const isMeet = block.type === 'recover_meet';
+                      const useBg = rp.use_background ?? true;
+                      return (<>
+                        <div style={styles.paramRow} title="还原那一步用的插值。">
+                          <label style={styles.paramLabel}>Interpolation</label>
+                          <select style={styles.paramSelect} value={rp.interpolation ?? 'bilinear'}
+                            onChange={e => updateBlockParam(block.id, 'interpolation', e.target.value)}>
+                            <option value="nearest" style={{ background: '#1c1c1e', color: '#fff' }}>Nearest</option>
+                            <option value="bilinear" style={{ background: '#1c1c1e', color: '#fff' }}>Bilinear</option>
+                            <option value="bicubic" style={{ background: '#1c1c1e', color: '#fff' }}>Bicubic</option>
+                          </select>
+                        </div>
+                        {isMeet && (<>
+                          <div style={styles.paramRow}
+                            title="开（默认）：用 Meet 之前那张整幅图当背景 —— 被裁掉的边缘是原内容（完美还原），对应节点接了 background。关：不接背景，边缘用 Fill Color 补（有损还原）。">
+                            <label style={styles.paramLabel}>Use Background</label>
+                            <IOSToggle checked={useBg}
+                              onChange={v => updateBlockParam(block.id, 'use_background', v)} />
+                          </div>
+                          {!useBg && (
+                            <div style={styles.paramRow}
+                              title="关掉背景时，被 Meet 裁掉的那圈边用什么颜色：'255, 255, 255' 或 '#ffffff'（ImageRecoverMeetNode 的 Padding Color）。">
+                              <label style={styles.paramLabel}>Fill Color</label>
+                              <input style={styles.paramInput} type="text" placeholder="255, 255, 255"
+                                value={rp.padding_color ?? '255, 255, 255'}
+                                onChange={e => updateBlockParam(block.id, 'padding_color', e.target.value)} />
+                            </div>
+                          )}
+                        </>)}
+                        <div style={styles.blockNote}>
+                          {isMeet
+                            ? (useBg
+                              ? 'Restores the Meet directly above it: the result is scaled back into the region it came from and pasted onto the image as it was before that Meet — the edges Meet cropped away come back from the original.'
+                              : 'Restores the Meet directly above it without a background: the cropped-away edge is filled with Fill Color, so only the centre region is real content.')
+                            : 'Restores the Fit directly above it: takes the inner frame back and scales it to the original size, so the padding is gone.'}
+                        </div>
+                      </>);
+                    })()}
+                    {block.type === 'limit' && (() => {
+                      const lp = block.params as LimitBlockParams;
+                      const capOnly = !!lp.cap_only;
+                      return (<>
+                        <div style={styles.paramRow}
+                          title="目标像素数：链上此刻的工作图按这个预算缩放（与 DEFAULT SETTING 的 Pixels 同一套 limit_pixels）。0 = 沿用 DEFAULT SETTING。">
+                          <label style={styles.paramLabel}>Pixels</label>
+                          <input style={styles.paramInput} type="number" min={0} step={1024}
+                            value={lp.pixels ?? 0}
+                            onChange={e => updateBlockParam(block.id, 'pixels', parseInt(e.target.value) || 0)} />
+                        </div>
+                        <div style={styles.paramRow}
+                          title="缩放后的宽高就近吸附到这个像素格。0 = 沿用 DEFAULT SETTING 的 Align（QwenImage2.1 会自动抬到 32）。">
+                          <label style={styles.paramLabel}>Align</label>
+                          <input style={styles.paramInput} type="number" min={0} max={64} step={1}
+                            value={lp.align ?? 0}
+                            onChange={e => updateBlockParam(block.id, 'align', parseInt(e.target.value) || 0)} />
+                        </div>
+                        <div style={styles.paramRow}
+                          title="开：Pixels 是**上限**（只缩不涨，落格一律向下取整）。关：Pixels 是目标值（大图缩小、小图放大补足）。">
+                          <label style={styles.paramLabel}>Cap Only</label>
+                          <IOSToggle checked={capOnly}
+                            onChange={v => updateBlockParam(block.id, 'cap_only', v)} />
+                        </div>
+                        <div style={styles.blockNote}>
+                          Re-applies the pixel budget mid-chain — pair it with Recover Limit to get the
+                          resolution back afterwards. Without a Recover the run still ends at the input
+                          size (the end-of-chain recovery handles it), it just cannot repaint at the old
+                          resolution in between.
+                        </div>
+                      </>);
+                    })()}
+                    {block.type === 'recover_limit' && (
+                      <div style={styles.blockNote}>
+                        Returns to the resolution from before the last Limit: a Limit block above it, or —
+                        with no Limit block on the chain — the chain-start one (DEFAULT SETTING → Pixels).
+                        Everything after it runs at that resolution, and the end-of-chain recovery is
+                        skipped, so there is no second resize.
+                      </div>
+                    )}
+                    {block.type === 'recover_scale' && (() => {
+                      const rp = block.params as RecoverBlockParams;
+                      return (<>
+                        <div style={styles.paramRow} title="还原那一步用的插值。">
+                          <label style={styles.paramLabel}>Interpolation</label>
+                          <select style={styles.paramSelect} value={rp.interpolation ?? 'bilinear'}
+                            onChange={e => updateBlockParam(block.id, 'interpolation', e.target.value)}>
+                            <option value="nearest" style={{ background: '#1c1c1e', color: '#fff' }}>Nearest</option>
+                            <option value="bilinear" style={{ background: '#1c1c1e', color: '#fff' }}>Bilinear</option>
+                            <option value="bicubic" style={{ background: '#1c1c1e', color: '#fff' }}>Bicubic</option>
+                          </select>
+                        </div>
+                        <div style={styles.blockNote}>
+                          Undoes the Scale block directly above it: everything repainted since then stays,
+                          the rest comes back from the original pixels instead of being resampled twice.
+                        </div>
+                      </>);
+                    })()}
+                    {block.type === 'detect' && (() => {
+                      const dp2 = block.params as DetectBlockParams;
+                      return (<>
+                        <div style={styles.paramRow}
+                          title="掩码表达式，语法与 Detector 小窗完全一致（支持 & | ! 与 name:threshold）。留空 = 整图检测一次。">
+                          <label style={styles.paramLabel}>Expression</label>
+                          <input style={styles.paramInput} type="text" placeholder="(whole image)"
+                            value={dp2.prompt ?? ''}
+                            onChange={e => updateBlockParam(block.id, 'prompt', e.target.value)} />
+                        </div>
+                        <div style={styles.paramRow} title="检测阈值 0–1。">
+                          <label style={styles.paramLabel}>Threshold</label>
+                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.05}
+                            value={dp2.threshold ?? 0.5}
+                            onChange={e => updateBlockParam(block.id, 'threshold', parseFloat(e.target.value))} />
+                        </div>
+                        <div style={styles.paramRow} title="开：结果取反（检出来的地方变成不覆盖）。">
+                          <label style={styles.paramLabel}>Invert</label>
+                          <IOSToggle checked={!!dp2.invert}
+                            onChange={v => updateBlockParam(block.id, 'invert', v)} />
+                        </div>
+                        <div style={styles.paramRow}
+                          title="Replace：检测结果直接成为 pipeline 的 mask。Intersect：与此刻的 mask 取交集（保留上游已有的限制）。">
+                          <label style={styles.paramLabel}>Mode</label>
+                          <select style={styles.paramSelect} value={dp2.mode ?? 'replace'}
+                            onChange={e => updateBlockParam(block.id, 'mode', e.target.value)}>
+                            <option value="replace" style={{ background: '#1c1c1e', color: '#fff' }}>Replace</option>
+                            <option value="intersect" style={{ background: '#1c1c1e', color: '#fff' }}>Intersect</option>
+                          </select>
+                        </div>
+                        <div style={styles.blockNote}>
+                          Runs the node's detector right here and turns the result into the pipeline mask —
+                          every Detailer after it works on that mask. Needs a detector connected to the node.
+                        </div>
                       </>);
                     })()}
                     {block.type === 'query' && (() => {
@@ -3213,7 +3466,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   {addMenu && (
                     <ContextMenu x={addMenu.x} y={addMenu.y} up onClose={() => setAddMenu(null)}
                       items={ADD_BLOCK_KINDS.map(opt => ({
-                        label: opt.label, color: opt.color, hint: opt.hint, onClick: () => onAddBlock(opt.kind),
+                        label: opt.label, color: opt.color, hint: opt.hint, sep: opt.sep,
+                        onClick: () => { if (opt.kind) onAddBlock(opt.kind); },
                       }))} />
                   )}
                 </div>
@@ -4219,6 +4473,9 @@ const styles: Record<string, React.CSSProperties> = {
   paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   paramSelect: { flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '6px 12px', color: '#fff', fontSize: 13, outline: 'none', colorScheme: 'dark', WebkitAppearance: 'none', appearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28, transition: 'background 0.15s ease, border-color 0.15s ease' } as React.CSSProperties,
   paramInput: { flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums', textAlign: 'right' },
+  // 块卡里那句"这块做什么"的说明：Recover 类没有旋钮，只能靠它说清自己吃哪一步；
+  // 几何块也用它补一句语义（cover vs contain、要不要 mask）。
+  blockNote: { fontSize: 11, lineHeight: 1.45, color: 'rgba(255,255,255,0.42)', paddingTop: 2 },
 
   // ── Settings 页的 iOS inset-grouped 词汇（系统色，不再手调白叠加）：卡片 #1c1c1e、分节标题
   // #8e8e93 大写、内缩分隔线 rgba(84,84,88,.55)、强调 #0a84ff、告警 #ff9f0a。Draw 页那套

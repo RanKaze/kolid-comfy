@@ -223,11 +223,91 @@ export interface QueryBlockParams {
 
 export interface PipelineBlock {
   id: string;
-  type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale';
+  type: PipelineBlockKind;
   name: string;
-  params: DetailerBlockParams | InterfaceBlockParams | PromptBlockParams | QueryBlockParams | TaggerBlockParams | ScaleBlockParams;
+  params: DetailerBlockParams | InterfaceBlockParams | PromptBlockParams | QueryBlockParams | TaggerBlockParams | ScaleBlockParams | CropBlockParams | MeetFitBlockParams | RecoverBlockParams | RecoverCropBlockParams | DetectBlockParams | LimitBlockParams;
   interface_index?: number;
   exec_options?: InterfaceExecOptions;
+}
+
+/** 链上能挂的块。detailer / interface / prompt / query / tagger / scale 是原有那六种；
+ *  后面十个是**几何/检测块**（都与 `scale` 同一档：改的是链上此刻的工作图与 mask，
+ *  只影响它后面的块）。
+ *
+ *  几何块天生成对：Crop→Recover Crop、Meet→Recover Meet、Fit→Recover Fit、
+ *  Limit→Recover Limit、Scale→Recover Scale。
+ *  前端只是照这份名单画菜单，`Recover` 类只有一个插值旋钮；真正决定能跑不能跑的是
+ *  后端那条帧栈（只能恢复栈顶那一帧；Crop/Meet/Fit 漏了会在链尾报错，Scale/Limit
+ *  是"软帧"—— 没收也不会落错位置，链尾的 recover_size 会带回原始落点）。 */
+export type PipelineBlockKind =
+  | 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale'
+  | 'crop' | 'recover_crop'
+  | 'meet' | 'recover_meet'
+  | 'fit' | 'recover_fit'
+  | 'limit' | 'recover_limit' | 'recover_scale'
+  | 'detect';
+
+/** Limit 块：链中按**像素预算**再限一次分辨率（语义与链首那次隐式 limit 同源）。
+ *  想在几块之前降分辨率、后面再还回去，就 Limit + Recover Limit 成对用。 */
+export interface LimitBlockParams {
+  /** 目标像素数；0 = 沿用 DEFAULT SETTING 的 Pixels */
+  pixels: number;
+  /** 落格步长；0 = 沿用 DEFAULT SETTING 的 Align */
+  align: number;
+  /** 开 = pixels 是上限（只缩不涨，也就不需要恢复）；关（默认）= 目标值 */
+  cap_only?: boolean;
+}
+
+/** Crop 块：按**当前 pipeline mask 的外接框**把工作区裁掉一层（算法与链首那次隐式
+ *  crop 完全同一套）。裁掉的这一层由后面的 Recover Crop 贴回去 —— 背景是 Crop 那一刻
+ *  的图，所以边缘是原内容而不是色块。 */
+export interface CropBlockParams {
+  /** Use Pipeline Reserve 关时用这一颗（语义同 DEFAULT SETTING 的 Crop Reserve） */
+  reserve: number;
+  /** 开（默认）：沿用 DEFAULT SETTING 的 Crop Reserve；关：用块自己的 reserve。 */
+  use_pipeline_reserve?: boolean;
+}
+
+/** Meet（cover）/ Fit（contain）共用的目标画幅。width/height 传 0 = 沿用它进来时那一维
+ *  的尺寸（两个都 0 = 只落格不换画幅）；范围与步长与 ImageMeetNode / ImageFitNode 一致
+ *  （0–2048，步长 8）。插值三档也同源。 */
+export interface MeetFitBlockParams {
+  width: number;
+  height: number;
+  interpolation: 'nearest' | 'bilinear' | 'bicubic';
+  /** 仅 Fit：补出来的边用什么颜色（'255, 255, 255' 或 '#ffffff'） */
+  padding_color?: string;
+}
+
+/** Recover Crop 块：贴回最近一次 Crop（栈空时吃链首那次隐式 crop）。 */
+export interface RecoverCropBlockParams {
+  /** 与 ImageRecoverCropNode 同三档：
+   *  mask_blend（默认，羽化混合）/ mask_only（只贴 mask 覆盖到的像素）/ bounds_only（整块硬覆盖） */
+  recover_method?: 'mask_blend' | 'mask_only' | 'bounds_only';
+}
+
+/** Recover 类块（Recover Meet / Recover Fit / Recover Limit / Recover Scale）
+ *  恢复的是**链上直接压在自己下面**的那一步，参数都在那一步的帧里。
+ *  Recover Meet 多两颗 —— 与 ImageRecoverMeetNode 一致：它可以把"背景"整条省掉，
+ *  此时被裁掉的边缘按 padding_color 补（有损还原）。 */
+export interface RecoverBlockParams {
+  interpolation?: 'nearest' | 'bilinear' | 'bicubic';
+  /** 仅 Recover Meet：开（默认）= 用 Meet 之前那张图当背景（完美还原）；
+   *  关 = 不接背景，被裁掉的边缘用 padding_color 填（节点同款有损路径）。 */
+  use_background?: boolean;
+  /** 仅 Recover Meet：use_background 关时补边用的颜色 */
+  padding_color?: string;
+}
+
+/** Detect 块：run 到它时现跑一次 detector，结果当作 pipeline 的 mask。
+ *  表达式语法与 Detector 小窗完全一致（空 = 整图检测一次）。 */
+export interface DetectBlockParams {
+  /** 掩码表达式（如 `person & !background`）；空串 = 整图检测 */
+  prompt: string;
+  threshold: number;
+  invert: boolean;
+  /** replace = 直接当新 mask；intersect = 与此刻的 mask 取交集（保留原有的限制） */
+  mode: 'replace' | 'intersect';
 }
 
 /** Scale 块：把链上当前工作图按比例缩放并落 Align 格 —— 语义对齐 DEFAULT SETTING 的

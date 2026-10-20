@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendUiPayloads, BlendUiSend, BlendPen } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, PipelineBlockKind, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendUiPayloads, BlendUiSend, BlendPen } from './types';
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
 import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendAttrOpen, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUi, setBlendUi } from './workbench/store';
@@ -1503,8 +1503,10 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  const handleAddBlock = useCallback((type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale') => {
+  const handleAddBlock = useCallback((type: PipelineBlockKind) => {
     const id = 'block-' + blockIdCounter.current++;
+    // 几何块与 Recover 块都只有一两颗旋钮 —— 默认值就是「什么都不做」（0 = 沿用当前尺寸，
+    // reserve 跟随 DEFAULT SETTING），所以刚加进来时链的行为不变，用户再拧。
     const newBlock: PipelineBlock = type === 'detailer'
       ? { id, type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } }
       : type === 'interface'
@@ -1515,7 +1517,45 @@ const App: React.FC = () => {
             ? { id, type: 'tagger', name: 'Tagger', params: { mode: 'mask' } }
             : type === 'scale'
               ? { id, type: 'scale', name: 'Scale', params: { scale: 1.0, align: 8, use_pipeline_align: true } }
-              : { id, type: 'prompt', name: 'Prompt', params: { preset_id: null } };
+              : type === 'crop'
+                ? { id, type: 'crop', name: 'Crop', params: { reserve: 0, use_pipeline_reserve: true } }
+                : type === 'meet'
+                  ? { id, type: 'meet', name: 'Meet', params: { width: 0, height: 0, interpolation: 'bilinear' } }
+                  : type === 'fit'
+                    ? {
+                      id, type: 'fit', name: 'Fit',
+                      params: { width: 0, height: 0, interpolation: 'bilinear', padding_color: '255, 255, 255' },
+                    }
+                    : type === 'recover_meet'
+                      ? {
+                        id, type, name: 'Recover Meet',
+                        // 与 ImageRecoverMeetNode 同参数表：插值 + 可选背景（不接背景就补色）
+                        params: {
+                          interpolation: 'bilinear',
+                          use_background: true,
+                          padding_color: '255, 255, 255',
+                        },
+                      }
+                      : type === 'recover_fit' || type === 'recover_scale'
+                        ? {
+                          id, type, name: type === 'recover_fit' ? 'Recover Fit' : 'Recover Scale',
+                          params: { interpolation: 'bilinear' },
+                        }
+                        : type === 'recover_crop'
+                          ? {
+                            id, type: 'recover_crop', name: 'Recover Crop',
+                            params: { recover_method: 'mask_blend' },
+                          }
+                          : type === 'recover_limit'
+                            ? { id, type: 'recover_limit', name: 'Recover Limit', params: {} }
+                            : type === 'limit'
+                              ? { id, type: 'limit', name: 'Limit', params: { pixels: 0, align: 0, cap_only: false } }
+                              : type === 'detect'
+                                ? {
+                                  id, type: 'detect', name: 'Detect',
+                                  params: { prompt: '', threshold: 0.5, invert: false, mode: 'replace' },
+                                }
+                                : { id, type: 'prompt', name: 'Prompt', params: { preset_id: null } };
     handleBlocksChange([...blocks, newBlock]);
   }, [blocks, handleBlocksChange]);
 
