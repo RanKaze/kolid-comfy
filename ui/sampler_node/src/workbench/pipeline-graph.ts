@@ -335,6 +335,18 @@ export function portKindOf(kind: NodeKind, dir: 'in' | 'out', portId: string, en
   return list.find(p => p.id === portId)?.kind;
 }
 
+/** 两类端口能不能连线（与后端 `pipeline_graph.ports_compatible` 逐条一致）。
+ *
+ *  同 kind 可连；任何一端是 any（Switch 的 data 口）也可连。
+ *  **mask 可以接进 image**：后端把它按亮度铺成 3 通道黑白图（`mask_as_image`），
+ *  所以"拿 mask 当图用"（Detect 检测白区、Tagger 对 mask 打标、Interface 送去子图）
+ *  是合法接线。反过来 image → mask 不放行 —— 把画面压成灰度当覆盖图，语义不对。 */
+export function portsCompatible(sk?: PortKind, tk?: PortKind): boolean {
+  if (!sk || !tk) return false;
+  if (sk === tk || sk === 'any' || tk === 'any') return true;
+  return sk === 'mask' && tk === 'image';
+}
+
 // ---------------------------------------------------------------------------
 // 默认参数（与 App.tsx handleAddBlock 逐条同源）
 // ---------------------------------------------------------------------------
@@ -807,7 +819,7 @@ export function sanitizeGraph(input: PipelineGraph): PipelineGraph {
     const sk = portKindOfNode(s, 'out', e.sourcePort, enableMask);
     const tk = portKindOfNode(t, 'in', e.targetPort, enableMask);
     if (!sk || !tk) continue;                                 // 端口已不存在
-    if (!(sk === tk || sk === 'any' || tk === 'any')) continue; // kind 不匹配
+    if (!portsCompatible(sk, tk)) continue;                     // kind 不匹配
     const key = `${e.source}:${e.sourcePort}>${e.target}:${e.targetPort}`;
     if (seenEdge.has(key)) continue;                           // 重复边
     seenEdge.add(key);

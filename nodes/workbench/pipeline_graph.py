@@ -221,6 +221,24 @@ def port_kind(kind: str, direction: str, port_id: str, enable_mask: bool = True)
     return None
 
 
+def ports_compatible(sk: Optional[str], tk: Optional[str]) -> bool:
+    """两类端口能不能连线（前端 `portsCompatible` 逐条一致）。
+
+    同 kind 可连；任何一端是 any（Switch 的 data 口）也可连。
+    **mask 可以接进 image**：执行器把那份 mask 按亮度铺成 3 通道黑白图
+    （`mask_as_image`），于是"拿 mask 当图用"是一种合法接线，而不是类型错误 ——
+    Detect 直接检测 mask 里的白区、Tagger 对 mask 打标、Interface 把 mask 送去
+    子图处理，都靠它。
+    反过来 image → mask **不放行**：把画面压成灰度当覆盖图，语义与画面不符，
+    要看图的块请直接接 image。
+    """
+    if not sk or not tk:
+        return False
+    if sk == tk or sk == PORT_ANY or tk == PORT_ANY:
+        return True
+    return sk == PORT_MASK and tk == PORT_IMAGE
+
+
 def _has(kind: str, direction: str, pkind: str) -> bool:
     spec = NODE_SPECS.get(kind)
     if not spec:
@@ -530,7 +548,7 @@ def sanitize_graph(graph: Dict[str, Any]) -> Dict[str, Any]:
         tk = port_kind_node(t, 'in', e.get('targetPort'), enable_mask)
         if not sk or not tk:
             continue
-        if not (sk == tk or sk == PORT_ANY or tk == PORT_ANY):
+        if not ports_compatible(sk, tk):
             continue
         key = (e.get('source'), e.get('sourcePort'), e.get('target'), e.get('targetPort'))
         if key in seen_edge:
@@ -639,6 +657,104 @@ def input_sources(graph: Dict[str, Any]) -> Dict[str, Dict[str, Tuple[str, str]]
             continue
         res.setdefault(t, {})[str(e.get('targetPort'))] = (str(e.get('source')), str(e.get('sourcePort')))
     return res
+
+
+# ---------------------------------------------------------------------------
+# 几何帧：谁开、谁还
+#
+# 软帧（Scale / Limit）只改分辨率 —— 不裁、不补边、不挪坐标；硬帧（Crop / Meet / Fit）
+# 换坐标系，不还就一定贴错位置。软帧压栈是为了让 Recover Scale / Recover Limit 能"完美"
+# 还原（吃那一步之前的图当背景），但它们也可以不还（链尾的 recover_size 会把分辨率带回
+# 原始落点）。这两条判据在执行器里决定"detailer 跑完要不要先把工作分辨率缩回去"。
+# ---------------------------------------------------------------------------
+GEO_SOFT_KINDS = ('scale', 'limit')
+
+GEO_KINDS = ('crop', 'meet', 'fit', 'scale', 'limit',
+             'recover_crop', 'recover_meet', 'recover_fit', 'recover_scale', 'recover_limit')
+
+# 这三颗 Recover 在恢复自己的硬帧之前会**顺手收掉**压在下面的软帧（执行器里
+# `_close_soft_frames`），所以它们也算"会还掉这层软帧"。
+GEO_ANY_RECOVER = ('recover_crop', 'recover_meet', 'recover_fit')
+
+
+def _step_kind(step: Dict[str, Any]) -> Optional[str]:
+    return step.get('kind') or step.get('type')
+
+
+def soft_frame_will_close(geo_open: List[Dict[str, Any]], steps: List[Dict[str, Any]],
+                          from_idx: int) -> Optional[int]:
+    """`from_idx` 之后那颗 Recover 会不会还掉**当前这层软帧**（Scale / Limit）？
+
+    返回距离（>=1，即"再往后第几颗块"）或 None。判据：从 from_idx 往后找**第一颗几何块** —
+      · 它是要还这一层的 Recover Scale / Recover Limit（且没被显式 info 边接去别的帧上）
+        ⇒ 会还，返回它；
+      · 它是 Recover Crop / Meet / Fit ⇒ 它们恢复硬帧前先收掉软帧，也会还；
+      · 是别的几何块（又压一层 Crop / Limit / …）⇒ 这层轮不到它，返回 None。
+    非几何块（detect / interface / switch / tagger）不改坐标系，直接跳过。
+
+    帧上的 `node` 是压帧那颗节点的 id（执行器写入）—— 显式 info 边必须指向同一颗节点，
+    才认它是在还**这一层**。
+    """
+    if not geo_open:
+        return None
+    top = geo_open[-1]
+    kind = top.get('kind')
+    if kind not in GEO_SOFT_KINDS:
+        return None
+    owner = top.get('node')
+    for j in range(from_idx + 1, len(steps)):
+        k = _step_kind(steps[j])
+        if k not in GEO_KINDS:
+            continue
+        if k in GEO_ANY_RECOVER:
+            return j - from_idx
+        if k != f'recover_{kind}':
+            return None
+        src = (steps[j].get('inputs') or {}).get(f'{kind}_info')
+        if src is None or owner is None or src[0] == owner:
+            return j - from_idx
+        return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Switch（汇聚）：只能取**这次真走过**的那条分枝
+# ---------------------------------------------------------------------------
+
+def switch_live_branches(n_branches: int, exec_sources: Dict[int, Optional[Tuple[str, str]]],
+                         detect_verdict: Dict[str, bool], ran: set,
+                         kind_of: Dict[str, str]) -> List[int]:
+    """哪几条分枝的 exec 头这次真的被喂过（按分枝顺序返回）。
+
+    判据：exec 输入来自 detect 的 `exec_yes` / `exec_no` ⇒ 按运行时命中与否判（另一条
+    永不执行）；来自别的节点 ⇒ 那颗节点这次执行过就算走过。
+
+    为什么必须这么判：未命中那条分枝的数据口通常接 Start.image，它**永远有值**；只按
+    "分枝顺序取第一个有值的"会让没跑过的那条顶掉真正跑完的那条（人物细化整条链就白跑，
+    产出还是原图）。
+    """
+    live: List[int] = []
+    for b in range(n_branches):
+        src = exec_sources.get(b)
+        if src is None:
+            continue
+        sid, sport = src
+        if kind_of.get(sid) == 'detect':
+            hit = detect_verdict.get(sid)
+            if hit is None:
+                continue
+            if ((not hit) if sport == 'exec_no' else bool(hit)):
+                live.append(b)
+        elif sid in ran:
+            live.append(b)
+    return live
+
+
+def switch_branch_order(n_branches: int, live: List[int]) -> List[int]:
+    """取数顺序：走过的分枝先（保持分枝顺序），没走过的按原顺序兜底。"""
+    _live = set(live)
+    return ([b for b in range(n_branches) if b in _live]
+            + [b for b in range(n_branches) if b not in _live])
 
 
 def exec_plan(graph: Dict[str, Any]) -> List[Dict[str, Any]]:

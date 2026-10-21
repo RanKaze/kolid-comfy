@@ -34,7 +34,7 @@ except ImportError as e:
     SnapshotPromptServer = None
     SnapshotPromptNode = None
 
-from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl, merge_mask_alpha, meet_image, recover_meet_image, fit_image, recover_fit_image, recover_scale_image
+from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl, merge_mask_alpha, meet_image, recover_meet_image, fit_image, recover_fit_image, recover_scale_image, _geo_info_at
 from ...libs.mask_utils import expand_mask
 from ...libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
@@ -43,7 +43,10 @@ from ...libs.generate_text_utils import apply_generate_text_to_prompt
 from ...libs import debug_trace as dbg
 from ...architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
 from .pipeline_graph import (blocks_to_graph, graph_from_config, exec_plan, port_kind,
-                            OP_INFO_PORT, START_ID, switch_n, sw_data_in, sw_data_out, sanitize_graph)
+                            OP_INFO_PORT, START_ID, END_ID, switch_n, sw_exec_in,
+                            sw_data_in, sw_data_out, sanitize_graph,
+                            GEO_SOFT_KINDS, soft_frame_will_close,
+                            switch_live_branches, switch_branch_order)
 import gc
 import uuid
 
@@ -98,7 +101,8 @@ GEO_RECOVER_LABEL = {
 #   ① 链尾不算漏（否则所有带 Scale 块的老链都要补一颗 Recover Scale）；
 #   ② 上方的 Crop/Meet/Fit 要恢复时，先把软帧自动收掉（还原无歧义，不该逼用户补块）。
 # 反过来 Crop/Meet/Fit 是**硬帧**：没恢复就是坐标系统错位，链尾必须报错。
-GEO_SOFT_KINDS = ('scale', 'limit')
+# 软帧/硬帧的种类表与「后面那颗 Recover 会不会还掉这一层」的判据都在 pipeline_graph
+# （纯 python，可单测）：GEO_SOFT_KINDS / GEO_KINDS / soft_frame_will_close。
 
 
 def _geo_kind_label(kind):
@@ -158,7 +162,9 @@ def detail_place_rect(crop_info, patch=None):
     **这次 run 的原始图像素**表示（ow/oh 同单位），外加 patch 自身尺寸与缩放比便于核对。
     纯算术、不依赖 torch，方便单测。
     """
-    info = crop_info or {}
+    # crop_info 在 batch 下是**逐帧 list**（各帧 bbox 不同）；这里是给前端算单张 patch 的
+    # 贴回矩形（视频模式不靠它贴 —— 产物直接编码成视频），取第 0 帧那一份即可。
+    info = _geo_info_at(crop_info, 0) if crop_info else {}
     ow = int(info.get('original_width') or 0)
     oh = int(info.get('original_height') or 0)
     if ow <= 0 or oh <= 0:
@@ -317,11 +323,13 @@ def staging_image_to_mask(img):
     return None
 
 
-def staging_mask_to_image(mask):
-    """[1,H,W]（兼容 [H,W] / [1,H,W,1]）mask → [1,H,W,3] 灰度图。
+def mask_as_image(mask):
+    """mask → 3 通道黑白图：`[1,H,W]`（兼容 `[H,W]` / `[B,H,W,1]`）→ `[B,H,W,3]`。
 
-    接口的 MASK 产出没有直接过线的通道 —— staging 只运图。灰度展开成 RGB 后
-    工作台拿到的就是一张普通 PNG，写回蒙版时按亮度读回来。
+    两处用它：
+      · staging 写回蒙版（接口的 MASK 产出没有直接过线的通道，staging 只运图）；
+      · 图里把 mask 接到 **image 端口**上（见 pipeline_graph.ports_compatible）——
+        那份 mask 在此按亮度铺成灰度 RGB，之后就是一张普通的图。
     """
     m = mask
     if m is None or not hasattr(m, 'shape'):
@@ -332,7 +340,11 @@ def staging_mask_to_image(mask):
         m = m.unsqueeze(0)
     if m.dim() != 3:
         return None
-    return m.unsqueeze(-1).expand(-1, -1, -1, 3).clamp(0.0, 1.0)
+    return m.unsqueeze(-1).expand(-1, -1, -1, 3).clamp(0.0, 1.0).contiguous()
+
+
+# staging 那条路的旧名字（语义相同，保留是因为它是"给 staging 用"的那份说明）。
+staging_mask_to_image = mask_as_image
 
 
 def parse_prompt_image_refs(text, resolve):
@@ -781,10 +793,27 @@ def _vid_encode(frames, fps=30, name='proc'):
         fps = 30.0
 
     def _hw_c(frame):
+        """帧 → (H, W)。
+
+        **别按维数一刀切**：管线吐出来的是单帧 `[H,W,3]` / `[H,W,1]`（`batch_out[k]` 之后
+        就是 3 维），而 `_rgb` 读的也是 `[H,W,C]`；老的 `(shp[-2], shp[-1])` 假设的是
+        `[C,H,W]`，对 `[404,720,3]` 会算成 `720x3` —— ffmpeg 拿 3 像素宽去开 libx264
+        （yuv420p 要求偶数宽高）当场退出，整个视频编码返回 None（video 模式最后那句
+        "Encoding the result to mp4 failed" 就是它）。所以 3 维按"最后一维是不是通道数"判。
+        """
         shp = getattr(frame, 'shape', None)
-        if shp is None or len(shp) not in (3, 4):
+        if shp is None:
             return None
-        return (int(shp[-3]), int(shp[-2])) if len(shp) == 4 else (int(shp[-2]), int(shp[-1]))
+        n = len(shp)
+        if n == 4:                       # [B,H,W,C] / [B,C,H,W]：倒数第三、第二都是 H,W
+            return (int(shp[-3]), int(shp[-2]))
+        if n == 3:                       # [H,W,C]（主）或 [C,H,W]（少量调用方）
+            if int(shp[-1]) in (1, 3, 4):
+                return (int(shp[0]), int(shp[1]))
+            return (int(shp[1]), int(shp[2]))
+        if n == 2:                       # 裸 mask [H,W]
+            return (int(shp[0]), int(shp[1]))
+        return None
 
     def _rgb(frame, size):
         a = frame.detach().cpu().numpy() if hasattr(frame, 'detach') else np.asarray(frame)
@@ -809,10 +838,31 @@ def _vid_encode(frames, fps=30, name='proc'):
     if first is None:
         return None
     h, w = first
+    # libx264 + yuv420p 要求偶数宽高：奇数尺寸（链上几何块会算出 1179、825 这种）
+    # 直接开编会以 "width not divisible by 2" 退出。统一砍到偶数，缩放交给 _rgb。
+    h -= h % 2
+    w -= w % 2
+    if h < 2 or w < 2:
+        print(f'[VidEncode] refusing to encode a {w}x{h} frame')
+        return None
     d = _vid_media_dir()
     os.makedirs(d, exist_ok=True)
     stem = re.sub(r'[^\w\-. ]+', '_', str(name or 'proc'))[:60] or 'proc'
-    h16 = hashlib.sha1((stem + str(len(frames)) + str(fps)).encode('utf-8')).hexdigest()[:12]
+    # 指纹必须含内容：只拿 (名字, 帧数, fps) 做键的话，同一 preset 跑第二遍会命中上一次
+    # 的 mp4 直接返回旧文件（画面看着像"还是上一轮的结果"）。抽 3 帧的左上角 16x16 参与 hash，
+    # 成本可以忽略，换内容就换文件名。
+    _fp = hashlib.sha1(f'{stem}|{len(frames)}|{fps:.3f}|{h}x{w}'.encode('utf-8'))
+    for _i in (0, len(frames) // 2, len(frames) - 1):
+        try:
+            _s = frames[_i]
+            _a = _s.detach().cpu().numpy() if hasattr(_s, 'detach') else np.asarray(_s)
+            _a = np.asarray(_a, dtype=np.float32)
+            if _a.ndim == 4:
+                _a = _a[0]
+            _fp.update(np.ascontiguousarray(_a[:16, :16]).tobytes())
+        except Exception:
+            pass
+    h16 = _fp.hexdigest()[:12]
     out = os.path.join(d, f'{h16}_{stem}.mp4')
     if os.path.exists(out):
         return '/api/vid_media/' + os.path.basename(out)
@@ -820,19 +870,30 @@ def _vid_encode(frames, fps=30, name='proc'):
            '-s', f'{w}x{h}', '-r', f'{fps:.3f}', '-i', '-',
            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
            '-pix_fmt', 'yuv420p', '-movflags', '+faststart', out]
+    proc = None
     try:
+        # stderr 收进管道而不是丢掉：失败时要能说出原因（原来 DEVNULL + 只返回 None，
+        # 上层只有一句 "check the ComfyUI console"，而 console 里什么都没有）。
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
+                                stderr=subprocess.PIPE)
         for fr in frames:
             proc.stdin.write(_rgb(fr, (h, w)).tobytes())
         proc.stdin.close()
-        if proc.wait(timeout=600) != 0 or not os.path.exists(out):
+        # 先等退出再读 stderr：反过来的话一个卡死的 ffmpeg 会让 read 无限等，
+        # 而 wait 有超时兜底（超时走 except，进程被杀掉、错误照样打出来）。
+        rc = proc.wait(timeout=600)
+        err = proc.stderr.read()
+        if rc != 0 or not os.path.exists(out):
+            msg = (err or b'').decode('utf-8', 'replace').strip().replace('\n', ' | ')
+            print(f'[VidEncode] ffmpeg failed rc={rc} {w}x{h} {len(frames)} frames: '
+                  f'{msg[:400] or "(no stderr)"}')
             return None
-    except Exception:
+    except Exception as e:
         try:
             proc.kill()
         except Exception:
             pass
+        print(f'[VidEncode] encode threw: {type(e).__name__}: {e}')
         return None
     print(f'[VidEncode] {len(frames)} frames {w}x{h}@{fps:.0f}fps → {os.path.basename(out)}')
     return '/api/vid_media/' + os.path.basename(out)
@@ -4578,7 +4639,261 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Detailer
     # -------------------------------------------------------------------------
-    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None, extra_prompt='', prompt_ref_ids=None, graph=None):
+    def frames_from_batch(self, batch_image, batch_mask=None, base_pipeline=None):
+        """一段 batch 的像素 → **一串 pipeline**（每帧一条）。
+
+        视频 segment 的真实载体：执行器之间传的是 `List[PipelineData]`，不是
+        `[N,H,W,C]` 张量。这样每帧自带自己的 image / mask / latent / 几何帧栈，
+        裁剪框、工作分辨率、检测结论都逐帧成立 —— 6 帧里只有 3 帧检出人物时，
+        没检出的那 3 帧原样穿过，不会被硬裁一块再贴回去；也不会出现"图与 mask 不同
+        网格"（那是两条显式边拉到一起才有的问题，单帧下 manifest 里没有这个可能）。
+
+        共享层（**同一个对象，逐帧不重建**）：model / clip / vae / context /
+        reference / config / `_cond_store`。私有层：image / mask / latent /
+        `resize_info_stack` / SamplerCache（`inverted_latent` 的键只有 block 序号，
+        共享的话第二帧会盖掉第一帧那份噪声）。
+        """
+        base = base_pipeline if base_pipeline is not None else self._base_pipeline
+        if base is None:
+            raise ValueError('Pipeline not initialized — pick a pipeline in Pipeline Settings first')
+        img = batch_image
+        if img is None:
+            return []
+        if isinstance(img, (list, tuple)):
+            # 已经是"一列帧"（视频抽帧的产物）：不拼 batch，逐帧原样包成 pipeline。
+            frames = [f if f.dim() == 4 else f.unsqueeze(0) for f in img]
+            n = len(frames)
+            img = None
+        else:
+            if img.dim() == 3:
+                img = img.unsqueeze(0)
+            n = int(img.shape[0])
+            frames = [img[i:i + 1] for i in range(n)]
+        msk = batch_mask
+        if msk is not None:
+            if msk.dim() == 2:
+                msk = msk.unsqueeze(0)
+            elif msk.dim() == 4:
+                msk = msk[..., 0] if msk.shape[-1] == 1 else msk.squeeze(1)
+            # 逐帧各自对齐到自己的帧网格（两张视频的像素尺寸不一定相同）。
+            per = []
+            for i in range(n):
+                m = msk[i] if msk.shape[0] > 1 else msk[0]
+                h, w = int(frames[i].shape[1]), int(frames[i].shape[2])
+                if tuple(m.shape[-2:]) != (h, w):
+                    m = torch.nn.functional.interpolate(
+                        m.unsqueeze(0).unsqueeze(1).float(),
+                        size=(h, w), mode='bilinear', align_corners=False,
+                    ).squeeze(0).squeeze(0)
+                per.append(m)
+            msk = per
+        else:
+            per = [None] * n
+
+        pipes = []
+        for i in range(n):
+            p = base.copy()                      # 共享 model / clip / vae / _cond_store
+            # cache 也按引用共享（`copy()` 原本会浅拷贝一份）：执行器内部还会再 copy
+            # 一层（`next_pipeline = pipeline.copy()`），所以某一帧写进去的 inverted
+            # latent 不会串到别的帧；这里共享省掉的是每帧一份 dict。
+            p.cache = base.cache
+            p.image = frames[i]                  # [1,H,W,C]：与单图路径同形
+            p.mask = per[i] if msk is not None else None
+            p.latent = None
+            pipes.append(p)
+        return pipes
+
+    # 一"组"帧最多同时停在阶段点上多少帧。组内是阶段对齐推进的（所有帧的 text
+    # encode 连着算、所有帧的采样连着跑），代价是这一组的中间状态同时驻留内存：
+    # 每帧一份工作图 + 一份几何帧栈（crop/limit 的原像素）。8 帧一组在 SDXL 工作
+    # 分辨率下约几百 MB，换来的是一次模型上下文里干完一组；段再长就自动切组。
+    _STAGE_GROUP = 8
+
+    def _run_pipeline_frames(self, pipes, masks, seeds, user_positive, user_loras,
+                             global_params, blocks, server=None, extra_prompt='',
+                             prompt_ref_ids=None, graph=None, on_frame=None):
+        """一串 pipeline（每帧一条）跑完整条链 —— 视频 segment 的事件循环。
+
+        每帧仍是**独立一趟**：自己的裁剪框、自己的工作分辨率、自己的检测结论
+        （逐帧分枝）、自己的几何帧栈。但推进顺序不是"一帧跑到底再下一帧"，而是
+        **按阶段对齐**：
+
+            检测/裁剪/VAE encode（全部帧） → text encode（全部帧，连着做）
+            → 采样（全部帧） → 解码（全部帧） → recover 等剩余块（全部帧）
+
+        这就是"一个 List 的 text encode 一次做完，再拿着数据去 List 地采样"：
+        CLIP / SDXL / VAE 各自只进一次上下文，而不是每帧进出一次。
+        实现上每帧是一条协程（`_run_pipeline_steps`），阶段点用 yield 出来，
+        由这里攒齐整组再一起放行 —— 单帧语义因此逐位不变。
+        """
+        n = len(pipes)
+        outs, origs, metas = [None] * n, [None] * n, [None] * n
+        last_pipe = None
+        done_count = 0
+        _total = int(getattr(server, 'preset_video_total', 0) or 0) if server is not None else 0
+
+        group = max(1, int(self._STAGE_GROUP or 1))
+        for gstart in range(0, n, group):
+            gidx = list(range(gstart, min(n, gstart + group)))
+            gens = {}
+            for fi in gidx:
+                gp = dict(global_params or {})
+                if seeds and fi < len(seeds):
+                    # 每帧一套种子：帧 i 从 seeds[i] 起，块内仍按 next_seed 往下发。
+                    gp['seed'] = int(seeds[fi])
+                gens[fi] = self._run_pipeline_steps(
+                    pipes[fi],
+                    masks[fi] if masks else None,
+                    user_positive, user_loras, gp, blocks,
+                    server=server, extra_prompt=extra_prompt,
+                    prompt_ref_ids=prompt_ref_ids, graph=graph,
+                )
+            pending = list(gidx)
+            resp = {}
+            try:
+                while pending:
+                    if mm.processing_interrupted():
+                        raise mm.InterruptProcessingException()
+                    # ── 阶段一：把每帧推到下一个阶段点（或跑完）──────────────
+                    pauses = []
+                    for fi in list(pending):
+                        try:
+                            req = gens[fi].send(resp.pop(fi, None))
+                        except StopIteration as stop:
+                            pending.remove(fi)
+                            _np, _orig, detailed, meta = stop.value
+                            last_pipe = _np
+                            if detailed is not None:
+                                outs[fi] = detailed if detailed.dim() == 4 else detailed.unsqueeze(0)
+                            if _orig is not None:
+                                origs[fi] = _orig if _orig.dim() == 4 else _orig.unsqueeze(0)
+                            metas[fi] = meta
+                            done_count += 1
+                            if n > 1:
+                                print(f"[PipelineFrames] {fi + 1}/{n} done"
+                                      f"{'' if detailed is None else ' — ' + str(tuple(detailed.shape))}")
+                            if _total:
+                                server.preset_video_current = done_count
+                                server.preset_video_progress = done_count / _total
+                            if on_frame is not None:
+                                on_frame(fi, n, detailed)
+                            continue
+                        pauses.append((fi, req))
+
+                    # ── 阶段二：这一轮攒下的 conditioning 连着算完 ─────────────
+                    # 全部帧的 text encode 背靠背做，中间不插采样 —— CLIP 因此只在
+                    # 上下文里进一次。同键（同 clip / 同提示词 / 同 lora / 同参考）
+                    # 的帧直接共享同一份 conditioning：一组帧共用一个提示词时，
+                    # 实际只编一次。
+                    _conds = [(fi, req) for fi, req in pauses
+                              if req and req.get('kind') == 'cond']
+                    if len(_conds) > 1:
+                        _uniq = len({req.get('key') for _, req in _conds})
+                        print(f"[CondStage] block {_conds[0][1].get('block')}: "
+                              f"{len(_conds)} frame(s) → {_uniq} distinct encode(s), "
+                              f"{len(_conds) - _uniq} shared")
+                    _seen = {}
+                    for fi, req in _conds:
+                        _k = req.get('key')
+                        if _k is not None and _k in _seen:
+                            resp[fi] = _seen[_k]
+                            req['elapsed'] = 0.0      # 没编，按共享记 0
+                            continue
+                        resp[fi] = self._serve_stage(req)
+                        if _k is not None:
+                            _seen[_k] = resp[fi]
+                    # 剩下的（decode 屏障）不放 resp：下一轮 send(None) 即放行。
+            finally:
+                # 中途出错 / 被取消：把还挂着的协程关掉，让它们各自的 finally 复原
+                # pipeline 状态（model / config 的补丁不能留在共享层上）。
+                for fi, g in gens.items():
+                    if fi in pending:
+                        try:
+                            g.close()
+                        except Exception:
+                            pass
+
+        detailed_all = torch.cat([o for o in outs if o is not None], dim=0) \
+            if any(o is not None for o in outs) else None
+        orig_all = torch.cat([o for o in origs if o is not None], dim=0) \
+            if any(o is not None for o in origs) else None
+        _meta = next((m for m in metas if m), None)
+        return last_pipe, orig_all, detailed_all, _meta
+
+    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None, extra_prompt='', prompt_ref_ids=None, graph=None, frame_seeds=None):
+        """跑一条链（或一串帧）。
+
+        `pipeline` 传单个 `PipelineData` = 图像模式：就地驱动同一条协程，
+        遇到阶段点立刻算掉，行为与以前一字不差。
+
+        传一串 = 视频段：交给 `_run_pipeline_frames` **按阶段推进整组帧** ——
+        所有帧的 text encode 连着做完，才放开逐帧采样（少切换上下文）。
+        """
+        if isinstance(pipeline, (list, tuple)):
+            return self._run_pipeline_frames(
+                list(pipeline),
+                list(user_mask) if isinstance(user_mask, (list, tuple)) else user_mask,
+                frame_seeds, user_positive, user_loras, global_params, blocks,
+                server=server, extra_prompt=extra_prompt,
+                prompt_ref_ids=prompt_ref_ids, graph=graph,
+            )
+        gen = self._run_pipeline_steps(
+            pipeline, user_mask, user_positive, user_loras, global_params, blocks,
+            server=server, extra_prompt=extra_prompt,
+            prompt_ref_ids=prompt_ref_ids, graph=graph, frame_seeds=frame_seeds,
+        )
+        resp = None
+        while True:
+            try:
+                req = gen.send(resp)
+            except StopIteration as stop:
+                return stop.value
+            resp = self._serve_stage(req)
+
+    # 阶段点（协程 yield 出来的请求）怎么就地满足：
+    #   'cond'  = 算这一步的 positive / negative conditioning（CLIP text encode）
+    #   'decode'= 屏障，只表示"接下来要占 VAE"，没有数据
+    # 单条链（图像模式）在这里立刻算；一串帧（视频段）由 `_run_pipeline_frames`
+    # 把整组请求攒齐、连着算完再放行 —— 这就是"先一个 List 做下来"。
+    def _serve_stage(self, req):
+        if not req:
+            return None
+        if req.get('kind') == 'cond':
+            t0 = time.perf_counter()
+            value = req['compute']()
+            req['elapsed'] = time.perf_counter() - t0
+            return value
+        return None
+
+    @staticmethod
+    def _cond_cache_key(pipeline, clip, positive, negative, ref_latent, ref_image, latent):
+        """conditioning 的复用键：**get_conditioning 真正读到的输入**逐项钉死。
+
+        键相等 ⇒ 两次调用在语义上不可区分（同一份 clip / 同一段提示词 / 同一组
+        lora / 同一张参考图 / 同一份 config）⇒ 结果必然相同，可以安全共享同一份
+        conditioning，不必各自再编一遍。
+        - `source_latent` 只有 QwenImage2.1 会读（第一格参考图沿用 target latent）。
+          别的架构把它算进键里，每帧的 latent 对象都不同 ⇒ 永远不命中。
+        - 参考图 / 参考 latent 在 enable_edit 时就是**逐帧的裁剪区**，id 本来就不同，
+          于是这类块自然退化成逐帧编码（该逐帧的就得逐帧）。
+        """
+        try:
+            cfg = tuple(sorted((str(k), str(v)) for k, v in (pipeline.config or {}).items()))
+        except Exception:
+            cfg = None
+        try:
+            refs = tuple(id(x) for x in (getattr(pipeline.reference, 'reference_latents', None) or []))
+        except Exception:
+            refs = ()
+        try:
+            src = id(latent['samples']) if arch_qwen_image21.matches(pipeline.config) else None
+        except Exception:
+            src = None
+        return ('cond', id(clip), id(pipeline.vae), positive, negative,
+                getattr(pipeline, '_cache_loras', None), id(ref_latent), id(ref_image),
+                src, cfg, refs)
+
+    def _run_pipeline_steps(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None, extra_prompt='', prompt_ref_ids=None, graph=None, frame_seeds=None):
         seed = global_params['seed']
         mask_grow = int(global_params.get('mask_grow', 32))
         mask_blur = int(global_params.get('mask_blur', 32))
@@ -4706,6 +5021,13 @@ class SnapshotDetailerSamplerNode:
         # 直接抛。现在开局就认它 —— 有 detailer 的链随后会把它覆盖成同一个值，行为不变。
         last_resize_info = resize_info
         last_resized_mask = resized_mask
+        # 「最近那一次 Scale / Limit 的**前后尺寸**」（= limit_pixels 自己吐的那份）。
+        # detailer 的中途复原要落回**这一步之前**的尺寸 —— 那是链上当前的坐标系，后面的
+        # Recover 块都按它算。不能拿 last_resize_info 顶替：它的 original_* 是**链首复原
+        # 落点**（= 原始输入尺寸），链首 crop/limit 之后又摆了显式 Scale/Limit 时两者会
+        # 分叉 —— 用错就把重绘结果先压回原始尺寸、再被后面的 Recover 拉回工作尺寸，
+        # 白白多一次降采样（1272x824 → 720x404 → 1179x760）。
+        step_resize_info = resize_info
         # 工作分辨率是被哪颗像素旋钮定下来的（None = Enable Limit 关，尺寸就是裁剪结果）。
         # interface 块会把 current_image 换成子图产物 —— 那张没被 limit 过，届时置 None。
         work_pixel_limit = limit_pixels_val if enable_limit else None
@@ -4740,6 +5062,7 @@ class SnapshotDetailerSamplerNode:
         # 用闭包是因为它要改 current_image / current_mask 这一对工作值（与各分支同源）。
         def _close_soft_frames(_geo, keep=None):
             nonlocal current_image, current_mask, last_resize_info, last_resized_mask
+            nonlocal step_resize_info
             while (_geo and _geo[-1].get('kind') in GEO_SOFT_KINDS
                    and _geo[-1].get('kind') != keep):
                 _f = _geo.pop()
@@ -4759,6 +5082,7 @@ class SnapshotDetailerSamplerNode:
                             1, int(last_resize_info.get('original_width') or 1)),
                     }
                 last_resized_mask = current_mask
+                step_resize_info = None
                 print(f'[PipelineBlock] auto-closed {_geo_kind_label(_f.get("kind"))} frame from '
                       f'block {_f.get("block")} ({_before} → '
                       f'{int(current_image.shape[2])}x{int(current_image.shape[1])})')
@@ -4842,6 +5166,12 @@ class SnapshotDetailerSamplerNode:
             # 图引擎的端口值表：Start 交出链首裁剪/缩放后的工作图与 mask。
             _values = {(START_ID, 'image'): resized_image, (START_ID, 'mask'): resized_mask}
             _det_verdict = {}      # detect 节点 id → 命中与否（运行时分支依据）
+            # 这次真正**执行过**的节点（switch 判"哪条分枝活着"用，见 switch 分支）。
+            # 被 guard / 缺输入 / 缺值跳过的不算 —— 它们的产物只可能是旧值。
+            _ran = {START_ID}
+            # 节点 id → kind（switch 要靠它认出 exec 头的源是不是 detect）。
+            _kind_of = ({str(n.get('id')): n.get('kind') for n in (_pg.get('nodes') or [])}
+                        if (graph_mode and isinstance(_pg, dict)) else {})
             _prev = None           # 上一颗真正执行的节点 {id,kind,index}
             _step_inputs = None    # 当前节点的显式输入连线（图模式才有）
             det_hit = True         # 每轮默认 True；只有 detect 会改写
@@ -4917,6 +5247,20 @@ class SnapshotDetailerSamplerNode:
                             print(f"[PipelineBlock {i+1}/{len(steps)}] {block.get('name') or _kind} skipped "
                                   f"(Image input has no value)")
                             continue
+                        # 目标端口要 image，拿到的东西却不像 image —— 按 mask 处理，铺成
+                        # 3 通道黑白图（ComfyUI 的 IMAGE 恒为 [B,H,W,3]，所以形状就是判据）：
+                        #   · 源端口明写是 Mask（图里 mask → image 的合法接线，见 ports_compatible）；
+                        #   · 源端口是 Switch 的 data 口（any，链上看不出类型，只能在运行时判）。
+                        _ishape = tuple(getattr(_iv, 'shape', ()) or ())
+                        if len(_ishape) != 4 or int(_ishape[-1]) != 3:
+                            _mi = mask_as_image(_iv)
+                            if _mi is None:
+                                print(f"[PipelineBlock {i+1}/{len(steps)}] {block.get('name') or _kind} skipped "
+                                      f"(the Mask wired into Image has an unusable shape: {_ishape})")
+                                continue
+                            print(f"[PipelineBlock {i+1}] Mask wired into an Image input — "
+                                  f"{_ishape} → {tuple(_mi.shape)} (greyscale RGB)")
+                            _iv = _mi
                         current_image = _iv
                         next_pipeline.image = _iv
                     if port_kind(_kind, 'in', 'mask') == 'mask':
@@ -4924,7 +5268,29 @@ class SnapshotDetailerSamplerNode:
                         # 没接线（可选端口未连，或连线缺失）= 这颗没有 mask。
                         current_mask = _values.get((_msrc[0], _msrc[1])) if _msrc is not None else None
 
+                # 图与 mask 必须同网格。显式取数时两者可能来自**不同的上游端口**（image 接
+                # detailer 的输出、mask 接更上游 Limit/Detect 的输出），各自停在自己的分辨率
+                # 上 —— 后面任何按 mask 合成的块都会死在尺寸校验里（真踩过：
+                # image=404x720 而 mask=824x1272）。mask 是这张图的覆盖图，跟着图走才对。
+                if (current_mask is not None and current_image is not None
+                        and tuple(current_mask.shape[-2:]) != tuple(current_image.shape[1:3])):
+                    print(f'[PipelineBlock {i+1}] mask {tuple(current_mask.shape)} is off the image '
+                          f'grid {tuple(current_image.shape[1:3])} — resampling the mask onto it')
+                    _mt = current_mask
+                    if _mt.dim() == 2:
+                        _mt = _mt.unsqueeze(0).unsqueeze(0)
+                    elif _mt.dim() == 3:
+                        _mt = _mt.unsqueeze(1)
+                    else:                      # [B,H,W,C]（如 4 通道 mask）：取首通道
+                        _mt = _mt[..., :1].permute(0, 3, 1, 2)
+                    current_mask = torch.nn.functional.interpolate(
+                        _mt.float(),
+                        size=(int(current_image.shape[1]), int(current_image.shape[2])),
+                        mode='bilinear', align_corners=False).squeeze(1).clamp_(0.0, 1.0)
+                    next_pipeline.mask = current_mask
+
                 det_hit = True
+                _ran.add(block['id'])
                 _prev = {'id': block['id'], 'kind': _kind, 'index': i}
 
                 # 每个 block 执行前检查 interrupt 状态
@@ -4932,16 +5298,26 @@ class SnapshotDetailerSamplerNode:
 
                 # ── Switch（倒过来的 switch / gather）──────────────────────────
                 # 输入多头（每条分枝 = 一个 exec 头 + 它下面的若干 data，data 无类型），输出单头：
-                # 1 个 exec + N 个 data，N = 各分枝 data 数的最大值。对每个输出位置按**分枝顺序**
-                # 取"第一个有值的分枝"；没被 detect 放行 / 没连线的分枝不产值 → 该位置补空。
+                # 1 个 exec + N 个 data，N = 各分枝 data 数的最大值。
+                #
+                # 取数顺序：**先看这次真走了哪条分枝**，走的那条优先；剩下的按原顺序兜底。
+                # 只按"分枝顺序取第一个有值的"是不够的 —— 未命中那条分枝的数据口通常接
+                # Start.image（永远有值），于是它会顶掉真正跑完的那条（人物细化整条链的
+                # 产出就被换回原图，看着像"没生效"）。
                 if block.get('type') == 'switch':
                     _sw_id = block['id']
                     _branches = (block.get('params') or {}).get('branches') or []
                     _n_out = switch_n(block.get('params') or {})
+                    _live = switch_live_branches(
+                        len(_branches),
+                        {_b: (_step_inputs or {}).get(sw_exec_in(_b))
+                         for _b in range(len(_branches))},
+                        _det_verdict, _ran, _kind_of)
+                    _order = switch_branch_order(len(_branches), _live)
                     _filled = 0
                     for _i in range(_n_out):
                         _val = None
-                        for _b in range(len(_branches)):
+                        for _b in _order:
                             _src = (_step_inputs or {}).get(sw_data_in(_b, _i))
                             if _src is None:
                                 continue
@@ -4953,10 +5329,12 @@ class SnapshotDetailerSamplerNode:
                         if _val is not None:
                             _filled += 1
                     print(f"[PipelineBlock {i+1}/{len(steps)}] Switch block: "
-                          f"{len(_branches)} branch(es) → exec + {_n_out} data ({_filled} filled)")
+                          f"{len(_branches)} branch(es) → exec + {_n_out} data ({_filled} filled, "
+                          f"live={[b + 1 for b in _live] or 'none'})")
                     dbg.record_block(i + 1, f'Block {i+1} · Switch',
                                      f'{len(_branches)} branches → {_n_out} data',
-                                     branches=len(_branches), outputs=_n_out, filled=_filled)
+                                     branches=len(_branches), outputs=_n_out, filled=_filled,
+                                     live_branches=[b + 1 for b in _live])
                     continue
 
                 if block.get('type') == 'interface':
@@ -5020,14 +5398,40 @@ class SnapshotDetailerSamplerNode:
                     dbg.record_image(f'Block {i+1} · Interface 输入图', block_input_img, block=i + 1)
                     dbg.record_mask(f'Block {i+1} · Interface 输入 mask', block_input_mask, block=i + 1)
 
-                    result_img, result_mask = self._execute_interface(
-                        server, interface_idx, manual_values,
-                        exec_options=exec_options,
-                        input_image=block_input_img,
-                        input_mask=block_input_mask,
-                        return_image=True,
-                        base_pipeline=next_pipeline,
-                    )
+                    # 子图里的节点能扛多大 batch 不由我们保证（第三方节点多半按单图写的），
+                    # 所以 batch 在这里就地拆帧跑 —— 与 Detect 同一口径：只拆这一个块，
+                    # 不走"每帧一遍整链"。
+                    _if_B = (int(block_input_img.shape[0])
+                             if block_input_img is not None and block_input_img.dim() == 4 else 1)
+                    if _if_B > 1:
+                        print(f"[PipelineBlock {i+1}] Interface block: running per-frame on a "
+                              f"batch of {_if_B} (sub-graph nodes take one image at a time)")
+                        _if_imgs, _if_masks = [], []
+                        for _k in range(_if_B):
+                            _ri, _rm = self._execute_interface(
+                                server, interface_idx, manual_values,
+                                exec_options=exec_options,
+                                input_image=block_input_img[_k:_k + 1],
+                                input_mask=(block_input_mask[_k:_k + 1]
+                                            if block_input_mask is not None else None),
+                                return_image=True,
+                                base_pipeline=next_pipeline,
+                            )
+                            _if_imgs.append(_ri if _ri.dim() == 4 else _ri.unsqueeze(0))
+                            _if_masks.append(_rm if (_rm is not None and _rm.dim() == 3)
+                                             else (_rm.unsqueeze(0) if _rm is not None else None))
+                        result_img = torch.cat(_if_imgs, dim=0)
+                        result_mask = (torch.cat(_if_masks, dim=0)
+                                       if all(m is not None for m in _if_masks) else None)
+                    else:
+                        result_img, result_mask = self._execute_interface(
+                            server, interface_idx, manual_values,
+                            exec_options=exec_options,
+                            input_image=block_input_img,
+                            input_mask=block_input_mask,
+                            return_image=True,
+                            base_pipeline=next_pipeline,
+                        )
 
                     # 写回 pipeline + 局部变量，供下一 block 串联（block 间以 pipeline 传递
                     # 全部上下文：image/mask/model/clip/context/loras 等）。interface 子图
@@ -5172,7 +5576,7 @@ class SnapshotDetailerSamplerNode:
                             'original_width': in_w, 'original_height': in_h,
                             'resized_width': int(scale_info['resized_width']),
                             'resized_height': int(scale_info['resized_height']),
-                        }, 'bg': scale_bg, 'bg_mask': None, 'block': i + 1})
+                        }, 'bg': scale_bg, 'bg_mask': None, 'block': i + 1, 'node': block['id']})
                         # resize_info.original_* = 复原落点（crop 前尺寸，Enable Mask 关
                         # 时 = 整幅），沿用链首记录，不随缩放移动；只有 resized_* 换成
                         # 新工作分辨率。scale_factor 保留 scale_info 的实测值（落格后
@@ -5189,6 +5593,7 @@ class SnapshotDetailerSamplerNode:
                         }
                         last_resize_info = resize_info
                         last_resized_mask = scaled_mask
+                        step_resize_info = scale_info      # 这一步的前后尺寸（原始输入尺寸 ≠ 它）
                         # 缩放后的分辨率由 scale 旋钮决定，不再是像素目标/链首对齐。
                         work_pixel_limit = None
                         work_align = scale_align if scale_align > 1 else None
@@ -5233,7 +5638,7 @@ class SnapshotDetailerSamplerNode:
                     current_image, current_mask = l_img, l_mask
                     if l_info is not None:
                         geo_open.append({'kind': 'limit', 'info': dict(l_info), 'bg': limit_bg,
-                                         'bg_mask': None, 'block': i + 1})
+                                         'bg_mask': None, 'block': i + 1, 'node': block['id']})
                         # 与 Scale 分支同一套记账：original_* = 链首那个复原落点（不随本块
                         # 移动），resized_* = 新的工作分辨率 —— 链尾 recover_size 据此还原。
                         resize_info = {
@@ -5248,6 +5653,7 @@ class SnapshotDetailerSamplerNode:
                         }
                         last_resize_info = resize_info
                         last_resized_mask = l_mask
+                        step_resize_info = l_info          # 这一步的前后尺寸（原始输入尺寸 ≠ 它）
                     work_pixel_limit = None if limit_cap_only else limit_block_pixels
                     work_align = limit_block_align if limit_block_align > 1 else None
                     after_w, after_h = int(l_img.shape[2]), int(l_img.shape[1])
@@ -5294,7 +5700,8 @@ class SnapshotDetailerSamplerNode:
                     # crop_mask 是裁完那份（与裁出的 image 同维）—— recover_crop 要的
                     # 是后者（它按 cx/cy 把 mask 贴回画布），所以恢复时的兜底 mask 用它。
                     geo_open.append({'kind': 'crop', 'info': c_info, 'bg': current_image,
-                                     'bg_mask': crop_input_mask, 'crop_mask': c_mask, 'block': i + 1})
+                                     'bg_mask': crop_input_mask, 'crop_mask': c_mask,
+                                     'block': i + 1, 'node': block['id']})
                     next_pipeline.image = c_img
                     next_pipeline.mask = c_mask
                     current_image, current_mask = c_img, c_mask
@@ -5398,7 +5805,7 @@ class SnapshotDetailerSamplerNode:
                         current_image, current_mask, width=meet_w, height=meet_h,
                         interpolation=meet_interp)
                     geo_open.append({'kind': 'meet', 'info': m_info, 'bg': current_image,
-                                     'bg_mask': current_mask, 'block': i + 1})
+                                     'bg_mask': current_mask, 'block': i + 1, 'node': block['id']})
                     next_pipeline.image = m_img
                     next_pipeline.mask = m_mask
                     current_image, current_mask = m_img, m_mask
@@ -5461,7 +5868,7 @@ class SnapshotDetailerSamplerNode:
                         current_image, current_mask, width=fit_w, height=fit_h,
                         interpolation=fit_interp, padding_color=fit_pad)
                     geo_open.append({'kind': 'fit', 'info': f_info, 'bg': current_image,
-                                     'bg_mask': current_mask, 'block': i + 1})
+                                     'bg_mask': current_mask, 'block': i + 1, 'node': block['id']})
                     next_pipeline.image = f_img
                     next_pipeline.mask = f_mask
                     current_image, current_mask = f_img, f_mask
@@ -5530,6 +5937,7 @@ class SnapshotDetailerSamplerNode:
                             mask=(last_resized_mask if last_resized_mask is not None else current_mask))
                         last_resize_info = None
                         last_resized_mask = None
+                        step_resize_info = None
                         src = 'the chain-start Limit'
                     elif frame is not None:
                         r_img, r_mask = recover_scale_image(
@@ -5544,6 +5952,8 @@ class SnapshotDetailerSamplerNode:
                                 'resized_height': int(r_img.shape[1]),
                             }
                         last_resized_mask = r_mask
+                        # 这一步已经还掉了，后面再遇 detailer 不该再往它身上复原。
+                        step_resize_info = None
                     elif geo_open:
                         # 顶上是 Crop/Meet/Fit（硬帧）：直接交给统一文案报"先收哪一个"
                         # （这一句必然抛，geo_pop_frame 不会静默返回）。
@@ -5594,43 +6004,55 @@ class SnapshotDetailerSamplerNode:
                         det_threshold = 0.5
                     det_threshold = min(1.0, max(0.0, det_threshold))
                     det_invert = bool(bp.get('invert'))
-                    det_img = current_image[0] if current_image.dim() == 4 else current_image
                     dbg.record_block(i + 1, f'Block {i+1} · Detect',
                                      det_prompt or '(whole image)',
                                      prompt=det_prompt, threshold=det_threshold,
                                      invert=det_invert)
                     dbg.record_image(f'Block {i+1} · Detect 输入图', current_image, block=i + 1)
-                    if det_prompt:
-                        _root = _parse_expr(det_prompt, det_threshold)
-                        _term_masks = {}
-                        for _name, _t in _collect_terms(_root):
-                            _hits = _detect_mask(detector=server.detector, image=det_img,
-                                                 threshold=float(_t), prompt=_name)
-                            _combined = _combine_masks(_hits, mode='max')
-                            _term_masks[(_name, float(_t))] = _combined
-                            dbg.record_mask(f"Block {i+1} · 术语 '{_name}' @ {_t}", _combined,
-                                            block=i + 1, detail=f'{len(_hits)} 个实例')
-                        det_mask = _eval_expr(_root, _term_masks)
-                    else:
-                        det_mask = _combine_masks(
-                            _detect_mask(detector=server.detector, image=det_img,
-                                         threshold=det_threshold, prompt=''),
-                            mode='max')
-                    if det_invert:
-                        det_mask = 1.0 - det_mask
-                    # 对齐到当前工作图的网格：detector 自己那一档分辨率与链上的不同。
-                    if det_mask.dim() == 2:
-                        det_mask = det_mask.unsqueeze(0)
-                    if det_mask.dim() == 4:
-                        det_mask = det_mask.squeeze(1)
-                    if (int(det_mask.shape[1]) != int(current_image.shape[1])
-                            or int(det_mask.shape[2]) != int(current_image.shape[2])):
-                        det_mask = torch.nn.functional.interpolate(
-                            det_mask.unsqueeze(1).float(),
-                            size=(int(current_image.shape[1]), int(current_image.shape[2])),
-                            mode='bilinear', align_corners=False,
-                        ).squeeze(1)
-                    det_mask = det_mask.float().clamp_(0.0, 1.0)
+
+                    # 检测器一次只吃一张图（Grounding / SAM3 都不是按批写的），所以 batch 在
+                    # 这里**就地拆帧跑** —— 但只拆这一个块，不算整链重入：模型/CLIP/VAE 的
+                    # 上下文切换仍然只在块间发生一次，而不是每帧一遍。
+                    def _detect_one(det_img):
+                        if det_prompt:
+                            _root = _parse_expr(det_prompt, det_threshold)
+                            _term_masks = {}
+                            for _name, _t in _collect_terms(_root):
+                                _hits = _detect_mask(detector=server.detector, image=det_img,
+                                                     threshold=float(_t), prompt=_name)
+                                _combined = _combine_masks(_hits, mode='max')
+                                _term_masks[(_name, float(_t))] = _combined
+                                dbg.record_mask(f"Block {i+1} · 术语 '{_name}' @ {_t}", _combined,
+                                                block=i + 1, detail=f'{len(_hits)} 个实例')
+                            _m = _eval_expr(_root, _term_masks)
+                        else:
+                            _m = _combine_masks(
+                                _detect_mask(detector=server.detector, image=det_img,
+                                             threshold=det_threshold, prompt=''),
+                                mode='max')
+                        if det_invert:
+                            _m = 1.0 - _m
+                        # 对齐到当前工作图的网格：detector 自己那一档分辨率与链上的不同。
+                        if _m.dim() == 2:
+                            _m = _m.unsqueeze(0)
+                        if _m.dim() == 4:
+                            _m = _m.squeeze(1)
+                        if (int(_m.shape[1]) != int(current_image.shape[1])
+                                or int(_m.shape[2]) != int(current_image.shape[2])):
+                            _m = torch.nn.functional.interpolate(
+                                _m.unsqueeze(1).float(),
+                                size=(int(current_image.shape[1]), int(current_image.shape[2])),
+                                mode='bilinear', align_corners=False,
+                            ).squeeze(1)
+                        return _m.float().clamp_(0.0, 1.0)
+
+                    _B = int(current_image.shape[0]) if current_image.dim() == 4 else 1
+                    if _B > 1:
+                        print(f"[PipelineBlock {i+1}/{len(steps)}] Detect block: running per-frame "
+                              f"on a batch of {_B} (the detector takes one image at a time)")
+                    det_mask = torch.cat(
+                        [_detect_one(current_image[_k]) for _k in range(_B)], dim=0) if _B > 1 else _detect_one(
+                        current_image[0] if current_image.dim() == 4 else current_image)
                     next_pipeline.mask = det_mask
                     current_mask = det_mask
                     # 运行时分支依据：命中 = 检测出了非空 mask。图引擎据此放行 exec_yes /
@@ -5712,14 +6134,28 @@ class SnapshotDetailerSamplerNode:
                     vae=next_pipeline.vae,
                     pixels=resized_image
                 )[0]
+                # 逐帧种子：视频 batch 里每一帧要有**各自的噪声**（同一份噪声会让整段长得
+                # 一模一样）。走 latent['noise_seeds'] —— _ksampler 会为每一帧单独起一个
+                # generator，与逐帧跑时 next_seed 的节奏逐位等价。
+                # 注意别写成 latent['batch_index']：那是 comfy prepare_noise 的**紧凑索引**
+                # （内部按 range(unique_inds[-1]+1) 逐个抽），塞裸种子会炸（uint64 → float64）。
+                if frame_seeds:
+                    _B = int(tmp_latent['samples'].shape[0])
+                    if _B > 1 and len(frame_seeds) >= _B:
+                        tmp_latent['noise_seeds'] = [int(s) for s in frame_seeds[:_B]]
+                        print(f"[PipelineBlock {i+1}] Detailer: per-frame noise seeds for {_B} "
+                              f"frames (first={tmp_latent['noise_seeds'][0]})")
 
                 sampler_name = next_pipeline.sampler_name or 'euler'
                 scheduler = next_pipeline.scheduler or 'normal'
-                steps = next_pipeline.steps or 20
+                # 变量名不能叫 steps —— 外层 for 的 **`steps` 是执行计划列表**（见上方
+                # exec_plan / 线性链），在这里被赋值成 int 会让下一轮循环头的
+                # `len(steps)` 抛 `int has no len()`（只要链里 detailer 后面还有块就必炸）。
+                sample_steps = next_pipeline.steps or 20
                 cfg = next_pipeline.cfg or 8.0
 
-                start_at_step = int(start_step_rate * steps)
-                end_at_step = int(end_step_rate * steps)
+                start_at_step = int(start_step_rate * sample_steps)
+                end_at_step = int(end_step_rate * sample_steps)
 
                 # Condition — 每个 detailer block 实时从当前 pipeline.context 解出
                 # lora/prompt（不提前解析），以捕获上游 interface 块对 pipeline 的修改。
@@ -5931,7 +6367,8 @@ class SnapshotDetailerSamplerNode:
                 # 解析出的全局 refs（prompt_ref_ids，首次出现顺序 = 注入顺序）。
                 # _injected_refs 把**编码前**的像素留给付费的槽位清单：那是 get_conditioning
                 # 解码回来的同一张图，省一次 VAEDecode。
-                _cc_t0 = time.perf_counter()
+                # 计时就是 conditioning 那一步自己的耗时（阶段点里量的），
+                # 不再从 ref 注入开始算 —— 那个数在 staging 下会把等待时间也算进去。
                 _cc_h0 = self._cond_store.stats['hits']
                 _cc_m0 = self._cond_store.stats['misses']
                 _injected_refs = []
@@ -5994,32 +6431,55 @@ class SnapshotDetailerSamplerNode:
                                             work_align=work_align,
                                             ref_align=(ref_cap_align if ref_cap_align > 1 else None))
 
-                positive_condition = next_pipeline.get_conditioning(
-                    mode='positive',
-                    clip=clip_to_use,
-                    vae=next_pipeline.vae,
-                    prompt=current_positive,
-                    reference_latent=ref_latent_arg,
-                    reference_image=ref_image_arg,
-                    reference=next_pipeline.reference,
-                    # ref_image_arg 就是 resized_image，本块的 target latent 也由它编码而来
-                    # —— 把这份 latent 交下去，QwenImage21 的第一格就不再重推尺寸（见其模块头）
-                    source_latent=tmp_latent["samples"]
-                )
+                # ── 阶段点：conditioning（CLIP text encode）────────────────────────
+                # 这一段不在这里直接算，而是 yield 出去交给驱动方：
+                #   单条链 → `_serve_stage` 立刻算（图像模式行为不变）；
+                #   一串帧 → `_run_pipeline_frames` 把**整组帧的**请求攒齐后连着算完，
+                #            再一起放行去采样（CLIP 只进一次上下文，采样也只进一次）。
+                # 两个 mode 打包在同一个请求里：positive 与 negative 必须背靠背编码，
+                # 中间插进别的东西只会让 CLIP 再被清出去一次。
+                def _encode_pair():
+                    _pos = next_pipeline.get_conditioning(
+                        mode='positive',
+                        clip=clip_to_use,
+                        vae=next_pipeline.vae,
+                        prompt=current_positive,
+                        reference_latent=ref_latent_arg,
+                        reference_image=ref_image_arg,
+                        reference=next_pipeline.reference,
+                        # ref_image_arg 就是 resized_image，本块的 target latent 也由它编码而来
+                        # —— 把这份 latent 交下去，QwenImage21 的第一格就不再重推尺寸（见其模块头）
+                        source_latent=tmp_latent["samples"]
+                    )
+                    _neg = next_pipeline.get_conditioning(
+                        mode='negative',
+                        clip=clip_to_use,
+                        vae=next_pipeline.vae,
+                        prompt=current_negative,
+                        reference_latent=ref_latent_arg,
+                        reference_image=ref_image_arg,
+                        reference=next_pipeline.reference,
+                        source_latent=tmp_latent["samples"]
+                    )
+                    return _pos, _neg
 
-                negative_condition = next_pipeline.get_conditioning(
-                    mode='negative',
-                    clip=clip_to_use,
-                    vae=next_pipeline.vae,
-                    prompt=current_negative,
-                    reference_latent=ref_latent_arg,
-                    reference_image=ref_image_arg,
-                    reference=next_pipeline.reference,
-                    source_latent=tmp_latent["samples"]
-                )
+                _cond_req = {
+                    'kind': 'cond',
+                    'block': i + 1,
+                    'prompt': current_positive,
+                    'negative': current_negative,
+                    # 跨帧复用的判据：把 get_conditioning 真正读到的输入逐项钉死。
+                    # 键相等 ⇒ 两次调用在语义上不可区分 ⇒ 结果必然相同，可以共享。
+                    'key': self._cond_cache_key(
+                        next_pipeline, clip_to_use, current_positive, current_negative,
+                        ref_latent_arg, ref_image_arg, tmp_latent),
+                    'compute': _encode_pair,
+                }
+                positive_condition, negative_condition = yield _cond_req
 
                 _st = self._cond_store.stats
-                print(f"[CondCache] block {i+1}: conditioning {time.perf_counter() - _cc_t0:.2f}s | "
+                print(f"[CondCache] block {i+1}: conditioning "
+                      f"{float(_cond_req.get('elapsed') or 0):.2f}s | "
                       f"hits={_st['hits'] - _cc_h0} misses={_st['misses'] - _cc_m0} | "
                       f"store {self._cond_store.report()}")
 
@@ -6063,7 +6523,7 @@ class SnapshotDetailerSamplerNode:
                     dbg.record_stage('OffsetProbe 采样入口', block=i + 1,
                                      latent_shape=list(tmp_latent['samples'].shape),
                                      has_noise_mask=('noise_mask' in tmp_latent),
-                                     steps=steps, start_step=start_at_step, end_step=end_at_step,
+                                     steps=sample_steps, start_step=start_at_step, end_step=end_at_step,
                                      cfg=cfg, sampler=sampler_name, scheduler=scheduler,
                                      seed=block_seed,
                                      has_model_negative=model_negative_to_use is not None,
@@ -6080,7 +6540,7 @@ class SnapshotDetailerSamplerNode:
                 sampled_latent = _ksampler(
                     model=model_to_use,
                     seed=block_seed,
-                    steps=steps,
+                    steps=sample_steps,
                     cfg=cfg,
                     sampler_name=sampler_name,
                     scheduler=scheduler,
@@ -6119,14 +6579,37 @@ class SnapshotDetailerSamplerNode:
                                      peak_captured=(peak is not None),
                                      noop=bool(invert_info.get('noop')))
 
+                # ── 阶段点：decode 屏障 ─────────────────────────────────────────
+                # 视频段里这一步让**所有帧先采样完**再一起解码：采样与解码各占一次
+                # 模型上下文（SDXL ↔ VAE 来回驱逐是逐帧串行里最贵的一笔）。
+                yield {'kind': 'decode', 'block': i + 1}
+
                 decoded_image = VAEDecode().decode(vae=next_pipeline.vae, samples=sampled_latent)[0]
 
                 # Recover to pre-resize (cropped) resolution so next block starts at cropped size
-                if not is_last:
-                    if resize_info is not None:
+                # 落点是**最近那次 Scale/Limit 之前**的尺寸（step_resize_info），不是
+                # resize_info.original_* —— 后者是链首复原落点（= 原始输入尺寸）；链首之后
+                # 又摆了显式 Scale/Limit 时两者不是一档，用错会多绕一次降采样。
+                #
+                # 但后面若有一颗 Recover 要还掉**当前这层**软帧（Limit → Detailer →
+                # Recover Limit 这种"夹心"接法），这里就不能先缩回去：那颗 Recover 本来就
+                # 按 frame 里的「前 → 后」尺寸一次还原（还会用那一步之前的原像素补 mask
+                # 之外的区域）。先缩一次、它再缩一次 = 白白多一趟重采样，mask 还要先被
+                # 重采样到它自己的网格（真踩过：image 已是 1179x760 而 mask 还是 1272x824）。
+                _soft_closer = None if is_last else soft_frame_will_close(geo_open, steps, i)
+                if _soft_closer is not None:
+                    current_image = decoded_image
+                    current_mask = resized_mask
+                    print(f"[Block {i+1}] keeping the working resolution "
+                          f"{int(decoded_image.shape[2])}x{int(decoded_image.shape[1])} — "
+                          f"{GEO_RECOVER_LABEL.get(geo_open[-1].get('kind'), 'Recover')} at block "
+                          f"{i + 1 + _soft_closer} restores it in one pass")
+                elif not is_last:
+                    _mid_info = step_resize_info if step_resize_info is not None else resize_info
+                    if _mid_info is not None:
                         recovered_decoded, recovered_mask = recover_size(
                             image=decoded_image,
-                            resize_info=resize_info,
+                            resize_info=_mid_info,
                             mask=resized_mask
                         )
                         current_image = recovered_decoded
@@ -6167,8 +6650,35 @@ class SnapshotDetailerSamplerNode:
                                  latent_shape=_latent_shape(sampled_latent),
                                  has_resize_info=resize_info is not None)
                 if not is_last:
-                    dbg.record_image(f'Block {i+1} · 复原到裁剪分辨率（传给下一块）', current_image,
-                                     block=i + 1)
+                    _label = ('保持工作分辨率（下游 Recover 一次还原）' if _soft_closer is not None
+                              else '复原到裁剪分辨率（传给下一块）')
+                    dbg.record_image(f'Block {i+1} · {_label}', current_image, block=i + 1)
+
+            # 图模式的产出 = **流进 End.image 的那一份**，不是"最后执行过哪颗节点的工作图"。
+            # 汇聚节点（switch）的产物只挂在端口值表里、不经过 current_image —— 不从这里
+            # 取就永远拿不到（switch 后面的链会白跑）。
+            if graph_mode and isinstance(_pg, dict):
+                for _e in _pg.get('edges') or []:
+                    if str(_e.get('target')) != END_ID:
+                        continue
+                    _tport = str(_e.get('targetPort') or '')
+                    if _tport not in ('image', 'mask'):
+                        continue
+                    _v = _values.get((str(_e.get('source')), str(_e.get('sourcePort'))))
+                    if _v is None or not hasattr(_v, 'dim'):
+                        continue
+                    if _tport == 'image' and _v.dim() == 4:
+                        if _v is not current_image:
+                            print(f'[PipelineBlock] chain product follows End.image from '
+                                  f'{_e.get("source")}:{_e.get("sourcePort")} → {tuple(_v.shape)}')
+                        current_image = _v
+                        next_pipeline.image = _v
+                    elif _tport == 'mask' and _v.dim() in (2, 3):
+                        if _v is not current_mask:
+                            print(f'[PipelineBlock] chain mask follows End.mask from '
+                                  f'{_e.get("source")}:{_e.get("sourcePort")} → {tuple(_v.shape)}')
+                        current_mask = _v
+                        next_pipeline.mask = _v
         finally:
             # Restore pipeline state
             if next_pipeline.config is not None:
@@ -6407,12 +6917,17 @@ class SnapshotDetailerSamplerNode:
             setattr(target, 'loras', getattr(source, 'loras'))
 
     def _run_preset_video(self, server, action, seed=0):
-        """视频模式跑一条 Pipeline Preset：抽一列帧 → **逐帧**过同一条 block 链 → 编码回 mp4。
+        """视频模式跑一条 Pipeline Preset：抽一列帧 → **每帧一条 pipeline** 走同一条链
+        → 编码回 mp4。
 
         与 run_detailer 的差别只有"输入是一列帧而不是一张图"：preset 解析、pipeline 绑定、
         Preprocess 开关、prompt/lora 注入全部走同一份 `_run_pipeline_blocks`，所以同一套
-        preset 在视频里跑出来的单帧结果与图像模式完全一致。逐帧（而不是把帧当 batch）是
-        调用方拍板的：帧间不共享状态，但每一帧的预处理/裁剪/mask 都是独立的一趟。
+        preset 在视频里跑出来的单帧结果与图像模式完全一致。
+
+        **执行器之间传的是 `List[PipelineData]`**（见 `frames_from_batch`）：每帧自带自己的
+        image / mask / latent / 几何帧栈，所以裁剪框、工作分辨率、检测结论都是逐帧的。
+        model / clip / vae / 条件仓库 / cache 按引用共享，逐帧跑不重建模型；放弃的只是
+        合批采样那份吞吐（逐帧 ksampler，见 `_skapler` 的 batch 日志）。
 
         mask 来自宿主传来的 `mask_input`（视频模式 Mask 轨的画面，亮度 = 覆盖）；没有就
         不送 mask（整幅都是工作区）。产物不落图层/图池 —— 这一段视频回给宿主按段落位。
@@ -6486,60 +7001,81 @@ class SnapshotDetailerSamplerNode:
             user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
 
         # 产出帧的 fps 与抽取 fps 相同 —— 段长在时间线上因此对得上（n / fps 秒）。
-        out_frames = []
-        for i, frame in enumerate(frames):
-            if mm.processing_interrupted():
-                raise mm.InterruptProcessingException()
-            run_pipeline = self._base_pipeline.copy()
-            run_pipeline.image = frame.clone()
-            # mask 的尺寸必须与这一帧一致（两张视频的像素尺寸不一定相同）——
-            # crop_mask 要求 image/mask 同网格，差一格就会炸在 block 里。
-            user_mask = None
-            if mask_frames:
+        #
+        # ── 每帧一条 pipeline，逐帧过链 ──────────────────────────────────────────
+        # 执行器之间传的是 `List[PipelineData]`（见 `frames_from_batch`）：每帧自带
+        # 自己的 image / mask / latent / 几何帧栈，于是裁剪框、工作分辨率、检测结论
+        # 都是逐帧的 —— 6 帧里只有 3 帧检出人物时，没检出的那 3 帧原样穿过。
+        # 共享的是 model / clip / vae / 条件仓库（`PipelineData.copy()` 按引用继承），
+        # 所以逐帧跑并不会重建模型，省掉的是合批采样那部分吞吐。
+        if mm.processing_interrupted():
+            raise mm.InterruptProcessingException()
+        n_frames = len(frames)
+        masks = None
+        if mask_frames:
+            # mask 轨：每帧各自对齐到自己的帧网格，然后逐帧下发。不再叠成 [N,H,W] ——
+            # 两张视频的像素尺寸不一定相同，叠之前得先 pad，那是 batch 时代的账。
+            masks = []
+            for i in range(n_frames):
                 mf = mask_frames[i] if i < len(mask_frames) else mask_frames[-1]
-                user_mask = mf
-                if user_mask.dim() == 4:
-                    user_mask = user_mask[0]
-                if user_mask.shape[-1] != 1:
-                    user_mask = user_mask.mean(dim=-1, keepdim=True)
-                if user_mask.shape[0] != frame.shape[1] or user_mask.shape[1] != frame.shape[2]:
-                    user_mask = torch.nn.functional.interpolate(
-                        user_mask.permute(2, 0, 1).unsqueeze(0),
-                        size=(int(frame.shape[1]), int(frame.shape[2])),
+                m = mf[0] if mf.dim() == 4 else mf
+                if m.shape[-1] != 1:
+                    m = m.mean(dim=-1, keepdim=True)
+                fh, fw = int(frames[i].shape[-3]), int(frames[i].shape[-2])
+                if int(m.shape[0]) != fh or int(m.shape[1]) != fw:
+                    m = torch.nn.functional.interpolate(
+                        m.permute(2, 0, 1).unsqueeze(0),
+                        size=(fh, fw),
                         mode='bilinear', align_corners=False,
                     ).squeeze(0).permute(1, 2, 0)
-                user_mask = user_mask.squeeze(-1)
+                masks.append(m.squeeze(-1))
 
-            run_architecture = (run_pipeline.config.get('architecture')
-                                if run_pipeline.config else None)
-            global_params = {
-                'seed': seed,
-                **{k: getattr(server, k) for k in server.GLOBAL_PARAM_DEFAULTS},
-                'context_regex': '.+',
-            }
-            arch_overrides, _rule = server.arch_overrides(run_architecture)
-            if arch_overrides:
-                global_params.update(arch_overrides)
+        # 逐帧种子：整段共用一份噪声会让每一帧长得一模一样，所以按 next_seed 的节奏
+        # 排出 N 个种子，帧 i 从 seeds[i] 起（块内仍按 next_seed 往下发）。
+        frame_seeds = []
+        _s = seed
+        for _ in range(n_frames):
+            frame_seeds.append(_s)
+            _s = next_seed(_s)
 
-            _next, _orig, detailed, detail_meta = self._run_pipeline_blocks(
-                run_pipeline, user_mask, user_positive, user_loras, global_params, blocks,
-                server=server, extra_prompt=extra_prompt, graph=run_graph,
-            )
-            if detailed is None:
-                raise ValueError(f'Frame {i + 1}/{len(frames)} produced no image')
-            img = detailed if detailed.dim() == 4 else detailed.unsqueeze(0)
-            if img.shape[0] > 1:
-                # 链一帧吐多张（少数批量节点）：视频只需要每帧一张，取第一张。
-                img = img[:1]
-            out_frames.append(img[0])
-            server.preset_video_current = i + 1
-            server.preset_video_progress = (i + 1) / len(frames)
-            if detail_meta:
-                print(f"[PresetVideo] frame {i + 1}: Recover Crop is off — the chain returned a patch "
-                      f"({tuple(img.shape)}), the video is that patch")
-            # seed 逐帧推进：同一段里每帧用不同种子，避免整段一模一样（与 block 链内
-            # next_seed 的节奏一致）。
-            seed = next_seed(seed)
+        pipes = self.frames_from_batch(frames, None, base_pipeline=self._base_pipeline)
+        print(f"[PresetVideo] {n_frames} frames → {len(pipes)} pipelines "
+              f"(shared model/clip/vae, per-frame geometry & detect)")
+
+        run_architecture = (pipes[0].config.get('architecture')
+                            if pipes and pipes[0].config else None)
+        global_params = {
+            'seed': seed,
+            **{k: getattr(server, k) for k in server.GLOBAL_PARAM_DEFAULTS},
+            'context_regex': '.+',
+        }
+        arch_overrides, _rule = server.arch_overrides(run_architecture)
+        if arch_overrides:
+            global_params.update(arch_overrides)
+
+        # 进度按帧报（`_run_pipeline_frames` 每跑完一帧写一次），不再是"0 然后 1"。
+        server.preset_video_total = n_frames
+        server.preset_video_current = 0
+        server.preset_video_progress = 0.0
+        _next, _orig, detailed, detail_meta = self._run_pipeline_blocks(
+            pipes, masks, user_positive, user_loras, global_params, blocks,
+            server=server, extra_prompt=extra_prompt, graph=run_graph,
+            frame_seeds=frame_seeds,
+        )
+        if detailed is None:
+            raise ValueError(f'The chain produced no image for this segment ({n_frames} frames)')
+        batch_out = detailed if detailed.dim() == 4 else detailed.unsqueeze(0)
+        if batch_out.shape[0] != n_frames:
+            # 链吐出的条数与喂进去的对不上（有帧没产出）—— 按帧数截断/告警，
+            # 宁可少给也别把错位的结果编进视频。
+            print(f"[PresetVideo] WARNING: the chain returned {batch_out.shape[0]} images for "
+                  f"{n_frames} frames — truncating to {min(batch_out.shape[0], n_frames)}")
+        out_frames = [batch_out[k] for k in range(min(batch_out.shape[0], n_frames))]
+        server.preset_video_current = n_frames
+        server.preset_video_progress = 1.0
+        if detail_meta:
+            print(f"[PresetVideo] Recover Crop is off — the chain returned a patch "
+                  f"({tuple(batch_out.shape)}), the video is that patch")
 
         url = _vid_encode(out_frames, fps=enc_fps,
                           name=f'preset_{preset_set.get("name") if preset_set else "run"}')

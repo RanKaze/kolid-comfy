@@ -9,7 +9,8 @@
 // 紧凑表单。所有交互控件挂在 `.nodrag` / `.nowheel` 容器里 —— 否则在输入框里拖选文本、
 // 滚轮滚动会去拖动/缩放画布，参数就编辑不了。
 //
-// 端口颜色按 kind 分：exec 灰 / image 绿 / mask 青 / *_info 紫。连线只有同 kind 能连。
+// 端口颜色按 kind 分：exec 灰 / image 绿 / mask 青 / *_info 紫。连线同 kind 才连 ——
+// 唯一的跨类型例外是 **mask → image**（后端把 mask 铺成黑白图，见 portsCompatible）。
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -21,6 +22,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import {
   NODE_SPECS, portKindOfNode, nodePorts, validateGraph, defaultParamsFor, defaultNameFor, PARAM_FIELDS,
+  portsCompatible,
   START_ID, END_ID, BOARD_ID, graphEnableMask, isSchedulable,
   type PipelineGraph, type GraphNode, type NodeKind, type PortKind, type PortSpec, type ParamField,
 } from './pipeline-graph';
@@ -713,8 +715,9 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
     const sk = kindOfRf(c.source!, 'out', String(c.sourceHandle));
     const tk = kindOfRf(c.target!, 'in', String(c.targetHandle));
     if (!sk || !tk) return false;
-    // 同 kind 可连；任何一端是 any（Switch 的 data）也能连。
-    return sk === tk || sk === 'any' || tk === 'any';
+    // 同 kind 可连；任何一端是 any（Switch 的 data）也能连；mask 还能接进 image
+    // （执行器把它铺成黑白图）。规则与后端 ports_compatible 逐条一致。
+    return portsCompatible(sk, tk);
   }, [kindOfRf]);
 
   // 新建边：官方 addEdge。id 必须**跨会话也不撞车** —— 迁移的边是 `e-0`、`e-1`（blocksToGraph

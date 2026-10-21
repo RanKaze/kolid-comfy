@@ -115,6 +115,31 @@ def _euler_unsampled_head(model, x, sigmas, extra_args=None, callback=None, disa
         model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable, **kwargs)
 
 
+def _prepare_noise_seeds(latent_image, seeds):
+    """逐帧独立噪声：帧 i 用 seeds[i] 单独起一个 generator 抽 randn。
+
+    与"这一帧单独跑一次采样"**逐位相同**（comfy 单帧路径就是
+    `torch.randn(size, generator=torch.manual_seed(seed))`，见 prepare_noise_inner 的
+    noise_inds=None 分支），所以视频 batch 化之后每帧噪声仍然等于逐帧跑的那一帧。
+
+    不能改用 latent['batch_index']：prepare_noise 内部是
+    `for i in range(unique_inds[-1] + 1)` 逐个抽，索引必须是**紧凑小整数**；把裸种子
+    （next_seed 是 uint64 量级）塞进去，np.unique 会被撑成 float64，直接抛
+    `TypeError: 'numpy.float64' object cannot be interpreted as an integer`（就算塞得进
+    int64，`range(1e19)` 也会当场挂死）。
+    """
+    out = []
+    for s in seeds:
+        g = torch.Generator(device='cpu')
+        g.manual_seed(int(s) & 0x7FFFFFFFFFFFFFFF)
+        n = torch.randn([1] + list(latent_image.size())[1:], dtype=torch.float32,
+                        layout=latent_image.layout, generator=g, device='cpu')
+        out.append(n.to(dtype=latent_image.dtype))
+    if len(out) == 1:
+        return out[0]
+    return torch.cat(out, axis=0)
+
+
 def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
               latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None,
               force_full_denoise=False, sigmas=None, model_negative=None,
@@ -130,9 +155,22 @@ def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negati
     if disable_noise:
         noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype,
                              layout=latent_image.layout, device="cpu")
+        frame_seeds = None
     else:
-        batch_inds = latent.get("batch_index", None)
-        noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
+        # 视频 batch 走逐帧种子（有 noise_seeds 就优先），单图照旧走 comfy 的口径。
+        frame_seeds = latent.get("noise_seeds", None)
+        if frame_seeds is not None and not latent_image.is_nested:
+            noise = _prepare_noise_seeds(latent_image, frame_seeds)
+        else:
+            batch_inds = latent.get("batch_index", None)
+            noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
+
+    # 一行交代"这次到底几张图一起进采样"：batch 化之后视频段的耗时/显存全靠它判断，
+    # 出现 batch=1 而输入是 N 帧时，说明上游某块把 batch 拆掉了。
+    _n_lat = int(latent_image.shape[0]) if latent_image.dim() >= 1 else 1
+    print(f"[KSampler] batch={_n_lat} latent={tuple(latent_image.shape)} "
+          f"noise={tuple(noise.shape)} "
+          f"seeds={'per-frame/%d' % len(frame_seeds) if frame_seeds is not None else seed}")
 
     noise_mask = None
     if "noise_mask" in latent:
@@ -489,11 +527,18 @@ class ConfigData(dict):
 
 class SamplerCache:
     def __init__(self):
+        # 私有层：随 copy() 走自己的一份（inverted_latent 的键只有 block 序号，
+        # 跨帧共享会让第二帧盖掉第一帧那份噪声）。
         self._cache = {}
+        # 共享层：**按引用继承**（copy() 不复制）。这里只放"输入身份决定结果"的
+        # 条目 —— model/clip 的 lora 克隆（键 = (id(model), id(clip), loras 集合)）。
+        # 视频段每帧各跑一趟链时，这一层让 LoRA 只应用一次，而不是每帧重贴一遍。
+        self._shared = {}
 
     def copy(self):
         new = SamplerCache()
         new._cache = self._cache.copy()
+        new._shared = self._shared          # 引用继承：跨帧共享 lora 克隆
         return new
 
     # ---- 反演噪声 latent（add_noise = Invert 的块在梯子顶点那一刻的 x）----
@@ -598,27 +643,29 @@ class SamplerCache:
             loras = []
 
         # ---- 正向 model + clip ----
+        # 走**共享层**（_shared）：键全是身份（模型/clip 的对象 id + lora 集合值），
+        # 同一份输入必然得到同一份克隆 —— 视频段逐帧跑链时只应用一次 LoRA。
         cache_key = (id(model), id(clip) if clip is not None else None, frozenset(loras))
 
-        if cache_key in self._cache:
+        if cache_key in self._shared:
             print(f"✓ LoRA model cache hit")
-            model_patcher, clip_patcher = self._cache[cache_key]
+            model_patcher, clip_patcher = self._shared[cache_key]
         else:
             model_patcher, clip_patcher = self._apply_loras(model, clip, loras)
             result = (model_patcher, clip_patcher)
-            self._cache[cache_key] = result
+            self._shared[cache_key] = result
 
         # ---- 负向 model (也应用相同 LoRA) ----
         model_negative_patcher = None
         if model_negative is not None:
             neg_cache_key = (id(model_negative), None, frozenset(loras))
 
-            if neg_cache_key in self._cache:
+            if neg_cache_key in self._shared:
                 print(f"✓ LoRA model_negative cache hit")
-                model_negative_patcher, _ = self._cache[neg_cache_key]
+                model_negative_patcher, _ = self._shared[neg_cache_key]
             else:
                 model_negative_patcher, _ = self._apply_loras(model_negative, None, loras)
-                self._cache[neg_cache_key] = (model_negative_patcher, None)
+                self._shared[neg_cache_key] = (model_negative_patcher, None)
 
         # ========== 应用 Reference IPAdapter ==========
         if reference is not None and reference.reference_ipadapters:

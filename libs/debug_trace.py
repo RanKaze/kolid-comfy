@@ -164,7 +164,9 @@ class DebugTrace:
             t = _as_preview_tensor(image_tensor)
             if t is None:
                 return self
-            arr = t.squeeze(0).cpu().numpy()
+            # 视频 batch 是 [B,H,W,C]，B>1 时 squeeze(0) 不掉维 → PIL 收到 4D 直接报
+            # "Cannot handle this data type"。面板一格只放得下一张，取第一帧代表这批。
+            arr = (t[0] if t.dim() == 4 else t).cpu().numpy()
             if arr.ndim == 3 and arr.shape[-1] == 1:
                 arr = arr[..., 0]
             arr = (arr * 255).clip(0, 255).astype('uint8')

@@ -416,19 +416,63 @@ def crop_mask(image, mask, reserve):
         cropped_image_tensor = torch.stack(cropped_images, dim=0)
         cropped_mask_tensor = torch.stack(cropped_masks_list, dim=0)
 
-        final_crop_info = crop_infos[0]
+        # ── info 的形状：逐帧一份 ──────────────────────────────────────────────
+        # 每一帧的 bbox 是各算各的（batch 里各帧的 mask 不一样），所以回贴时必须按帧
+        # 各自的矩形走 —— 只留 crop_infos[0] 会让第 2..N 帧贴到第一帧的位置上去。
+        # B>1 → **list**（每帧一份，顺序与 batch 一致）；B==1 → 仍是单个 dict，
+        # 与单图时代完全同形，存量调用方（节点 / 老链路）行为一字不差。
+        # 消费侧统一走 _geo_info_at()（recover_* 与几何帧栈都认这两种形状）。
+        final_crop_info = crop_infos if B > 1 else crop_infos[0]
 
-        print(f"[MASK-TRACE] crop_mask OUTPUT | crop_info={final_crop_info} | cropped_mask shape={cropped_mask_tensor.shape} | sum={cropped_mask_tensor.sum().item():.1f}")
+        print(f"[MASK-TRACE] crop_mask OUTPUT | crop_info={final_crop_info if not isinstance(final_crop_info, list) else f'<{len(final_crop_info)} per-frame infos>'} | cropped_mask shape={cropped_mask_tensor.shape} | sum={cropped_mask_tensor.sum().item():.1f}")
         return (cropped_image_tensor, cropped_mask_tensor, final_crop_info)
 
     except Exception as e:
         raise Exception(f"Failed to crop image by mask: {e}")
 
+def _geo_info_at(info, i=0):
+    """几何 info 的取帧器：dict → 原样（单图 / 整批同参的 info，如 Meet/Fit/Scale/Limit）；
+    list → 取第 i 帧那一份（逐帧 info，如 Crop —— 各帧 bbox 不同）。
+
+    有了它，几何块产出的 info 就能**统一以 list 承载逐帧参数**，而消费侧（recover_* /
+    几何帧栈）不必关心拿到的是哪一种：长度对不上就按最后一帧兜底。
+    """
+    if isinstance(info, list):
+        if not info:
+            return {}
+        return info[i] if i < len(info) else info[-1]
+    return info
+
+
 def recover_crop(background, image, crop_info, recover_method, mask=None):
     """
     Recover cropped image to original size using crop info
+
+    crop_info 可以是**单份 dict**（单图，或整批共用同一矩形），也可以是 **list**（逐帧
+    一份，视频 batch 里 Crop 各帧 bbox 不同）。list 时逐帧按自己的矩形贴回自己的背景，
+    顺序与 batch 一致。
     """
     try:
+        # ── 逐帧 info：拆成 B 次单帧回贴再 stack ──────────────────────────────
+        # batch 内各帧的裁剪矩形不同，且 crop_mask 会把小框 pad 到本批最大框 —— 所以第 i
+        # 帧的有效内容只在左上角 [crop_height_i, crop_width_i]，要贴到它自己的 (cx_i, cy_i)。
+        # 走一条路径处理会把 2..N 帧贴到第一帧的位置上（尺寸/坐标都不对）。
+        if isinstance(crop_info, list):
+            _B = int(image.shape[0])
+            _outs, _out_masks = [], []
+            for _i in range(_B):
+                _r, _rm = recover_crop(
+                    background=background[_i:_i + 1], image=image[_i:_i + 1],
+                    crop_info=crop_info[_i] if _i < len(crop_info) else crop_info[-1],
+                    recover_method=recover_method,
+                    mask=(mask[_i:_i + 1] if mask is not None else None))
+                _outs.append(_r)
+                _out_masks.append(_rm)
+            _img = torch.cat(_outs, dim=0)
+            if all(m is not None for m in _out_masks):
+                return (_img, torch.cat(_out_masks, dim=0))
+            return (_img, None)
+
         ow = crop_info.get("original_width")
         oh = crop_info.get("original_height")
         cx = crop_info.get("crop_x")
@@ -436,14 +480,90 @@ def recover_crop(background, image, crop_info, recover_method, mask=None):
 
         if None in (ow, oh, cx, cy):
             raise ValueError("Crop info missing required fields")
+        ow, oh, cx, cy = int(ow), int(oh), int(cx), int(cy)
 
         # QwenImage21 等 alpha VAE 解码出 4 通道，背景可能是 3 通道：先对齐再加权混合
         background, image = align_alpha_channels(background, image)
 
         B, H, W, C = image.shape
 
+        # mask 先收敛成 [B,H,W]（下面按块切片 + 逐元素混合，2 维进来会炸）。
+        if mask is not None:
+            if mask.dim() == 4:
+                mask = mask.squeeze(1) if mask.shape[1] == 1 else mask.mean(dim=1)
+            elif mask.dim() == 2:
+                mask = mask.unsqueeze(0)
+            if int(mask.shape[0]) == 1 and B > 1:
+                mask = mask.expand(B, -1, -1)
+
+        # 真实 crop 尺寸以 info 为准（batch pad 出来的那圈 0 不是内容，见 crop_mask）。
+        # info 里没带（旧存档 / 手写 info）就按整块走，与单图时代一致。
+        ch = int(crop_info.get("crop_height") or H)
+        cw = int(crop_info.get("crop_width") or W)
+
+        # ── background 与 info 描述的画布不符 ⇒ 先把矩形换算到 background 坐标系 ────
+        # 典型成因：背景给的是整幅原图，而 crop_info 记的是工作分辨率那层坐标系。
+        # 坐标不换算就贴 = 位置整体偏，同样是"下面的内容跑到上面"。必须**先换算再
+        # 比较 image**：image 该缩到多大，指的是 background 坐标系里的那块矩形。
+        bg_h, bg_w = int(background.shape[1]), int(background.shape[2])
+        if (bg_h, bg_w) != (oh, ow):
+            sy, sx = bg_h / float(oh), bg_w / float(ow)
+            print(f"[recover_crop] background {bg_w}x{bg_h} ≠ crop info canvas {ow}x{oh} — "
+                  f"scaling the paste rect by ({sx:.4f}, {sy:.4f})")
+            cx, cy = int(round(cx * sx)), int(round(cy * sy))
+            ch, cw = max(1, int(round(ch * sy))), max(1, int(round(cw * sx)))
+            ow, oh = bg_w, bg_h
+
+        # ── image 与 crop 框尺寸不符：分清"batch pad"和"上游没还干净" ────────────
+        # 两者尺寸都对不上，但语义相反：
+        #   · batch pad —— 小框被 pad 到本批最大框（见 crop_mask），多出来的是**补的 0**，
+        #     有效内容只占左上角，就该截；
+        #   · 上游没还干净 —— image 还是工作分辨率（放大 3~5 倍），内容是整块的，取左上
+        #     一块贴回去就是内容整体错位，看着像"画面下面的东西跑到了上面"，mask 跟着
+        #     错位于是"没按 mask 还原"。这种必须缩放。
+        # 判据：多出来的那几行/列是不是纯 0（pad 出来的就是 0）。
+        if (H, W) != (ch, cw):
+            _padded = (H >= ch and W >= cw)
+            if _padded and H > ch and float(image[:, ch:, :, :].abs().max()) > 1e-6:
+                _padded = False
+            if _padded and W > cw and float(image[:, :ch, cw:, :].abs().max()) > 1e-6:
+                _padded = False
+            if _padded:
+                print(f"[recover_crop] padded from {W}x{H} (batch pad — keeping the top-left {cw}x{ch})")
+                ch, cw = min(ch, H), min(cw, W)
+            else:
+                print(f"[recover_crop] source {W}x{H} ≠ crop rect {cw}x{ch} — resampling the source "
+                      f"back to the crop size first (a corner slice would shift the content)")
+                image = _geo_interp(image, (ch, cw), 'bilinear')
+                if mask is not None:
+                    mask = _geo_interp_mask(mask, (ch, cw), 'bilinear')
+                H, W = ch, cw
+        else:
+            # 贴到画布右下角时区域会被截断，按 image 能提供的部分裁剪
+            ch, cw = min(ch, H), min(cw, W)
+
+        # ── mask 也必须与 crop 框同网格 ─────────────────────────────────────────
+        # mask 端口的来源与 image 不一定同一条路（image 接 Recover Limit 的输出、mask
+        # 还接在 Limit 上；或 detailer 之后 mask 没跟着缩回来）。尺寸不对时下面
+        # `mask[:, :, :ch, :cw]` 就只取左上角 —— mask 内容整体错位，于是"没按 mask
+        # 还原"。判据同 image：多出来的是补的 0 就截（batch pad），否则缩放。
+        if mask is not None:
+            mh, mw = int(mask.shape[1]), int(mask.shape[2])
+            if (mh, mw) != (ch, cw):
+                _mpad = (mh >= ch and mw >= cw)
+                if _mpad and mh > ch and float(mask[:, ch:, :].abs().max()) > 1e-6:
+                    _mpad = False
+                if _mpad and mw > cw and float(mask[:, :ch, cw:].abs().max()) > 1e-6:
+                    _mpad = False
+                if _mpad:
+                    mask = mask[:, :ch, :cw]
+                else:
+                    print(f"[recover_crop] mask {mw}x{mh} ≠ crop rect {cw}x{ch} — resampling the "
+                          f"mask onto the crop rect")
+                    mask = _geo_interp_mask(mask, (ch, cw), 'bilinear')
+
         # ==================== 仅保留一行 print ====================
-        print(f"[recover_crop] {W}x{H} → {ow}x{oh} | method={recover_method}")
+        print(f"[recover_crop] {cw}x{ch} @ ({cx},{cy}) → {ow}x{oh} | method={recover_method}")
 
         # ==================== 统一设备 ====================
         # 同样必须是阻塞搬运：下面马上要用 mask/image 参与逐元素运算与切片赋值，
@@ -457,30 +577,31 @@ def recover_crop(background, image, crop_info, recover_method, mask=None):
         # 从 background 克隆开始
         recovered = background.clone()
 
-        # 准备要粘贴的区域
-        crop_region = recovered[:, cy:cy + H, cx:cx + W, :]
+        # 准备要粘贴的区域（按真实 crop 尺寸；区域可能贴着画布右下角被截断，取 min）
+        crop_region = recovered[:, cy:cy + ch, cx:cx + cw, :]
+        _src = image[:, :crop_region.shape[1], :crop_region.shape[2], :]
 
         if recover_method == "bounds_only":
             # 直接硬覆盖（不需要 mask）
-            crop_region.copy_(image)
+            crop_region.copy_(_src)
 
         elif recover_method in ["mask_blend", "mask_only"]:
             if mask is None:
                 raise ValueError(f"{recover_method} requires mask input")
 
-            # mask 转为 (B, 1, H, W)
-            m = mask.unsqueeze(1)[:, :, :H, :W].float()   # (B, 1, H, W)
-            m3 = m.expand(-1, C, -1, -1).permute(0, 2, 3, 1)  # (B, H, W, C)
+            # mask 转为 (B, 1, ch, cw)
+            m = mask.unsqueeze(1)[:, :, :crop_region.shape[1], :crop_region.shape[2]].float()
+            m3 = m.expand(-1, C, -1, -1).permute(0, 2, 3, 1)  # (B, ch, cw, C)
 
             if recover_method == "mask_blend":
                 # 柔和混合（推荐，大多数情况使用这个）
-                blended = crop_region * (1 - m3) + image * m3
+                blended = crop_region * (1 - m3) + _src * m3
                 crop_region.copy_(blended)
 
             elif recover_method == "mask_only":
                 # 只保留 mask 区域的内容（硬抠图，不混合背景）
                 # 等价于：background * (1 - mask) + image * mask，但只在 mask 区域替换
-                crop_region.copy_(image * m3 + crop_region * (1 - m3))  # 或者更直接：
+                crop_region.copy_(_src * m3 + crop_region * (1 - m3))  # 或者更直接：
                 # crop_region.copy_(torch.where(m3 > 0.5, image, crop_region))
 
         else:
@@ -495,8 +616,9 @@ def recover_crop(background, image, crop_info, recover_method, mask=None):
             # 把 cropped mask 放回原始位置。crop 框可能贴着画布右下角（或 crop 帧在
             # batch 内被 padding 放大过），此时 mask 会超出画布可用区域——按画布内的
             # 实际范围裁剪粘贴，避免 target/源尺寸对不上直接报错。
-            h = min(Hm, oh - cy)
-            w = min(Wm, ow - cx)
+            # 同样只认真实 crop 尺寸内的那部分（pad 出来的 0 不是 mask 内容）。
+            h = min(Hm, ch, oh - cy)
+            w = min(Wm, cw, ow - cx)
             if h > 0 and w > 0:
                 recovered_mask[:, cy:cy + h, cx:cx + w] = mask[:, :h, :w]
 
@@ -1223,7 +1345,23 @@ def recover_meet_image(image, mask, info, background, interpolation='bilinear',
     background=None 时退回 ImageRecoverMeetNode 的**有损**口径：被裁掉的那圈边用
     padding_color 填（节点在没有接 background 时就是这么做的 —— 两种还原方式的差别
     只在边缘，中间的 region 一样）。
+
+    info 可以是逐帧 list（见 _geo_info_at）—— 视频 batch 里各帧的几何参数不必相同。
     """
+    if isinstance(info, list):
+        _B = int(image.shape[0])
+        _outs, _oms = [], []
+        for _i in range(_B):
+            _r, _rm = recover_meet_image(
+                image[_i:_i + 1], mask[_i:_i + 1] if mask is not None else None,
+                info[_i] if _i < len(info) else info[-1],
+                background[_i:_i + 1] if background is not None else None,
+                interpolation=interpolation, padding_color=padding_color)
+            _outs.append(_r)
+            _oms.append(_rm)
+        return (torch.cat(_outs, dim=0),
+                torch.cat(_oms, dim=0) if all(m is not None for m in _oms) else None)
+
     B, _h, _w, C = image.shape
     original_w = int(info['originalWidth'])
     original_h = int(info['originalHeight'])
@@ -1323,7 +1461,22 @@ def fit_image(image, mask=None, width=0, height=0, interpolation='bilinear',
 
 
 def recover_fit_image(image, mask, info, interpolation='bilinear'):
-    """取内框，缩回原尺寸。补出来的边在这里自然丢掉（它们本来就不是内容）。"""
+    """取内框，缩回原尺寸。补出来的边在这里自然丢掉（它们本来就不是内容）。
+
+    info 可以是逐帧 list（见 _geo_info_at）。
+    """
+    if isinstance(info, list):
+        _B = int(image.shape[0])
+        _outs, _oms = [], []
+        for _i in range(_B):
+            _r, _rm = recover_fit_image(
+                image[_i:_i + 1], mask[_i:_i + 1] if mask is not None else None,
+                info[_i] if _i < len(info) else info[-1], interpolation=interpolation)
+            _outs.append(_r)
+            _oms.append(_rm)
+        return (torch.cat(_outs, dim=0),
+                torch.cat(_oms, dim=0) if all(m is not None for m in _oms) else None)
+
     B, H, W, _C = image.shape
     original_w = int(info['originalWidth'])
     original_h = int(info['originalHeight'])
@@ -1356,7 +1509,23 @@ def recover_scale_image(image, mask, info, background=None, interpolation='bilin
 
     info 认两种写法：`original_width/original_height`（limit_pixels 的 resize_info）
     与 `width/height`（Scale 帧自带的读数）。background 尺寸对不上 = 明确报错。
+
+    info 可以是逐帧 list（见 _geo_info_at）。
     """
+    if isinstance(info, list):
+        _B = int(image.shape[0])
+        _outs, _oms = [], []
+        for _i in range(_B):
+            _r, _rm = recover_scale_image(
+                image[_i:_i + 1], mask[_i:_i + 1] if mask is not None else None,
+                info[_i] if _i < len(info) else info[-1],
+                background=(background[_i:_i + 1] if background is not None else None),
+                interpolation=interpolation)
+            _outs.append(_r)
+            _oms.append(_rm)
+        return (torch.cat(_outs, dim=0),
+                torch.cat(_oms, dim=0) if all(m is not None for m in _oms) else None)
+
     B, _h, _w, C = image.shape
     orig_w = int(info.get('original_width') or info.get('width') or 0)
     orig_h = int(info.get('original_height') or info.get('height') or 0)
