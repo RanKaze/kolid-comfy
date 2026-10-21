@@ -21,7 +21,7 @@ import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistorySto
 import { setLayerEditBlocked } from '../workbench/editGate';
 import { getBlendUi, setBlendUi } from '../workbench/store';
 import { ingestFile } from '../workbench/video/ingest';
-import { clearProcFill, setProcFill, setVidProcRun, vidStagingOverlay } from '../workbench/video/procRun';
+import { clearProcFill, clearProcQueue, dequeueProcClip, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, vidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets } from '../workbench/video/Assets';
 import { VidPlayer } from '../workbench/video/Player';
@@ -576,42 +576,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [vidSeek] = useState(() => createSeekCoalescer(vidTransport));
   const [vidPlaying, setVidPlaying] = useState(false);
   const [vidPps, setVidPps] = useState(60);
-  // ── solo ── 音频/视频**分开**：一边亮不影响另一边。住在宿主（不进工程、不持久化）——
-  // solo 是监视手段，不是工程内容；关掉重开 .cud 时它是灭的。
-  // 清理：solo 记的是轨道 id，删轨/换文档后那些 id 就没人认了 —— 按 tracks 变化清掉 stale 条目，
-  // 否则"solo 亮着但轨没了"会让画面整个空掉（clipAtSolo 找不到任何段）。
-  const [soloAudio, setSoloAudio] = useState<ReadonlySet<string>>(() => new Set());
-  const [soloVideo, setSoloVideo] = useState<ReadonlySet<string>>(() => new Set());
-  const toggleSolo = useCallback((trackId: string, kind: VidTrackKind) => {
-    if (kind === 'layer' || kind === 'process') return;   // Layer / process 轨不接 solo
-    const set = kind === 'audio' ? setSoloAudio : setSoloVideo;
-    set(prev => {
-      const next = new Set(prev);
-      if (next.has(trackId)) next.delete(trackId); else next.add(trackId);
-      return next;
-    });
-  }, []);
-  // ── mute ── **所有轨类型共用一套**（轨道 id 全局唯一）。语义按类型：音频 = 不响；
-  // 视频 = 监视器不显示；Layer = 段不合成。mute 优先于 solo。同样住在宿主、不持久化。
-  const [mute, setMute] = useState<ReadonlySet<string>>(() => new Set());
-  const toggleMute = useCallback((trackId: string) => {
-    setMute(prev => {
-      const next = new Set(prev);
-      if (next.has(trackId)) next.delete(trackId); else next.add(trackId);
-      return next;
-    });
-  }, []);
-  // solo/mute 清理：轨道没了（删轨/换文档）就把对应条目摘掉。依赖 tracks 的引用 —— 它只在
-  // 增删轨时变（移动/裁剪片段不动 tracks），所以这个 effect 不会跟着每次编辑都跑。
-  useEffect(() => {
-    const ids = new Set(vidProject.tracks.map(t => t.id));
-    setSoloAudio(prev => (prev.size && [...prev].some(id => !ids.has(id)))
-      ? new Set([...prev].filter(id => ids.has(id))) : prev);
-    setSoloVideo(prev => (prev.size && [...prev].some(id => !ids.has(id)))
-      ? new Set([...prev].filter(id => ids.has(id))) : prev);
-    setMute(prev => (prev.size && [...prev].some(id => !ids.has(id)))
-      ? new Set([...prev].filter(id => ids.has(id))) : prev);
-  }, [vidProject.tracks]);
+  // ── solo / mute ── 正身在**工程**里（VidProject.soloAudioIds / soloVideoIds / muteIds），
+  // 这里只是包成 Set 给两扇窗用：切换时写回工程、随 .cud 落盘，刷新 / 重开文档后还亮着。
+  // solo 音频/视频分开（一边亮不影响另一边）；mute 所有轨类型共用一套。删轨时 removeTrack
+  // 会把对应 id 一并摘掉，所以这里不用再按 tracks 变化清 stale。
+  const soloAudio = useMemo(() => new Set(vidProject.soloAudioIds ?? []), [vidProject.soloAudioIds]);
+  const soloVideo = useMemo(() => new Set(vidProject.soloVideoIds ?? []), [vidProject.soloVideoIds]);
+  const mute = useMemo(() => new Set(vidProject.muteIds ?? []), [vidProject.muteIds]);
   /** 视频模式下正在编辑的 Layer 段 key（'' = 游标不在任何 Layer 段上，图层集是文档主图层）。 */
   const [vidLayerKey, setVidLayerKey] = useState('');
   // Video 模式下活跃文档窗永远交出**工作台画布**（View 与整套 Image 模式工具都作用在它上面）：
@@ -624,6 +595,47 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const vidByDoc = useRef(new Map<number, VidProject>());
   const activeUid = blendDocs.activeUid;
   const activeUidRef = useRef(activeUid); activeUidRef.current = activeUid;
+  // 工程里的"顺带状态"（范围、mute/solo）改完找机会落盘：拖一次把手会连发几十次改动 ——
+  // 停手后再写，一次手势 = 一次盘。与"跑完一段自动保存"同一口径：工作台只对已绑过文件的
+  // 文档写，没绑的它自己返回（不弹目录框）。
+  const metaSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveVidSoon = useCallback((uid: number) => {
+    if (metaSaveTimer.current) clearTimeout(metaSaveTimer.current);
+    metaSaveTimer.current = setTimeout(() => {
+      metaSaveTimer.current = null;
+      if (activeUidRef.current !== uid) return;   // 已经切走别的文档：这一发不是它的了
+      autoSaveCud();
+    }, 700);
+  }, [autoSaveCud]);
+  // mute / solo 写回工程。**不进撤销摞**：它们是监视开关，不是编辑动作；但工程确实变了 ——
+  // 置脏（tab 上的 ● / 关前询问）并落盘，否则刷新 / 重开 .cud 就回到旧的开关状态。
+  const updateVidMeta = useCallback((fn: (p: VidProject) => VidProject) => {
+    const uid = activeUidRef.current;
+    const prev = vidProjectRef.current;
+    const next = fn(prev);
+    if (next === prev) return;
+    vidProjectRef.current = next;
+    setVidProject(next);
+    if (uid != null) {
+      vidByDoc.current.set(uid, next);
+      markVidDirty(uid);
+      saveVidSoon(uid);
+    }
+  }, [markVidDirty, saveVidSoon]);
+  const toggleSolo = useCallback((trackId: string, kind: VidTrackKind) => {
+    if (kind === 'layer' || kind === 'process') return;   // Layer / process 轨不接 solo
+    const key = kind === 'audio' ? 'soloAudioIds' : 'soloVideoIds';
+    updateVidMeta(p => {
+      const cur = p[key] ?? [];
+      return { ...p, [key]: cur.includes(trackId) ? cur.filter(id => id !== trackId) : [...cur, trackId] };
+    });
+  }, [updateVidMeta]);
+  const toggleMute = useCallback((trackId: string) => {
+    updateVidMeta(p => {
+      const cur = p.muteIds ?? [];
+      return { ...p, muteIds: cur.includes(trackId) ? cur.filter(id => id !== trackId) : [...cur, trackId] };
+    });
+  }, [updateVidMeta]);
 
   // ── Video 的撤销摞 ── 工程住在宿主，工作台那两支摞（undoStack/redoStack）只认识图层，
   //  所以视频这一半得宿主自己记：Ctrl+Z 才撤得动片段、轨道、范围。
@@ -664,13 +676,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 把一份工程装回活跃文档。撤销/重做**也是一种修改**：脏标记要亮 —— 否则撤完直接关 tab，
   // 会以为"和盘上一致"而丢掉这次撤销。
   const applyVidState = useCallback((uid: number, proj: VidProject) => {
+    const prev = vidProjectRef.current;
     vidByDoc.current.set(uid, proj);
     vidProjectRef.current = proj;
     if (uid === activeUidRef.current) setVidProject(proj);
     markVidDirty(uid);
     vidEditAt.current = Date.now();
     bumpVidHist();
-  }, [markVidDirty]);
+    if (proj.inPoint !== prev.inPoint || proj.outPoint !== prev.outPoint) saveVidSoon(uid);
+  }, [markVidDirty, saveVidSoon]);
   const vidUndo = useCallback((): boolean => {
     const uid = activeUidRef.current;
     if (uid == null) return false;
@@ -728,8 +742,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       vidByDoc.current.set(uid, next);
       pushVidHist(uid, prev, label || 'Video edit');
       markVidDirty(uid);                       // tab 上的 ● 与工作台的关前询问，都靠这一笔
+      // 范围改了就找机会落盘：.cud 是刷新后唯一的正身，不入盘的话重开就回到旧范围。
+      if (next.inPoint !== prev.inPoint || next.outPoint !== prev.outPoint) saveVidSoon(uid);
     }
-  }, [pushVidHist, markVidDirty]);
+  }, [pushVidHist, markVidDirty, saveVidSoon]);
   // 文档切换 = 换一份 Video 工程。**工程的正身就在 .cud 里**（读档那趟由 blend-vid-restore 送回来），
   // 所以这里只做三件事：
   //   · 桶里已有 ⇒ 装回它那一份；
@@ -904,6 +920,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 旗子让分段循环不再开下一段、轮询不再收当前段；后端那半边由 ComfyUI 的 interrupt 打断在飞的
   // 执行（InterruptProcessingException → interface_status 回 idle）。
   const vidCancelRef = useRef(false);
+  // 单段 ■ 的插旗：只打断**这一段**（后端照样 interrupt 当前执行），队列里后面的段继续跑。
+  // 值 = 目标段 clipId；与 vidCancelRef 同时亮，收尾时按它把 cancelled 认成 stopped。
+  const vidStopRef = useRef<string | null>(null);
   // 视频 list 跑的进度条与 Cancel 走**原本那一条**：写进 BlendUi 快照的 staging 段（与 detailer /
   // 图像模式 Processor 同一个真值源），RunStatusSeg 原样读、原样画 —— 不另起一套。跑动期间页面
   // 推来的快照由 App 侧按 vidStagingOverlay 合流，不会被冲掉。
@@ -1491,7 +1510,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 原样重放，不再弹 modal。
   const continuePendingClip = useCallback(async (
     clipId: string,
-  ): Promise<'skip' | 'failed' | 'cancelled' | 'done'> => {
+  ): Promise<'skip' | 'failed' | 'cancelled' | 'stopped' | 'done'> => {
     if (vidProcBusy.current) {
       setVidProcRun({ state: 'error', msg: 'A run is already in flight — wait for it or cancel it first.' });
       return 'skip';
@@ -1499,6 +1518,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const clip = vidProjectRef.current.clips.find(c => c.id === clipId);
     if (!clip || !clip.pending) return 'skip';
     const pd = clip.pending;
+    // 开跑（或确认不跑）就从队列里摘掉：排队标记不能让已轮到的段还挂着 ⏸。
+    dequeueProcClip(clipId);
     if (procSlotBusy(vidProjectRef.current, pd.port ?? 0, clip.start, clip.duration, clip.id)) {
       setVidProcRun({ state: 'error', msg: `The output track already has a clip over ${clip.start.toFixed(1)}s–${(clip.start + clip.duration).toFixed(1)}s — move or delete it first.` });
       return 'skip';
@@ -1546,16 +1567,22 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       return 'done';
     } catch (e: unknown) {
       const cancelled = vidCancelRef.current;
-      setVidProcRun(cancelled
-        ? { state: 'cancelled', msg: 'Segment run cancelled — the placeholder stays; click it to try again.' }
-        : { state: 'error', msg: `${isPreset ? 'Preset' : 'Processor'} failed — ${e instanceof Error ? e.message : String(e)}` });
-      return cancelled ? 'cancelled' : 'failed';
+      // ■ 单段停止 vs 标题条 Cancel 整批取消：两者都靠 vidCancelRef 打断当前执行，
+      // 差别只在那面旗上有没有记着"只停这一段"。
+      const stopped = cancelled && vidStopRef.current === clipId;
+      setVidProcRun(stopped
+        ? { state: 'cancelled', msg: 'Segment stopped — the rest of the queue keeps running.' }
+        : cancelled
+          ? { state: 'cancelled', msg: 'Segment run cancelled — the placeholder stays; click it to try again.' }
+          : { state: 'error', msg: `${isPreset ? 'Preset' : 'Processor'} failed — ${e instanceof Error ? e.message : String(e)}` });
+      return stopped ? 'stopped' : cancelled ? 'cancelled' : 'failed';
     } finally {
       clearProcFill(clipId);
       vidStagingOverlay.busy = false;
       vidStagingOverlay.progress = -1;
       pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
       vidCancelRef.current = false;
+      if (vidStopRef.current === clipId) vidStopRef.current = null;
       vidProcBusy.current = false;
     }
   }, [interfaces, vidUpdate, blockSets, executePresetSeg, autoSaveCud]);
@@ -1583,15 +1610,38 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       setVidProcRun({ state: 'error', msg: 'Every selected placeholder is blocked — its slot on the output track is taken.' });
       return;
     }
-    let done = 0, failed = 0, cancelled = false;
-    for (const c of runnable) {
-      const r = await continuePendingClip(c.id);
-      if (r === 'cancelled') { cancelled = true; break; }
-      if (r === 'done') done++;
-      else if (r === 'failed') failed++;
+    let done = 0, failed = 0, stopped = 0, paused = 0, cancelled = false;
+    // ■ 停止后后端 interrupt 是异步收尾的：等状态离开 running 再开下一段，否则下一段的轮询
+    // 会把上一段收尾时的 idle 当成自己跑完，收错产物。最多等 10s（等不到就照常继续）。
+    const settleBackend = async () => {
+      for (let i = 0; i < 40; i++) {
+        const st = await fetch('/api/status').then(r => r.json()).catch(() => null);
+        if (!st) return;
+        const busy = (st.interface_status ?? 'idle') === 'running'
+          || (st.preset_video_status ?? 'idle') === 'running';
+        if (!busy) return;
+        await new Promise(r => setTimeout(r, 250));
+      }
+    };
+    // 整条队摆出来：时间线把还没轮到的段画成 ⏸（点一下 = 退出队列，见 pausePendingClip）。
+    setProcQueue(runnable.map(c => c.id));
+    try {
+      for (const c of runnable) {
+        // 排队期间被 ⏸ 移出队列的段：轮到时直接跳过（占位段留在原处，随时可再 ▶）。
+        if (!isProcQueued(c.id)) { paused++; continue; }
+        const r = await continuePendingClip(c.id);
+        if (r === 'cancelled') { cancelled = true; break; }   // 标题条 Cancel = 整批不再开跑
+        if (r === 'done') done++;
+        else if (r === 'failed') failed++;
+        else if (r === 'stopped') { stopped++; await settleBackend(); }   // ■ 只停这一段，后面的照跑
+      }
+    } finally {
+      clearProcQueue();
     }
     const bits = [`Ran ${done} of ${runnable.length} segment${runnable.length === 1 ? '' : 's'} in order`];
     if (failed) bits.push(`${failed} failed`);
+    if (stopped) bits.push(`${stopped} stopped`);
+    if (paused) bits.push(`${paused} removed from the queue`);
     if (blocked) bits.push(`${blocked} blocked (output slot taken)`);
     setVidProcRun(cancelled
       ? { state: 'cancelled', msg: `Batch cancelled — ${bits.join(', ')}.` }
@@ -1599,6 +1649,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         ? { state: 'error', msg: `${bits.join(', ')}.` }
         : { state: 'done', msg: `${bits.join(', ')}.` });
   }, [continuePendingClip]);
+
+  // 队列中的 ⏸：把这一段移出队列。批次循环每轮查一次队列，被移出的段轮到时直接跳过
+  // （占位段本身留在轨上，之后随时可以再 ▶）。
+  const pausePendingClip = useCallback((clipId: string) => {
+    dequeueProcClip(clipId);
+  }, []);
+
+  // 正在跑的那段的 ■：只打断**这一段**（后端 interrupt 当前执行）；队列里后面的段照常继续。
+  // 与标题条 Cancel 的区别就在 vidStopRef：有它 = 单段停止，没收尾的批次不会 break。
+  const stopPendingClip = useCallback((clipId: string) => {
+    if (!vidProcBusy.current || getProcFill(clipId) < 0) return;
+    vidStopRef.current = clipId;
+    vidCancelRef.current = true;
+    fetch('/api/cancel_run', { method: 'POST' }).catch(() => {});
+  }, []);
 
   // 工作台那几格的 send 先过宿主这一道 —— History 格的 Undo / Redo / 点某一行，
   // 要能落到视频那一半（页面的下标空间里没有它）。
@@ -1693,9 +1758,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     continueProc: continuePendingClip,
     // 多选时点 ▶：整批按 左→右 / 同起点 下→上 依次跑（见 continueManyPendingClips）。
     continueProcMany: continueManyPendingClips,
+    // 队列中的 ⏸ / 正在跑的那段的 ■（见 pausePendingClip / stopPendingClip）。
+    pauseProc: pausePendingClip,
+    stopProc: stopPendingClip,
     // Layer 段合并：向页面要图层集签名，两段一致才允许并。
     layerSigs,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, layerSigs]);
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs]);
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。

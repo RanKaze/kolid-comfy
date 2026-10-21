@@ -63,3 +63,37 @@ export const subscribeProcFill = (fn: () => void): (() => void) => {
   fillSubs.add(fn);
   return () => { fillSubs.delete(fn); };
 };
+
+// ── 占位段队列 ────────────────────────────────────────────────────────────────────────────────
+// 多选 ▶ 排出来的那一队：queued = 还没轮到跑的段（**不含**正在跑的那颗 —— 它有 fills 进度）。
+// 时间线按它画 ⏸（点一下退出队列）；批次循环每轮都问一句「这段还在队里吗」，被移出的直接跳过。
+// 与 fills 同一套口径：模块级小仓库，只让订阅者重渲，不惊动工程 state。
+export type ProcQueue = { queued: readonly string[] };
+
+let queue: ProcQueue = { queued: [] };
+const queueSubs = new Set<() => void>();
+
+export const getProcQueue = (): ProcQueue => queue;
+
+export const subscribeProcQueue = (fn: () => void): (() => void) => {
+  queueSubs.add(fn);
+  return () => { queueSubs.delete(fn); };
+};
+
+const setQueue = (ids: readonly string[]): void => {
+  const next = [...new Set(ids)];
+  if (next.length === queue.queued.length && next.every((id, i) => queue.queued[i] === id)) return;
+  queue = { queued: next };
+  queueSubs.forEach(fn => fn());
+};
+
+/** 批次开跑前把整条队摆出来（顺序 = 实际要跑的顺序）。 */
+export const setProcQueue = (ids: readonly string[]): void => setQueue(ids);
+
+/** 一段被移出队列（⏸ 或已经开始跑）—— 批次循环见到它不在队里就跳过。 */
+export const dequeueProcClip = (clipId: string): void =>
+  setQueue(queue.queued.filter(id => id !== clipId));
+
+export const isProcQueued = (clipId: string): boolean => queue.queued.includes(clipId);
+
+export const clearProcQueue = (): void => setQueue([]);

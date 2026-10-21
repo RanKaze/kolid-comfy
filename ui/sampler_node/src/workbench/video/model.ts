@@ -137,18 +137,24 @@ export type VidProject = {
    *  这回事，工作区得跟着帧走。空/找不到轨 = 没绑 = 视作没有 mask（整幅都是工作区）。
    *  Processor 的 mask 口有自己的端口来源，不受这里影响；preset 链（没有输入口）用它。 */
   maskTrackId?: string;
+  /** 静音的轨道 id（所有轨类型共用一套）。随工程走：刷新 / 重开 .cud 后还亮着。 */
+  muteIds?: string[];
+  /** solo 的轨道 id，音频与视频分开记。随工程走，与 `muteIds` 同理。 */
+  soloAudioIds?: string[];
+  soloVideoIds?: string[];
 };
 
 /** solo 状态：**音频与视频分开记** —— 一边亮着不影响另一边。空集 = 没有 solo（全部照常）。
- *  住在宿主（VidController），**不进工程、不持久化**：solo 是监视手段，不是工程内容 ——
- *  关掉重开 .cud 时它是灭的，删轨/换文档时按轨道 id 自动清理（见 EditPhase 的清理 effect）。 */
+ *  住宿主（VidController）的视图，但**持久化**：每次切换都写回工程
+ *  （`soloAudioIds` / `soloVideoIds`），随 .cud / 页面存档一起回来 —— 刷新后还亮着。
+ *  删轨时由 `removeTrack` 一并摘掉对应 id（否则"solo 亮着但轨没了"会让画面整个空掉）。 */
 export type VidSolo = {
   audio: ReadonlySet<string>;
   video: ReadonlySet<string>;
 };
 
 /** mute 状态：**所有轨道类型共用一套**（轨道 id 全局唯一，不需要像 solo 那样按域分开）。
- *  同样住在宿主、不进工程、不持久化，清理口径与 solo 相同。
+ *  同样住宿主的视图，**持久化**在工程的 `muteIds` 里（随 .cud / 页面存档回来），清理口径与 solo 相同。
  *  语义按轨类型：音频轨 = 不响；视频轨 = 监视器不直接显示它的画面；Layer 轨 = 它的段不参与
  *  合成（露出底下）。**mute 优先于 solo**：被静音的轨即使被 solo 也不出声/不显示。
  *  注意 mute 只挡**直接输出**：Layer 合成把视频轨当源帧用时不受影响（合成是主动创作，
@@ -240,6 +246,10 @@ export type VidController = {
   /** 多选后点 ▶：整批占位段依次重放，顺序 = 从左到右（start 升序）、同起点从下到上。
    *  单段的忙碌闸门/进度/落位仍走 continueProc；这里只负责排序与串行编排。 */
   continueProcMany?: (clipIds: string[]) => void;
+  /** 队列中那一段的 ⏸：把它移出队列（后面轮到时不再跑）。正在跑的那段不走这条。 */
+  pauseProc?: (clipId: string) => void;
+  /** 正在跑的那一段的 ■：只打断这一段的生成，队列里后面的段照常继续。 */
+  stopProc?: (clipId: string) => void;
   /** Layer 段合并用：向工作台页要这些图层集的内容签名（key → 签名）。页面不在/超时 = 空表。 */
   layerSigs?: (keys: string[]) => Promise<Record<string, string>>;
 };
@@ -422,6 +432,10 @@ export const removeTrack = (p: VidProject, trackId: string): VidProject => ({
   // 删掉的就是 Mask 轨 → 绑定跟着断（留一条指向不存在轨的 id 等于"绑着但取不到"，
   // 比"没绑"更难解释）。
   ...(p.maskTrackId === trackId ? { maskTrackId: undefined } : {}),
+  // mute / solo 记的也是轨道 id：轨没了就把那条摘掉（solo 悬空会让画面整个空掉）。
+  muteIds: p.muteIds?.filter(id => id !== trackId),
+  soloAudioIds: p.soloAudioIds?.filter(id => id !== trackId),
+  soloVideoIds: p.soloVideoIds?.filter(id => id !== trackId),
 });
 
 /** 视频模式的 Mask：绑一条轨（或传空 = 解绑）。只认视频轨 —— 音频轨没有画面，
@@ -1065,6 +1079,10 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
     });
     const assets = (Array.isArray(p.assets) ? p.assets : []).filter(a => a && a.src && !a.src.startsWith('blob:')
       && Number.isFinite(a.duration) && a.duration > 0);
+    // mute / solo 的轨道 id：只留还活着的轨（删轨后重开不该把悬空 id 带回来）。
+    const pickIds = (v: unknown): string[] => Array.isArray(v)
+      ? [...new Set(v.filter((x): x is string => typeof x === 'string' && trackIds.has(x)))]
+      : [];
     return {
       tracks: p.tracks, clips, assets,
       inPoint: Math.max(0, +p.inPoint || 0), outPoint: Math.max(0, +p.outPoint || 0),
@@ -1072,6 +1090,9 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       // Mask 轨：绑的轨没了就当没绑（读档后轨道可能被删/改名）—— 不留一条悬空 id。
       ...(typeof p.maskTrackId === 'string' && trackIds.has(p.maskTrackId)
         ? { maskTrackId: p.maskTrackId } : {}),
+      muteIds: pickIds(p.muteIds),
+      soloAudioIds: pickIds(p.soloAudioIds),
+      soloVideoIds: pickIds(p.soloVideoIds),
     };
   } catch { return base; }
 };
