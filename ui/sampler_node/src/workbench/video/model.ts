@@ -240,6 +240,8 @@ export type VidController = {
   /** 多选后点 ▶：整批占位段依次重放，顺序 = 从左到右（start 升序）、同起点从下到上。
    *  单段的忙碌闸门/进度/落位仍走 continueProc；这里只负责排序与串行编排。 */
   continueProcMany?: (clipIds: string[]) => void;
+  /** Layer 段合并用：向工作台页要这些图层集的内容签名（key → 签名）。页面不在/超时 = 空表。 */
+  layerSigs?: (keys: string[]) => Promise<Record<string, string>>;
 };
 
 const MIN_CLIP = 0.05;   // 片段/裁剪的最短寿命（s）
@@ -758,6 +760,225 @@ export const placeProcAssets = (
     });
   });
   return next;
+};
+
+// ── 多选合并 ────────────────────────────────────────────────────────────────────────────────
+// 时间线上多选几段、右键合并。口径：
+//  * 必须在同一条轨、同一类型（video / process / layer），且首尾**严格相接**（无空隙无重叠）；
+//  * process 段：除帧窗口外的执行快照必须一致，逐口帧窗口还要连续（next.f0 = prev.f0 + prev.n，
+//    同 file / fps）—— 合并后就是同一个坑的更长一段，帧窗口 n 相加；
+//  * video 段：同源且源内连续 → 本地并成一段；否则交后端 ffmpeg 拼成一条新文件再替换；
+//  * layer 段：内容是否相同由页面回签（见 layerSigs），调用方确认后才允许合并。
+// 联合音画（groupId）一律不合并：视频段被并、音频段没被并，组就断了 —— 先 ⧉ 解绑再来。
+const MERGE_EPS = 0.002;
+
+export type VidMergeKind = 'video' | 'process' | 'layer';
+export type VidMergePlan = {
+  kind: VidMergeKind;
+  /** 按 start 升序。 */
+  clips: VidClip[];
+  /** video：local = 同一 src 且源内连续（前端直接并）；concat = 交后端拼新文件。 */
+  videoMode?: 'local' | 'concat';
+};
+export type VidMergeProbe =
+  | { ok: true; plan: VidMergePlan }
+  | { ok: false; reason: string };
+
+/** 结构可合并性（不看参数）：同轨、同类、首尾相接。菜单要不要露头由它决定。 */
+export const vidMergeStructure = (
+  p: VidProject, ids: readonly string[],
+): { ok: true; clips: VidClip[]; kind: VidMergeKind } | { ok: false; reason: string } => {
+  const uniq = [...new Set(ids)];
+  if (uniq.length < 2) return { ok: false, reason: 'Select at least two segments.' };
+  const clips = uniq.map(id => p.clips.find(c => c.id === id)).filter((c): c is VidClip => !!c);
+  if (clips.length !== uniq.length) return { ok: false, reason: 'Some selected segments no longer exist.' };
+  const kind = (clips[0].pending ? 'process' : clips[0].kind) as VidTrackKind;
+  if (kind !== 'video' && kind !== 'process' && kind !== 'layer') {
+    return { ok: false, reason: 'Only video, process and layer segments can be merged.' };
+  }
+  if (clips.some(c => c.trackId !== clips[0].trackId)) {
+    return { ok: false, reason: 'Segments must all be on the same track.' };
+  }
+  if (clips.some(c => (c.pending ? 'process' : c.kind) !== kind)) {
+    return { ok: false, reason: 'Segments must all be of the same type.' };
+  }
+  const sorted = [...clips].sort((a, b) => a.start - b.start);
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1], next = sorted[i];
+    if (Math.abs(next.start - (prev.start + prev.duration)) > MERGE_EPS) {
+      return { ok: false, reason: 'Segments must be adjacent — no gaps or overlaps.' };
+    }
+  }
+  return { ok: true, clips: sorted, kind: kind as VidMergeKind };
+};
+
+/** 深度相等（对象 key 顺序无关）—— params 里既有数字/字符串，也有嵌套对象。 */
+const sameJson = (a: unknown, b: unknown, depth = 0): boolean => {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (typeof a === 'number') return Number.isNaN(a) && Number.isNaN(b);
+  if (!a || !b || typeof a !== 'object') return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((v, i) => sameJson(v, b[i], depth + 1));
+  }
+  if (depth > 8) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  return ka.every(k => sameJson((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], depth + 1));
+};
+
+/** process 段的"其它参数"：执行去向、接口、参数值、Mask 绑定；runId / 段号 / 帧窗口不算。 */
+const pendingParamsEqual = (a: VidProcPending, b: VidProcPending): boolean =>
+  (a.kind ?? 'processor') === (b.kind ?? 'processor')
+  && (a.presetId ?? '') === (b.presetId ?? '')
+  && (a.presetName ?? '') === (b.presetName ?? '')
+  && (a.extraPrompt ?? '') === (b.extraPrompt ?? '')
+  && (a.maskTrackId ?? '') === (b.maskTrackId ?? '')
+  && (a.port ?? 0) === (b.port ?? 0)
+  && a.iface === b.iface
+  && (a.ifaceNum ?? 0) === (b.ifaceNum ?? 0)
+  && sameJson(a.params ?? {}, b.params ?? {});
+
+/** 两组帧窗口能不能首尾接上：端口集合相同、同 file/fps、帧号严格连续。 */
+const windowsContinuous = (
+  a: Record<string, ProcFrameWindow>, b: Record<string, ProcFrameWindow>,
+): boolean => {
+  const ka = Object.keys(a).sort(), kb = Object.keys(b).sort();
+  if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return false;
+  for (const k of ka) {
+    const wa = a[k], wb = b[k];
+    if (!wa || !wb) return false;
+    if (wa.file !== wb.file) return false;
+    if (!Number.isFinite(wa.fps) || !Number.isFinite(wb.fps)) return false;
+    if (Math.abs(wa.fps - wb.fps) > MERGE_EPS) return false;
+    if (!Number.isFinite(wa.f0) || !Number.isFinite(wa.n) || !Number.isFinite(wb.f0)) return false;
+    if (wb.f0 !== wa.f0 + wa.n) return false;
+  }
+  return true;
+};
+
+/** 合并探针：结构 + 参数/帧窗口/视频源。layer 的内容比较要另问页面（这里只放行结构）。 */
+export const probeVidMerge = (p: VidProject, ids: readonly string[]): VidMergeProbe => {
+  const st = vidMergeStructure(p, ids);
+  if (!st.ok) return st;
+  const { clips, kind } = st;
+  if (clips.some(c => c.groupId)) {
+    return { ok: false, reason: 'Linked A/V pairs cannot be merged — click ⧉ to unlink them first.' };
+  }
+  if (kind === 'process') {
+    for (let i = 1; i < clips.length; i++) {
+      const prev = clips[i - 1].pending, next = clips[i].pending;
+      if (!prev || !next) return { ok: false, reason: 'Not every selected segment is a process placeholder.' };
+      if (!pendingParamsEqual(prev, next)) {
+        return { ok: false, reason: 'Processor settings differ between these segments (only the frame window may differ).' };
+      }
+      if (!windowsContinuous(prev.inputs, next.inputs)) {
+        return { ok: false, reason: 'Input frame windows are not continuous — segmented frames must run on without gaps.' };
+      }
+      if (!windowsContinuous(prev.maskInputs ?? {}, next.maskInputs ?? {})) {
+        return { ok: false, reason: 'Mask frame windows are not continuous — segmented frames must run on without gaps.' };
+      }
+    }
+    return { ok: true, plan: { kind, clips } };
+  }
+  if (kind === 'video') {
+    let local = true;
+    for (let i = 1; i < clips.length; i++) {
+      if (clips[i].src !== clips[i - 1].src
+        || Math.abs(clips[i].offset - (clips[i - 1].offset + clips[i - 1].duration)) > MERGE_EPS) {
+        local = false;
+        break;
+      }
+    }
+    // 后端只能读媒体库里的文件：本地拖进来的 blob:/其它 URL 拼不了。
+    if (!local && clips.some(c => !c.src.startsWith('/api/vid_media/'))) {
+      return { ok: false, reason: 'Only library video files can be stitched together.' };
+    }
+    return { ok: true, plan: { kind, clips, videoMode: local ? 'local' : 'concat' } };
+  }
+  return { ok: true, plan: { kind, clips } };
+};
+
+/** 若干段同口帧窗口首尾相接后的那一口：f0 取第一段、n 累加。 */
+const mergeWindowRuns = (runs: Record<string, ProcFrameWindow>[]): Record<string, ProcFrameWindow> => {
+  const out: Record<string, ProcFrameWindow> = {};
+  for (const k of Object.keys(runs[0])) {
+    const w = { ...runs[0][k] };
+    for (let i = 1; i < runs.length; i++) w.n += runs[i][k].n;
+    out[k] = w;
+  }
+  return out;
+};
+
+/** 合并（纯函数）。layer 段必须由调用方先确认 `layerEqual`（页面回签一致）才放行。 */
+export const mergeVidClips = (
+  p: VidProject, ids: readonly string[], opts?: { layerEqual?: boolean },
+): VidProject => {
+  const pr = probeVidMerge(p, ids);
+  if (!pr.ok) return p;
+  const { plan } = pr;
+  if (plan.kind === 'layer' && opts?.layerEqual !== true) return p;
+  if (plan.kind === 'video' && plan.videoMode !== 'local') return p;   // 异源走后端拼接
+  const first = plan.clips[0], last = plan.clips[plan.clips.length - 1];
+  const start = first.start;
+  const duration = last.start + last.duration - start;
+  const own = new Set(plan.clips.map(c => c.id));
+  // 占位段上一次的产物也跟着占位走：留着会挡住合并后那一段的重跑槽位。
+  const rest = p.clips.filter(c => !own.has(c.id) && !(c.procOwner && own.has(c.procOwner)));
+  let merged: VidClip;
+  if (plan.kind === 'process') {
+    const pds = plan.clips.map(c => c.pending as VidProcPending);
+    const maskRuns = pds.every(pd => pd.maskInputs) ? pds.map(pd => pd.maskInputs as Record<string, ProcFrameWindow>) : null;
+    merged = {
+      ...first,
+      start, duration, srcDuration: duration, offset: 0, hasAudio: false,
+      groupId: undefined, procOwner: undefined,
+      pending: {
+        ...(pds[0] as VidProcPending),
+        inputs: mergeWindowRuns(pds.map(pd => pd.inputs)),
+        ...(maskRuns ? { maskInputs: mergeWindowRuns(maskRuns) } : { maskInputs: undefined }),
+      },
+    };
+  } else if (plan.kind === 'video') {
+    merged = {
+      ...first,
+      start, duration,
+      groupId: undefined,
+      // 合并后的这一段是用户的编辑产物，不再归任何一个占位段：重跑旧占位时它会报"槽位被占"，
+      // 而不是被静默换掉。
+      procOwner: undefined,
+    };
+  } else {
+    merged = {
+      ...first,
+      start, duration, src: '', offset: 0, srcDuration: duration, hasAudio: false,
+      layerKey: first.layerKey || first.id,
+      groupId: undefined, procOwner: undefined,
+    };
+  }
+  return { ...p, clips: [...rest, merged] };
+};
+
+/** 后端拼接成功后的替换：删掉被合并的几段，资产库里记一条新文件，原位置换成一段引用它的片段。 */
+export const replaceVidClipsWithMerged = (
+  p: VidProject, ids: readonly string[], src: string, name: string, duration: number, hasAudio = false,
+): VidProject => {
+  const st = vidMergeStructure(p, ids);
+  if (!st.ok || st.kind !== 'video') return p;
+  const first = st.clips[0];
+  const total = Math.max(0.1, Math.abs(Number(duration)) || st.clips.reduce((s, c) => s + c.duration, 0));
+  const withAsset = addAsset(p, {
+    id: newVidId('as'), name: `${name} · merged`, src, origin: 'file', kind: 'video',
+    duration: total, hasAudio,
+  });
+  const own = new Set(st.clips.map(c => c.id));
+  const clips = withAsset.clips.filter(c => !own.has(c.id));
+  clips.push({
+    id: first.id, trackId: first.trackId, kind: 'video', name, src, origin: 'asset',
+    start: first.start, duration: total, offset: 0, srcDuration: total, hasAudio,
+  });
+  return { ...withAsset, clips };
 };
 
 // ── 持久化 ────────────────────────────────────────────────────────────────────────────────────

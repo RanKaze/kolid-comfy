@@ -778,11 +778,26 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     }
     bumpVidHist();
   }, [blendDocs.docs, blendDocs.activeUid, blendDocs.announced]);
+  // Layer 段合并的内容比较：宿主问页面「这几套图层是不是同一套内容」（见 blend-vid-layer-sig）。
+  // 回包按 reqId 认领；页面不在 / 1.5s 没回 = 空表（调用方按"比较失败"处理，不合并）。
+  const layerSigSeq = useRef(1);
+  const layerSigWaiters = useRef(new Map<number, (sigs: Record<string, string>) => void>());
   // iframe 的两条 Video 消息：保存时按 uid 来要快照；读档/重开时把文件里那份送回桶里。
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
-      const d = e.data as { type?: string; uid?: number; project?: unknown; files?: unknown; at?: number } | null;
+      const d = e.data as { type?: string; uid?: number; project?: unknown; files?: unknown; at?: number;
+        reqId?: number; sigs?: Record<string, string> } | null;
       if (!d || typeof d.type !== 'string') return;
+      if (d.type === 'blend-vid-layer-sig') {
+        if (e.source !== blendIframeRef.current?.contentWindow) return;
+        const rid = Math.round(Number(d.reqId) || 0);
+        const finish = layerSigWaiters.current.get(rid);
+        if (finish) {
+          layerSigWaiters.current.delete(rid);
+          finish(d.sigs && typeof d.sigs === 'object' ? d.sigs : {});
+        }
+        return;
+      }
       if (d.type === 'blend-edited') {
         // 页面刚提交了一步图层动作（或刚撤销/重做了一步）：Ctrl+Z 从此归它，直到视频又被改动。
         layerEditAt.current = Number(d.at) || Date.now();
@@ -1632,6 +1647,27 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     win.postMessage(msg, '*', transfer);
     return true;
   }, [blendIframeRef]);
+  // Layer 段合并的"内容是否同一套"：向页面要素材签名（见页面 replyVidLayerSigs）。
+  const layerSigs = useCallback((keys: string[]): Promise<Record<string, string>> => {
+    const win = blendIframeRef.current?.contentWindow;
+    const uniq = [...new Set((Array.isArray(keys) ? keys : []).map(String).filter(Boolean))];
+    if (!win || !uniq.length) return Promise.resolve({});
+    return new Promise(resolve => {
+      const reqId = layerSigSeq.current++;
+      let done = false;
+      let timer = 0;
+      const finish = (sigs: Record<string, string>) => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        layerSigWaiters.current.delete(reqId);
+        resolve(sigs);
+      };
+      timer = window.setTimeout(() => finish({}), 1500);
+      layerSigWaiters.current.set(reqId, finish);
+      win.postMessage({ type: 'blend-vid-layer-sig', reqId, keys: uniq }, '*');
+    });
+  }, [blendIframeRef]);
   // 播放器报"游标底下是哪一段 Layer 段"：画布内容、Layers 面板的作用对象、Transform 的开工条件
   // 全跟着游标走 —— 离开段就回到主图层集（画布转成视频底片，见页面 vidBaseOn）。
   const showPlayLayer = useCallback((key: string | null) => {
@@ -1657,7 +1693,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     continueProc: continuePendingClip,
     // 多选时点 ▶：整批按 左→右 / 同起点 下→上 依次跑（见 continueManyPendingClips）。
     continueProcMany: continueManyPendingClips,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips]);
+    // Layer 段合并：向页面要图层集签名，两段一致才允许并。
+    layerSigs,
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, layerSigs]);
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。

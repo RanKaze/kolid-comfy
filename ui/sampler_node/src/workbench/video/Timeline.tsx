@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { createPortal } from 'react-dom';
 import {
-  type VidClip, type VidController, type VidTrack,
-  addLayerClip, addTrack, clipAtSolo, fmtTime, importToTrack, isAudioName, isVideoName, moveClip, moveTrack, placeAsset, procSlotBusy, removeClip, removeTrack, renameTrack,
-  setMaskTrack, splitClip, trackOf, trimClip, unlinkGroup, vidDuration,
+  type VidClip, type VidController, type VidTrack, type VidMergeProbe,
+  addLayerClip, addTrack, clipAtSolo, fmtTime, importToTrack, isAudioName, isVideoName, mergeVidClips, moveClip, moveTrack, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack,
+  replaceVidClipsWithMerged, setMaskTrack, splitClip, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
 import { probeMedia } from './audio';
@@ -108,6 +109,15 @@ const IconLink: React.FC = () => (
   <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor"
     strokeWidth="1.7" strokeLinecap="round">
     <path d="M6.5 9.5l3-3M6.8 4.6l1-1a2.6 2.6 0 013.7 3.7l-1 1M9.2 11.4l-1 1a2.6 2.6 0 01-3.7-3.7l1-1" />
+  </svg>
+);
+// 合并：两段并成一段。
+const IconMerge: React.FC = () => (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="2" y="4.2" width="5.2" height="7.6" rx="1.2" />
+    <rect x="8.8" y="4.2" width="5.2" height="7.6" rx="1.2" />
+    <path d="M7.2 8h1.6" />
   </svg>
 );
 
@@ -314,7 +324,9 @@ export const VidTimeline: React.FC<{
   // ── 片段拖动 / 裁剪 ── pointer capture 挂在被按的那个元素上，move/up 都回到它身上。
   const startClipDrag = (e: React.PointerEvent, mode: 'move' | 'l' | 'r', clip: VidClip) => {
     e.stopPropagation();
-    if (bladeRef.current && e.button === 0) {
+    // 右键留给片段的合并菜单（见 openMergeMenu）：不在这里选中、不抓指针、不拖不裁。
+    if (e.button !== 0) return;
+    if (bladeRef.current) {
       // 剃刀优先于拖拽：切口落在指针处，片段不动。
       e.preventDefault();
       vid.update(proj => splitClip(proj, clip.id, timeAt(e.clientX), !e.altKey), 'Split clip');
@@ -413,6 +425,135 @@ export const VidTimeline: React.FC<{
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [selIds, vid, clearSel]);
+
+  // ── 右键合并（多选 + 头尾相接）────────────────────────────────────────────────────────────
+  // 菜单只在"多选、同轨同类、首尾严格相接"时露头（结构由 vidMergeStructure 判，见 model）。
+  // 参数/帧窗口不满足、占位段正在跑、Layer 两套内容不一致时按钮置灰，原因写在下面。
+  type MergeMenuState = {
+    x: number;
+    y: number;
+    ids: string[];
+    probe: VidMergeProbe;
+    layerCheck: 'idle' | 'checking' | 'equal' | 'differ';
+    busy: boolean;
+    note: string;
+  };
+  const [mergeMenu, setMergeMenu] = useState<MergeMenuState | null>(null);
+  // 异步回包认领号：关菜单 / 再开一次都会 ++，晚到的旧回包不会改到新菜单。
+  const mergeSeq = useRef(0);
+  const closeMergeMenu = useCallback(() => {
+    mergeSeq.current++;
+    setMergeMenu(null);
+  }, []);
+  const openMergeMenu = useCallback((e: React.MouseEvent, clip: VidClip) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // 右击未选中的段 = 只选它（多选之外的右键不合并）。
+    if (!selIds.has(clip.id)) { selectOnly(clip.id); return; }
+    const ids = [...selIds];
+    if (!vidMergeStructure(p, ids).ok) return;      // 头尾不相连：不弹菜单
+    const probe = probeVidMerge(p, ids);
+    const token = ++mergeSeq.current;
+    const base: MergeMenuState = {
+      x: e.clientX, y: e.clientY, ids, probe,
+      layerCheck: 'idle', busy: false, note: '',
+    };
+    if (probe.ok && probe.plan.kind === 'layer') {
+      const keys = [...new Set(probe.plan.clips.map(c => c.layerKey || c.id))];
+      if (vid.layerSigs && keys.length) {
+        base.layerCheck = 'checking';
+        void vid.layerSigs(keys).then(sigs => {
+          if (mergeSeq.current !== token) return;
+          const vals = keys.map(k => sigs[k] || '');
+          const equal = vals.every(v => !!v && v === vals[0]);
+          setMergeMenu(prev => (prev && mergeSeq.current === token
+            ? {
+              ...prev,
+              layerCheck: equal ? 'equal' : 'differ',
+              note: equal ? '' : (vals.some(v => !v)
+                ? 'Could not read the layer contents from the workbench.'
+                : 'The layer sets are not identical.'),
+            }
+            : prev));
+        });
+      } else {
+        base.layerCheck = 'differ';
+        base.note = 'Layer comparison is unavailable.';
+      }
+    }
+    setMergeMenu(base);
+  }, [p, selIds, selectOnly, vid]);
+  useEffect(() => {
+    if (!mergeMenu) return;
+    const inMenu = (t: EventTarget | null): boolean => {
+      const el = t as HTMLElement | null;
+      return !!el && typeof el.closest === 'function' && !!el.closest('[data-vid-merge-menu]');
+    };
+    const onDown = (e: PointerEvent) => { if (!inMenu(e.target)) closeMergeMenu(); };
+    const onCtx = (e: MouseEvent) => { if (!inMenu(e.target)) closeMergeMenu(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeMergeMenu();
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    document.addEventListener('contextmenu', onCtx, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('blur', closeMergeMenu);
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true);
+      document.removeEventListener('contextmenu', onCtx, true);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('blur', closeMergeMenu);
+    };
+  }, [mergeMenu !== null, closeMergeMenu]);
+  const runMerge = async () => {
+    const m = mergeMenu;
+    if (!m || m.busy || !m.probe.ok) return;
+    const plan = m.probe.plan;
+    if (plan.kind === 'layer' && m.layerCheck !== 'equal') return;
+    if (plan.clips.some(c => c.pending && getProcFill(c.id) >= 0)) {
+      setMergeMenu(prev => (prev ? { ...prev, note: 'A selected segment is running — wait for it to finish.' } : prev));
+      return;
+    }
+    const firstId = plan.clips[0].id;
+    if (plan.kind === 'video' && plan.videoMode === 'concat') {
+      // 异源（或同源但源内不连续）：后端 ffmpeg 按 in/out 切好后拼成一条新文件。
+      setMergeMenu(prev => (prev ? { ...prev, busy: true, note: '' } : prev));
+      try {
+        const parts = plan.clips.map(c => ({ f: c.src, in: c.offset, out: c.offset + c.duration }));
+        const r = await fetch('/api/vid_merge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ parts, name: plan.clips[0].name }),
+        });
+        const res = await r.json().catch(() => null) as {
+          ok?: boolean; src?: string; name?: string; duration?: number; hasAudio?: boolean; error?: string;
+        } | null;
+        const src = res && res.ok ? res.src : '';
+        if (!res || !src) {
+          setMergeMenu(prev => (prev
+            ? { ...prev, busy: false, note: String((res && res.error) || 'The server could not stitch these segments.') }
+            : prev));
+          return;
+        }
+        const total = Number(res.duration) || plan.clips.reduce((s, c) => s + c.duration, 0);
+        vid.update(proj => replaceVidClipsWithMerged(
+          proj, m.ids, src, res.name || plan.clips[0].name, total, !!res.hasAudio), 'Merge clips');
+        closeMergeMenu();
+        selectOnly(firstId);
+      } catch (err) {
+        setMergeMenu(prev => (prev
+          ? { ...prev, busy: false, note: String((err as Error)?.message || err || 'Merge failed') }
+          : prev));
+      }
+      return;
+    }
+    vid.update(proj => mergeVidClips(proj, m.ids, { layerEqual: plan.kind === 'layer' }), 'Merge clips');
+    closeMergeMenu();
+    selectOnly(firstId);
+  };
 
   // ── 轨道头的拖动排序 / 双击重命名 ─────────────────────────────────────────────────────────
   // 排序走 **pointer 拖**（不走 HTML5 DnD）：轨道头按住（按钮/输入框除外）移动 5px 即进入，
@@ -860,6 +1001,7 @@ export const VidTimeline: React.FC<{
                       wave={assetBySrc.get(c.src)?.waveform}
                       mediaFile={c.src.startsWith('/api/vid_media/') ? c.src.split('/').pop() : undefined}
                       onStartDrag={startClipDrag} onPointerMove={onClipPointerMove} onPointerUp={endClipDrag}
+                      onContextMenu={openMergeMenu}
                       onDelete={() => {
                         vid.update(proj => removeClip(proj, c.id), 'Delete clip');
                         setSelIds(prev => { const next = new Set(prev); next.delete(c.id); return next; });
@@ -960,6 +1102,60 @@ export const VidTimeline: React.FC<{
 
       {/* 底注：当前播放头下的画面来自哪段（transport 订阅者直改文本）。 */}
       <div ref={noteRef} style={{ padding: '4px 10px', fontSize: 10.5, color: 'rgba(255,255,255,0.4)', borderTop: '0.5px solid rgba(255,255,255,0.06)', flexShrink: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} />
+
+      {/* 右键合并菜单：挂到 body（不受轨道区的滚动/裁剪影响），fixed 定位。 */}
+      {mergeMenu && createPortal((() => {
+        const m = mergeMenu;
+        const plan = m.probe.ok ? m.probe.plan : null;
+        const running = !!plan && plan.clips.some(c => c.pending && getProcFill(c.id) >= 0);
+        const blocked = !m.probe.ok ? m.probe.reason
+          : !plan ? ''
+            : running ? 'A selected segment is running — wait for it to finish.'
+              : plan.kind === 'layer' && m.layerCheck === 'checking' ? 'Comparing the layer contents…'
+                : plan.kind === 'layer' && m.layerCheck !== 'equal' ? (m.note || 'The layer sets are not identical.')
+                  : m.note;
+        const disabled = !plan || running || m.busy || (plan.kind === 'layer' && m.layerCheck !== 'equal');
+        const label = !plan ? 'Merge segments'
+          : plan.kind === 'process' ? `Merge ${plan.clips.length} process segments`
+            : plan.kind === 'layer' ? `Merge ${plan.clips.length} layer segments`
+              : plan.videoMode === 'concat'
+                ? `Merge ${plan.clips.length} video segments (stitch into a new file)`
+                : `Merge ${plan.clips.length} video segments`;
+        return (
+          <div
+            data-vid-merge-menu="1"
+            onContextMenu={e => e.preventDefault()}
+            style={{
+              position: 'fixed', zIndex: 9999,
+              left: Math.max(8, Math.min(m.x, window.innerWidth - 342)),
+              top: Math.max(8, Math.min(m.y, window.innerHeight - 104)),
+              minWidth: 230, maxWidth: 330, padding: 4, borderRadius: 8,
+              background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
+              boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
+            }}
+          >
+            <button
+              disabled={disabled}
+              onClick={() => { void runMerge(); }}
+              title={blocked || 'Merge the selected adjacent segments into one.'}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left',
+                padding: '6px 9px', borderRadius: 5, border: 'none',
+                background: disabled ? 'transparent' : 'rgba(10,132,255,0.18)',
+                color: disabled ? 'rgba(255,255,255,0.38)' : 'rgba(255,255,255,0.92)',
+                fontSize: 11.5, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer',
+              }}
+            >
+              <IconMerge />{m.busy ? 'Merging…' : label}
+            </button>
+            {blocked && (
+              <div style={{ padding: '4px 9px 5px', fontSize: 10, lineHeight: 1.45, color: 'rgba(255,255,255,0.5)' }}>
+                {blocked}
+              </div>
+            )}
+          </div>
+        );
+      })(), document.body)}
     </div>
   );
 };
@@ -980,6 +1176,8 @@ const Clip: React.FC<{
   onStartDrag: (e: React.PointerEvent, mode: 'move' | 'l' | 'r', clip: VidClip) => void;
   onPointerMove: (e: React.PointerEvent) => void;
   onPointerUp: () => void;
+  /** 右键：多选且首尾相接时弹合并菜单（见 VidTimeline 的 openMergeMenu）。 */
+  onContextMenu: (e: React.MouseEvent, clip: VidClip) => void;
   onDelete: () => void;
   onUnlink: () => void;
   /** 占位段上的 ▶（续跑这一段）；undefined = 宿主没接（按钮不画）。 */
@@ -988,7 +1186,7 @@ const Clip: React.FC<{
   onSettings?: (clipId: string) => void;
   /** 这个占位的产物槽位已被别的东西占着：▶ 置灰不跑（自己的旧产物不算占）。 */
   continueBlocked?: boolean;
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onDelete, onUnlink, continueBlocked, onContinue, onSettings }) => {
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onDelete, onUnlink, continueBlocked, onContinue, onSettings }) => {
   const isAudio = c.kind === 'audio';
   // Layer 段没有源文件：不抽条、不取首尾帧，只画一块"合成区间"。
   const isLayer = c.kind === 'layer';
@@ -1078,6 +1276,7 @@ const Clip: React.FC<{
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onContextMenu={e => onContextMenu(e, c)}
       // 片段上按下已经选中它了；click / dblclick 别冒泡到 lane —— 那里"点空白"会清选中、双击会再造一段。
       onClick={e => e.stopPropagation()}
       onDoubleClick={e => e.stopPropagation()}

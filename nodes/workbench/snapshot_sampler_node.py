@@ -1178,6 +1178,124 @@ def _vid_ingest(raw, name):
             'waveform': previews.get('waveform')}
 
 
+def _vid_merge(parts, name='merged'):
+    """把时间线上几段视频按顺序拼成一条新文件（POST /api/vid_merge）。
+
+    `parts` = [{'f': '/api/vid_media/xxx.mp4', 'in': 0.0, 'out': 3.2}, ...] —— f 是媒体库 URL，
+    in/out 是这一段在源文件里的起止秒。先试 concat demuxer 流拷贝（快、不损画质）；拼不动
+    （编码/尺寸/帧率不一致，或入出点落在关键帧缝里）再退到 concat 滤镜重编码，统一到第一段的
+    尺寸/帧率。输出落在资产媒体库，文件名按文件身份 + 入出点哈希缓存 —— 同样的拼接第二次
+    直接命中，不会重复写盘。
+    """
+    ff = _ff_bin('ffmpeg')
+    fp = _ff_bin('ffprobe')
+    if not ff or not fp:
+        return {'ok': False, 'error': 'ffmpeg not available on the server'}
+    if not isinstance(parts, list) or len(parts) < 2:
+        return {'ok': False, 'error': 'need at least two parts'}
+    # 片段/资产名不带扩展名：时间线上显示的是逻辑名，扩展名由 src 决定。
+    nm = os.path.splitext(os.path.basename(str(name or 'merged')))[0] or 'merged'
+    d = _vid_media_dir()
+    paths, spans = [], []
+    for i, pt in enumerate(parts):
+        if not isinstance(pt, dict):
+            return {'ok': False, 'error': f'part {i} is not an object'}
+        raw = str(pt.get('f') or '')
+        fname = os.path.basename(unquote(raw))
+        path = os.path.join(d, fname)
+        if not raw.startswith('/api/vid_media/') or not fname or not os.path.isfile(path):
+            return {'ok': False, 'error': f'part {i}: media file not found'}
+        try:
+            a = max(0.0, float(pt.get('in') or 0))
+            b = float(pt.get('out'))
+        except (TypeError, ValueError):
+            return {'ok': False, 'error': f'part {i}: bad in/out'}
+        if not (b > a):
+            return {'ok': False, 'error': f'part {i}: out must be greater than in'}
+        paths.append(path)
+        spans.append((a, b))
+    # 缓存键：文件身份（大小 + mtime_ns，同名重写也会换 key）+ 入出点 + 版本前缀。
+    h = hashlib.sha1(b'merge-v1')
+    for path, (a, b) in zip(paths, spans):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return {'ok': False, 'error': 'media file disappeared'}
+        h.update(f'{os.path.basename(path)}|{st.st_size}|{st.st_mtime_ns}|{a:.6f}|{b:.6f}\n'.encode('utf-8'))
+    out = os.path.join(d, f'merge_{h.hexdigest()[:16]}.mp4')
+    if os.path.isfile(out):
+        probe = _vid_ffprobe(out)
+        if probe is not None:
+            return {'ok': True, 'src': '/api/vid_media/' + os.path.basename(out),
+                    'name': nm,
+                    'duration': probe['duration'] or sum(b - a for a, b in spans),
+                    'hasAudio': bool(probe['acodec'])}
+    os.makedirs(d, exist_ok=True)
+    tmp = out + f'.{os.getpid()}.part.mp4'
+    listing = out + f'.{os.getpid()}.txt'
+
+    def _q(p):
+        return "'" + p.replace("'", "'\\''") + "'"
+
+    try:
+        with open(listing, 'w', encoding='utf-8') as f:
+            for path, (a, b) in zip(paths, spans):
+                f.write(f'file {_q(path)}\n')
+                f.write(f'inpoint {a:.6f}\n')
+                f.write(f'outpoint {b:.6f}\n')
+        r = subprocess.run(
+            [ff, '-y', '-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0',
+             '-i', listing, '-c', 'copy', '-an', '-movflags', '+faststart', tmp],
+            capture_output=True, timeout=1800)
+        ok = r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0
+        if not ok:
+            # 回退：逐段 -ss/-t 切开，统一缩放/补边/帧率后 concat 重编码。
+            probe0 = _vid_ffprobe(paths[0]) or {}
+            try:
+                w = int(probe0.get('width') or 0)
+                hgt = int(probe0.get('height') or 0)
+                fps = float(probe0.get('fps') or 0) or 30.0
+            except (TypeError, ValueError):
+                w, hgt, fps = 0, 0, 30.0
+            if w < 2 or hgt < 2:
+                return {'ok': False, 'error': 'cannot read the source resolution'}
+            w -= w % 2
+            hgt -= hgt % 2
+            fps = max(1.0, min(120.0, fps))
+            cmd = [ff, '-y', '-hide_banner', '-loglevel', 'error']
+            for path, (a, b) in zip(paths, spans):
+                cmd += ['-ss', f'{a:.6f}', '-t', f'{b - a:.6f}', '-i', path]
+            chains = [
+                f'[{i}:v]scale={w}:{hgt}:force_original_aspect_ratio=decrease,'
+                f'pad={w}:{hgt}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps:.6f}[v{i}]'
+                for i in range(len(paths))
+            ]
+            graph = ';'.join(chains) + ';' + ''.join(f'[v{i}]' for i in range(len(paths))) \
+                + f'concat=n={len(paths)}:v=1:a=0[outv]'
+            cmd += ['-filter_complex', graph, '-map', '[outv]', '-an',
+                    '-c:v', 'libx264', '-preset', _VID_PRESET, '-crf', str(_VID_CRF),
+                    '-pix_fmt', 'yuv420p', '-movflags', '+faststart', tmp]
+            r = subprocess.run(cmd, capture_output=True, timeout=1800)
+            if r.returncode != 0 or not os.path.isfile(tmp) or os.path.getsize(tmp) == 0:
+                tail = r.stderr.decode('utf-8', 'replace')[-400:] if r.stderr else 'unknown'
+                return {'ok': False, 'error': 'stitch failed: ' + tail}
+        os.replace(tmp, out)
+    finally:
+        for p in (tmp, listing):
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+            except OSError:
+                pass
+    probe = _vid_ffprobe(out)
+    if probe is None:
+        return {'ok': False, 'error': 'stitched file is not decodable'}
+    return {'ok': True, 'src': '/api/vid_media/' + os.path.basename(out),
+            'name': nm,
+            'duration': probe['duration'] or sum(b - a for a, b in spans),
+            'hasAudio': bool(probe['acodec'])}
+
+
 class DocumentIo:
     """原生对话框 + token→绝对路径 登记表，供 MainHandler 的 /api/io_* 四条路由与
     /api/recent_cud 使用。"""
@@ -3359,6 +3477,18 @@ class SnapshotDetailerSamplerServer:
                     length = int(self.headers.get('Content-Length', 0))
                     raw = self.rfile.read(length) if length else b''
                     res = _vid_ingest(raw, name)
+                    self._send_json(res, 200 if res.get('ok') else 500)
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
+                return
+
+            # 时间线多选视频段的合并：body = {parts: [{f, in, out}...], name}。
+            # 后端按入出点切好后拼成一条新文件（见 _vid_merge），前端拿回持久 src 原位替换。
+            if self.path == '/api/vid_merge':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    res = _vid_merge(body.get('parts'), str(body.get('name') or 'merged'))
                     self._send_json(res, 200 if res.get('ok') else 500)
                 except Exception as e:
                     self._send_json({'ok': False, 'error': str(e)}, 500)

@@ -4777,6 +4777,112 @@ function layerSetsToRecords() {
     return out;
 }
 
+// ── Layer 段合并的图层集签名 ────────────────────────────────────────────────────────────────
+// 宿主多选几段 Layer 段要合并时，先问这里："这几套图层是不是同一套内容？"（blend-vid-layer-sig）
+// 签名只取**影响合成结果**的字段：图层名/可见/栅格化/3D/变换/文本/属性/cud/像素，以及 decal。
+// selectedId、undo/redo 栈、图层 id、srcRef 这类身份与编辑态一律不算 —— 两段内容一致 = 签名相等。
+// 活跃那套的活对象就是全局 layers；非活跃的在 layerSets 里各自存着（切换时存回）。
+let _vidSigErrSeq = 0;
+function vidPixelSig(img) {
+    if (!img) return '';
+    try {
+        const w = Math.round(img.videoWidth || img.naturalWidth || img.width || 0);
+        const h = Math.round(img.videoHeight || img.naturalHeight || img.height || 0);
+        if (!w || !h) return '';
+        const cv = document.createElement('canvas');
+        cv.width = 16;
+        cv.height = 16;
+        const ctx = cv.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return '?';
+        ctx.clearRect(0, 0, 16, 16);
+        ctx.drawImage(img, 0, 0, 16, 16);
+        const d = ctx.getImageData(0, 0, 16, 16).data;
+        let h32 = 2166136261;
+        for (let i = 0; i < d.length; i++) { h32 ^= d[i]; h32 = Math.imul(h32, 16777619); }
+        return (h32 >>> 0).toString(16) + ':' + w + 'x' + h;
+    } catch (e) {
+        // 读不出像素（跨源污染等）就给它一个独一份的号：两边永远不相等 —— 宁可合不了，也不误合。
+        return '?' + (++_vidSigErrSeq);
+    }
+}
+function vidSigVal(v, depth) {
+    depth = depth || 0;
+    if (v === undefined || v === null) return null;
+    const t = typeof v;
+    if (t === 'number') return Number.isFinite(v) ? v : String(v);
+    if (t === 'string' || t === 'boolean') return v;
+    if (t === 'function') return '[fn]';
+    if (t !== 'object') return String(v);
+    if (depth > 6) return '[deep]';
+    if (v === window || v === document) return '[dom-root]';
+    if (typeof v.getContext === 'function') {
+        let w = 0, h = 0;
+        try { w = v.width | 0; h = v.height | 0; } catch (e) { /* 取不到尺寸就按 0 记 */ }
+        return { canvas: true, w, h, pix: vidPixelSig(v) };
+    }
+    if (typeof ImageBitmap !== 'undefined' && v instanceof ImageBitmap) {
+        return { bitmap: true, w: v.width | 0, h: v.height | 0, pix: vidPixelSig(v) };
+    }
+    if (typeof Node !== 'undefined' && v instanceof Node) {
+        return { node: String(v.tagName || v.nodeName || ''), pix: vidPixelSig(v) };
+    }
+    if (Array.isArray(v)) {
+        const out = [];
+        for (let i = 0; i < v.length; i++) out.push(vidSigVal(v[i], depth + 1));
+        return out;
+    }
+    if (ArrayBuffer.isView(v)) {
+        const n = v.length | 0;
+        if (n > 4096) {
+            let h32 = 2166136261;
+            for (let i = 0; i < n; i++) { h32 ^= (Number(v[i]) | 0); h32 = Math.imul(h32, 16777619); }
+            return 'view:' + n + ':' + (h32 >>> 0).toString(16);
+        }
+        const out = [];
+        for (let i = 0; i < n; i++) out.push(Number(v[i]));
+        return out;
+    }
+    const out = {};
+    const ks = Object.keys(v).sort();
+    for (let i = 0; i < ks.length; i++) {
+        const k = ks[i];
+        try { out[k] = vidSigVal(v[k], depth + 1); } catch (e) { out[k] = '[err]'; }
+    }
+    return out;
+}
+function vidLayerSetSig(key) {
+    const k = String(key || '');
+    // 活跃那套以全局 layers 为准（layerSets 里那份是上次切走时的旧壳）。
+    const set = k && k === activeLayerSet ? captureLayerSet() : (layerSets.get(k) || null);
+    const ls = (set && Array.isArray(set.layers)) ? set.layers : [];
+    const layers = ls.map(l => ({
+        name: l.name,
+        visible: !!l.visible,
+        fragment: !!l.fragment,
+        raster: !!l.raster,
+        stash: !!l.stash,
+        stack: stackOf(l),
+        three: !!l.three,
+        sceneUid: l.sceneUid || null,
+        text: vidSigVal(l.text),
+        dir: vidSigVal(l.dir),
+        transform: vidSigVal(l.transform),
+        cud: vidSigVal(l.cud),
+        attrs: vidSigVal(typeof snapshotAttrs === 'function' ? snapshotAttrs(l) : (l.attrs || [])),
+        pix: vidPixelSig(l.img),
+    }));
+    return JSON.stringify({ layers, decal: vidPixelSig(set && set.decal) });
+}
+function replyVidLayerSigs(reqId, keys) {
+    const sigs = {};
+    for (const k of (Array.isArray(keys) ? keys : [])) {
+        const key = String(k || '');
+        if (!key) continue;
+        try { sigs[key] = vidLayerSetSig(key); } catch (e) { sigs[key] = ''; }
+    }
+    window.parent.postMessage({ type: 'blend-vid-layer-sig', reqId, sigs }, '*');
+}
+
 function switchLayerSet(key) {
     const k = String(key || '');
     if (k === activeLayerSet) return;
@@ -13688,6 +13794,7 @@ window.addEventListener('message', event => {
         return;
     }
     if (d.type === 'blend-vid-frame') { handleVidFrameMessage(d); return; }
+    if (d.type === 'blend-vid-layer-sig') { replyVidLayerSigs(d.reqId, d.keys); return; }
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
     if (d.type === 'blend-vid-base') { handleVidBaseMessage(d); return; }
     if (d.type === 'blend-vid-base-off') { vidBaseOff(); return; }
