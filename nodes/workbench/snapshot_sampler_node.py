@@ -580,6 +580,14 @@ def _vid_ffprobe(path):
         return None
     vcodec = acodec = None
     width = height = 0
+    fps = 0.0
+    def _rate(v):
+        """'30000/1001' → 29.97；读不出来算 0（调用方走"按秒抽帧"的旧路）。"""
+        try:
+            a, _, b = str(v or '').partition('/')
+            return float(a) / float(b or 1)
+        except (TypeError, ValueError):
+            return 0.0
     for s in (data.get('streams') or []):
         t = s.get('codec_type')
         if t == 'video' and vcodec is None and not (s.get('disposition') or {}).get('attached_pic'):
@@ -589,13 +597,16 @@ def _vid_ffprobe(path):
                 height = int(s.get('height') or 0)
             except (TypeError, ValueError):
                 width = height = 0
+            # 源帧率：抽帧要按**源帧号**取（见 _vid_frames），VFR 只能近似。
+            fps = _rate(s.get('avg_frame_rate')) or _rate(s.get('r_frame_rate'))
         elif t == 'audio' and acodec is None:
             acodec = s.get('codec_name') or ''
     try:
         dur = float((data.get('format') or {}).get('duration') or 0)
     except (TypeError, ValueError):
         dur = 0
-    return {'duration': dur, 'vcodec': vcodec, 'acodec': acodec, 'width': width, 'height': height}
+    return {'duration': dur, 'vcodec': vcodec, 'acodec': acodec,
+            'width': width, 'height': height, 'fps': fps}
 
 
 def _vid_browser_ok(ext, probe):
@@ -725,9 +736,14 @@ def _vid_work_size(sw, sh, n):
     return ow, oh
 
 
-def _vid_frames(path, ss=0.0, t=None, n=None, fps=None):
-    """从 [ss, ss+t] 里均匀抽 n 帧（或按 fps 抽），返回 [1,H,W,3] float tensor 的列表。
+def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None):
+    """从 [ss, ss+t] 里抽 n 帧，返回 [1,H,W,3] float tensor 的列表。
 
+    入口是**帧段**：`f0` = 源文件内按 fps 的整数起始帧号（优先于 ss），`n` = 帧数。
+    有 f0/fps 且量得到源帧率时**按源帧号取帧**：输出第 k 帧 = 源第
+    floor((f0+k)×src_fps/fps) 帧 —— 段与段按源帧号硬分界，接缝既不重复也不跳帧
+    （交给 ffmpeg 的 fps 滤镜"就近取帧"会在 25/29.97fps 源配 30fps 工程时把下一段的
+    首帧提前取进上一段）。量不到源帧率才退回按秒 + fps 滤镜的老路。
     n 与 fps 二选一（都给了按 n）。抽不满 n 张（片子比区间短）就返回实际抽到的那些 ——
     调用方按实际条数落位，不补帧（补出来的帧是重复内容，编码出来是卡顿）。
     帧尺寸在抽取时按帧列内存预算压到工作分辨率（见 _vid_work_size，只缩不放）——
@@ -741,16 +757,38 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None):
         ss = max(0.0, float(ss or 0))
     except (TypeError, ValueError):
         ss = 0.0
+    # 工程帧率：段网格、f0 都按它计。缺省 30 与旧行为一致。
+    try:
+        pf = float(fps or 0)
+    except (TypeError, ValueError):
+        pf = 0.0
+    if pf <= 0:
+        pf = 30.0
+    # 本段第一帧的**工程帧号**：f0 优先；旧客户端只发 ss 时按 ss×pf 落回同一套网格。
+    # 起点一律走整数帧号 —— 秒数只是它的表示，真正决定取哪一帧的是帧号。
+    if f0 is not None:
+        try:
+            start_f = max(0, int(f0))
+        except (TypeError, ValueError):
+            start_f = int(ss * pf + 1e-6)
+    else:
+        start_f = int(ss * pf + 1e-6)
+    ss = start_f / pf
+    if n is not None:
+        try:
+            t = float(n) / pf
+        except (TypeError, ValueError):
+            t = None
     probe = _vid_ffprobe(path) or {}
     total = probe.get('duration') or 0
+    try:
+        _fps_req = float(fps or 0)
+    except (TypeError, ValueError):
+        _fps_req = 0.0
     if t is None:
         # n + fps 一起给的时候，区间长度就是 n / fps —— 不能拿"整段剩下的时长"当 t：
         # 那会把 n 帧摊到整段上（抽出来的 fps 远低于请求值），编码却仍按 fps 写，
         # 产物看起来就是被快进了好几倍。
-        try:
-            _fps_req = float(fps or 0)
-        except (TypeError, ValueError):
-            _fps_req = 0.0
         if n is not None and _fps_req > 0:
             try:
                 t = float(n) / _fps_req
@@ -768,22 +806,53 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None):
         except (TypeError, ValueError):
             n = 30
     n = max(1, min(_VID_FRAME_MAX_N, int(n)))
-    # 抽出来的尺寸：长边按本段帧数对应的内存预算反推（见 _vid_work_size），短边按比例取偶。
+    # 抽出来的尺寸：长边按**实际要解的帧数**对应的内存预算反推（见 _vid_work_size），
+    # 短边按比例取偶。按源帧号取帧时实际解码 need 帧（可能多于 n），预算按 need 算。
     # 宽高必须都钉死成这里算出的数值，不能把高度交给 ffmpeg 的 h=-2 去推：
     # 1080p 缩到 720 长边时 round(202.5)=202（银行家舍入）→ 404，而 ffmpeg 把 405 对齐到
     # 偶数 → 406。rawvideo 是按 per = ow*oh*3 手工切帧的，每帧差 2 行就会逐帧累积漂移
     # （15 帧 ≈ 30 行），表现为画面在 Y 轴上越跑越偏。竖屏（高 > 宽）封顶的是高，一律按
     # w= 写会把竖屏宽度顶到 720、高度涨到 720 以上，同样对不上。
     sw, sh = int(probe.get('width') or 0), int(probe.get('height') or 0)
-    ow, oh = _vid_work_size(sw, sh, n)
+    src_fps = float(probe.get('fps') or 0)
+    start_src, need = 0, 0
+    if src_fps > 0:
+        # 本段首帧在**源文件里的帧号**，以及本段要用到的源帧数。
+        # need 必须由首尾两个帧号相减得到，不能用 (n-1)×src_fps/pf 直接算 ——
+        # start_f×src_fps/pf 的小数部分会把它整体推后一帧（25fps 源配 30fps 工程时
+        # 每段都要多解一帧才够，否则段尾少一帧）。
+        start_src = int(start_f * src_fps / pf + 1e-6)
+        last_src = int((start_f + n - 1) * src_fps / pf + 1e-6)
+        need = last_src - start_src + 1
+    # 源帧率比工程帧率高太多时（>8×）按源速解码的帧数会爆掉，退回 fps 滤镜那条路。
+    by_index = src_fps > 0 and need <= max(8 * n + 8, 600)
+    ow, oh = _vid_work_size(sw, sh, need if by_index else n)
     if ow > 0 and oh > 0:
         scale = f"scale=w={ow}:h={oh}"
     else:
         scale = f"scale=w=min({_VID_FRAME_MAX_W}\\,iw):h=-2"
-    # fps = n/t：让 ffmpeg 自己把 n 张铺到整个区间上（首尾都给到）。
-    vf = f'fps={n / t:.4f},{scale},format=rgb24'
-    cmd = [ff, '-v', 'error', '-ss', f'{ss:.3f}', '-t', f'{t:.3f}', '-i', path,
-           '-vf', vf, '-frames:v', str(n), '-f', 'rawvideo', '-']
+    if by_index:
+        # **按源帧号取帧**：输出第 k 帧 = 源第 floor((start_f+k)×src_fps/pf) 帧。
+        # 段与段之间因此是按源帧号的硬分界 —— 上一段最后一帧恰好是下一段首帧的前一帧。
+        # 不能交给 ffmpeg 的 fps 滤镜"就近取帧"：它会在接缝处把下一段的首帧提前取进
+        # 上一段（源 25fps / 29.97fps 配 30fps 工程时每段交界处一帧重复，播放就是一顿）。
+        # seek 落到本段首帧上、再往前 0.1ms —— 保证这一帧不会因"seek 点之前"被丢掉。
+        # -ss 相对文件起点计（含 container start_time），所以只用帧号/源帧率即可。
+        seek = max(0.0, start_src / src_fps - 1e-4)
+        cmd = [ff, '-v', 'error', '-ss', f'{seek:.6f}', '-i', path,
+               '-vf', f'{scale},format=rgb24', '-frames:v', str(need), '-f', 'rawvideo', '-']
+    else:
+        # 兜底（量不到源帧率 / 帧率比过大）：fps = n/t，让 ffmpeg 把 n 张铺到整个区间上。
+        vf = f'fps={n / t:.4f},{scale},format=rgb24'
+        # seek 点按微秒**向下**截断，不能按毫秒四舍五入：段起点常是 k/fps 这类无限小数
+        # （如 32/30 = 1.066666…），四舍五入成 1.067 会越过源帧 32 的时间戳 1.066667，
+        # ffmpeg 把这帧当"seek 点之前"丢掉；下一段的起点仍按名义网格算，于是又从同一帧
+        # 开始取 —— 接缝处一帧重复、同时上一段末尾少一帧（32→33→…→48 与下一段 48 起）。
+        # 向下截到微秒只让 seek 点落在边界帧上或之前 <1µs，远小于任意帧间隔
+        # （120fps 也有 8.3ms），不会多带前一帧。
+        ss_eff = int(ss * 1e6) / 1e6
+        cmd = [ff, '-v', 'error', '-ss', f'{ss_eff:.6f}', '-t', f'{t:.6f}', '-i', path,
+               '-vf', vf, '-frames:v', str(n), '-f', 'rawvideo', '-']
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=300)
     except Exception:
@@ -798,9 +867,9 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None):
             return None
         h, w = oh, ow
     else:
-        # 量不到源尺寸（ffprobe 没给宽高）：按总字节反推最接近 n 的因子。
+        # 量不到源尺寸（ffprobe 没给宽高）：按总字节反推最接近的帧数因子。
         per = None
-        for guess in range(n, 0, -1):
+        for guess in range(need if by_index else n, 0, -1):
             if len(raw) % (guess * 3) == 0:
                 cand = len(raw) // (guess * 3)
                 sq = int(cand ** 0.5)
@@ -810,6 +879,18 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None):
         if per is None:
             return None
     arr = np.frombuffer(raw[:got * per], dtype=np.uint8).reshape(got, h, w, 3)
+    if by_index:
+        frames = []
+        for k in range(n):
+            local = int((start_f + k) * src_fps / pf + 1e-6) - start_src
+            if local < 0 or local >= got:
+                break
+            frames.append(torch.from_numpy(arr[local:local + 1].astype(np.float32) / 255.0))
+        if not frames:
+            return None
+        print(f'[VidFrames] {os.path.basename(path)} f0={start_f} n={n} '
+              f'src={src_fps:.3f}fps → {len(frames)}/{n} frames {w}x{h}')
+        return frames
     frames = [torch.from_numpy(arr[i:i + 1].astype(np.float32) / 255.0) for i in range(got)]
     print(f'[VidFrames] {os.path.basename(path)} ss={ss:.2f} t={t:.2f} → {got} frames {w}x{h}')
     return frames
@@ -7029,7 +7110,7 @@ class SnapshotDetailerSamplerNode:
         fname = os.path.basename(str(spec.get('file') or ''))
         vpath = os.path.join(_vid_media_dir(), fname)
         frames = _vid_frames(vpath, ss=spec.get('ss', 0), t=spec.get('t'),
-                             n=spec.get('n'), fps=spec.get('fps'))
+                             n=spec.get('n'), fps=spec.get('fps'), f0=spec.get('f0'))
         if not frames:
             raise ValueError(f'No frames extracted from {fname} — is the file still in the asset library?')
         try:
@@ -7048,7 +7129,8 @@ class SnapshotDetailerSamplerNode:
             mname = os.path.basename(str(m_in.get('file') or ''))
             mpath = os.path.join(_vid_media_dir(), mname)
             mask_frames = _vid_frames(mpath, ss=m_in.get('ss', 0), t=m_in.get('t'),
-                                      n=m_in.get('n') or len(frames), fps=m_in.get('fps') or enc_fps)
+                                      n=m_in.get('n') or len(frames), fps=m_in.get('fps') or enc_fps,
+                                      f0=m_in.get('f0'))
             if not mask_frames:
                 print(f"[PresetVideo] mask track gave no frames ({mname}) — running without a mask")
             else:
@@ -7292,7 +7374,8 @@ class SnapshotDetailerSamplerNode:
         # 构建端口级图片覆盖。端口声明为 MASK 的走亮度转换 —— 覆盖值都是 staging 里
         # 的 [1,H,W,C] 图，直接灌进 mask 端口形状不对。
         # Allow List：image_keys 的值可以是**一列** staging id（list 模式的多图入口），
-        # video_inputs 直接按 {file, ss, t, fps} 抽帧成一列 —— 两条路都落成
+        # video_inputs 直接按 {file, f0, n, fps} 帧段抽帧成一列（旧快照的 {file, ss, t, …}
+        # 仍照旧按秒走）—— 两条路都落成
         # port_overrides 里的 list，由 InterfaceExecutor 的 list_mode 分流。
         start_types = pkg.get('start_types', {})
         _start_names = ((getattr(server, 'interface_meta', None) or {})
@@ -7329,7 +7412,7 @@ class SnapshotDetailerSamplerNode:
             fname = os.path.basename(str(spec.get('file') or ''))
             vpath = os.path.join(_vid_media_dir(), fname)
             frames = _vid_frames(vpath, ss=spec.get('ss', 0), t=spec.get('t'),
-                                 n=spec.get('n'), fps=spec.get('fps'))
+                                 n=spec.get('n'), fps=spec.get('fps'), f0=spec.get('f0'))
             if not frames:
                 raise ValueError(f'Video input for port {port_num_str}: no frames extracted from {fname}')
             declared = start_types.get(str(port_num_str))

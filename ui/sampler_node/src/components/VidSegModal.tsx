@@ -53,8 +53,11 @@ const VidSegModal: React.FC<{
     onChange: (next: { kind: 'tracks' | 'sel_track' | 'asset'; trackId: string; assetId: string }) => void;
   };
   onRun: (segFrames: number, inFrame: number, outFrame: number) => void;
+  /** 目标输出槽位守卫：返回非空字符串 = 这个范围在输出轨上已被别的东西占着（显示原因并
+   *  把 Run 置灰）。不传 = 不查（例如还没有输出轨）。 */
+  checkRange?: (inFrame: number, outFrame: number) => string | null;
   onClose: () => void;
-}> = ({ anchorName, anchorKind, spanStart, spanDuration, total, fps, defaultIn, title, subtitle, note, sources, onRun, onClose }) => {
+}> = ({ anchorName, anchorKind, spanStart, spanDuration, total, fps, defaultIn, title, subtitle, note, sources, onRun, checkRange, onClose }) => {
   const spanEnd = spanStart + spanDuration;
   const [segText, setSegText] = useState(String(Math.min(SEG_DEFAULT, total)));
   const [inText, setInText] = useState(() => fmt(
@@ -73,6 +76,9 @@ const VidSegModal: React.FC<{
   const outFrame = Math.min(total, Math.round((outSec - spanStart) * fps));
   const rangeFrames = Math.max(0, outFrame - inFrame);
   const rangeOk = rangeFrames >= 1 && rangeFrames <= SEG_TOTAL_CAP;
+  // 输出轨的槽位占用：目标位置已经被别的片段占着 → Run 置灰（原因写在范围预览里）。
+  const blocked = rangeOk ? (checkRange?.(inFrame, outFrame) ?? null) : null;
+  const canRun = rangeOk && !blocked;
 
   const parsed = Math.round(Number(segText));
   const segFrames = Number.isFinite(parsed) && parsed >= 1
@@ -82,8 +88,8 @@ const VidSegModal: React.FC<{
   const segSecs = segFrames / fps;
 
   const run = useCallback(() => {
-    if (rangeOk) onRun(segFrames, inFrame, outFrame);
-  }, [rangeOk, onRun, segFrames, inFrame, outFrame]);
+    if (canRun) onRun(segFrames, inFrame, outFrame);
+  }, [canRun, onRun, segFrames, inFrame, outFrame]);
 
   const resetRange = useCallback(() => {
     setInText(fmt(spanStart));
@@ -199,6 +205,7 @@ const VidSegModal: React.FC<{
                 {rangeFrames < 1 ? ' — out must be after in' : ` — over the ${SEG_TOTAL_CAP}-frame cap`}
               </span>
             )}
+            {blocked && <span style={{ color: '#ff6961' }}> — {blocked}</span>}
           </div>
 
           {/* ── 每段帧数 ── */}
@@ -229,9 +236,10 @@ const VidSegModal: React.FC<{
           {/* ── 口径说明 ── */}
           <div style={S.note}>
             {note || `Each segment runs as its own pass — frames are extracted from the selected range, the
-            processor runs on the column, and the results encode back to video. The segments land
-            back-to-back on a new track, starting at the in-point. Frame-to-frame state (temporal
-            nodes) does not carry across segment boundaries.`}
+            processor runs on the column, and the results encode back to video. The placeholders stay
+            on their own track; every finished segment lands on the output track above, at the same
+            timeline position, and can be run again any time (its previous result is replaced).
+            Frame-to-frame state (temporal nodes) does not carry across segment boundaries.`}
           </div>
         </div>
 
@@ -239,8 +247,9 @@ const VidSegModal: React.FC<{
         <div style={S.actions}>
           <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
           <button
-            style={{ ...S.runBtn, ...(rangeOk ? {} : S.runBtnOff) }}
-            disabled={!rangeOk}
+            style={{ ...S.runBtn, ...(canRun ? {} : S.runBtnOff) }}
+            disabled={!canRun}
+            title={blocked || undefined}
             onClick={run}
           >Run</button>
         </div>

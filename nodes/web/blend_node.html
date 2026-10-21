@@ -11733,6 +11733,20 @@ async function saveCud() {
     }
 }
 
+// 自动保存：宿主每跑完一段（Processor / Preset / 续跑）就敲一次门。**只对已经落过盘的文档生效** ——
+// 没绑过文件的工程绝不自动存，更绝不替用户弹「另存为」的目录框（saveCud 的 fallback 在这里是要被
+// 拦住的）。上一次写还没回来时把这一发挂起，写完再补一次 —— 连跑几段只多落最后一版。
+let autoSaveQueued = false;
+async function autosaveCud() {
+    if (!currentCudHandle) return false;      // 从未落盘：不自动存，也不走 Save As
+    if (isSceneDoc(activeDoc)) return false;  // 3D tab 的全局不是这份文档的像素，saveCud 也会拒
+    if (cudBusy) { autoSaveQueued = true; return false; }
+    autoSaveQueued = false;
+    const ok = await saveCud();
+    if (autoSaveQueued) { autoSaveQueued = false; void autosaveCud(); }
+    return ok;
+}
+
 // Load: the document a project came from is remembered by its token (or handle), which is what lets
 // Save write to the same path. Where no picker exists at all, <input type=file> reads it and Save As
 // becomes the only way to write.
@@ -13659,6 +13673,11 @@ window.addEventListener('message', event => {
         // 宿主替我们按了 Ctrl+S（Video 模式下焦点在宿主那侧，页面根本收不到这个键）。
         // 保存的还是同一份 .cud：header 里的 Video 工程由 requestHostVid 在组装时向宿主要。
         saveCud();
+        return;
+    }
+    if (d.type === 'blend-autosave') {
+        // 宿主跑完一段了：已落盘的文档静静覆盖一版（没落盘的不碰，也不弹目录框）。见 autosaveCud。
+        void autosaveCud();
         return;
     }
     if (d.type === 'blend-vid-dirty') {

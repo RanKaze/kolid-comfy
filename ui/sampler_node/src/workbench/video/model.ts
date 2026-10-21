@@ -14,14 +14,26 @@
 import type { StagingItem } from '../../types';
 import type { MediaInfo } from './audio';
 
-// 三种轨：
+// 四种轨：
 //  * video / audio —— 素材轨，帧与声直接来自源文件；
 //  * layer —— **合成轨**。它自己不装素材，只装"Layer 段"：每一段绑定一套独立图层
 //    （在 Layers 窗里编辑），这一帧的画面**就是这一段图层自己的合成** —— 不叠加脚下视频轨的帧，
 //    空段因此是一张空图。要让画面里出现某条视频轨的帧，就把它绑到 decal / mask 的 Frame source。
 //    **只有它排在所有视频轨之上时才会生效**（渲染按轨道序找第一条命中的轨，先命中先赢）。
-export type VidTrackKind = 'video' | 'audio' | 'layer';
-export type VidTrack = { id: string; kind: VidTrackKind; name: string };
+//  * process —— **process 轨**（琥珀色）：只装 Processor / Preset 的**占位段**（VidProcPending），
+//    不播、不参与合成、不收素材。Run 时自动创建（在输出轨正下方），产物落到上方输出轨；
+//    占位段原地保留，所以可以反复 ▶ 重跑。
+export type VidTrackKind = 'video' | 'audio' | 'layer' | 'process';
+export type VidTrack = {
+  id: string;
+  kind: VidTrackKind;
+  name: string;
+  /** `'output'` = **产物输出轨**：Processor / Preset 的 process 段跑完，成品固定落在这一条
+   *  上层轨的对应时间位置（占位段自己留在原地，可以反复重跑）。每条输出口一条，懒建。 */
+  role?: 'output';
+  /** 输出轨对应的输出口（缺省 0；preset 恒 0）。process 段按 pending.port 找自己的输出轨。 */
+  port?: number;
+};
 
 /** 资产库的一件货：视频/音频源，URL 收藏在这里，时间线上的片段按 src/资产来引用 ——
  *  同一源泉多次拖进时间线也只是多几段引用，不复制数据。 */
@@ -61,14 +73,19 @@ export type VidClip = {
   hasAudio: boolean;
   /** 同一次导入拆出来的视频段 + 音频段共用一颗 —— 拖动/裁剪一起走。 */
   groupId?: string;
-  /** Processor 占位段（见 VidProcPending）：跑完被视频替换，撤掉前播放/合成当它不存在。 */
+  /** Processor 占位段（见 VidProcPending）：产物落在输出轨上，占位段自己**原地保留**
+   *  （可以反复 ▶ 重跑）；重跑会把它自己上一次的产物换掉。撤掉它 = 放弃这个 process 段。 */
   pending?: VidProcPending;
+  /** 输出轨上的产物由哪个占位段生成（= 占位段的 clip id）。重跑同一个占位段时按它认亲，
+   *  自己的旧产物不算"占位"，会被原地换掉；别的东西占着才是真占。 */
+  procOwner?: string;
 };
 
 /** Processor 占位段里的**执行快照**：Run 确认的当下就在轨上摆好的坑（每段一个、预分配
- *  空间），等对应段跑完被编码视频替换。里面存着这一段怎么跑的全部信息 —— 接口、参数、
- *  每行输入的抽帧窗口（源内秒）—— 中途退出再进来，点占位上的 ▶ 就按快照原样重放
- *  这一段（只跑被点的那个）。 */
+ *  空间），等对应段跑完把成品放到**上层输出轨**的对应位置 —— 占位段自己留在原地不替换，
+ *  所以同一段可以反复重跑（每次覆盖它自己上一次的产物）。里面存着这一段怎么跑的全部信息
+ *  —— 接口、参数、每行输入的抽帧窗口（源内秒）—— 中途退出再进来，点占位上的 ▶ 就按快照
+ *  原样重放这一段（只跑被点的那个）。 */
 export type VidProcPending = {
   /** 同一趟 Run 的所有占位共用一颗（播报/统计用）。 */
   runId: string;
@@ -92,10 +109,12 @@ export type VidProcPending = {
   ifaceNum: number;
   /** 参数快照（manual_values：port → 值）。 */
   params: Record<string, unknown>;
-  /** 这一段每行输入的抽帧窗口（port → {file, ss, t, n, fps}，ss/t 是源内秒）。 */
-  inputs: Record<string, { file: string; ss: number; t: number; n: number; fps: number }>;
-  /** preset 路：这一段的 Mask 轨抽帧窗口（同形，port 恒 '0'）。没绑 Mask 轨就是空。 */
-  maskInputs?: Record<string, { file: string; ss: number; t: number; n: number; fps: number }>;
+  /** 这一段每行输入的**帧段**（port → {file, f0, n, fps}）：f0 = 源文件内按工程 fps
+   *  的起始帧号（整数），n = 帧数。不再存秒 —— 段与段按整数帧号首尾相接，重跑/续跑
+   *  不受时间取整影响。 */
+  inputs: Record<string, ProcFrameWindow>;
+  /** preset 路：这一段的 Mask 轨**帧段**（同形，port 恒 '0'）。没绑 Mask 轨就是空。 */
+  maskInputs?: Record<string, ProcFrameWindow>;
   /** 第几段（0 起）/ 共几段。 */
   segIndex: number;
   segCount: number;
@@ -214,8 +233,9 @@ export type VidController = {
   mute: VidMute;
   /** 切某条轨的 mute（再点一次取消）。**所有轨类型都接** —— 视频/音频/Layer 各有各的语义。 */
   toggleMute: (trackId: string) => void;
-  /** 占位段上的 ▶（Processor 段续跑）：按段里的执行快照把这一段单独重放，跑完当场替换。
-   *  宿主（EditPhase）接线；Timeline 的片段直接透传。 */
+  /** 占位段上的 ▶（Processor 段续跑）：按段里的执行快照把这一段单独重放，产物落到输出轨的
+   *  对应位置（占位段原地保留，可反复重跑；占用时按钮置灰）。宿主（EditPhase）接线；
+   *  Timeline 的片段直接透传。 */
   continueProc?: (clipId: string) => void;
 };
 
@@ -232,6 +252,7 @@ export const trackOf = (p: VidProject, id: string): VidTrack | null => p.tracks.
 /** 播放头 t 落在哪一段上（按轨道上下序，先命中先赢）。`kind` 缺省 = 不挑类型。 */
 export const clipAt = (p: VidProject, t: number, kind?: VidTrackKind): VidClip | null => {
   for (const tr of p.tracks) {
+    if (tr.kind === 'process') continue;             // process 轨只有占位段，从来不播
     if (kind && tr.kind !== kind) continue;
     const hit = p.clips.find(c => c.trackId === tr.id && !c.pending && t >= c.start && t < c.start + c.duration);
     if (hit) return hit;
@@ -365,9 +386,11 @@ export const removeAsset = (p: VidProject, id: string): VidProject =>
 
 export const addTrack = (p: VidProject, kind: VidTrackKind): VidProject => {
   const n = p.tracks.filter(t => t.kind === kind).length + 1;
-  const name = kind === 'video' ? `Video ${n}` : kind === 'layer' ? `Layer ${n}` : `Audio ${n}`;
+  const name = kind === 'video' ? `Video ${n}` : kind === 'layer' ? `Layer ${n}`
+    : kind === 'process' ? `Process ${n}` : `Audio ${n}`;
   const track: VidTrack = { id: newVidId('trk'), kind, name };
-  // 视频轨 / Layer 轨插到最上面（序 = 数组序，也是渲染的上下序），音频轨排到所有音频轨的最后。
+  // 视频轨 / Layer 轨 / process 轨插到最上面（序 = 数组序，也是渲染的上下序），
+  // 音频轨排到所有音频轨的最后。
   const tracks = kind === 'audio' ? [...p.tracks, track] : [track, ...p.tracks];
   return { ...p, tracks };
 };
@@ -545,11 +568,13 @@ export const placeProcVideoSegs = (
   return { ...next, clips: [...next.clips, ...clips] };
 };
 
-/** Processor 的 Allow List 视频路（输出口 = New Track）：**Run 确认的当下**就开一条新
- *  视频轨、按段的划分摆好占位段（每段一个坑、预分配空间）—— 段跑完一个替换一个，
- *  不必等整趟结束。占位段带着执行快照（VidProcPending），中途退出也能点占位续跑。
- *  item.segs 的 start/duration 是时间线口径（第一段对齐范围入点），inputs 是这一段的
- *  抽帧窗口（全口）。每个被跟踪的输出口各开一条轨（与 placeProcVideoSegs 的口径一致）。 */
+/** Processor 的 Allow List 视频路（输出口 = New Track）：**Run 确认的当下**就摆好两条轨 ——
+ *  一条**产物输出轨**（role='output'，按输出口各一条、懒建、固定复用）在上，process 轨
+ *  紧贴它下方；process 轨上每段一个占位坑（带着执行快照 VidProcPending）。段跑完产物落到
+ *  输出轨的对应时间位置，占位段**原地保留** —— 所以同一段可以反复重跑，中途退出也能点
+ *  占位续跑。item.segs 的 start/duration 是时间线口径（第一段对齐范围入点），inputs 是
+ *  这一段的**帧段**（全口：file/f0/n/fps，f0 = 源内按工程 fps 的整数起始帧号）。每个被
+ *  跟踪的输出口各开一条 process 轨。 */
 export const placeProcPlaceholders = (
   p: VidProject,
   item: {
@@ -563,17 +588,22 @@ export const placeProcPlaceholders = (
     maskTrackId?: string;
     maskTrackName?: string;
     segs: { start: number; duration: number; segIndex: number; segCount: number;
-      inputs: Record<string, { file: string; ss: number; t: number; n: number; fps: number }>;
-      maskInputs?: Record<string, { file: string; ss: number; t: number; n: number; fps: number }> }[];
+      inputs: Record<string, ProcFrameWindow>;
+      maskInputs?: Record<string, ProcFrameWindow> }[];
   },
 ): VidProject => {
   if (!item.segs.length) return p;
+  // 产物的固定去处先就位：输出轨在上、process 轨紧贴其下。之后无论跑多少次，成品都落在
+  // 这一条输出轨的对应位置 —— 不会再多开一条"结果轨"。
+  const out = ensureOutputTrack(p, item.port);
   const track: VidTrack = {
-    id: newVidId('trk'), kind: 'video',
-    name: `Video ${p.tracks.filter(t => t.kind === 'video').length + 1}`,
+    id: newVidId('trk'), kind: 'process',
+    name: `Process ${out.p.tracks.filter(t => t.kind === 'process').length + 1}`,
   };
+  const tracks = [...out.p.tracks];
+  tracks.splice(tracks.findIndex(t => t.id === out.track.id) + 1, 0, track);
   const clips: VidClip[] = item.segs.map(s => ({
-    id: newVidId('clip'), trackId: track.id, kind: 'video', name: item.name,
+    id: newVidId('clip'), trackId: track.id, kind: 'process', name: item.name,
     src: '', origin: 'file', start: Math.max(0, s.start), duration: Math.max(0.1, s.duration),
     offset: 0, srcDuration: Math.max(0.1, s.duration), hasAudio: false,
     pending: {
@@ -588,29 +618,124 @@ export const placeProcPlaceholders = (
       ...(s.maskInputs ? { maskInputs: s.maskInputs } : {}),
     },
   }));
-  return { ...p, tracks: [track, ...p.tracks], clips: [...p.clips, ...clips] };
+  return { ...out.p, tracks, clips: [...out.p.clips, ...clips] };
 };
 
-/** 一段跑完：占位段**当场**换成对应的编码视频（同位替换、pending 撤掉），产物照记
- *  资产库（Assets 是项目所有数据的来源）。撤销这一步 = 这段退回占位（历史按快照走）。
- *  占位已被用户删掉时 clip 找不到 —— 调用方（EditPhase）负责把那段产物改道资产库。 */
-export const fillProcSegment = (
+/** 产物输出轨查找：每个输出口一条（缺省 0）。没有 = 还没跑过这一口。 */
+export const outputTrackOf = (p: VidProject, port: number): VidTrack | null =>
+  p.tracks.find(t => t.role === 'output' && (t.port ?? 0) === port) ?? null;
+
+const outputTrackName = (port: number): string => (port ? `Output ${port}` : 'Output');
+
+/** 输出轨就位：没有就建一条，插在所有 Layer 轨之下（Layer 轨要压在视频轨上方才合成）；
+ *  已有就原样复用（用户挪过的位置不强行搬回去）。 */
+const ensureOutputTrack = (p: VidProject, port: number): { p: VidProject; track: VidTrack } => {
+  const found = outputTrackOf(p, port);
+  if (found) return { p, track: found };
+  let at = 0;
+  while (at < p.tracks.length && p.tracks[at].kind === 'layer') at++;
+  const track: VidTrack = {
+    id: newVidId('trk'), kind: 'video', role: 'output', port, name: outputTrackName(port),
+  };
+  const tracks = [...p.tracks];
+  tracks.splice(at, 0, track);
+  return { p: { ...p, tracks }, track };
+};
+
+/** 输出口 port 的槽位 [start, start+duration) 是否被**别的东西**占着。`ownerId` = 占位段
+ *  id：它自己上一次跑出来的产物不算占（重跑会原地换掉自己的旧结果）—— 这样一段可以反复
+ *  执行；别的片段 / 别的 process 的产物占着就是真占，执行键应置灰。 */
+export const procSlotBusy = (
+  p: VidProject, port: number, start: number, duration: number, ownerId?: string,
+): boolean => {
+  const tr = outputTrackOf(p, port);
+  if (!tr) return false;
+  const a = Math.max(0, start);
+  const b = a + Math.max(0.05, duration);
+  return p.clips.some(c => c.trackId === tr.id && !c.pending && c.duration > 0
+    && !(ownerId && c.procOwner === ownerId)
+    && c.start < b - 1e-6 && c.start + c.duration > a + 1e-6);
+};
+
+/** 一个输入口的**帧段**：f0 = 源文件内按工程 fps 的起始帧号（整数），n = 帧数。
+ *  `ss`/`t` 这类秒数不再进存档 —— 段与段用整数帧号相接，重跑不受取整影响。 */
+export type ProcFrameWindow = { file: string; f0: number; n: number; fps: number };
+
+/** 占位段批量设置的写回补丁（只带用户真正改过的字段 —— 混合值不写）：
+ *  * 顶层 `name/start/duration` 写片段本身；
+ *  * `pending` 按字段覆盖快照；
+ *  * `params` 按 key 覆盖（没有该 key 的段也会补上）；
+ *  * `inputs/maskInputs` 按 key **只改已有的那行** —— 某段没有这个输入口就原样不动。 */
+export type ProcSettingsPatch = {
+  name?: string;
+  start?: number;
+  duration?: number;
+  pending?: Partial<VidProcPending>;
+  params?: Record<string, unknown>;
+  inputs?: Record<string, Partial<ProcFrameWindow>>;
+  maskInputs?: Record<string, Partial<ProcFrameWindow>>;
+};
+
+/** 把一份设置补丁应用到一批占位段上（纯函数）。非占位段一律不碰。 */
+export const applyProcSettings = (p: VidProject, ids: readonly string[], patch: ProcSettingsPatch): VidProject => {
+  if (!Object.keys(patch).length) return p;
+  const set = new Set(ids);
+  let changed = false;
+  const clips = p.clips.map(c => {
+    if (!set.has(c.id) || !c.pending) return c;
+    const pd: VidProcPending = { ...c.pending };
+    if (patch.pending) Object.assign(pd, patch.pending);
+    if (patch.params) pd.params = { ...pd.params, ...patch.params };
+    if (patch.inputs) {
+      const next = { ...pd.inputs };
+      for (const [k, part] of Object.entries(patch.inputs)) {
+        if (next[k]) next[k] = { ...next[k], ...part };
+      }
+      pd.inputs = next;
+    }
+    if (patch.maskInputs) {
+      const next = { ...(pd.maskInputs ?? {}) };
+      for (const [k, part] of Object.entries(patch.maskInputs)) {
+        if (next[k]) next[k] = { ...next[k], ...part };
+      }
+      pd.maskInputs = Object.keys(next).length ? next : undefined;
+    }
+    const duration = patch.duration != null ? Math.max(0.1, patch.duration) : c.duration;
+    changed = true;
+    return {
+      ...c,
+      name: patch.name != null ? patch.name : c.name,
+      start: patch.start != null ? Math.max(0, patch.start) : c.start,
+      duration,
+      srcDuration: patch.duration != null ? duration : c.srcDuration,
+      pending: pd,
+    };
+  });
+  return changed ? { ...p, clips } : p;
+};
+
+/** 一段跑完：产物落到**输出轨的对应时间位置**。占位段**原地不动**（pending 还在，可以
+ *  反复 ▶ 重跑）；同一个占位段上一次的产物按 procOwner 认亲原地换掉（重跑 = 覆盖自己的
+ *  旧结果）。别的东西占着这个位置时不覆盖 —— 调用方先过 procSlotBusy 拦下。
+ *  产物照记资产库（Assets 是项目所有数据的来源）。 */
+export const placeProcOutput = (
   p: VidProject, clipId: string, src: string, name: string, duration: number,
 ): VidProject => {
   const clip = p.clips.find(c => c.id === clipId);
   if (!clip || !clip.pending) return p;
+  const port = clip.pending.port ?? 0;
   const dur = Math.max(0.1, duration);
-  const withAsset = addAsset(p, {
+  const { p: withTrack, track } = ensureOutputTrack(p, port);
+  const withAsset = addAsset(withTrack, {
     id: newVidId('as'), name, src, origin: 'file', kind: 'video', duration: dur, hasAudio: false,
   });
-  return {
-    ...withAsset,
-    clips: withAsset.clips.map(c => {
-      if (c.id !== clipId || !c.pending) return c;
-      const { pending: _drop, ...rest } = c;
-      return { ...rest, name, src, duration: dur, srcDuration: dur, offset: 0 };
-    }),
-  };
+  const clips = withAsset.clips.filter(c => !(c.trackId === track.id && c.procOwner === clipId));
+  clips.push({
+    id: newVidId('clip'), trackId: track.id, kind: 'video', name, src, origin: 'file',
+    start: Math.max(0, clip.start), duration: dur, offset: 0, srcDuration: dur, hasAudio: false,
+    procOwner: clipId,
+  });
+  return { ...withAsset, clips };
 };
 
 /** Processor 的 Allow List 视频产物**只入库**（输出口选了 Asset）：时间线不动、不开轨，
@@ -655,6 +780,39 @@ export const loadVidProject = (): VidProject => {
   } catch { return defaultVidProject(); }
 };
 
+/** 旧存档的抽帧窗口是秒（ss/t）—— 读档时换成帧段（f0/n），存档里从此只留帧。
+ *  已经新格式的原样保留。f0 用 floor（容差 1e-6 帧）落到"包含起点的那一帧"，
+ *  保证整段不会越过源尾。 */
+const migrateFrameWindow = (w: unknown, projectFps: number): ProcFrameWindow | null => {
+  if (!w || typeof w !== 'object') return null;
+  const o = w as Record<string, unknown>;
+  const file = typeof o.file === 'string' ? o.file : '';
+  if (!file) return null;
+  const rate = Number(o.fps) > 0 ? Number(o.fps) : projectFps;
+  const nRaw = Number(o.n);
+  const n = Number.isFinite(nRaw) && nRaw > 0
+    ? Math.max(1, Math.round(nRaw))
+    : Math.max(1, Math.round((Number(o.t) > 0 ? Number(o.t) : 1 / rate) * rate));
+  if (Number.isFinite(Number(o.f0))) {
+    return { file, f0: Math.max(0, Math.floor(Number(o.f0) + 1e-6)), n, fps: rate };
+  }
+  const ss = Number(o.ss);
+  if (!Number.isFinite(ss)) return null;
+  return { file, f0: Math.max(0, Math.floor(ss * rate + 1e-6)), n, fps: rate };
+};
+
+const migrateWindows = (
+  raw: unknown, projectFps: number,
+): Record<string, ProcFrameWindow> | undefined => {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out: Record<string, ProcFrameWindow> = {};
+  for (const [k, w] of Object.entries(raw as Record<string, unknown>)) {
+    const m = migrateFrameWindow(w, projectFps);
+    if (m) out[k] = m;
+  }
+  return Object.keys(out).length ? out : undefined;
+};
+
 /** 任何来源（localStorage / .cud 的 header.video / 宿主消息）的工程数据都过这里：
  *  形状不对的部分当场剪掉 —— 一份坏数据不该把时间线整个掀了。 */
 export const normalizeVidProject = (raw: unknown): VidProject => {
@@ -663,6 +821,7 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
     const p = raw as VidProject;
     if (!p || !Array.isArray(p.tracks) || !Array.isArray(p.clips)) return base;
     const trackIds = new Set(p.tracks.map(t => t.id));
+    const fps = clampFps(Number(p.fps));
     // blob: 的 objectURL 活不过刷新 —— 那些片段/资产当场蒸发；挂在不存在的轨道上的也一样。
     // Layer 段没有 src（它装的是图层，不是素材），所以"必须有 src"那条只对素材段成立。
     const clips = p.clips.filter(c => {
@@ -671,7 +830,15 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       if (c.pending) return true;   // 占位段没有 src（等跑完才有）—— 快照要活过重开，照常回来
       if (c.kind === 'layer') return c.src === '' || !c.src;
       return !!c.src && !c.src.startsWith('blob:');
-    }).map(c => (c.kind === 'layer' ? { ...c, src: '', layerKey: c.layerKey || c.id } : c));
+    }).map(c => {
+      if (c.pending) {
+        // 占位段的输入窗口统一成帧段（旧存档的 ss/t 在这里换掉 —— 存档不再写秒）。
+        const inputs = migrateWindows(c.pending.inputs, fps) ?? {};
+        const maskInputs = migrateWindows(c.pending.maskInputs, fps);
+        return { ...c, pending: { ...c.pending, inputs, ...(maskInputs ? { maskInputs } : { maskInputs: undefined }) } };
+      }
+      return c.kind === 'layer' ? { ...c, src: '', layerKey: c.layerKey || c.id } : c;
+    });
     const assets = (Array.isArray(p.assets) ? p.assets : []).filter(a => a && a.src && !a.src.startsWith('blob:')
       && Number.isFinite(a.duration) && a.duration > 0);
     return {
