@@ -697,10 +697,32 @@ def _vid_strip(path, n):
 # Allow List（Processor 的视频那条路）：把一段视频按帧拆成一列 tensor，再把一列 tensor
 # 编码回一段视频。两端都走 ffmpeg 的 rawvideo 管道（不落中间文件），帧尺寸在抽取时
 # 就压到工作分辨率 —— 一列 1080p 的 float32 帧动辄几 GB，抽之前必须缩。
-_VID_FRAME_MAX_W = 720      # 帧的长边上限（只缩不放）
+_VID_FRAME_MAX_W = 720      # ffprobe 量不到源尺寸时的兜底长边（也只缩不放）
 _VID_FRAME_MAX_N = 150      # 一列帧的条数上限（再多内存扛不住，也让用户知道代价）
+_VID_FRAME_BUDGET = 1536 * 1024 * 1024   # 一列帧（float32 RGB）的总字节预算 ≈ 1.5 GiB
 _VID_CRF = 18               # 产物重编码质量（20 偏软，18 基本看不出二次编码损失）
 _VID_PRESET = 'medium'      # veryfast 在同 CRF 下细节保留更差；产物都是短片段，medium 代价可接受
+
+
+def _vid_work_size(sw, sh, n):
+    """这一列帧的工作尺寸：长边按内存预算反推，短边按源比例取偶。
+
+    帧列是一列 float32 RGB 张量，总字节 = n × 长边 × 短边 × 12。所以短片段可以按源分辨率
+    进链路（1080p 的 15 帧 ≈ 0.36 GB），帧数越多长边越小，峰值内存封在 _VID_FRAME_BUDGET。
+    "只缩不放"：长边不会超过源。量不到源尺寸时返回 (0, 0)，调用方走兜底分支。
+    """
+    if sw <= 0 or sh <= 0:
+        return 0, 0
+    long_edge = max(sw, sh)
+    aspect = min(sw, sh) / long_edge
+    budget_long = int((_VID_FRAME_BUDGET / max(1, n) / (12.0 * aspect)) ** 0.5)
+    long_edge = max(2, min(long_edge, budget_long))
+    long_edge -= long_edge % 2            # 偶数：_vid_encode 不用再为奇数宽高裁一列
+    if sw >= sh:
+        ow, oh = long_edge, max(2, int(round(long_edge * sh / sw / 2)) * 2)
+    else:
+        oh, ow = long_edge, max(2, int(round(long_edge * sw / sh / 2)) * 2)
+    return ow, oh
 
 
 def _vid_frames(path, ss=0.0, t=None, n=None, fps=None):
@@ -708,7 +730,7 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None):
 
     n 与 fps 二选一（都给了按 n）。抽不满 n 张（片子比区间短）就返回实际抽到的那些 ——
     调用方按实际条数落位，不补帧（补出来的帧是重复内容，编码出来是卡顿）。
-    帧尺寸在抽取时就压到工作分辨率（长边 ≤ _VID_FRAME_MAX_W，只缩不放）——
+    帧尺寸在抽取时按帧列内存预算压到工作分辨率（见 _vid_work_size，只缩不放）——
     一列全尺寸的 float32 帧动辄几 GB，抽之前必须缩。
     返回 None = 抽不了（ffmpeg 不在 / 解不开 / 一帧都没抽到）。
     """
@@ -746,23 +768,17 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None):
         except (TypeError, ValueError):
             n = 30
     n = max(1, min(_VID_FRAME_MAX_N, int(n)))
-    # 抽出来的尺寸：**长边**封顶、短边按比例、取偶。
+    # 抽出来的尺寸：长边按本段帧数对应的内存预算反推（见 _vid_work_size），短边按比例取偶。
     # 宽高必须都钉死成这里算出的数值，不能把高度交给 ffmpeg 的 h=-2 去推：
-    # 1080p → 这里 round(202.5)=202（银行家舍入）→ 404，而 ffmpeg 把 405 对齐到偶数 → 406。
-    # rawvideo 是按 per = ow*oh*3 手工切帧的，每帧差 2 行就会逐帧累积漂移（15 帧 ≈ 30 行），
-    # 表现为画面在 Y 轴上越跑越偏。竖屏（高 > 宽）封顶的是高，一律按 w= 写会把竖屏
-    # 宽度顶到 720、高度涨到 720 以上，同样对不上。
+    # 1080p 缩到 720 长边时 round(202.5)=202（银行家舍入）→ 404，而 ffmpeg 把 405 对齐到
+    # 偶数 → 406。rawvideo 是按 per = ow*oh*3 手工切帧的，每帧差 2 行就会逐帧累积漂移
+    # （15 帧 ≈ 30 行），表现为画面在 Y 轴上越跑越偏。竖屏（高 > 宽）封顶的是高，一律按
+    # w= 写会把竖屏宽度顶到 720、高度涨到 720 以上，同样对不上。
     sw, sh = int(probe.get('width') or 0), int(probe.get('height') or 0)
-    if sw > 0 and sh > 0:
-        if sw >= sh:
-            ow = min(_VID_FRAME_MAX_W, sw)
-            oh = max(2, int(round(ow * sh / sw / 2)) * 2)
-        else:
-            oh = min(_VID_FRAME_MAX_W, sh)
-            ow = max(2, int(round(oh * sw / sh / 2)) * 2)
+    ow, oh = _vid_work_size(sw, sh, n)
+    if ow > 0 and oh > 0:
         scale = f"scale=w={ow}:h={oh}"
     else:
-        ow = oh = 0
         scale = f"scale=w=min({_VID_FRAME_MAX_W}\\,iw):h=-2"
     # fps = n/t：让 ffmpeg 自己把 n 张铺到整个区间上（首尾都给到）。
     vf = f'fps={n / t:.4f},{scale},format=rgb24'
