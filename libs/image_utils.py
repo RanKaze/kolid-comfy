@@ -376,7 +376,11 @@ def crop_mask(image, mask, reserve):
                     "crop_y": 0,
                     "crop_width": W,
                     "crop_height": H,
-                    "spatial_rate": 1.0
+                    "spatial_rate": 1.0,
+                    # 空 mask = 整幅不裁；batch_* 记的是这张张量所在网格（B>1 时
+                    # 是"本批最大框"，recover 拿它判断该不该先缩回来）
+                    "batch_width": max_crop_w,
+                    "batch_height": max_crop_h,
                 }
             else:
                 x1, y1 = int(min_x[i]), int(min_y[i])
@@ -401,6 +405,10 @@ def crop_mask(image, mask, reserve):
                 crop_height = y2 - y1
                 crop_area = crop_width * crop_height
                 spatial_rate = crop_area / original_area if original_area > 0 else 0.0
+                # ── 只记矩形 + 它所在的张量网格 ───────────────────────────────
+                # B>1 时小框被补到本批最大框（右下补 0），所以 crop_w/h（真实内容）
+                # 与 batch_w/h（张量尺寸）必须分开记 —— recover 只按这两个数截取，
+                # 不需要（也不该）去猜哪一圈是补出来的。
                 crop_info = {
                     "original_width": W,
                     "original_height": H,
@@ -408,7 +416,9 @@ def crop_mask(image, mask, reserve):
                     "crop_y": y1,
                     "crop_width": crop_width,
                     "crop_height": crop_height,
-                    "spatial_rate": spatial_rate
+                    "spatial_rate": spatial_rate,
+                    "batch_width": max_crop_w,
+                    "batch_height": max_crop_h,
                 }
 
             crop_infos.append(crop_info)
@@ -496,71 +506,48 @@ def recover_crop(background, image, crop_info, recover_method, mask=None):
             if int(mask.shape[0]) == 1 and B > 1:
                 mask = mask.expand(B, -1, -1)
 
-        # 真实 crop 尺寸以 info 为准（batch pad 出来的那圈 0 不是内容，见 crop_mask）。
-        # info 里没带（旧存档 / 手写 info）就按整块走，与单图时代一致。
+        # ══════════════════════════════════════════════════════════════════════
+        # 与 ImageRecoverCropNode 同一条规矩，只做两件事：
+        #   ① 让张量站在 **crop 那一刻的网格** 上（`batch_*`）；
+        #   ② 取左上 `crop_width × crop_height`（这是本帧真实内容），贴到 (cx, cy)。
+        # 不猜像素、不按内容比例重采样 —— 尺寸不对就是上游没还干净，缩回网格即可，
+        # 一旦去"猜哪一圈是 pad"，夹过一次插值判据就失效（旧代码就栽在这里）。
+        # ══════════════════════════════════════════════════════════════════════
         ch = int(crop_info.get("crop_height") or H)
         cw = int(crop_info.get("crop_width") or W)
+        # crop 那一刻的张量网格 = 本批最大框（B==1 时就是本帧框）
+        gh = int(crop_info.get("batch_height") or ch)
+        gw = int(crop_info.get("batch_width") or cw)
 
-        # ── background 与 info 描述的画布不符 ⇒ 先把矩形换算到 background 坐标系 ────
-        # 典型成因：背景给的是整幅原图，而 crop_info 记的是工作分辨率那层坐标系。
-        # 坐标不换算就贴 = 位置整体偏，同样是"下面的内容跑到上面"。必须**先换算再
-        # 比较 image**：image 该缩到多大，指的是 background 坐标系里的那块矩形。
+        # background 与 info 描述的画布不符 ⇒ 矩形按同一比例换算（同一层坐标系里贴）
         bg_h, bg_w = int(background.shape[1]), int(background.shape[2])
         if (bg_h, bg_w) != (oh, ow):
             sy, sx = bg_h / float(oh), bg_w / float(ow)
-            print(f"[recover_crop] background {bg_w}x{bg_h} ≠ crop info canvas {ow}x{oh} — "
-                  f"scaling the paste rect by ({sx:.4f}, {sy:.4f})")
+            print(f"[recover_crop] background {bg_w}x{bg_h} ≠ canvas {ow}x{oh} — "
+                  f"rect ×({sx:.4f}, {sy:.4f})")
             cx, cy = int(round(cx * sx)), int(round(cy * sy))
             ch, cw = max(1, int(round(ch * sy))), max(1, int(round(cw * sx)))
+            gh, gw = max(1, int(round(gh * sy))), max(1, int(round(gw * sx)))
             ow, oh = bg_w, bg_h
 
-        # ── image 与 crop 框尺寸不符：分清"batch pad"和"上游没还干净" ────────────
-        # 两者尺寸都对不上，但语义相反：
-        #   · batch pad —— 小框被 pad 到本批最大框（见 crop_mask），多出来的是**补的 0**，
-        #     有效内容只占左上角，就该截；
-        #   · 上游没还干净 —— image 还是工作分辨率（放大 3~5 倍），内容是整块的，取左上
-        #     一块贴回去就是内容整体错位，看着像"画面下面的东西跑到了上面"，mask 跟着
-        #     错位于是"没按 mask 还原"。这种必须缩放。
-        # 判据：多出来的那几行/列是不是纯 0（pad 出来的就是 0）。
-        if (H, W) != (ch, cw):
-            _padded = (H >= ch and W >= cw)
-            if _padded and H > ch and float(image[:, ch:, :, :].abs().max()) > 1e-6:
-                _padded = False
-            if _padded and W > cw and float(image[:, :ch, cw:, :].abs().max()) > 1e-6:
-                _padded = False
-            if _padded:
-                print(f"[recover_crop] padded from {W}x{H} (batch pad — keeping the top-left {cw}x{ch})")
-                ch, cw = min(ch, H), min(cw, W)
-            else:
-                print(f"[recover_crop] source {W}x{H} ≠ crop rect {cw}x{ch} — resampling the source "
-                      f"back to the crop size first (a corner slice would shift the content)")
-                image = _geo_interp(image, (ch, cw), 'bilinear')
-                if mask is not None:
-                    mask = _geo_interp_mask(mask, (ch, cw), 'bilinear')
-                H, W = ch, cw
-        else:
-            # 贴到画布右下角时区域会被截断，按 image 能提供的部分裁剪
-            ch, cw = min(ch, H), min(cw, W)
+        # ① 回到 crop 网格（还在工作分辨率 / 尺寸被别的块改过，都在这里一次收敛）
+        if (H, W) != (gh, gw):
+            print(f"[recover_crop] source {W}x{H} → crop grid {gw}x{gh}")
+            image = _geo_interp(image, (gh, gw), 'bilinear')
+            if mask is not None:
+                mask = _geo_interp_mask(mask, (gh, gw), 'bilinear')
+            H, W = gh, gw
 
-        # ── mask 也必须与 crop 框同网格 ─────────────────────────────────────────
-        # mask 端口的来源与 image 不一定同一条路（image 接 Recover Limit 的输出、mask
-        # 还接在 Limit 上；或 detailer 之后 mask 没跟着缩回来）。尺寸不对时下面
-        # `mask[:, :, :ch, :cw]` 就只取左上角 —— mask 内容整体错位，于是"没按 mask
-        # 还原"。判据同 image：多出来的是补的 0 就截（batch pad），否则缩放。
+        # ② 有效内容 = 左上 (cw, ch)；batch pad 在右下，直接丢掉
+        ch, cw = min(ch, H), min(cw, W)
+        image = image[:, :ch, :cw, :]
+
+        # mask 走同一条路（必须与 image 同网格，否则贴回去的是错位的 mask）
         if mask is not None:
             mh, mw = int(mask.shape[1]), int(mask.shape[2])
-            if (mh, mw) != (ch, cw):
-                _mpad = (mh >= ch and mw >= cw)
-                if _mpad and mh > ch and float(mask[:, ch:, :].abs().max()) > 1e-6:
-                    _mpad = False
-                if _mpad and mw > cw and float(mask[:, :ch, cw:].abs().max()) > 1e-6:
-                    _mpad = False
-                if _mpad:
-                    mask = mask[:, :ch, :cw]
-                else:
-                    print(f"[recover_crop] mask {mw}x{mh} ≠ crop rect {cw}x{ch} — resampling the "
-                          f"mask onto the crop rect")
-                    mask = _geo_interp_mask(mask, (ch, cw), 'bilinear')
+            if (mh, mw) != (gh, gw):
+                mask = _geo_interp_mask(mask, (gh, gw), 'bilinear')
+            mask = mask[:, :ch, :cw]
 
         # ==================== 仅保留一行 print ====================
         print(f"[recover_crop] {cw}x{ch} @ ({cx},{cy}) → {ow}x{oh} | method={recover_method}")
@@ -1198,6 +1185,8 @@ def recover_size(image, resize_info, mask=None):
         if current_w == original_width and current_h == original_height:
             return (image, mask)
 
+        # 纯缩放：没有切/补，直接一步缩回 original_* 即可（不做"先回网格"的二次插值）。
+
         # 恢复图像
         img_tensor = image.permute(0, 3, 1, 2).contiguous()
         recovered_img = F.interpolate(
@@ -1293,6 +1282,38 @@ def _as_mask_bhw(mask, batch, height, width):
     return m
 
 
+def _geo_settle(image, mask, size, interpolation='bilinear', label=''):
+    """把张量收敛到「这一步**输出时**的网格」—— 只有**会切会补**的还原才需要它。
+
+    `size` = (h, w)，来自这一步 info 里记的输出尺寸（fit 的 canvas*；crop 在
+    recover_crop 里就地做同一件事，用的是 batch_*）。三种情况：
+
+      · 已在网格上      —— 什么都不做（绝大多数情况，零重采样）；
+      · 比网格**大**    —— 中间有放大没还（detailer 的工作分辨率 / 漏接的 Recover
+                           Limit）：整块缩回网格。这是唯一允许的重采样；
+      · 比网格**小**    —— 上游把内容裁小过（比如显式 Crop 夹在中间），网格已经
+                          不适用，按当前尺寸继续，由调用方 clamp。
+
+    **纯缩放（meet / scale / limit / recover_size）不用它**：整块缩回目标尺寸本身
+    就带着位置关系，多收敛一次只是多一遍插值。
+    """
+    if not size:
+        return image, mask
+    th, tw = int(size[0]), int(size[1])
+    if th <= 0 or tw <= 0:
+        return image, mask
+    h, w = int(image.shape[1]), int(image.shape[2])
+    if (h, w) == (th, tw):
+        return image, mask
+    if h < th or w < tw:
+        return image, mask
+    print(f"[geo_settle] {label or 'recover'}: {w}x{h} → grid {tw}x{th}")
+    image = _geo_interp(image, (th, tw), interpolation)
+    if mask is not None:
+        mask = _geo_interp_mask(mask, (th, tw), interpolation)
+    return image, mask
+
+
 def meet_image(image, mask=None, width=0, height=0, interpolation='bilinear'):
     """等比缩放到**盖满** width×height 再居中裁 —— 比例不变，不留边。
 
@@ -1368,6 +1389,8 @@ def recover_meet_image(image, mask, info, background, interpolation='bilinear',
     rx, ry = int(info['regionX']), int(info['regionY'])
     rw, rh = max(1, int(info['regionWidth'])), max(1, int(info['regionHeight']))
 
+    # ① 先回到 Meet 输出时的网格？—— 不需要：Meet 的输出被整块缩回 region，
+    #    没有"切"这一步，网格不携带位置信息，直接缩即可（少一次插值）。
     tmp_img = _geo_interp(image, (rh, rw), interpolation)
     tmp_mask = _geo_interp_mask(mask, (rh, rw), interpolation)
 
@@ -1483,6 +1506,13 @@ def recover_fit_image(image, mask, info, interpolation='bilinear'):
     x, y = int(info['x']), int(info['y'])
     tw, th = max(1, int(info['targetWidth'])), max(1, int(info['targetHeight']))
 
+    # ① 先回到 Fit 输出时的画布网格（内框坐标 x/y 是那个坐标系里的像素）
+    canvas = None
+    if info.get('canvasWidth') and info.get('canvasHeight'):
+        canvas = (int(info['canvasHeight']), int(info['canvasWidth']))
+    image, mask = _geo_settle(image, mask, canvas, interpolation, label='recover_fit')
+    H, W = int(image.shape[1]), int(image.shape[2])
+
     x = max(0, min(x, W - 1))
     y = max(0, min(y, H - 1))
     tw = min(tw, W - x)
@@ -1533,6 +1563,7 @@ def recover_scale_image(image, mask, info, background=None, interpolation='bilin
         raise ValueError('recover_scale_image needs the size the step started from')
 
     mask = _as_mask_bhw(mask, B, int(image.shape[1]), int(image.shape[2]))
+    # 整块缩放不需要知道"当时的网格"（没有切/补，不携带位置），一步缩回原尺寸即可。
     resized = _geo_interp(image, (orig_h, orig_w), interpolation)
     r_mask = _geo_interp_mask(mask, (orig_h, orig_w), interpolation)
 

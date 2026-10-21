@@ -354,24 +354,59 @@ def blocks_to_graph(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
 # 执行顺序 / 校验
 # ---------------------------------------------------------------------------
 
-def exec_order(graph: Dict[str, Any]) -> List[str]:
-    """Execute 边上的拓扑排序（Kahn）。分支图同样成立；有环时排不满全部节点。
-    黑板这类不参与执行的节点**不进**这张排序（留着会被当成一颗待执行的节点）。"""
+def _exec_children(graph: Dict[str, Any]) -> Dict[str, List[str]]:
+    """参与执行的节点之间、**Execute 边**构成的邻接表（Start/End 也在里面）。"""
     nodes = {n['id']: n for n in graph.get('nodes', [])}
-    children: Dict[str, List[str]] = {nid: [] for nid, n in nodes.items() if is_schedulable(str(n.get('kind') or ''))}
-    indeg: Dict[str, int] = {nid: 0 for nid in children}
+    children: Dict[str, List[str]] = {
+        nid: [] for nid, n in nodes.items() if is_schedulable(str(n.get('kind') or ''))}
     for e in graph.get('edges', []):
         s, t = e.get('source'), e.get('target')
         if s not in nodes or t not in nodes:
             continue
-        if s not in indeg or t not in indeg:      # 有一端不参与执行：这条边不算
+        if s not in children or t not in children:      # 有一端不参与执行：这条边不算
             continue
         if port_kind_node(nodes[s], 'out', e.get('sourcePort')) != PORT_EXEC:
             continue
         if port_kind_node(nodes[t], 'in', e.get('targetPort')) != PORT_EXEC:
             continue
         children[s].append(t)
-        indeg[t] += 1
+    return children
+
+
+def exec_reachable(graph: Dict[str, Any]) -> set:
+    """从 Start 沿 Execute 边**走得到**的节点集合（含 Start）。
+
+    执行顺序由 Execute 连线决定 ⇒ 没被 Execute 连进来的节点（画布上摆着但没接线的
+    detailer 之类）不属于这条链：不执行、不占 block 号、不计进度。这条判据同时
+    挡掉"任意一颗没有 exec 输入的节点都自成一条链"的多根行为。
+    """
+    children = _exec_children(graph)
+    reach: set = set()
+    if START_ID not in children:
+        return reach
+    stack = [START_ID]
+    while stack:
+        nid = stack.pop()
+        if nid in reach:
+            continue
+        reach.add(nid)
+        stack.extend(c for c in children.get(nid, []) if c not in reach)
+    return reach
+
+
+def exec_order(graph: Dict[str, Any]) -> List[str]:
+    """Execute 边上的拓扑排序（Kahn），**只看从 Start 可达的节点**。
+    分支图同样成立；有环时排不满可达集合。黑板这类不参与执行的节点不进排序。"""
+    nodes = {n['id']: n for n in graph.get('nodes', [])}
+    children = _exec_children(graph)
+    indeg: Dict[str, int] = {nid: 0 for nid in children}
+    for nid, kids in children.items():
+        for c in kids:
+            indeg[c] += 1
+    reach = exec_reachable(graph)
+    children = {nid: [c for c in kids if c in reach]
+                for nid, kids in children.items() if nid in reach}
+    indeg = {nid: d for nid, d in indeg.items() if nid in reach}
     ready = [nid for nid, d in indeg.items() if d == 0]
     order: List[str] = []
     seen = set()
@@ -449,8 +484,11 @@ def validate_graph(graph: Dict[str, Any]) -> List[str]:
                    if pid not in optional and (n['id'], pid) not in connected_in]
         if missing:
             issues.append(f"{n.get('name')} 有 {len(missing)} 个输入端口未连接：" + ' / '.join(missing))
-    # 环检测：分母只在**参与执行的节点**里数（黑板之类的要去掉，否则永远"缺一个"）。
-    schedulable = sum(1 for n in graph.get('nodes', []) if is_schedulable(str(n.get('kind') or '')))
+    # 环检测：分母只在**从 Start 可达、且参与执行**的节点里数 —— 黑板之类不进执行序，
+    # 画布上没接线的孤立节点也不属于这条链，都不能算进分母（否则永远"缺几个"）。
+    _reach = exec_reachable(graph)
+    schedulable = sum(1 for n in graph.get('nodes', [])
+                      if is_schedulable(str(n.get('kind') or '')) and n.get('id') in _reach)
     if len(exec_order(graph)) < schedulable:
         issues.append('Execute 连线成环')
     return issues
@@ -589,7 +627,7 @@ def graph_from_config(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 # 执行计划：拓扑序 + 运行时分支约束 + 显式边取数
 # ---------------------------------------------------------------------------
 
-def _exec_children(graph: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
+def _exec_child_ports(graph: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
     """node → [(child, source_port_id)]，只走 exec 边（Switch 的动态端口也认）。"""
     nodes = {n['id']: n for n in graph.get('nodes', [])}
     out: Dict[str, List[Tuple[str, str]]] = {nid: [] for nid in nodes}
@@ -607,7 +645,7 @@ def _exec_children(graph: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
 
 def _reachable_depth_first(graph: Dict[str, Any], start_id: str) -> set:
     """从 start_id 沿 exec 边可达的全部节点（含自身）。"""
-    children = _exec_children(graph)
+    children = _exec_child_ports(graph)
     seen = {start_id}
     stack = [start_id]
     while stack:
@@ -629,10 +667,13 @@ def branch_guards(graph: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
     返回里只保留有约束的节点。"""
     nodes = {n['id']: n for n in graph.get('nodes', [])}
     guards: Dict[str, List[Tuple[str, str]]] = {}
+    # 只看从 Start 可达的 detect：画布上没接进链的 detect 永远不会跑，它给出的约束
+    # 若落到可达节点上，会把那颗节点**永久跳过**（运行时 verdict 取不到值）。
+    reach = exec_reachable(graph)
     for n in graph.get('nodes', []):
-        if n['kind'] != 'detect':
+        if n['kind'] != 'detect' or n['id'] not in reach:
             continue
-        children = _exec_children(graph)
+        children = _exec_child_ports(graph)
         reach_yes = set(); reach_no = set()
         for child, port in children.get(n['id'], []):
             sub = _reachable_depth_first(graph, child)

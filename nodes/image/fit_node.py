@@ -56,6 +56,7 @@ class ImageFitNode:
         new_image = torch.zeros(
             (img_batchSize, height, width, img_channelCount),
             dtype=torch.float32,
+            device=image.device,
         );
         
         new_image[:,:,:,0] = color_list[0] / 255
@@ -66,6 +67,7 @@ class ImageFitNode:
             new_mask = torch.zeros(
                 (mask_batchSize, height, width),
                 dtype=torch.float32,
+                device=mask.device,
             )
 
         
@@ -125,7 +127,7 @@ class ImageFitNode:
 
         if mask is not None:
             return (new_image, fit_Info, new_mask,)
-        return (new_image, fit_Info)
+        return (new_image, fit_Info, None)
         
 
 class ImageRecoverFitNode:
@@ -194,7 +196,7 @@ class ImageRecoverFitNode:
         
         if mask is not None:
             return (new_image, new_mask,)
-        return (new_image,)
+        return (new_image, None)
 
 
 class ImageMeetNode:
@@ -287,7 +289,7 @@ class ImageMeetNode:
 
         if mask is not None:
             return (new_image, meet_Info, new_mask,)
-        return (new_image, meet_Info)
+        return (new_image, meet_Info, None)
 
 
 class ImageRecoverMeetNode:
@@ -370,6 +372,7 @@ class ImageRecoverMeetNode:
             new_image = torch.zeros(
                 (img_batchSize, originalHeight, originalWidth, img_channelCount),
                 dtype=torch.float32,
+                device=image.device,
             )
             new_image[:,:,:,0] = color_list[0] / 255
             new_image[:,:,:,1] = color_list[1] / 255
@@ -381,9 +384,10 @@ class ImageRecoverMeetNode:
             new_mask = torch.zeros(
                 (img_batchSize, originalHeight, originalWidth),
                 dtype=torch.float32,
+                device=image.device,
             )
             new_mask[:, regionY:regionY + regionHeight, regionX:regionX + regionWidth] = tmp_mask
         
         if mask is not None:
             return (new_image, new_mask,)
-        return (new_image,)
+        return (new_image, None)

@@ -1064,7 +1064,6 @@ class ImageCropMaskNode:
 
     def crop_mask(self, image, mask, reserve):
         try:
-            print(f"[ImageCropMaskNode] Calling crop_mask from image_util")
             return crop_mask(image, mask, reserve)
         except Exception as e:
             raise Exception(f"Failed to crop image by mask: {e}")

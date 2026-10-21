@@ -535,6 +535,22 @@ export function execOrder(graph: PipelineGraph): string[] {
     children.get(e.source)!.push(e.target);
     indeg.set(e.target, (indeg.get(e.target) || 0) + 1);
   }
+  // 执行顺序由 Execute 连线决定 ⇒ 没被 Execute 连进来的节点不属于这条链：
+  // 不执行、不占 block 号、不计进度（画布上摆着但没接线的 detailer 就是这种）。
+  const reach = new Set<string>();
+  if (indeg.has(START_ID)) {
+    const stack = [START_ID];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (reach.has(id)) continue;
+      reach.add(id);
+      for (const c of children.get(id) || []) if (!reach.has(c)) stack.push(c);
+    }
+  }
+  for (const id of [...children.keys()]) {
+    if (!reach.has(id)) { children.delete(id); indeg.delete(id); }
+    else children.set(id, (children.get(id) || []).filter(c => reach.has(c)));
+  }
   const order: string[] = [];
   const ready: string[] = [];
   for (const [id, d] of indeg) if (d === 0) ready.push(id);
@@ -642,10 +658,33 @@ export function validateGraph(graph: PipelineGraph): GraphIssue[] {
     }
   }
 
-  // Execute 环检测：execOrder 覆盖的是**所有参与执行的节点**，有环时 Kahn 排不完 → 排序更短。
-  // （黑板这类不进执行序的节点要从分母里去掉，否则永远"缺一个"。）
-  const schedulable = graph.nodes.filter(n => isSchedulable(n.kind)).length;
-  if (execOrder(graph).length < schedulable) {
+  // Execute 环检测：分母 = **从 Start 可达、且参与执行**的节点（黑板不进执行序，
+  // 画布上没接线的孤立节点也不属于这条链，都不能算进分母）。有环时 Kahn 排不满 → 更短。
+  const orderSet = new Set(execOrder(graph));
+  const reachable = new Set<string>();
+  {
+    // 与 execOrder 同一套 Execute 邻接表，只为得到可达集合。
+    const children = new Map<string, string[]>();
+    for (const n of graph.nodes) if (isSchedulable(n.kind)) children.set(n.id, []);
+    for (const e of graph.edges) {
+      const sN = byId.get(e.source); const tN = byId.get(e.target);
+      if (!sN || !tN || !children.has(e.source) || !children.has(e.target)) continue;
+      if (portKindOfNode(sN, 'out', e.sourcePort) !== 'exec') continue;
+      if (portKindOfNode(tN, 'in', e.targetPort) !== 'exec') continue;
+      children.get(e.source)!.push(e.target);
+    }
+    if (children.has(START_ID)) {
+      const stack = [START_ID];
+      while (stack.length) {
+        const id = stack.pop()!;
+        if (reachable.has(id)) continue;
+        reachable.add(id);
+        for (const c of children.get(id) || []) if (!reachable.has(c)) stack.push(c);
+      }
+    }
+  }
+  const schedulable = graph.nodes.filter(n => isSchedulable(n.kind) && reachable.has(n.id)).length;
+  if (orderSet.size < schedulable) {
     issues.push({ nodeId: '', message: 'Execute 连线成环' });
   }
   return issues;
