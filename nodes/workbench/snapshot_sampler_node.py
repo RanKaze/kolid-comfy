@@ -736,14 +736,116 @@ def _vid_work_size(sw, sh, n):
     return ow, oh
 
 
+def _vid_frames_av(path, start_f, n, pf, probe):
+    """PyAV 按**时间戳**精确取帧，返回 [1,H,W,3] float tensor 列表（失败返回 None）。
+
+    输出第 k 帧对应源时间 (start_f + k) / pf；取该时刻**正在显示**的源帧 ——
+    PTS <= 该时间的最后一帧（nearest-previous）。这是播放器与 ComfyUI 自带
+    VideoFromFile 的解码口径（见 comfy_api/latest/_input_impl/video_types.py：
+    帧由 PyAV 解出、时间由帧自己的 PTS 决定），对 CFR / VFR 都成立：
+
+      * 不再用"时间 × 平均帧率 = 帧号"换算。avg_frame_rate 只是全片平均，VFR、
+        可变 GOP、元数据不准的源上它和真实帧边界对不上，按帧号切会在接缝处
+        多一帧/少一帧；
+      * 不再用 ffmpeg 的 -ss 输入跳转 + 手工下标切帧。seek 只负责"跳到目标之前
+        最近的关键帧"，选哪一帧完全由解出来的 PTS 决定，seek 落点差一帧也不影响
+        结果；
+      * seek 到目标前一秒内，逐帧解码到窗口尾，只保留命中的 n 帧，内存与旧路一致。
+    """
+    try:
+        import av
+    except Exception:
+        return None
+    try:
+        cont = av.open(path, mode='r')
+    except Exception:
+        return None
+    try:
+        st = next((s for s in cont.streams if s.type == 'video'), None)
+        if st is None:
+            return None
+        tb = float(st.time_base) if st.time_base else 0.0
+        # PTS 的原点：容器 start_time（多数 mp4 为 0；带 priming 的源可能非 0，
+        # 与 ffmpeg -ss 的"相对文件起点"口径对齐）。
+        base = float(st.start_time or 0) * tb if tb > 0 else 0.0
+        rate = float(st.average_rate or 0) or float(probe.get('fps') or 0) or pf
+        if rate <= 0:
+            rate = 30.0
+        targets = [base + (start_f + k) / pf for k in range(n)]
+        sw = int(probe.get('width') or st.width or 0)
+        sh = int(probe.get('height') or st.height or 0)
+        ow, oh = _vid_work_size(sw, sh, n)
+        if tb > 0:
+            try:
+                # backward：落在目标之前最近的关键帧上；之后逐帧解码、按 PTS 选。
+                cont.seek(int(max(0.0, targets[0]) / tb), stream=st,
+                          backward=True, any_frame=False)
+            except Exception:
+                cont.seek(0)
+
+        def conv(frame):
+            f = frame
+            if ow > 0 and oh > 0 and (f.width != ow or f.height != oh):
+                f = f.reformat(width=ow, height=oh, format='rgb24')
+            else:
+                f = f.reformat(format='rgb24')
+            a = f.to_ndarray()
+            return torch.from_numpy(np.ascontiguousarray(a)).to(torch.float32).div_(255.0).unsqueeze(0)
+
+        out: list = []
+        ti = 0
+        eps = 1e-5                     # 10µs：远小于任意帧间隔，只用来吸收浮点误差
+        last_frame = None
+        last_t = 0.0
+        last_dur = 1.0 / rate
+        last_tensor = None
+        for frame in cont.decode(st):
+            ft = frame.time
+            if ft is None:             # 无 PTS 的罕见流：按标称帧率推一个
+                ft = last_t + (1.0 / rate if last_frame is not None else 0.0)
+            ft = float(ft)
+            fdur = float(frame.duration) * tb if (frame.duration and tb > 0) else 1.0 / rate
+            if last_frame is None:
+                last_frame, last_t, last_dur = frame, ft, fdur
+                continue
+            # 目标时间严格落在上一帧之后、这一帧之前 → 那些目标都由上一帧代表。
+            while ti < n and targets[ti] + eps < ft:
+                if last_tensor is None:
+                    last_tensor = conv(last_frame)
+                # 同一源帧被连续多个输出帧命中（升帧率时必然发生）—— 后续几帧给副本，
+                # 免得下游若有原地修改把整段一起改掉。
+                out.append(last_tensor if not out or out[-1] is not last_tensor else last_tensor.clone())
+                ti += 1
+            if ti >= n:
+                break
+            last_frame, last_t, last_dur = frame, ft, fdur
+            last_tensor = None
+        # 流结束：窗口尾部落在最后一帧"仍在显示"的时间内的，用最后一帧补齐；
+        # 超出源尾的不补（调用方按实际条数落位，补出来的帧是重复内容）。
+        if ti < n and last_frame is not None:
+            if last_tensor is None:
+                last_tensor = conv(last_frame)
+            while ti < n and targets[ti] <= last_t + last_dur + eps:
+                out.append(last_tensor if not out or out[-1] is not last_tensor else last_tensor.clone())
+                ti += 1
+        return out or None
+    except Exception:
+        return None
+    finally:
+        try:
+            cont.close()
+        except Exception:
+            pass
+
+
 def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None):
     """从 [ss, ss+t] 里抽 n 帧，返回 [1,H,W,3] float tensor 的列表。
 
     入口是**帧段**：`f0` = 源文件内按 fps 的整数起始帧号（优先于 ss），`n` = 帧数。
-    有 f0/fps 且量得到源帧率时**按源帧号取帧**：输出第 k 帧 = 源第
-    floor((f0+k)×src_fps/fps) 帧 —— 段与段按源帧号硬分界，接缝既不重复也不跳帧
-    （交给 ffmpeg 的 fps 滤镜"就近取帧"会在 25/29.97fps 源配 30fps 工程时把下一段的
-    首帧提前取进上一段）。量不到源帧率才退回按秒 + fps 滤镜的老路。
+    首选 `_vid_frames_av`：按 PyAV 解出的**帧 PTS** 选"该时刻正在显示的源帧"，
+    段与段按同一时间网格首尾相接，接缝不重复也不跳帧（CFR / VFR 都成立）。
+    PyAV 不可用或解不开时才退回 ffmpeg：有源帧率时按帧号取帧，量不到就按秒 + fps
+    滤镜铺 n 张。
     n 与 fps 二选一（都给了按 n）。抽不满 n 张（片子比区间短）就返回实际抽到的那些 ——
     调用方按实际条数落位，不补帧（补出来的帧是重复内容，编码出来是卡顿）。
     帧尺寸在抽取时按帧列内存预算压到工作分辨率（见 _vid_work_size，只缩不放）——
@@ -806,6 +908,13 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None):
         except (TypeError, ValueError):
             n = 30
     n = max(1, min(_VID_FRAME_MAX_N, int(n)))
+    # 首选精确路径：PyAV 按帧 PTS 选"该时刻正在显示的源帧"（见 _vid_frames_av）。
+    # 它对源帧率元数据、seek 落点都不敏感 —— 下面按帧号切帧的 ffmpeg 路只作兜底。
+    av_frames = _vid_frames_av(path, start_f, n, pf, probe)
+    if av_frames:
+        print(f'[VidFrames] {os.path.basename(path)} f0={start_f} n={n} pf={pf:.3f} '
+              f'→ {len(av_frames)}/{n} frames (pyav pts)')
+        return av_frames
     # 抽出来的尺寸：长边按**实际要解的帧数**对应的内存预算反推（见 _vid_work_size），
     # 短边按比例取偶。按源帧号取帧时实际解码 need 帧（可能多于 n），预算按 need 算。
     # 宽高必须都钉死成这里算出的数值，不能把高度交给 ffmpeg 的 h=-2 去推：
@@ -889,7 +998,7 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None):
         if not frames:
             return None
         print(f'[VidFrames] {os.path.basename(path)} f0={start_f} n={n} '
-              f'src={src_fps:.3f}fps → {len(frames)}/{n} frames {w}x{h}')
+              f'src={src_fps:.3f}fps srcFrames={start_src}..{last_src} → {len(frames)}/{n} frames {w}x{h}')
         return frames
     frames = [torch.from_numpy(arr[i:i + 1].astype(np.float32) / 255.0) for i in range(got)]
     print(f'[VidFrames] {os.path.basename(path)} ss={ss:.2f} t={t:.2f} → {got} frames {w}x{h}')
@@ -967,19 +1076,18 @@ def _vid_encode(frames, fps=30, name='proc'):
     d = _vid_media_dir()
     os.makedirs(d, exist_ok=True)
     stem = re.sub(r'[^\w\-. ]+', '_', str(name or 'proc'))[:60] or 'proc'
-    # 指纹必须含内容：只拿 (名字, 帧数, fps) 做键的话，同一 preset 跑第二遍会命中上一次
-    # 的 mp4 直接返回旧文件（画面看着像"还是上一轮的结果"）。抽 3 帧的左上角 16x16 参与 hash，
-    # 成本可以忽略，换内容就换文件名。编码参数也进指纹 —— 否则调了 CRF/preset 之后，
-    # 同样的内容还会命中旧参数的缓存文件。
-    _fp = hashlib.sha1(f'{stem}|{len(frames)}|{fps:.3f}|{h}x{w}|crf{_VID_CRF}|{_VID_PRESET}'.encode('utf-8'))
-    for _i in (0, len(frames) // 2, len(frames) - 1):
+    # 指纹必须含内容，而且要覆盖**整幅画面**：只采几帧左上角 16x16 的话，固定机位/
+    # 纯色背景的片子角上整段都不变，同 preset、同帧数的相邻两段会撞成同一个文件名
+    # —— 第二段直接命中第一段的 mp4，回放看起来就是"每一段都是同一批帧/接缝重复"。
+    # （实测 vector.mp4 的左上角 16x16 全片一模一样。）这里每帧按整幅画面隔行隔列
+    # 采样到约 256×256 再入 hash：角、边缘、主体都参与，成本远低于编码本身。
+    # v2 前缀同时把旧版本算出来的缓存键整体作废，避免继续复用有问题的旧产物。
+    _fp = hashlib.sha1(f'v2|{stem}|{len(frames)}|{fps:.3f}|{h}x{w}|crf{_VID_CRF}|{_VID_PRESET}'.encode('utf-8'))
+    _st = max(1, int(max(h, w) / 256))
+    for _f in frames:
         try:
-            _s = frames[_i]
-            _a = _s.detach().cpu().numpy() if hasattr(_s, 'detach') else np.asarray(_s)
-            _a = np.asarray(_a, dtype=np.float32)
-            if _a.ndim == 4:
-                _a = _a[0]
-            _fp.update(np.ascontiguousarray(_a[:16, :16]).tobytes())
+            _a = _rgb(_f, (h, w))
+            _fp.update(np.ascontiguousarray(_a[::_st, ::_st]).tobytes())
         except Exception:
             pass
     h16 = _fp.hexdigest()[:12]

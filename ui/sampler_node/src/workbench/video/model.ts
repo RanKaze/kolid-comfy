@@ -237,6 +237,9 @@ export type VidController = {
    *  对应位置（占位段原地保留，可反复重跑；占用时按钮置灰）。宿主（EditPhase）接线；
    *  Timeline 的片段直接透传。 */
   continueProc?: (clipId: string) => void;
+  /** 多选后点 ▶：整批占位段依次重放，顺序 = 从左到右（start 升序）、同起点从下到上。
+   *  单段的忙碌闸门/进度/落位仍走 continueProc；这里只负责排序与串行编排。 */
+  continueProcMany?: (clipIds: string[]) => void;
 };
 
 const MIN_CLIP = 0.05;   // 片段/裁剪的最短寿命（s）

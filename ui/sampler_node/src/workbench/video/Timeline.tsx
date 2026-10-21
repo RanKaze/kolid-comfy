@@ -179,6 +179,46 @@ export const VidTimeline: React.FC<{
     selAnchorRef.current = null;
     setSelIds(new Set<string>());
   }, []);
+  // ── Shift + 拖空白 = 框选（可以跨轨）：矩形碰到的片段全选。片段自己会 stopPropagation，
+  //    所以"在片段上按住 Shift 拖"仍是原来的同轨连选，不和这里抢手势。 ──
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const marqueeRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const marqueeMoved = useRef(false);
+  const laneClickBlocked = useRef(false);
+  const startMarquee = (e: React.PointerEvent) => {
+    if (!e.shiftKey || e.button !== 0) return;
+    e.preventDefault();                              // 别顺手把轨道名/页面文字选中
+    laneClickBlocked.current = true;                 // 松手后的 click 不要清掉框选结果
+    marqueeMoved.current = false;
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 合成事件不挡手势 */ }
+    marqueeRef.current = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY };
+    setMarquee(marqueeRef.current);
+  };
+  const onMarqueeMove = (e: React.PointerEvent) => {
+    const m = marqueeRef.current;
+    if (!m) return;
+    if (Math.abs(e.clientX - m.x0) > 3 || Math.abs(e.clientY - m.y0) > 3) marqueeMoved.current = true;
+    marqueeRef.current = { ...m, x1: e.clientX, y1: e.clientY };
+    setMarquee(marqueeRef.current);
+  };
+  const endMarquee = (apply: boolean) => {
+    const m = marqueeRef.current;
+    marqueeRef.current = null;
+    setMarquee(null);
+    if (!m || !apply || !marqueeMoved.current) return;   // Shift+点空白 = 保持原选择
+    const left = Math.min(m.x0, m.x1), right = Math.max(m.x0, m.x1);
+    const top = Math.min(m.y0, m.y1), bottom = Math.max(m.y0, m.y1);
+    const picked = new Set<string>();
+    contentRef.current?.querySelectorAll<HTMLElement>('[data-vid-clip]').forEach(el => {
+      const r = el.getBoundingClientRect();
+      if (r.left < right && r.right > left && r.top < bottom && r.bottom > top) {
+        const id = el.getAttribute('data-vid-clip');
+        if (id) picked.add(id);
+      }
+    });
+    selAnchorRef.current = picked.size ? [...picked][0] : null;
+    setSelIds(picked);
+  };
   const [dropLane, setDropLane] = useState<string | null>(null);
 
   // ── 播放头直改 DOM ── 线、三角、时间读数、底注、跟随滚动都不走 React。
@@ -791,7 +831,15 @@ export const VidTimeline: React.FC<{
                 }}
                 onDragLeave={() => setDropLane(l => (l === tr.id ? null : l))}
                 onDrop={e => { if (tr.kind !== 'layer' && tr.kind !== 'process') laneDrop(e, tr.id); }}
-                onClick={() => { clearSel(); vid.focusClip(null); }}
+                onClick={() => {
+                  // Shift 框选松手后紧跟着的 click 不要清掉刚框出来的那批。
+                  if (laneClickBlocked.current) { laneClickBlocked.current = false; return; }
+                  clearSel(); vid.focusClip(null);
+                }}
+                onPointerDown={e => { if (e.shiftKey) startMarquee(e); else laneClickBlocked.current = false; }}
+                onPointerMove={onMarqueeMove}
+                onPointerUp={() => endMarquee(true)}
+                onPointerCancel={() => endMarquee(false)}
                 onDoubleClick={e => {
                   // 双击 Layer 轨 = 在指针处造一段（默认 5s）。段之间由 snapPlace 吸附，不会叠。
                   if (tr.kind !== 'layer') return;
@@ -819,7 +867,15 @@ export const VidTimeline: React.FC<{
                       }}
                       onUnlink={() => { if (gid) vid.update(proj => unlinkGroup(proj, gid), 'Unlink'); }}
                       continueBlocked={continueBlocked}
-                      onContinue={vid.continueProc}
+                      onContinue={id => {
+                        // ▶ 点中的段在当前多选里 → 整批按 左→右、同起点 下→上 依次跑；
+                        // 不在多选里（或只选中这一颗）→ 只跑它自己。
+                        if (selIds.has(id) && vid.continueProcMany) {
+                          const ids = p.clips.filter(x => selIds.has(x.id) && x.pending).map(x => x.id);
+                          if (ids.length > 1) { void vid.continueProcMany(ids); return; }
+                        }
+                        vid.continueProc?.(id);
+                      }}
                       onSettings={onSettingsPlaceholders ? (id: string) => {
                         // 点中的段在多选里 → 整批一起设置；否则只它自己（并把它切成唯一选中）。
                         const inSel = selIds.has(id);
@@ -861,6 +917,25 @@ export const VidTimeline: React.FC<{
               <div style={{ position: 'absolute', left: HEADER_W + p.outPoint * pps, right: 0, top: RULER_H, bottom: 0, background: 'rgba(0,0,0,0.28)', zIndex: 2, pointerEvents: 'none' }} />
             </>
           )}
+
+          {/* Shift 框选的矩形：纯视觉（拖拽判定在 lane 的 pointer 事件里，命中靠片段 DOM 的
+              rect 与矩形求交 —— 这样跨轨、跨行高都天然正确）。 */}
+          {marquee && (() => {
+            const root = contentRef.current;
+            if (!root) return null;
+            const r = root.getBoundingClientRect();
+            const left = Math.min(marquee.x0, marquee.x1) - r.left;
+            const top = Math.min(marquee.y0, marquee.y1) - r.top;
+            const w = Math.abs(marquee.x1 - marquee.x0);
+            const h = Math.abs(marquee.y1 - marquee.y0);
+            if (w < 1 && h < 1) return null;
+            return (
+              <div style={{
+                position: 'absolute', left, top, width: w, height: h, pointerEvents: 'none', zIndex: 7,
+                border: '1px solid rgba(120,200,255,0.9)', background: 'rgba(10,132,255,0.12)', borderRadius: 2,
+              }} />
+            );
+          })()}
 
           {/* 播放头竖线：横穿标尺与所有轨道（时间 0 = 轨道头右缘；逐帧位移走 transport）。 */}
           <div ref={lineRef} style={{ position: 'absolute', left: HEADER_W - 0.5, top: 0, bottom: 0, width: 1, background: '#ff453a', zIndex: 6, pointerEvents: 'none', opacity: 0.85 }} />
@@ -998,6 +1073,7 @@ const Clip: React.FC<{
   const fillP = useSyncExternalStore(subscribeProcFill, () => getProcFill(c.id));
   return (
     <div
+      data-vid-clip={c.id}
       onPointerDown={e => onStartDrag(e, 'move', c)}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -1065,7 +1141,7 @@ const Clip: React.FC<{
             <span
               title={continueBlocked
                 ? `The output track already has a clip over ${fmtTime(c.start)}–${fmtTime(c.start + c.duration)} — move or delete it before running this segment again.`
-                : `Run this segment from its stored snapshot (${c.pending.kind === 'preset' ? 'preset' : 'interface'} 「${c.pending.iface}」, segment ${c.pending.segIndex + 1}/${c.pending.segCount}; params and frame windows are kept in the clip). The result lands on the output track, leaving this placeholder in place.`}
+                : `Run this segment from its stored snapshot (${c.pending.kind === 'preset' ? 'preset' : 'interface'} 「${c.pending.iface}」, segment ${c.pending.segIndex + 1}/${c.pending.segCount}; params and frame windows are kept in the clip). The result lands on the output track, leaving this placeholder in place. With several placeholders selected, ▶ runs them all in order (left → right, bottom → top).`}
               onPointerDown={e => e.stopPropagation()}
               style={{ flexShrink: 0, display: 'flex', position: 'relative', margin: tight ? '0 auto' : undefined }}
             >

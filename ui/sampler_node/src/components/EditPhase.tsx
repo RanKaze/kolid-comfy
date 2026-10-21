@@ -50,7 +50,8 @@ type SectionKey = UnitId;
 // Preprocess 不再是一扇窗 —— 它搬进 Pipeline Graph，成了画布上那块黑板（board 节点）。
 // Pipeline 与 Pipeline Presets 各占一扇窗：前者只选 pipeline，后者只列 preset（Add 在动作条里）。
 const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', 'blocks'];
-// vtracks 是**默认提供**的常驻窗（Image 模式=空态卡，Video 模式=时间线）。播放器不单独占窗：
+// vtracks / vassets 是**默认提供**的常驻窗，两种模式都显示正文（时间线 / 资产库）——
+// 轨道与资产属于文档，不该只在 Video 模式下才看得见。播放器不单独占窗：
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
 // 标题条上有一颗 Image/Video 切换（见 heads）。
 const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets'];
@@ -65,10 +66,9 @@ const COLUMN_W = 340;
 const RIGHT_W = 280;
 const TOP_H = 60;
 const DOCK_STORE = 'sampler.drawDock';
-// ── Video 模式 ── **同一棵 dock 树**的第二种活法：切过去时只动两处 —— Workbench 那格
-// （id 'canvas'）的正文换成播放器，'vtracks'（时间线）缺了就补进树里（插在 canvas 窗下面）。
-// **其它每一扇窗原地不动。** vtracks 一旦进树就不再被剪：切回 Image 时它的正文换成空态卡，
-// 位置保留，来回切换不重排任何东西。
+// ── Video 模式 ── **同一棵 dock 树**的第二种活法：切过去时只动一处 —— Workbench 那格
+// （id 'canvas'）的正文换成播放器。Tracks / Assets 两扇窗的正文与模式无关，始终是时间线与
+// 资产库。**其它每一扇窗原地不动**，来回切换不重排任何东西。
 const VID_MODE_STORE = 'sampler.vidMode';
 export type VidMode = 'image' | 'video';
 // A canvas window pops out at a working size. A settings card gets the dock's default 300px strip;
@@ -443,6 +443,15 @@ interface EditPhaseProps {
   stageRemove: (id: string) => void;
 }
 
+// 视频分段跑完一段，通知 Kolid Desktop 的壳页摇一次铃。响不响由桌面端的铃铛总开关
+// （Tinkle enabled）决定，前端只管发；浏览器直开时 parent 是自己，这条消息无人听。
+// segment: true 是给壳页的标记 —— 分段完成不参与那 1.5s 的整链节流，每段各响一次。
+function ringSegmentDone() {
+  try {
+    window.parent.postMessage({ __kolid: 'tinkle', event: 'pipeline-done', segment: true }, '*');
+  } catch { /* ignore */ }
+}
+
 const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, promptUrl,
   promptReady, detailStatus,
@@ -501,7 +510,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // Where each unit sits — stacked, side by side, tabbed together, or popped out over the workbench —
   // is the user's layout call and lives in its own key; which are collapsed is a separate one.
   // ── Video 模式 ── 页面级的第二形态，刷新后留在上次的模式里（localStorage 一位）。
-  // 只改两处：canvas 格正文换播放器（见 bodies）、'vtracks' 缺了补进树 —— 树与存档都是同一份。
+  // 只改一处：canvas 格正文换播放器（见 bodies）—— Tracks / Assets 与模式无关。
   const vidMode0: VidMode = (() => {
     try { return localStorage.getItem(VID_MODE_STORE) === 'video' ? 'video' : 'image'; } catch { return 'image'; }
   })();
@@ -540,8 +549,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setDockState(next);
     if (persist) { try { localStorage.setItem(DOCK_STORE, JSON.stringify(next)); } catch { /* in-memory only */ } }
   }, []);
-  // 模式切换不动树：vtracks 本来就是默认提供的窗（起手树 / fitLayout 补缺都保证它在）。
-  // 切换只换两格的正文 —— canvas ↔ 播放器、vtracks ↔ 时间线/空态卡 —— 其它每一扇窗原地不动。
+  // 模式切换不动树：vtracks / vassets 本来就是默认提供的窗（起手树 / fitLayout 补缺都保证它们在）。
+  // 切换只换 canvas 格的正文 —— 画布 ↔ 播放器 —— Tracks / Assets 与其它每一扇窗原地不动。
   const setVidMode = useCallback((m: VidMode) => {
     if (m === vidModeRef.current) return;
     try { localStorage.setItem(VID_MODE_STORE, m); } catch { /* in-memory only */ }
@@ -1189,6 +1198,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           const arr = perAsset.get(m.port);
           if (arr) arr.push(m); else perAsset.set(m.port, [m]);
         }
+        ringSegmentDone();          // 这一段跑完了：桌面端开着 Tinkle 就响一声
       }
       if (perAsset.size) {
         const assetPlans = [...perAsset.entries()].map(([port, segs]) => ({
@@ -1440,6 +1450,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           nSegs > 1 ? `Preset segment ${i + 1}/${nSegs}` : 'Preset → output');
           autoSaveCud();              // 一段落位 = 工程变了：已落盘的 .cud 立刻跟上一版
         }
+        ringSegmentDone();            // 这一段跑完了：桌面端开着 Tinkle 就响一声
       }
       setVidProcRun({ state: 'done', msg: `Done — 「${presetName}」 on ${rangeFrames} frames${nSegs > 1 ? `, ${nSegs} segments` : ''}.` });
     } catch (e: unknown) {
@@ -1463,17 +1474,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 输出轨的那个位置被别的东西占着时不跑（按钮已置灰，这里是兜底）。
   // 接口按名字解析（快照存了名 + 下标兜底 —— 退出期间接口列表可能变过），参数/抽帧窗口
   // 原样重放，不再弹 modal。
-  const continuePendingClip = useCallback(async (clipId: string) => {
+  const continuePendingClip = useCallback(async (
+    clipId: string,
+  ): Promise<'skip' | 'failed' | 'cancelled' | 'done'> => {
     if (vidProcBusy.current) {
       setVidProcRun({ state: 'error', msg: 'A run is already in flight — wait for it or cancel it first.' });
-      return;
+      return 'skip';
     }
     const clip = vidProjectRef.current.clips.find(c => c.id === clipId);
-    if (!clip || !clip.pending) return;
+    if (!clip || !clip.pending) return 'skip';
     const pd = clip.pending;
     if (procSlotBusy(vidProjectRef.current, pd.port ?? 0, clip.start, clip.duration, clip.id)) {
       setVidProcRun({ state: 'error', msg: `The output track already has a clip over ${clip.start.toFixed(1)}s–${(clip.start + clip.duration).toFixed(1)}s — move or delete it first.` });
-      return;
+      return 'skip';
     }
     const isPreset = pd.kind === 'preset';
     let idx = -1;
@@ -1484,7 +1497,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         ?? blockSets.find(s => s.name === (pd.presetName || pd.iface));
       if (!set) {
         setVidProcRun({ state: 'error', msg: `Preset 「${pd.presetName || pd.iface}」 no longer exists — re-run it from the Pipeline Presets list.` });
-        return;
+        return 'skip';
       }
       presetId = set.id;
     } else {
@@ -1492,7 +1505,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       if (idx < 0 && pd.ifaceNum >= 0 && pd.ifaceNum < interfaces.length) idx = pd.ifaceNum;
       if (idx < 0) {
         setVidProcRun({ state: 'error', msg: `Interface 「${pd.iface}」 is no longer in the package — reload the pipeline and try again.` });
-        return;
+        return 'skip';
       }
     }
     vidProcBusy.current = true;
@@ -1513,11 +1526,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       vidUpdate(proj => placeProcOutput(proj, clipId, m.video as string,
         m.name || clip.name, dur), `${isPreset ? 'Preset' : 'Processor'} segment ${pd.segIndex + 1}/${pd.segCount}`);
       autoSaveCud();                // 续跑完成一段也立刻落盘
+      ringSegmentDone();            // 续跑的也是"一段完成"：同样响一声
       setVidProcRun({ state: 'done', msg: `Segment ${pd.segIndex + 1}/${pd.segCount} landed on the output track.` });
+      return 'done';
     } catch (e: unknown) {
-      setVidProcRun(vidCancelRef.current
+      const cancelled = vidCancelRef.current;
+      setVidProcRun(cancelled
         ? { state: 'cancelled', msg: 'Segment run cancelled — the placeholder stays; click it to try again.' }
         : { state: 'error', msg: `${isPreset ? 'Preset' : 'Processor'} failed — ${e instanceof Error ? e.message : String(e)}` });
+      return cancelled ? 'cancelled' : 'failed';
     } finally {
       clearProcFill(clipId);
       vidStagingOverlay.busy = false;
@@ -1527,6 +1544,46 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       vidProcBusy.current = false;
     }
   }, [interfaces, vidUpdate, blockSets, executePresetSeg, autoSaveCud]);
+
+  // 多选 ▶：把选中的占位段按 **从左到右（start 升序）、同起点从下到上（轨道序号降序）**
+  // 的顺序串行跑完。单段的忙碌闸门/进度/落位/自动保存仍走 continuePendingClip，这里只排队：
+  //  * 槽位已被别的片段占着的段跳过（它自己的 ▶ 本来就置灰），整批结束后统一报一句；
+  //  * 中途取消 = 不再开跑后面的段（已经落位的保留）；
+  //  * 单段失败不打断整批 —— 每段互相独立，失败的那段占位还在，可以单独再点 ▶。
+  const continueManyPendingClips = useCallback(async (clipIds: string[]) => {
+    if (vidProcBusy.current) {
+      setVidProcRun({ state: 'error', msg: 'A run is already in flight — wait for it or cancel it first.' });
+      return;
+    }
+    const proj = vidProjectRef.current;
+    const rowOf = new Map(proj.tracks.map((tr, i) => [tr.id, i]));
+    const picked = clipIds
+      .map(id => proj.clips.find(c => c.id === id))
+      .filter((c): c is VidClip => !!c && !!c.pending)
+      .sort((a, b) => (a.start - b.start)
+        || ((rowOf.get(b.trackId) ?? 0) - (rowOf.get(a.trackId) ?? 0)));
+    const runnable = picked.filter(c => !procSlotBusy(proj, c.pending!.port ?? 0, c.start, c.duration, c.id));
+    const blocked = picked.length - runnable.length;
+    if (!runnable.length) {
+      setVidProcRun({ state: 'error', msg: 'Every selected placeholder is blocked — its slot on the output track is taken.' });
+      return;
+    }
+    let done = 0, failed = 0, cancelled = false;
+    for (const c of runnable) {
+      const r = await continuePendingClip(c.id);
+      if (r === 'cancelled') { cancelled = true; break; }
+      if (r === 'done') done++;
+      else if (r === 'failed') failed++;
+    }
+    const bits = [`Ran ${done} of ${runnable.length} segment${runnable.length === 1 ? '' : 's'} in order`];
+    if (failed) bits.push(`${failed} failed`);
+    if (blocked) bits.push(`${blocked} blocked (output slot taken)`);
+    setVidProcRun(cancelled
+      ? { state: 'cancelled', msg: `Batch cancelled — ${bits.join(', ')}.` }
+      : failed
+        ? { state: 'error', msg: `${bits.join(', ')}.` }
+        : { state: 'done', msg: `${bits.join(', ')}.` });
+  }, [continuePendingClip]);
 
   // 工作台那几格的 send 先过宿主这一道 —— History 格的 Undo / Redo / 点某一行，
   // 要能落到视频那一半（页面的下标空间里没有它）。
@@ -1598,7 +1655,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     mute, toggleMute,
     // 占位段上的 ▶：按快照续跑这一段（见 continuePendingClip）。
     continueProc: continuePendingClip,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip]);
+    // 多选时点 ▶：整批按 左→右 / 同起点 下→上 依次跑（见 continueManyPendingClips）。
+    continueProcMany: continueManyPendingClips,
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips]);
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。
@@ -1617,7 +1676,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     <div style={styles.modeSeg} role="tablist" title="Workbench mode">
       {(['image', 'video'] as VidMode[]).map(m => (
         <button key={m} style={{ ...styles.modeSegBtn, ...(vidMode === m ? styles.modeSegOn : null) }}
-          title={m === 'image' ? 'Image — the canvas workbench' : 'Video — player & timeline'}
+          title={m === 'image' ? 'Image — the canvas workbench' : 'Video — the player (Tracks and Assets stay available in both modes)'}
           onClick={e => { e.stopPropagation(); setVidMode(m); }}>{m === 'image' ? 'Image' : 'Video'}</button>
       ))}
     </div>
@@ -2433,17 +2492,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               // 工作台搬出来的那几格：宿主只发指令，正文每格自己读那份快照。Staging 那一格还要
               // 一小把宿主事实 —— 图池镜像、画布合成预览、以及图池的两个后端写口（`wbHost`）。
               ...workbenchBodies(uiSend, wbHost),
-              // Tracks / Assets 是常驻的普通窗：Video 模式显示各自正文，Image 模式正文留空。树一概不动。
+              // Tracks / Assets 是常驻的普通窗：**两种模式都显示正文** —— 轨道与资产属于文档，
+              // 不该被 Video 模式这道门挡住（Image 模式下没有播放器，但时间线与资产库照常可用）。
               // **没有打开的文档 = 没有工程**：这两扇窗读的就是 vidProject，文档关光之后必须换成
               // 一句空态，不能把刚关掉那份的轨道/资产继续摆着（它们属于文档，不属于页面）。
-              vtracks: vidMode !== 'video' ? null
-                : blendDocs.activeUid === null
-                  ? <div style={styles.vidVoid}>No project open — Tracks belong to a document.</div>
-                  : <VidTimeline vid={vidCtl} onSettingsPlaceholders={setProcSettingsIds} />,
-              vassets: vidMode !== 'video' ? null
-                : blendDocs.activeUid === null
-                  ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
-                  : <VidAssets vid={vidCtl} />,
+              vtracks: blendDocs.activeUid === null
+                ? <div style={styles.vidVoid}>No project open — Tracks belong to a document.</div>
+                : <VidTimeline vid={vidCtl} onSettingsPlaceholders={setProcSettingsIds} />,
+              vassets: blendDocs.activeUid === null
+                ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
+                : <VidAssets vid={vidCtl} />,
               context: (<>
                 <div style={styles.dockCard}>
                   <div style={styles.contextPreviewWrap}>

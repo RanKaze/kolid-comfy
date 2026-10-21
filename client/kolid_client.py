@@ -1809,11 +1809,13 @@ SHELL_HTML = r"""<!DOCTYPE html>
         }
     }
 
-    // pipeline blocks 跑完(仅 'done';取消/报错不响)
+    // pipeline blocks 跑完(仅 'done';取消/报错不响) / 视频分段每跑完一段。
+    // 整链完成沿用 1.5s 节流(同一趟里可能紧跟一段的收尾,别叠罗汉);分段完成带 segment 标记,
+    // 每段各响一次,不节流 —— 用户要的就是"每段完成响一声"。
     window.addEventListener('message', (e) => {
         if (!e.data || e.data.__kolid !== 'tinkle' || e.data.event !== 'pipeline-done') return;
         const now = Date.now();
-        if (now - lastTinkleAt < 1500) return;
+        if (!e.data.segment && now - lastTinkleAt < 1500) return;
         lastTinkleAt = now;
         playTinkle(false);
     });
