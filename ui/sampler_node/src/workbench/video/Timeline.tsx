@@ -1227,8 +1227,9 @@ export const VidTimeline: React.FC<{
                   return (
                     <Clip key={c.id} clip={c} pps={pps} selected={selIds.has(c.id)} blade={blade} muted={isMuted}
                       touchesLeft={touchesLeft}
+                      missing={!!((c.asset && vid.missing.has(c.asset)) || (c.play && vid.missing.has(c.play)))}
                       wave={assetBySrc.get(c.src)?.waveform}
-                      mediaFile={c.src.startsWith('/api/vid_media/') ? c.src.split('/').pop() : undefined}
+                      mediaFile={/^\/api\/(?:vid|asset|global)_media\//.test(c.src) ? c.src.split('/').pop() : undefined}
                       onStartDrag={startClipDrag} onPointerMove={onClipPointerMove} onPointerUp={endClipDrag}
                       onContextMenu={openMergeMenu}
                       onUnlink={() => { if (gid) vid.update(proj => unlinkGroup(proj, gid), 'Unlink'); }}
@@ -1432,8 +1433,12 @@ const Clip: React.FC<{
   onDequeue?: (clipId: string) => void;
   /** 这一段正在跑：按钮换成 ■，点击只打断这一段（后面的队列继续）。 */
   onStop?: (clipId: string) => void;
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings }) => {
+  /** 它引用的仓库哈希已经不在仓库里（A5）：段面盖红斜纹 + 「!」—— 去 Assets 窗的 Project 档 relink。 */
+  missing?: boolean;
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing }) => {
   const isAudio = c.kind === 'audio';
+  // 缺失：只有"真有来源"的段才可能缺（Layer 段与占位段没有仓库来源）。
+  const gone = !!missing && c.kind !== 'layer' && !c.pending;
   // Layer 段没有源文件：不抽条、不取首尾帧，只画一块"合成区间"。
   const isLayer = c.kind === 'layer';
   // Processor 占位段同样没有源（等跑完才有）：不抽条不取帧，画一块带快照的"待跑坑"。
@@ -1531,14 +1536,15 @@ const Clip: React.FC<{
       onDoubleClick={e => e.stopPropagation()}
       title={isPending && c.pending
         ? `${c.name} — ${c.pending.kind === 'preset' ? 'Pipeline Preset' : 'Processor'} placeholder, segment ${c.pending.segIndex + 1}/${c.pending.segCount} of 「${c.pending.iface}」 (nothing to show until it runs). Click ▶ Run to execute just this segment from its stored snapshot; the result lands on the output track above and this placeholder stays, so it can be run again. Drag/trim/delete like any clip.`
-        : `${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}`}
+        : `${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}${gone ? ' · MEDIA MISSING from the asset store — pick the original file in the Assets window (Project scope) to relink' : ''}`}
       style={{
         position: 'absolute', left: c.start * pps, width: Math.max(8, c.duration * pps), top: 3, bottom: 3,
         borderRadius: 0, overflow: 'hidden', cursor: blade ? BLADE_CURSOR : 'grab', userSelect: 'none',
         // 上亮下暗的立面色：片段是"一片实体"，不是一块半透明色纸；选中时白边 + 外发光。
         // 占位段：虚线浅灰白边 —— "这里有个坑等着被填"一眼认出；跑出来的成品在输出轨上是实心蓝。
         background: isPending ? `linear-gradient(180deg, ${PK.clipA}, ${PK.clipB})` : `linear-gradient(180deg, ${K.clipA}, ${K.clipB})`,
-        border: selected ? '1px solid rgba(255,255,255,0.92)'
+        border: gone ? '1px solid rgba(255,69,58,0.9)'
+          : selected ? '1px solid rgba(255,255,255,0.92)'
           : isPending ? `1px dashed ${PK.edge}` : `0.5px solid ${K.edge}`,
         // 首尾相接时让出左边框：接缝只画左邻那条右边框，不会两条叠成 2px。
         borderLeftWidth: touchesLeft ? 0 : undefined,
@@ -1577,6 +1583,17 @@ const Clip: React.FC<{
       )}
       {isLayer && (
         <span style={{ display: 'flex', alignItems: 'center', color: '#ffd9a8', flexShrink: 0, position: 'relative', pointerEvents: 'none' }}><IconLayers /></span>
+      )}
+      {/* 缺失：整段盖一层红斜纹（画面/波形还在也压得住），右边挂一颗「!」。 */}
+      {gone && (
+        <span style={{ position: 'absolute', inset: 0, pointerEvents: 'none',
+          background: 'repeating-linear-gradient(45deg, rgba(255,69,58,0.26) 0 5px, rgba(255,69,58,0.05) 5px 10px)' }} />
+      )}
+      {gone && (
+        <span title="MEDIA MISSING — the bytes are gone from the asset store. Relink the original file in the Assets window (Project scope)."
+          style={{ position: 'relative', flexShrink: 0, fontSize: 9, fontWeight: 800, fontStyle: 'normal',
+            color: '#fff', background: 'rgba(255,69,58,0.95)', borderRadius: 4, padding: '1px 5px',
+            lineHeight: 1.25, pointerEvents: 'none' }}>!</span>
       )}
       {!(tight && isPending) && !isVideoClip && (
         <span style={{ fontSize: 10.5, fontWeight: 600, color: 'rgba(255,255,255,0.94)', textShadow: '0 1px 2px rgba(0,0,0,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', pointerEvents: 'none', position: 'relative' }}>{c.name}</span>

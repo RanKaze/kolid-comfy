@@ -299,6 +299,12 @@ const PlusIcon = () => (
     <path d="M6 2.5v7M2.5 6h7" />
   </svg>
 );
+/** 回形针：把本地文件重新接到这个哈希上（relink）。 */
+const ClipIcon = () => (
+  <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+    <path d="M9.5 5.2L5.6 9.1a2.1 2.1 0 01-3-3l4.3-4.3a1.5 1.5 0 012.1 2.1L4.7 8.2a0.8 0.8 0 01-1.1-1.1l3.9-3.9" />
+  </svg>
+);
 
 const Card: React.FC<{ it: CardItem }> = ({ it }) => {
   const poster = useCardThumb(it.kind, it.src, it.poster);
@@ -381,24 +387,48 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
   const [store, setStore] = useState<StoreAsset[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // 清单自己拉失败，和"刚才那个动作失败"（relink 挑错文件…）分开存 —— 后者不能被一次重新拉取抹掉。
+  const [listErr, setListErr] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const bump = useCallback(() => setTick(t => t + 1), []);
   const fileRef = useRef<HTMLInputElement | null>(null);
+
+  // ── 缺失 / relink（A5）─────────────────────────────────────────────────────────────────────
+  // `vid.missing` 是宿主问过仓库的结论（工程引用的哈希里没字节的那些）。卡片挂 MISSING，
+  // 点回形针挑本地文件 → `vid.relink` 重新入库；哈希对不上会被拒（那说明挑错了文件）。
+  const gone = useCallback((a: VidAsset) =>
+    !!((a.asset && vid.missing.has(a.asset)) || (a.play && vid.missing.has(a.play))), [vid.missing]);
+  const relinkRef = useRef<HTMLInputElement | null>(null);
+  const relinkForRef = useRef<string | null>(null);
+  const startRelink = (hash: string | undefined) => {
+    if (!hash) return;
+    relinkForRef.current = hash;
+    setErr(null);
+    relinkRef.current?.click();
+  };
+  const onRelinkPick = async (f: File | undefined) => {
+    const hash = relinkForRef.current;
+    relinkForRef.current = null;
+    if (!f || !hash) return;
+    const r = await vid.relink(hash, f);
+    if (!r.ok) setErr(r.error || 'relink failed');
+    bump();          // 入库可能新增了一件货（影不影响 relink 都重拉一次清单）
+  };
 
   // 仓库清单：一次拉全（`/api/global_assets` = 仓库里的一切 + 媒体探测），四档作用域与搜索都在
   // 本地过滤 —— 一百多件的过滤比往返一趟便宜，搜索也不必去抖。`tick` 变了就重拉（导入/删除之后）。
   useEffect(() => {
     let alive = true;
     setBusy(true);
-    setErr(null);
+    setListErr(null);
     fetch('/api/global_assets')
       .then(r => r.json())
       .then(d => {
         if (!alive) return;
         setStore(Array.isArray(d?.assets) ? d.assets : []);
-        if (d?.ok === false) setErr(d?.error || 'list failed');
+        if (d?.ok === false) setListErr(d?.error || 'list failed');
       })
-      .catch(e => { if (alive) { setStore([]); setErr(String(e)); } })
+      .catch(e => { if (alive) { setStore([]); setListErr(String(e)); } })
       .finally(() => { if (alive) setBusy(false); });
     return () => { alive = false; };
   }, [tick]);
@@ -434,7 +464,13 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
     if (kind !== 'all' && k !== kind) return false;
     return hits(a.name);
   });
-  const total = storeItems.length + projectItems.length;
+  // 时间线上引用了、但资产表里没有对应行（老工程/库件被删后片段还留着）的缺失哈希 ——
+  // 也得给一张卡，否则"3 missing"却找不到可以 relink 的那一件。
+  const coveredHashes = new Set<string>();
+  for (const a of p.assets) { if (a.asset) coveredHashes.add(a.asset); if (a.play) coveredHashes.add(a.play); }
+  const orphanMissing = scope !== 'project' || kind === 'image' ? []
+    : [...vid.missing].filter(h => !coveredHashes.has(h));
+  const total = storeItems.length + projectItems.length + orphanMissing.length;
 
   // 收进本工程（视频/音频才有片段可落；图片不是可播素材）。
   const claimStore = (s: StoreAsset) => {
@@ -469,13 +505,15 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
     const label = s.displayName || s.name;
     const ok = window.confirm(
       `Delete「${label}」from the asset store?\n\nThe file and its record are removed. ` +
-      `Clips already on the timeline keep their own reference.`);
+      `Timeline clips that reference it are marked MISSING until you relink the original file.`);
     if (!ok) return;
     const r = await fetch('/api/asset_delete', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
     }).then(x => x.json()).catch(() => null);
     if (!r?.ok) setErr(r?.error || 'delete failed');
+    // 删完立刻重问缺失：时间线该当场标红，不该等下一次工程改动。
+    vid.recheckMissing();
     bump();
   };
 
@@ -615,7 +653,40 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
             void importFiles(fs);
           }}
         />
+        {/* relink 的文件入口：Project 档卡片上的回形针点它（同一时刻只为一个哈希挑文件）。 */}
+        <input
+          ref={relinkRef}
+          type="file"
+          accept="video/*,audio/*"
+          style={{ display: 'none' }}
+          onChange={e => {
+            const f = e.target.files?.[0];
+            e.target.value = '';
+            void onRelinkPick(f);
+          }}
+        />
       </div>
+
+      {/* 缺失横幅：工程引用的字节不在仓库里了。All/Library/Session 不列工程资产，所以这里给个入口。 */}
+      {vid.missing.size > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', flexShrink: 0,
+          background: 'rgba(255,69,58,0.12)', borderBottom: '0.5px solid rgba(255,69,58,0.35)',
+        }}>
+          <span style={{ fontSize: 9.5, fontWeight: 800, color: '#ff6b60', flexShrink: 0, whiteSpace: 'nowrap' }}>
+            {vid.missing.size} missing
+          </span>
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.5)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {scope === 'project' ? 'Pick the original file with the paperclip on a card.' : 'The timeline references bytes that are gone from the store.'}
+          </span>
+          {scope !== 'project' && (
+            <button
+              onClick={() => setScope('project')}
+              style={{ ...rowBtn, width: 'auto', height: 16, padding: '0 5px', fontSize: 9, flexShrink: 0, color: '#ff9a92', background: 'rgba(255,69,58,0.18)', borderRadius: 4 }}
+            >Show</button>
+          )}
+        </div>
+      )}
 
       {/* 卡片网格：可拖（application/x-asset），名字右边是动作。 */}
       <div style={{
@@ -636,29 +707,60 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
         {projectItems.map(a => {
           const img = isImageAsset(a);
           const k = img ? 'image' : a.kind;
+          const miss = gone(a);
           return (
             <Card
               key={'p:' + a.id}
               it={{
                 name: a.name, kind: k, src: a.src, duration: a.duration, hasAudio: img ? null : a.hasAudio,
-                byteFrom: 'store', origin: a.origin, usedBy: usedBy(a.src),
+                byteFrom: miss ? 'missing' : 'store', origin: a.origin, usedBy: usedBy(a.src),
                 drag: img ? undefined : {
                   'application/x-vid-asset': a.id,
-                  [ASSET_ITEM_TYPE]: JSON.stringify({ id: a.id, url: a.src, name: a.name, kind: k }),
+                  [ASSET_ITEM_TYPE]: JSON.stringify({ id: a.id, url: a.src, name: a.name, kind: k, asset: a.asset, play: a.play }),
                 },
                 actions: (
-                  <button
-                    title={'Remove「' + a.name + '」from this project (clips already on the timeline keep playing)'}
-                    onClick={() => vid.update(proj => removeAsset(proj, a.id))}
-                    style={rowBtn}
-                  >
-                    <CrossIcon />
-                  </button>
+                  <>
+                    {miss && (
+                      <button
+                        title={'Relink「' + a.name + '」— pick the original file; its bytes must hash to ' + (a.asset || a.play || '').slice(0, 8) + '…'}
+                        onClick={() => startRelink(a.asset || a.play)}
+                        style={{ ...rowBtn, color: '#ff6b60' }}
+                      >
+                        <ClipIcon />
+                      </button>
+                    )}
+                    <button
+                      title={'Remove「' + a.name + '」from this project (clips already on the timeline keep playing)'}
+                      onClick={() => vid.update(proj => removeAsset(proj, a.id))}
+                      style={rowBtn}
+                    >
+                      <CrossIcon />
+                    </button>
+                  </>
                 ),
               }}
             />
           );
         })}
+
+        {orphanMissing.map(h => (
+          <Card
+            key={'m:' + h}
+            it={{
+              name: 'missing · ' + h.slice(0, 8), kind: 'video', src: '', duration: 0, hasAudio: null,
+              byteFrom: 'missing', origin: 'referenced by the timeline',
+              actions: (
+                <button
+                  title={'Relink the bytes for ' + h.slice(0, 8) + '… — pick the original file; the hash must match'}
+                  onClick={() => startRelink(h)}
+                  style={{ ...rowBtn, color: '#ff6b60' }}
+                >
+                  <ClipIcon />
+                </button>
+              ),
+            }}
+          />
+        ))}
 
         {storeItems.map(s => {
           const id = s.hash || s.name;
@@ -710,8 +812,13 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
         display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', flexShrink: 0,
         borderTop: '0.5px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.015)',
       }}>
-        <span style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.32)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {busy ? 'loading…' : err ? err : `${total} ${total === 1 ? 'asset' : 'assets'} · ${scope}`}
+        <span
+          title={(err || listErr) || undefined}
+          style={{
+            fontSize: 9.5, color: (err || listErr) ? '#ff8a80' : 'rgba(255,255,255,0.32)',
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          }}>
+          {busy ? 'loading…' : err ? err : listErr ? listErr : `${total} ${total === 1 ? 'asset' : 'assets'} · ${scope}`}
         </span>
         <span style={{ flex: 1 }} />
         {store && (

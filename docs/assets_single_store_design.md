@@ -151,14 +151,16 @@ payload = 依次拼接 length > 0 的那些资产的字节（PNG / WEBP 原样�
 - **在磁盘上显示**
 - 拖拽协议统一成 `application/x-asset = {hash}`，替掉现在的 `x-vid-asset` / `x-vid-global` / `x-blend-staging`
 
-### 4.4 缺失与 relink（B 决策必须配的一步）
+### 4.4 缺失与 relink（B 决策必须配的一步）—— **已落地（A5b）**
 
-音视频不内嵌 ⇒ 把 .cud 挪到别的机器/仓库，它们一定缺。打开时：
+音视频不内嵌 ⇒ 把 .cud 挪到别的机器/仓库，它们一定缺。现在：
 
-1. 窗顶一条横幅：`3 media files are missing（2 video · 1 audio）` + 一个列表；
-2. 每项可 `Relink…`（选文件 / 选文件夹，先按 hash 精确匹配，再按 `name + duration` 模糊提示）；
-3. 或者 `Pin into document`：把这份字节真的写进 .cud（`length > 0`），从此不再缺——这是给"我要把工程发给别人"的逃生口；
-4. 时间线上缺的片段画红条纹 + 播不了，但**不删你的片段数据**（只标记缺失）。
+1. 打开工程（以及每次改动后）批量问 `/api/assets_exist`：**只拿"在/不在"，不改工程里任何一个字段**；
+2. 缺的片段：红边 + 红斜纹 + `!`，tooltip 写 `MEDIA MISSING …`，**不删你的片段数据**（播不了但在）；
+3. Assets 窗 Project 档的卡片挂 `MISSING` + 回形针；顶部横幅 `N missing`（其它档位一键切过去）；
+4. `Relink…` = 选文件 → 重新入库 → **按哈希精确匹配**（原件或它新算出的代理）。对不上就明说
+   `Different bytes — expected …, got …`，什么都不改。`force` 留给未来的"就用这个新文件"，UI 暂不给；
+5. **没做** `Pin into document`（把字节塞回 .cud）：那是"我要把工程发给别人"的逃生口，A6 之后再说。
 
 ---
 
@@ -390,7 +392,7 @@ v5 文件在新读端打开后保存即升级。**离线/宿主没起时整份�
 - `asset_store.delete()` 仍无引用检查：`.cud` 的 manifest 已经是一张引用图，A6 要把
   "打开中的文档 + 时间线 + 特效槽"接进来再拦删除。
 
-### A5 落地记录（音视频入仓：存储层 + 模型层已跑验收，relink 面板待做）
+### A5 落地记录（音视频入仓：存储层 + 模型层）
 
 一句话：**音视频的字节也搬进 `data/assets/` 了**；`media/vid/` 降级成"派生缓存 + 老 URL 的兼容落点"；
 时间线片段与资产从此记 `{asset, play}` 两个哈希。入轨、抽帧、缩略条、合并、preset/接口抽帧全部走同一个
@@ -438,8 +440,38 @@ resolver —— **URL 面没变**（`/api/vid_media/<file>` 仍然有效、老 `
 
 **剩下的（A5 未完成部分 → A6 前置）**
 
-- **relink 面板 / `MISSING` 徽章**：后端已经会回 404，缺的是"打开工程时批量问一遍哈希在不在，
-  缺的片段画红线 + 选文件按哈希精确匹配"。这是 A5 的最后一块 UI。
 - **Run 产物仍留在 `media/vid` 当缓存**（`_vid_encode`、`_vid_merge` 的输出）：它们是时间线片段的
   `src`，A6 的引用图要先能看见它们，再谈回收或入仓。
 - `asset_store.delete()` 仍无引用检查；A6 接"打开中的文档 + 时间线 + 特效槽"后改成"有引用就拒绝"。
+
+### A5b 落地记录（relink：缺失标记 + 按哈希挑回原件）
+
+一句话：**打开工程与每次改动后，工程引用的每个哈希都问一遍仓库**。缺的在三个地方同时露出来 ——
+时间线段红斜纹 + `!`、Assets 窗的 `MISSING` 徽章、顶部横幅 —— 并且**只标记、不改数据**：片段的
+`asset` / `play` / `src` 一个都不动。挑回原件走 `vid.relink(hash, file)`：字节重新入库，`md5` 对得上
+（或对上新算出的代理哈希）才改绑；对不上就报 `Different bytes — expected …, got …`。
+
+| 位置 | 内容 |
+|---|---|
+| `/api/assets_exist` | `{ids:[hash…]} → {ok, have[], missing[]}`（去重保序）。**只读**：不写盘、不建记录、不改表 |
+| `vidAssetRefs(p)` | 工程引用的全部哈希（`p.assets` + 片段的 `asset`/`play`）—— 缺失检查与 relink 共用这一份 |
+| `relinkAsset(p, from, to, playHash)` | 把引用 `from` 的行改指 `to`，`src` 同时换成 `/api/asset_media/<play>`。老工程里指 `/api/vid_media/<旧文件名>` 的段，relink 后自动换成仓库地址 |
+| `VidController.missing` | `ReadonlySet<string>`，宿主问过仓库的结论 |
+| `VidController.relink(hash, file, force?)` | 入库后比对哈希：命中原件、或命中它新算出的代理 → 改绑 + 重问；不命中 → `{ok:false, error}` |
+| 触发时机 | 工程变化（250ms 去抖，按哈希清单签名去重）、删完仓库件（`recheckMissing()` 强制重问）、窗口重新获得焦点（别的窗口/宿主删了东西） |
+| 时间线 | 片段红边 + 45° 红斜纹 + `!`，tooltip 追加 `MEDIA MISSING …`；Layer 段与占位段不参与（它们没有仓库来源） |
+| Assets 窗 | Project 档卡片挂 `MISSING`（`byteFrom:'missing'`）+ 回形针；资产表里没有对应行的"孤儿缺失"补一张卡；顶部横幅 `N missing` + 一键切到 Project |
+| 错误面 | `err`（动作失败）与 `listErr`（清单拉取失败）分开存 —— 否则重新拉清单会把"挑错文件"的提示当场抹掉（探针抓到的那个 bug） |
+
+**为什么咬死"精确哈希"**：同一份字节 ⇒ 同一个 `md5` ⇒ 同一件货。放宽成"名字/时长差不多"就等于
+悄悄换素材。`force` 参数留着给以后"就用这个新文件"的显式逃生口，UI 目前不给。
+
+**验收（全绿，各连跑两遍）**
+
+| 探针 | 结果 | 覆盖 |
+|---|---|---|
+| `temporary/_probe_vid_relink.cjs` | **30/30** | 端点语义（空表/重复/空白/未知哈希）、只读性（文件数与记录数不变）、删掉→404→挑回同一哈希→**老 URL 复活**、不同字节不同哈希、只丢了代理也能认出并重建 |
+| `temporary/_probe_vid_relink_ui.cjs` | **26/26** | 真页面：claim → 拖轨 → 用 UI 的删除按钮删掉 → 片段红边/标题/`!`、横幅、`MISSING` 卡 → 挑错文件被拒且数据不变 → 挑对文件复原（`src` 换成 `asset_media`，清单里回来） |
+| 回归 | 12/12 · 35/35 · 13/13 · 14/14 · 22/22 · 45/45 | vid 模型、A5 后端、仓库 UI、A1 两扇窗、仓库层 |
+
+**A5 至此完成**（存储层 + 模型层 + relink）。A6 才是"引用图 + 有引用就拒绝删除"。

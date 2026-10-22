@@ -3915,6 +3915,23 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'ok': False, 'error': str(e)}, 500)
                 return
 
+            if urlparse(self.path).path == '/api/assets_exist':
+                # 批量"这些哈希还在不在"（A5 的缺失/relink）：打开工程与每次改动后问一次，
+                # 缺的片段画红线、Assets 卡挂 MISSING。只读仓库，不写任何东西。
+                # body = {ids: [hash…]} → {ok, have:[…], missing:[…]}（顺序按传入）。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    ids = body.get('ids') if isinstance(body, dict) else None
+                    want = [str(i).strip() for i in (ids or []) if str(i).strip()]
+                    have, missing = [], []
+                    for aid in dict.fromkeys(want):      # 去重但保序
+                        (have if asset_store.get(aid) else missing).append(aid)
+                    self._send_json({'ok': True, 'have': have, 'missing': missing})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
+                return
+
             if urlparse(self.path).path == '/api/asset_import':
                 # 往仓库里放字节（A0 的唯一写口）：{images:[dataURL…], names:[…], library?:bool, origin?}
                 # 也收单张 {data|image:'dataURL', name}。id 由**内容**决定（md5(bytes)），

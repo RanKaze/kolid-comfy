@@ -261,6 +261,13 @@ export type VidController = {
   stopProc?: (clipId: string) => void;
   /** Layer 段合并用：向工作台页要这些图层集的内容签名（key → 签名）。页面不在/超时 = 空表。 */
   layerSigs?: (keys: string[]) => Promise<Record<string, string>>;
+  /** 仓库里已经找不到的哈希（工程引用了，但字节不在了）。打开工程与每次改动后刷新：
+   *  时间线画红线、Assets 卡挂 MISSING、relink 按它挑目标。 */
+  missing: ReadonlySet<string>;
+  /** 把 `hash` 这件货换成本地文件（重新入库）。哈希对不上默认拒绝 —— `force` 才改绑到新字节。 */
+  relink: (hash: string, file: File, force?: boolean) => Promise<{ ok: boolean; error?: string; hash?: string }>;
+  /** 重新问一遍缺失（删除/relink/入库之后调用；工程变化会自动问）。 */
+  recheckMissing: () => void;
 };
 
 const MIN_CLIP = 0.05;   // 片段/裁剪的最短寿命（s）
@@ -270,6 +277,30 @@ export const newVidId = (prefix: string): string =>
 
 export const vidDuration = (p: VidProject): number =>
   p.clips.reduce((m, c) => Math.max(m, c.start + c.duration), 0);
+
+/** 工程引用的全部仓库哈希（资产表 + 片段的 `asset`/`play`）。缺失检查与 relink 都按这一份。 */
+export const vidAssetRefs = (p: VidProject): string[] => {
+  const out = new Set<string>();
+  for (const a of p.assets) { if (a.asset) out.add(a.asset); if (a.play) out.add(a.play); }
+  for (const c of p.clips) { if (c.asset) out.add(c.asset); if (c.play) out.add(c.play); }
+  return [...out];
+};
+
+/** 换绑：把工程里对 `from` 的引用改指 `to`；`playHash` = 可播字节（转码代理），缺省用 `to`。
+ *  只动引用了 `from` 的行 —— src 也一起换成仓库地址，否则换了哈希还在播旧 URL。 */
+export const relinkAsset = (p: VidProject, from: string, to: string, playHash?: string): VidProject => {
+  const play = playHash || to;
+  const url = '/api/asset_media/' + encodeURIComponent(play);
+  const fix = <T extends { asset?: string; play?: string; src: string }>(row: T): T => {
+    if (row.asset !== from && row.play !== from) return row;
+    return { ...row, asset: row.asset === from ? to : row.asset, play: row.play === from ? play : row.play, src: url };
+  };
+  return {
+    ...p,
+    assets: p.assets.map(fix),
+    clips: p.clips.map(c => (c.kind === 'layer' ? c : fix(c))),
+  };
+};
 
 export const trackOf = (p: VidProject, id: string): VidTrack | null => p.tracks.find(t => t.id === id) ?? null;
 

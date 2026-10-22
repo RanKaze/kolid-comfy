@@ -14,7 +14,7 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, placeProcAssets, placeProcOutput, placeProcPlaceholders, procSlotBusy, saveVidProject } from '../workbench/video/model';
+import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, placeProcAssets, placeProcOutput, placeProcPlaceholders, procSlotBusy, relinkAsset, saveVidProject, vidAssetRefs } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
@@ -1740,9 +1740,67 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setVidLayerKey(prev => (prev === next ? prev : next));
     onBlendUiCommand('layer-set', { key: next });
   }, [onBlendUiCommand]);
+  // ── 缺失 / relink（A5）：工程引用的每个哈希，仓库里还有没有 ────────────────────────────────
+  // 什么时候问：工程变了（去抖 250ms），以及删除/入库之后（`recheckMissing` 手动，绕过去重）。
+  // 请求失败（宿主没起）⇒ 保持上一次的结论：宁可不画，也别把一条能播的时间线整片标红。
+  const [vidMissing, setVidMissing] = useState<ReadonlySet<string>>(() => new Set());
+  const missingSigRef = useRef('');
+  const recheckMissing = useCallback(async () => {
+    const refs = vidAssetRefs(vidProjectRef.current);
+    if (!refs.length) {
+      missingSigRef.current = '';
+      setVidMissing(prev => (prev.size ? new Set<string>() : prev));
+      return;
+    }
+    try {
+      const r = await fetch('/api/assets_exist', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: refs }),
+      }).then(x => x.json());
+      if (!r || r.ok !== true) return;
+      const miss = new Set<string>(Array.isArray(r.missing) ? r.missing.map(String) : []);
+      missingSigRef.current = [...refs].sort().join(',');
+      setVidMissing(prev => (prev.size === miss.size && [...miss].every(h => prev.has(h)) ? prev : miss));
+    } catch { /* 宿主没起：保持上一次的结论 */ }
+  }, []);
+  useEffect(() => {
+    if (vidMode !== 'video') return;
+    const refs = vidAssetRefs(vidProject);
+    if (!refs.length) {
+      if (missingSigRef.current) {
+        missingSigRef.current = '';
+        setVidMissing(prev => (prev.size ? new Set<string>() : prev));
+      }
+      return;
+    }
+    if ([...refs].sort().join(',') === missingSigRef.current) return;
+    const t = setTimeout(() => { void recheckMissing(); }, 250);
+    return () => clearTimeout(t);
+  }, [vidProject, vidMode, recheckMissing]);
+  // 别的窗口/宿主删了文件，本页不会收到通知 —— 回到前台时重问一遍（便宜：清单有缓存）。
+  useEffect(() => {
+    const onFocus = () => { void recheckMissing(); };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [recheckMissing]);
+  // relink：把用户挑的文件重新入库。**哈希必须对得上**（这是"同一件货"的判据），对不上默认拒绝。
+  const vidRelink = useCallback(async (hash: string, file: File, force?: boolean) => {
+    const ing = await ingestFile(file);
+    if (!ing || !ing.asset) return { ok: false, error: 'This file could not be read (ingest failed)' };
+    // 认两种命中：挑的是原件（哈希 = 缺失的原件），或者缺的其实是它的转码代理（哈希 = 新算出的 play）。
+    if (ing.asset !== hash && ing.play !== hash && !force) {
+      return { ok: false, error: `Different bytes — expected ${hash.slice(0, 8)}…, got ${ing.asset.slice(0, 8)}…`, hash: ing.asset };
+    }
+    // 精确命中也要改 src：老工程指的多半是 `/api/vid_media/<旧文件名>`（缓存被清掉了），而重新
+    // 入库后的地址是 `<md5>`。relinkAsset 顺手把它换成仓库地址（P1 的 play 也一起换）。
+    vidUpdate(p => relinkAsset(p, hash, ing.asset!, ing.play), 'Relink media');
+    await recheckMissing();
+    return { ok: true, hash: ing.asset };
+  }, [vidUpdate, recheckMissing]);
   const vidCtl: VidController = useMemo(() => ({
     project: vidProject, transport: vidTransport, playing: vidPlaying, pps: vidPps,
     staging, update: vidUpdate, seek: vidSeek, setPlaying: setVidPlaying, setPps: setVidPps,
+    missing: vidMissing, relink: vidRelink, recheckMissing: () => { void recheckMissing(); },
     // 点 Layer 段 = 把游标带进这一段：画布只在游标压着它时折这一套图层（见 vidCanvasRef）。
     // 这里不写 vidLayerKey / 不发 layer-set —— 那一份由播放器按游标底下**实际命中**的段来报
     // （见 showPlayLayer），否则点一下段、游标却留在段外，两边说的就不是同一段了。
@@ -1763,7 +1821,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     stopProc: stopPendingClip,
     // Layer 段合并：向页面要图层集签名，两段一致才允许并。
     layerSigs,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs]);
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs, vidMissing, vidRelink, recheckMissing]);
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。
