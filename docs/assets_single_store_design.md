@@ -267,7 +267,7 @@ finish 选中 · 时间线 `clip.asset` · 打开的提示词 chip · library �
 |---|---|
 | `libs/asset_store.py` | 仓库层：`records/get/resolve/path_of/put_bytes/dataurl_bytes/sniff_ext/set_library/thumb_path/stats`。id = 文件名 stem；表 = `data/assets/_index.json`（只装库成员 + 名字/标签/来源）；缩略图缓存在 `data/assets/.thumbs/` |
 | `snapshot_sampler_node.py` | `GET /api/assets`（scope/kind/q/refresh）、`GET /api/asset/<ref>`、`GET /api/asset_media/<ref>`（Range）、`GET /api/asset_thumb/<ref>?w=`、`POST /api/asset_import`；`/api/global_assets` 改为从仓库取（旧字段一字未改，新增 `hash/inLibrary/thumb`）；删掉 node 里那份扩展名常量（扩展名→种类只剩 asset_store 一处判定） |
-| `temporary/_test_asset_store.cjs` | 仓库层自测 29 项（内容寻址/去重/表持久化/前缀解析/缩略图/dataURL/魔数/stats），全部在临时目录跑，不碰真库 |
+| `temporary/_test_asset_store.cjs` | 仓库层自测 **45 项**（内容寻址/去重/表持久化/前缀解析/缩略图/dataURL/魔数/stats/同 hash 只许一个文件），全部在临时目录跑，不碰真库 |
 | `temporary/_probe_assets_api.cjs` | 活服务端到端验收（重启 ComfyUI 后跑），跑完自己删探针图 |
 
 **首次认领（迁移）**：表第一次落盘时，把库里已有的货全部登记成库成员（`origin:'legacy'`，名字沿用文件名）——
@@ -278,12 +278,12 @@ finish 选中 · 时间线 `clip.asset` · 打开的提示词 chip · library �
 而**文件名 stem 本身就是内容摘要**（老货是 md5(base64)，新货是 md5(bytes)），已满足 id 需要的三条性质（唯一 / 由内容决定 / 永不重编号）。
 代价只剩"同字节两种摘要各存一份"，极少见且不伤正确性。
 
-### A1 落地记录（代码已写）
+### A1 落地记录（已跑验收）
 
 | 位置 | 内容 |
 |---|---|
-| `libs/asset_store.py` | 加 `delete()`：删字节 + 缩略图 + 表记录（**还没有引用检查** —— 引用图在 A4/A6，眼下由窗里的确认框兜底） |
-| `snapshot_sampler_node.py` | 加 `POST /api/asset_update`（改名/标签，只动表）与 `POST /api/asset_delete` |
+| `libs/asset_store.py` | 加 `delete()`：删字节 + 缩略图 + 表记录（**还没有引用检查** —— 引用图在 A4/A6，眼下由窗里的确认框兜底）；加 `update_meta()`（改名/标签**不改作用域**，session 图改名不会顺手升成库成员）；表行加 `member` 字段，`records()` 的 `inLibrary` 由它派生，非成员缺元数据时 `origin` 落成 `session` |
+| `snapshot_sampler_node.py` | 加 `POST /api/asset_update`（改名/标签，只动表，走 `update_meta`）与 `POST /api/asset_delete`；`/api/global_assets` 增加 `displayName / origin / tags`（老字段一字未改），窗里因此能显示改名后的名字与真实来源 |
 | `video/Assets.tsx` | 整窗重写：四档 scope（All/Library/Project/Session）、kind 过滤、搜索、`＋ Import`（图片走 `/api/asset_import`）、**统一卡片**（旧的 `AssetCard`/`GlobalCard` 两套合并成一套）、字节来源徽章、`used-by`（片段按 src 认）、改名/删除/收进工程 |
 | `video/Timeline.tsx` | 接受 `application/x-asset`（{id,url,name,kind}）—— 仓库卡片拖上轨道仍走 `importSource`（先入库再落片段） |
 
@@ -292,5 +292,154 @@ finish 选中 · 时间线 `clip.asset` · 打开的提示词 chip · library �
 `/api/assets` 是给后续 staging/特效解析用的轻量清单）。四档 scope 与搜索都在本地过滤 —— 一百多件的
 过滤比一次往返便宜。`/api/assets` 仍是 A2 起的主入口。
 
+**作用域的一处修正**：`All` 只列仓库，`Project` 才列本工程资产表。否则一件"既被收进工程、又是库成员"
+的视频会在 `All` 里画两遍，而 `Library + Session == All` 这条最便宜的验收判据也会失真。
+
 **字节来源徽章**：A1 只会出现 `LOCAL`（都在仓库里）。`IN DOC` 要等 A4 把文档 manifest 读出来，
 `MISSING` 要等 A5（音视频不内嵌）与 A6（引用图）才有真实来源；卡片已经按三态画好，接线即可。
+
+**验收**（独立宿主 `temporary/_serve_node_probe.py`，跑的是新代码）：
+- `temporary/_probe_assets_ui.cjs` 14/14：四档作用域都在、默认 All、卡片有内容与 LOCAL 徽章、
+  Library+Session==All、Session 卡片来源正确、Project 空态、搜索收敛、拖拽载荷带 `application/x-asset`，
+  末尾清理"基线之外新增的 session 资产"（开文档会发布 Guidance 卡，见 A4 的已知代价）；
+- `temporary/_probe_assets_manage.cjs` 22/22：导入/去重/缩略图/改名/删字节+缩略图+表记录，
+  以及"session 改名不会升成库成员"；
+- 截图 `temporary/_probe_assets_ui.png`（1500 × 3400，154 件库 + 1 件 session）。
+
+### A2 落地记录（后端已跑验收）
+
+| 位置 | 内容 |
+|---|---|
+| `SnapshotDetailerSamplerServer.add_staging` | 每张图在存 tensor 的同时**写进仓库**：`tensor_to_base64` 出字节 → `asset_store.put_bytes(origin='staging', library=False)`；条目新增 `asset`（hash）与 `url`（`/api/asset_media/<hash>`） |
+| `get_staging_list` | 投影里加 `asset` / `url`，老字段一个不动 |
+| `types.ts` | `StagingItem` 加 `asset?` / `url?` |
+| `asset_store.put_bytes` | `library=False` 时**不查表**、按已知事实拼返回 —— 图池每条都要调它，不能让一次 154 文件的目录扫描压在热路径上 |
+| `asset_store._ensure_index_exists` | **测试逼出来的一个坑**：首次写入就落一张空表，否则"库里还没表时写进一张 session 图"会被下一次读取的首次认领误升成库成员 |
+
+**A2 特意只做了一半（`src` 仍是 base64）**：页面保存 `.cud` 时写的是 `stagingItems[].src`，
+现在把 `src` 换成 URL 就会把 `http://…` 写进文档（自包含当场破掉）。所以 `src → url` 这一步和
+v6（manifest 存 hash）绑在一起做（A4）。这一版的语义是：**字节的权威已经搬到仓库，`src` 只是过渡期的
+一份副本**；条目上的 `asset` 才是正身。
+
+**验收**：`temporary/_probe_staging_assets.cjs` 16/16 —— 上传后条目带 `asset`/`url`、`src` 仍是
+dataURL、尺寸在、仓库里是非库成员（`origin: session`）、按 url 取到同一份字节、从图池移除后字节仍在
+（等 A6 GC）。
+
+**已知代价**：run / detailer / processor 的每张产出都会落一份 session 资产，A6 的 GC 之前会一直长。
+
+### A3 落地记录（已跑验收）
+
+| 位置 | 内容 |
+|---|---|
+| `nodes/web/fx/maps.js` | 引用新增 `{asset, name}`（仓库哈希正身）；`fxMapSource` 按 `asset → /api/asset_media/<hash>` 解析；老 `{key: staging_N/map_N}` 保留为**只读**兼容（图池条目优先用 A2 的 `url`，不再搬 base64）；新增 `fxImportMap()`：文件选择的字节走 `/api/asset_import`（`library: true, origin: 'map'`） |
+| `nodes/web/fx/ui.js` | 选图器新增 **Library 组**（`/api/global_assets` 里的图片，按 `{asset: hash}` 绑定）；Workspace 卡片优先用 `url`；`From file` 改为先入库再绑定（不再 mint `map_N` / data URL） |
+| `nodes/web/blend_node.html` | `cudEffects` 写 `{asset: <文件资产表序号>, hash: <仓库哈希>, name}`；文件资产行同时记 `hash`。**双字段是有意的**：老读端按数字 `asset` 找内嵌 blob，新读端按 `hash` 走仓库，v5 文件双向可读。`restoreFxMaps` 优先认 `hash`，并把数字 `asset` 收成 `fileAsset` 兜底 |
+
+**读档规则**：`hash` 在仓库里 ⇒ 直接按 URL 取字节（删掉图池索引/本地池都不影响）；
+`hash` 不在（换机器）则仍有文件内嵌 PNG 的 `fileAsset`，v6/A4 再把它落回仓库。
+老档的 `asset` 是数字、没有 `hash`，仍走"解码 → 本地池"那条兼容路。
+
+**验收**：`temporary/_probe_fx_assets.cjs` 22/22 —— 哈希解析、图池老引用按 url、解码出 `<img>`、
+读档保留哈希与 fileAsset、选图器 Workspace+Library 两组、点仓库卡真的换绑；并真建一层 + Warp 特效
+跑 `buildCudBlob → decodeCud → restoreFxMaps`，确认存档里同时有数字 `asset` 与 `hash`、且没有 `map_N`。
+
+### A4 落地记录（已跑验收）：图层物化 + `.cud` v6
+
+| 位置 | 内容 |
+|---|---|
+| `nodes/web/blend_node.html` · `CUD_VERSION` | 5 → **6**。读端 `header.version > CUD_VERSION` 仍然拒绝（"newer than this workbench"） |
+| `buildCudBlob()` | 图层行同时写老数字 `image`（v5 读端照旧按序号找内嵌 blob）与新 `buffer` / `source`（仓库哈希）。`buffer` = 这一行表面的哈希（别名合并之后再回填），`source` = 图层最初绑定的资产（`l.asset`，没有就是 `null`） |
+| `buildCudBlob()` · staging | 图池写成**索引**：`{id, name, place, hidden, asset}`，不再写 `src`。Guidance 卡（`GUIDANCE_CARD_ID`）不入档——它是文档的派生画面，重开由画布重算 |
+| `buildCudBlob()` · 去重 | 资产表编码完成后按真实哈希合并：同哈希只留一行，`alias` 表把 `records / layerSetList / attrTable / composite / maskSurface` 里的数字引用定向改写（不重排其它 id）。特效贴图的 `hash` 按**实际内嵌字节**回写（`storeHash` 直取、否则 `assetImportBytes` 现算） |
+| `assetImportBytes()` / `assetFetchBlob()` | 哈希由宿主给：`POST /api/asset_import {library:false, origin:'cud-save'/'cud-load'}` 返回的 `id` 就是 `md5(bytes)`（内容寻址，天然去重），**客户端不算 md5**；`Blob` / `Uint8Array` 两种入参 |
+| `storeCudImages()` | 读档物化：v6 行先在仓库里探（`/api/asset/<hash>`），缺了才把内嵌字节导回去，并**核对**返回 id 与文件里的 `hash`；对不上按"文件损坏"报错，绝不换一张。v5 行没有 `hash` 就当场补一个，下次保存即成 v6。没有宿主时整段跳过——payload 里的字节照样能画，打开不失败 |
+| `openCudDocument()` | v6 staging 只带 `asset`：先从内嵌 `blobs` 取字节，取不到再 `assetFetchBlob(hash)`，补成宿主认识的 `src`；`asset` 原样保留，下次保存仍写 hash |
+
+**物化点**：像素只在五处离开内存——保存（本步）、导出 PNG、生成落层、图层导出到工作区
+（`exportLayerToStaging → /api/staging`）、source 被替换。**编辑期 raster 只在内存**：拖图层、
+undo/redo 都不写盘（否则每次手势都是一次全分辨率 PNG 落盘）。
+
+**v5 兼容与降级**：v6 文件给老读端留了完整的老字段（数字 `image`、内嵌 payload、特效双字段），
+v5 文件在新读端打开后保存即升级。**离线/宿主没起时整份文件退回 v5 形状**（不写 `hash`/`buffer`/
+`source`，staging 保留 `src`）——保存永远不因为"算不出哈希"而失败，代价只是这一次没享受到去重。
+
+**验收**：`temporary/_probe_cud_v6.cjs` 24/24 —— v6 字段齐（`buffer`/`source`/`hash`）、同像素只留
+一行资产、staging 行里没有 `src`、保存→重开像素逐点相等、`source` 与 `buffer` 往返存活、二次保存
+仍是 v6、v5 文件照旧打开且像素一致。跑完把源图与本次新增的 session 字节一起收掉。
+
+**复验时抓到的存储竞态（已修，`libs/asset_store.py`）**：`buildCudBlob` 是并发问哈希的，两个内容
+相同的图层（探针里的两张 "Same"）会同时打 `/api/asset_import`。老 `put_bytes` 是"查存在 → 写临时
+→ `os.replace`"，第二个线程的 replace 撞上正在被读/刚被换掉的目标文件，Windows 报 PermissionError，
+接口回 500 → 整份文件降级成 v5（探针 14/24）。同一次复验还暴露了第二个洞：A4 导入的名字一律是
+`role-id.png`，但字节可能是 GIF/JPEG 原件，老逻辑**名字优先**于魔数，于是同一个 hash 落成
+`.gif` + `.png` 两份，`records()` 数出两件货、`get()` 只碰得到一份。修法：
+
+- 魔数先于名字：`ext = ext or sniff_ext(bytes) or name 的后缀`。
+- 落盘前先找同 stem 的**任何**扩展名文件（`_existing_stem`），有就沿用 —— 同一 hash 永远一个文件。
+- `_atomic_write` 抛 OSError 时，只要目标文件已经存在就算成功（内容寻址下写同一份字节是幂等的）。
+
+复验：A4 24/24 连跑两次、A3 23/23、A2 16/16、A1 管理 22/22、仓库自测 45/45（新增"同字节只许一个
+文件"三条），库回到 **154 库成员 + 1 session**。顺手修了 `_test_asset_store.cjs` 一条过期断言：
+"撤销库成员"从 A1 起不再删表行（只把 `member` 落下），旧断言还要求它消失。
+
+**已知代价（留给 A6）**：
+- 保存会物化像素进仓库（这是 A4 的本意），旧 session 资产要等 A6 GC 才回收。
+- 页面一加载就会恢复/建文档 → Guidance 卡被发布进图池，A2 之后它同时是一份 session 资产。
+  内容是内容寻址的，同一份画面只会有一份（不是每次开页新增一份）；它**不进 `.cud`**，
+  重开由画布重算。A1 UI 探针原先会把它留在库里，现在按"基线之外新增"清理（14/14）。
+- `asset_store.delete()` 仍无引用检查：`.cud` 的 manifest 已经是一张引用图，A6 要把
+  "打开中的文档 + 时间线 + 特效槽"接进来再拦删除。
+
+### A5 落地记录（音视频入仓：存储层 + 模型层已跑验收，relink 面板待做）
+
+一句话：**音视频的字节也搬进 `data/assets/` 了**；`media/vid/` 降级成"派生缓存 + 老 URL 的兼容落点"；
+时间线片段与资产从此记 `{asset, play}` 两个哈希。入轨、抽帧、缩略条、合并、preset/接口抽帧全部走同一个
+resolver —— **URL 面没变**（`/api/vid_media/<file>` 仍然有效、老 `.cud` 里那些 `sha1_名字.mp4` 照旧能播）。
+
+| 位置 | 内容 |
+|---|---|
+| `_vid_ingest()` | 原件按内容进仓库（`put_bytes(origin='vid-ingest')`，`md5` 命名）；要转码时把代理也整份进仓库（`origin='vid-proxy'`，`meta.proxyOf` 指回原件）。回包多两个字段 `asset` / `proxy`，`src` 仍是 `/api/vid_media/<文件名>` |
+| `_vid_media_path(ref)` | **唯一的媒体 resolver**：`/api/vid_media/<file>`、`/api/asset_media/<hash>`、裸文件名/裸哈希、老绝对路径，统一解析成盘上路径。先看 `media/vid`（老货 + 波形/抽帧/merge 缓存），再看仓库。找不到就是 `None` —— 调用方报 404 / 画缺失，绝不"随便找一个同名的" |
+| `/api/vid_media` · `/api/vid_frame` · `/api/vid_strip` · `/api/vid_merge` | 全部改走 resolver；`/api/vid_media` 继续带 Range（`<video>` 的 seek 靠它）。`d=global` 仍被接受但不再需要 |
+| preset / 接口抽帧 | `video_inputs[].file`、`mask_input.file` 也走 resolver —— 源在仓库里，ffmpeg 直接读，不绕浏览器 |
+| `/api/global_assets` | 代理折叠：`meta.proxyOf` 让原件那一条带上 `playHash`，代理自己**不出卡片**（内部件）。新增 `meta` 字段透传 |
+| `records()` / `update_meta()` | 记录带 `meta` 字典；`update_meta(ref, name, tags, meta)` 支持合并机械字段（`proxyOf` 住这儿）。`member` 语义不变 |
+| `ingestFile()` | 回 `{src, asset, play}` |
+| `VidAsset` / `VidClip` | 新增 `asset?` / `play?`；`placeImport` / `importToTrack` / `placeAsset` 全程携带（音画拆分的两段都带） |
+| `normalizeVidProject()` | 读档时按哈希重建 `src`（`play` 优先）：**`src` 是 `blob:` 或空、但有哈希的段不再被剪掉**；既没 src 又没哈希的老 blob 段照旧丢 |
+| 仓库卡片拖拽 | `application/x-asset` / `x-vid-global` 载荷带 `asset` / `play`；claim 用 `playHash` 作为可播地址 |
+
+**三个口径**：`asset` = 原件哈希（身份，relink 按它精确匹配）；`play` = 可播字节哈希（转码过的源指向
+代理片）；`src` = "怎么播"的 URL，丢了/换端口就由前两个重建。
+
+**验收（全绿）**
+
+| 探针 | 结果 | 覆盖 |
+|---|---|---|
+| `temporary/_probe_vid_assets.cjs` | **35/35**（连跑两遍） | 入仓/不入 media/vid、Range、frame/strip 两种引用面、同字节同哈希、音频、转码代理 + `playHash` 折叠、merge 吃仓库源、删除后 404、无残留、无重名 stem |
+| `temporary/_probe_vid_playback.cjs` | PASS | 真 Chrome 里 `<video>` 播仓库里的文件（476×720，`readyState=4`） |
+| `temporary/_test_vid_model_a5.cjs` | **12/12** | 放置/资产表/`placeAsset` 携带哈希；`blob:` 按 `play`→`asset` 重建；活 src 不动；无哈希 blob 段仍丢；Layer 段存活 |
+| `temporary/_probe_vid_store_ui.cjs` | **13/13** | 真页面：切 Video → 仓库卡 → Claim（`asset` 落进工程资产）→ 拖上视频轨（片段带哈希）→ 重开无异常、仓库仍在 |
+| `temporary/_test_asset_store.cjs` | 45/45 | 仓库层（`records` / `update_meta` 改动后复验） |
+| `temporary/_probe_assets_ui.cjs` · `_probe_assets_manage.cjs` | 14/14 · 22/22 | A1 两扇窗（Assets.tsx 改动后复验） |
+
+收尾：库 **155**（154 库成员 + 1 session）、`data/assets` 155 个货 + `_index.json`、无同 stem 重名、
+`media/vid` 里的探针临时文件已清。
+
+**这轮抓到的三个真 bug**
+
+1. `_vid_strip()` 把缩略帧写在**源文件旁边**（`os.path.dirname(path)`）。源搬进仓库之后，抽 4 帧 =
+   往 `data/assets/` 里铺 4 个 jpg，还会被清单数成 4 件新货（探针"no probe assets left"当场抓到）。
+   改成派生缓存永远落 `media/vid/`。
+2. `normalizeVidProject` 的 `recover()` 第一版是"没哈希就退回原 src"，于是早就该死掉的 `blob:` 段
+   被原样复活。改成"blob 且没哈希 ⇒ 空串 ⇒ 丢弃"（模型测试第 6 条抓到）。
+3. `put_bytes(library=False)` 不落元数据行：拖进来的片子清单里只剩 `<md5>.mp4`，用户认不出。
+   入库时补一行名字 —— 只在"非库成员、且没被改过名"时写，绝不覆盖别人给库成员起的名字。
+
+**剩下的（A5 未完成部分 → A6 前置）**
+
+- **relink 面板 / `MISSING` 徽章**：后端已经会回 404，缺的是"打开工程时批量问一遍哈希在不在，
+  缺的片段画红线 + 选文件按哈希精确匹配"。这是 A5 的最后一块 UI。
+- **Run 产物仍留在 `media/vid` 当缓存**（`_vid_encode`、`_vid_merge` 的输出）：它们是时间线片段的
+  `src`，A6 的引用图要先能看见它们，再谈回收或入仓。
+- `asset_store.delete()` 仍无引用检查；A6 接"打开中的文档 + 时间线 + 特效槽"后改成"有引用就拒绝"。

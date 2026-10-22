@@ -456,6 +456,10 @@ export interface StagingItem {
   id: string;
   name: string;
   src: string;
+  /** 这张图在资产仓库里的 id（内容哈希）。A2 起每条都有；绑图/引用一律走它。 */
+  asset?: string | null;
+  /** 仓库里的字节地址（/api/asset_media/<asset>），可直接喂 <img>。 */
+  url?: string | null;
   width?: number;
   height?: number;
   /** hidden = 生成侧自动登记的条目（Original 种子 / run、接口产出）：不进工作区条带，

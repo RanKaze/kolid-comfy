@@ -4,7 +4,11 @@
 // 后端没有 ffmpeg（旧服务在跑 / 环境里没有）时返回 null，调用方回退旧的 <video> 探测 + blob 路径。
 
 export type Ingested = {
-  src: string;          // 持久 URL（同源 /api/vid_media/<hash>_<name>）
+  src: string;          // 持久 URL（同源 /api/vid_media/<file>；字节在资产仓库里）
+  /** 原件的内容哈希（A5）：重开/换机器靠它认货，relink 按它精确匹配。 */
+  asset?: string;
+  /** 可播字节的哈希（转码过的源：原件浏览器咬不动，src 指向代理片）。 */
+  play?: string;
   name: string;
   duration: number;
   hasAudio: boolean;
@@ -22,6 +26,8 @@ export const ingestFile = async (file: File): Promise<Ingested | null> => {
     if (!j || !j.ok || !j.src) return null;
     return {
       src: String(j.src), name: String(j.name || file.name),
+      asset: j.asset ? String(j.asset) : undefined,
+      play: j.proxy ? String(j.proxy) : undefined,
       duration: +j.duration || 0, hasAudio: !!j.hasAudio, audioOnly: !!j.audioOnly,
       waveform: j.waveform ? String(j.waveform) : undefined,
     };

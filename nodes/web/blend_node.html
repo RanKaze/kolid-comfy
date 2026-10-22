@@ -4486,6 +4486,10 @@ function snapshotState() {
 function snapshotLayerRecord(l) {
     return {
         id: l.id, name: l.name, src: l.src, img: l.img,
+        // A4：源资产哈希（没走仓库的层为 null）。只作 .cud 的 source 记录，像素仍走 img。
+        asset: l.asset || null,
+        // 上一次物化的像素哈希（buffer）。编辑期只是标注，不参与绘制；保存时按当时的 img 重算。
+        buffer: l.buffer || null,
         // 共享以标签的形式进快照:两条记录写同一个 srcRef,重放时同组只立一条记录。缓冲值本身照旧
         // 逐层存 (img 只换不改的老规矩),表因此永远不必替历史保管任何东西。
         srcRef: l.srcRef,
@@ -4554,6 +4558,8 @@ function liveLayersFromRecords(recs, byRef, byAttr) {
         mergeLegacyGenerators(ls);
         return restoreSource({
         id: ls.id, name: ls.name,
+        asset: ls.asset || null,
+        buffer: ls.buffer || null,
         visible: ls.visible,
         fragment: !!ls.fragment,
         raster: !!ls.raster,
@@ -5789,6 +5795,9 @@ function addLayer(item, stack) {
             fragment: !!item.place,
             // The pointer a cud layer carries (see the cud link section). An image drop never has one.
             cud: item.cud || null,
+            // A4：这层像素是从哪张仓库资产来的（staging 拖入时有；文件导入/绘制没有）。
+            // 它只进 .cud 的 source 字段，不参与绘制。
+            asset: typeof item.asset === 'string' ? item.asset : null,
         };
         ownSource(l, img, item.src);        // 每张源图先各立一条记录;共享只在复制那一步建立
         insertAtStackTop(l);        // new images land on top of their own stack
@@ -6019,6 +6028,9 @@ function cloneLayerFields(l, name) {
     const copy = {
         name: name || l.name,
         src: l.src,
+        // A4：源资产哈希跟着副本走 —— 内容寻址下「同一张源图」本来就该共享同一个 id。
+        asset: l.asset || null,
+        buffer: l.buffer || null,
         img: l.img && l.img.getContext ? cloneCanvasSurface(l.img) : l.img,
         visible: l.visible,
         transform: cloneTransform(l.transform),
@@ -10748,7 +10760,7 @@ const CUD_MAGIC = 'CUD1';
 // `attrs` 列表 (attribute 的应用顺序从此是用户排的,不再由字段名固定);v5 把这些列表从"每层各存一份
 // 值"换成"文件级一张表 + 每层一串表键" —— 两层引用同一枚 attribute 时,文件里也只有一个它,重开之后
 // 引用还是引用。读端一进就把 v5 展开成带分组标签的条目,后面所有读者只认一种形状。
-const CUD_VERSION = 5;
+const CUD_VERSION = 6;
 let cudBusy = false;
 // The file this project is bound to, the way a document is bound in Photoshop: Load sets it, Save
 // As moves it, Ctrl+S overwrites it without asking again. null means "no file we can write to" —
@@ -11438,6 +11450,86 @@ const cudAssetBytes = new WeakMap();
 const isImgSurface = s => !!(s && (s instanceof HTMLImageElement || s.tagName === 'IMG'));
 const pngPartLen = p => (p.byteLength !== undefined ? p.byteLength : p.size);
 
+// ── v6: 内容哈希（仓库的唯一写口）──────────────────────────────────────────────
+// 页面里没有 md5，也不该再养一份 —— 仓库的 id 就是 md5(bytes)，所以「拿字节换 id」走
+// /api/asset_import（library:false = 只落字节，不入库）。这一步同时就是 A4 的物化：
+// 保存时每一张被引用的图都先进仓库，再拿回来的 id 写进 manifest。
+// 离线（没有宿主）时返回 null，调用方整体退回 v5 形状 —— 存档不能因为算不了哈希就失败。
+function bytesToDataURL(bytes, mime) {
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    let bin = '';
+    for (let i = 0; i < u8.length; i += 0x8000)
+        bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    return `data:${mime || 'image/png'};base64,${btoa(bin)}`;
+}
+function blobToDataURL(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error || new Error('could not read bytes'));
+        reader.readAsDataURL(blob);
+    });
+}
+async function dataURLToBytes(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('could not read ' + String(url).slice(0, 64));
+    return new Uint8Array(await res.arrayBuffer());
+}
+async function assetImportBytes(bytes, name, origin) {
+    // 从读档回来的图层带的是原 Blob（cudAssetBytes），不是 ArrayBuffer —— 两种都收。
+    const dataUrl = bytes instanceof Blob ? await blobToDataURL(bytes) : bytesToDataURL(bytes);
+    const body = JSON.stringify({
+        data: dataUrl, name: name || 'cud.png',
+        library: false, origin: origin || 'cud-save',
+    });
+    const res = await fetch('/api/asset_import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+    });
+    if (!res.ok) throw new Error('asset store refused the bytes (' + res.status + ')');
+    const data = await res.json();
+    const rec = data && data.added && data.added[0];
+    if (!rec || !rec.id) throw new Error((data && data.error) || 'asset store returned no id');
+    return rec.id;
+}
+async function assetFetchBlob(hash) {
+    if (!hash) return null;
+    try {
+        const res = await fetch('/api/asset_media/' + encodeURIComponent(hash));
+        if (!res.ok) return null;
+        return await res.blob();
+    } catch (e) { return null; }
+}
+
+// A4 读档：把内嵌图像落回仓库（文档权威 → 库缓存）。v6 的行带 hash：仓库里已有就跳过，
+// 没有就导回去并**核对** —— 字节的 md5 必须等于文件里写的 hash，对不上按损坏报，绝不
+// "随便用一张"。v5 的行没有 hash，就地补一个（下次保存即成 v6）。
+// 离线/宿主没起时 fetch 会失败：这份 payload 仍然是可画的，打开不因此失败。
+async function storeCudImages(header, blobs) {
+    const bad = [];
+    await Promise.all((Array.isArray(header.assets) ? header.assets : []).map(async a => {
+        if (!a || !(Number(a.length) > 0)) return;
+        const blob = blobs.get(a.id);
+        if (!blob) return;
+        const name = `${a.role || 'image'}-${a.id}.png`;
+        try {
+            if (!a.hash) {
+                a.hash = await assetImportBytes(new Uint8Array(await blob.arrayBuffer()), name, 'cud-load');
+                return;
+            }
+            const probe = await fetch('/api/asset/' + encodeURIComponent(a.hash));
+            if (probe.ok) return;
+            const got = await assetImportBytes(new Uint8Array(await blob.arrayBuffer()), name, 'cud-load');
+            if (got !== a.hash) bad.push({ want: a.hash, got, id: a.id, role: a.role });
+        } catch (e) {
+            // 没有宿主：不拦打开，字节还在 payload 里。
+        }
+    }));
+    if (bad.length) {
+        const first = bad[0];
+        throw new Error(`asset ${first.want} does not match its bytes (store says ${first.got}) — the .cud is damaged`);
+    }
+}
+
 // A layer's pixels stay an <img> (the row thumbnail renders `l.src`), so it gets its own URL.
 // That URL is intentionally never revoked: undo snapshots and the list both keep pointing at it.
 // The blob also buys one owned decode (fxWarmBitmap → fxSrcOf, fx/gl.js): the <img> would pay its
@@ -11538,28 +11630,43 @@ async function buildCudBlob() {
     applyTransformPending();
     // `assetList` 是文件里那份资产表 (header.assets),跟文档级的源图表 `assets` 没关系 —— 同名会遮住它。
     // 派单式: id 同步落位、编码在池里并发跑, 组装前统一 await (encodes) —— 池子只有并发派单才真并行。
-    const assetList = [], payload = [], encodes = [];
-    const addAsset = (role, source, w, h) => {
+    let assetList = [], payload = [], encodes = [];
+    // A4：同一份表面在一次存档里只立一条记录（复制图层共享同一张 <img>，图层像与 attribute 面也可能
+    // 是同一张画布）。内容相同的**不同**表面在哈希出来后再合一次 —— 见下面的 dedupe。
+    const assetBySource = new Map();
+    const layerRows = [];          // { row, layer } —— 哈希出来后才补 buffer/source
+    const stagingRow = new Map();  // staging id -> 资产表序号
+    const addAsset = (role, source, w, h, knownHash, bytesIn) => {
+        if (assetBySource.has(source)) return assetBySource.get(source);
         const id = assetList.length;
         const entry = { id, role, w: Math.round(w), h: Math.round(h), length: 0 };
         assetList.push(entry);
+        assetBySource.set(source, id);
         const done = (async () => {
             // 没动过的图层直取原字节 (见 cudAssetBytes); 动过的层是新对象, 走编码。
             const hit = cudAssetBytes.get(source);
-            let bytes = hit ? hit.part : null;
+            const supplied = bytesIn ? await bytesIn : null;
+            // bytesIn 可以交回 { bytes, hash }（字节就是仓库里那一份，哈希已知）或裸字节。
+            let bytes = supplied && supplied.bytes ? supplied.bytes : (supplied || (hit ? hit.part : null));
+            if (supplied && supplied.hash) entry.storeHash = supplied.hash;
+            if (bytesIn && !bytes) { entry.empty = true; payload[id] = null; return; }   // 取不到字节 → 这一趟退回 v5
             if (!bytes) {
                 bytes = await surfaceToPng(source, w, h);
                 if (isImgSurface(source)) cudAssetBytes.set(source, { part: bytes, len: pngPartLen(bytes) });
             }
-            entry.length = hit ? hit.len : pngPartLen(bytes);
+            entry.length = bytesIn ? pngPartLen(bytes) : (hit ? hit.len : pngPartLen(bytes));
+            // knownHash 只给「字节与仓库里那份逐字相等」的行（cudAssetBytes 从文件/仓库读回来的原字节）。
+            if (!entry.storeHash) entry.storeHash = knownHash || (hit && hit.hash) || null;
             payload[id] = bytes;
         })();
         encodes.push(done);
         return id;
     };
     // 链里绑定的贴图存成自己的资产:图池 id 由宿主在导入时重新编号,文件里那句 key 出了这个会话
-    // 就不作数,所以像素必须自带。同一份像素一次存档只写一个资产。还没解码完成的图不写资产 ——
-    // 那一层重开后读数为那张图写下「depth gone」、按钮转红,并且跳过该特效 —— 这比悄悄绑一张别的图诚实。
+    // 就不作数,所以像素必须自带。A3 起正身是仓库哈希(`ref.asset`),像素仍内嵌一份(换机器能开),
+    // 引用那颗 `asset` 不再被文件资产序号覆盖。同一份像素一次存档只写一个资产。还没解码完成的图
+    // 不写资产 —— 那一层重开后读数为那张图写下「depth gone」、按钮转红,并且跳过该特效 ——
+    // 这比悄悄绑一张别的图诚实。
     const mapAssets = new Map();
     const cudEffects = list => {
         const out = cloneEffects(list);
@@ -11575,10 +11682,24 @@ async function buildCudBlob() {
                 let id = mapAssets.get(found.src);
                 if (id === undefined) {
                     const n = nativeSize(img);
-                    id = addAsset('map', img, n.w, n.h);
+                    // A3：`ref.asset` 是仓库哈希时，文件里仍内嵌这份 PNG（换机器还能开）。
+                    // `asset` 保留**文件资产表序号**（老读端照旧按它找 blob），`hash` 才是新正身 ——
+                    // 新读端优先走 hash，老读端忽略 hash，v5 文件仍然双向可读。
+                    // v6：内嵌**仓库里的原字节**（GIF/JPEG 原样），这样 ref.asset 就是真哈希；
+                    // 取不到原字节才退回收编码 PNG（此时 hash 由哈希那一趟按 PNG 现算）。
+                    const bytesIn = ref.asset ? (async () => {
+                        try {
+                            const blob = await assetFetchBlob(ref.asset);
+                            if (blob) return { bytes: new Uint8Array(await blob.arrayBuffer()), hash: ref.asset };
+                        } catch (e) { /* fall through to PNG */ }
+                        return await surfaceToPng(img, n.w, n.h);
+                    })() : null;
+                    id = addAsset('map', img, n.w, n.h, null, bytesIn);
                     mapAssets.set(found.src, id);
                 }
-                e.params[slot.key] = Object.assign({}, ref, { asset: id });
+                e.params[slot.key] = ref.asset
+                    ? Object.assign({}, ref, { asset: id, hash: ref.asset })
+                    : Object.assign({}, ref, { asset: id });
             }
         }
         return out;
@@ -11647,7 +11768,7 @@ async function buildCudBlob() {
             // transform alone cannot recover it). A layer still decoding has no `img` at all — that
             // one is NOT blank, and encoding it must keep failing loudly instead of saving nothing.
             const blank = !!l.img && !l.src;
-            out.push({
+            const row = {
                 id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
                 raster: !!l.raster,
                 // A Stash owns no pixels to store (its `src` is empty, so `blank` above files it with
@@ -11677,19 +11798,23 @@ async function buildCudBlob() {
                 // v4 起蒙版/贴片/链都住在这一串里,顺序就是应用顺序;老文件的三个平字段由读端折算回来。
                 attrs: cudAttrs(l),
                 image: blank ? null : addAsset('image', l.img, n.w, n.h),
-            });
+            };
+            // v6 的 { buffer, source } 要等哈希算完才补得上（见 hashAssets）。这里先记住
+            // 记录与活图层的对应，不去猜。
+            layerRows.push({ row, layer: l });
+            out.push(row);
         }
         return out;
     };
     const records = buildLayerRecords(layers);
-    const maskSurface = (maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height)
+    let maskSurface = (maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height)
         ? addAsset('masklayer', maskLayer.decal, maskLayer.decal.width, maskLayer.decal.height)
         : null;
     // 链接读的"最终图":保存那一刻画布上的合成(特效链已烘、视图变换不在位图里)直接入档 ——
     // cud 图层的像素就是它,读取端不必再猜链怎么跑。旧工作台读新文件不受影响(它不认这个字段,
     // 照旧逐层折);读老文件没有这张图,也退回逐层折叠。
     render();
-    const compositeAsset = addAsset('composite', blendCanvas, canvasW, canvasH);
+    let compositeAsset = addAsset('composite', blendCanvas, canvasW, canvasH);
     // 每个 Layer 段那套图层也入档（活跃那套已经进了 header.layers）。连它自己的 decal 一起 ——
     // 读档照 key 装回 layerSets，于是"某一段的图层"活过重开，重开那天点回该段就是原样。
     const layerSetList = [];
@@ -11703,8 +11828,110 @@ async function buildCudBlob() {
             layers: buildLayerRecords(set && Array.isArray(set.layers) ? set.layers : []),
         });
     }
+    // 图池的每一张也入 manifest（A4）：字节本来就在仓库里（A2），这里只补一条资产行 +
+    // 一个 staging 引用。`src` 不再写进文件 —— 重开时按 hash 从内嵌/仓库取回再交给宿主。
+    for (const s of stagingItems) {
+        if (!s || s.id === GUIDANCE_CARD_ID) continue;
+        if (!s.asset && !s.src) continue;
+        const bytesIn = (async () => {
+            try {
+                if (s.asset) {
+                    const blob = await assetFetchBlob(s.asset);
+                    if (blob) return new Uint8Array(await blob.arrayBuffer());
+                }
+                return await dataURLToBytes(s.src);
+            } catch (e) { return null; }
+        })();
+        const id = addAsset('staging', s, Math.max(1, Number(s.width) || 1), Math.max(1, Number(s.height) || 1),
+            s.asset || null, bytesIn);
+        stagingRow.set(String(s.id), id);
+    }
     // 所有编码落地后 entry.length 与 payload 才齐, header 才能序列化。
     await Promise.all(encodes);
+    // ── v6：按实际字节算哈希 → 同哈希合一行 → 回填 buffer/source/特效 hash ──────────────
+    // 拿不到仓库（离线、宿主没起）时 `v6` 为 false，文件退回 v5 形状（不写 hash/buffer，
+    // staging 仍带 src），保存本身永远不因为「算不了哈希」失败。
+    let v6 = true;
+    await Promise.all(assetList.map(async entry => {
+        if (entry.storeHash) { entry.hash = entry.storeHash; return; }
+        const bytes = payload[entry.id];
+        if (!bytes) { v6 = false; (window.__cudV6Errors = window.__cudV6Errors || []).push('no bytes: ' + entry.role + '#' + entry.id); return; }
+        try { entry.hash = await assetImportBytes(bytes, `${entry.role}-${entry.id}.png`, 'cud-save'); }
+        catch (e) { v6 = false; (window.__cudV6Errors = window.__cudV6Errors || []).push(entry.role + '#' + entry.id + ': ' + (e && e.message || e)); }
+    }));
+    const idHash = new Map();                   // 资产表序号(含被合并掉的旧号) -> hash
+    for (const e of assetList) if (e.hash) idHash.set(e.id, e.hash);
+    let stagingOut = null;
+    // 先确认图池每一条都拿得到 hash —— 这一步必须在合并之前：合并会改写引用、删掉重复行，
+    // 一旦走到一半才发现 staging 缺 hash，就退不回可信的 v5 形状了。
+    if (v6) {
+        const out = [];
+        for (const s of stagingItems) {
+            if (!s || s.id === GUIDANCE_CARD_ID) continue;
+            const aid = stagingRow.get(String(s.id));
+            const hash = aid === undefined ? (s.asset || null) : (idHash.get(aid) || null);
+            if (!hash) { v6 = false; (window.__cudV6Errors = window.__cudV6Errors || []).push('staging ' + s.id + ' has no hash'); break; }
+            // An index, not a copy: id/name/place are the workspace's, the bytes are the asset's.
+            out.push({ id: s.id, name: s.name, place: s.place || null, hidden: !!s.hidden, asset: hash });
+        }
+        if (v6) stagingOut = out;
+    }
+    if (v6) {
+        // 同一份像素（例如复制图层共享的 <img>、图层像与 attribute 面逐字相同）只留一行。
+        // 引用全是数字序号，所以合并 = 别名表 + 一次定向遍历；不重排其它 id。
+        const keepByHash = new Map();
+        const alias = new Map();
+        for (const e of assetList) {
+            if (!e.hash) continue;
+            const keep = keepByHash.get(e.hash);
+            if (keep) {
+                alias.set(e.id, keep.id);
+                idHash.set(e.id, e.hash);
+                e.drop = true;
+                payload[e.id] = null;
+            } else keepByHash.set(e.hash, e);
+        }
+        const ASSET_KEYS = new Set(['image', 'surface', 'decal', 'composite', 'asset']);
+        const remap = node => {
+            if (!node || typeof node !== 'object') return;
+            if (Array.isArray(node)) { for (const v of node) remap(v); return; }
+            for (const k of Object.keys(node)) {
+                const val = node[k];
+                if (typeof val === 'number' && ASSET_KEYS.has(k) && alias.has(val)) node[k] = alias.get(val);
+                else if (val && typeof val === 'object') remap(val);
+            }
+        };
+        remap(records);
+        remap(layerSetList);
+        remap(attrTable);
+        if (alias.has(compositeAsset)) compositeAsset = alias.get(compositeAsset);
+        if (maskSurface !== null && alias.has(maskSurface)) maskSurface = alias.get(maskSurface);
+        // 特效贴图的 hash 必须按**实际内嵌的字节**写（A3 的 ref.asset 可能是 JPEG/GIF 原件的哈希，
+        // 而这里内嵌的是重编码后的 PNG）；读端拿 hash 去仓库取，取到的就是这份 PNG。
+        for (const a of attrTable) {
+            for (const e of (a && a.chain) || []) {
+                for (const p of Object.values((e && e.params) || {})) {
+                    if (p && typeof p === 'object' && typeof p.asset === 'number' && idHash.has(p.asset))
+                        p.hash = idHash.get(p.asset);
+                }
+            }
+        }
+        assetList = assetList.filter(e => !e.drop);
+        for (const { row, layer } of layerRows) {
+            row.buffer = (typeof row.image === 'number' && idHash.has(row.image)) ? idHash.get(row.image) : null;
+            row.source = layer.asset || null;
+        }
+    }
+    if (!v6) {
+        // 退回 v5：清掉只有 v6 才认识的字段，staging 保留 src（自包含优先）。
+        // 取不到字节的 staging 行没有 payload，v5 读端会当成截断 —— 整行去掉（staging 用 src 恢复）。
+        assetList = assetList.filter(e => !e.empty);
+        for (const e of assetList) { delete e.hash; delete e.storeHash; delete e.drop; }
+        for (const { row } of layerRows) { delete row.buffer; delete row.source; }
+        stagingOut = stagingItems.filter(s => s && s.id !== GUIDANCE_CARD_ID).map(s => Object.assign({}, s));
+    }
+    for (const e of assetList) delete e.storeHash;
+    const payloadParts = assetList.map(e => payload[e.id]).filter(Boolean);
     const hostVid = await requestHostVid(activeDoc ? activeDoc.uid : 0);
     // 这份工程里若有片段/资产的 src 是 blob:（后端 ffmpeg 不可用，前端回退到 objectURL），它写进
     // 文件也活不过下一次读档 —— 读档那趟 normalizeVidProject 会把 blob: 的整条剪掉。存盘时不静悄悄:
@@ -11715,7 +11942,7 @@ async function buildCudBlob() {
         : 0;
     const header = {
         format: 'cud',
-        version: CUD_VERSION,
+        version: v6 ? CUD_VERSION : 5,
         generator: 'kolid-comfy · blend workbench',
         created: new Date().toISOString(),
         canvas: { w: Math.round(canvasW), h: Math.round(canvasH), custom: canvasCustom },
@@ -11734,7 +11961,7 @@ async function buildCudBlob() {
         // The Guidance card is a projection of the stacks that are already in this file, so it must
         // not travel as a workspace image too — reloading would resurrect it as a plain entry and
         // then publish a second card on top of that.
-        staging: stagingItems.filter(s => s && s.id !== GUIDANCE_CARD_ID),     // 图池随文档走：导入时原样恢复到宿主工作区
+        staging: stagingOut,     // 图池随文档走：v6 只存 { id, name, place, hidden, asset }
         assets: assetList,
         // 文件级那张 attribute 表:一枚 attribute 一条,图层按 key 引用它。
         attributes: attrTable,
@@ -11742,7 +11969,7 @@ async function buildCudBlob() {
     const headerBytes = new TextEncoder().encode(JSON.stringify(header));
     const size = new Uint8Array(4);
     new DataView(size.buffer).setUint32(0, headerBytes.byteLength, true);
-    const blob = new Blob([CUD_MAGIC, size, headerBytes].concat(payload), { type: 'application/octet-stream' });
+    const blob = new Blob([CUD_MAGIC, size, headerBytes].concat(payloadParts), { type: 'application/octet-stream' });
     return { blob, count: records.length + layerSetList.reduce((n, s) => n + s.layers.length, 0), transient };
 }
 
@@ -11894,8 +12121,15 @@ function decodeCud(buffer) {
     let cursor = payloadStart;
     for (const a of header.assets) {
         const len = Number(a && a.length);
-        if (!a || !Number.isFinite(len) || len <= 0 || cursor + len > bytes.length) throw new Error('the .cud payload is truncated');
-        blobs.set(a.id, new Blob([bytes.subarray(cursor, cursor + len)], { type: 'image/png' }));
+        if (!a || !Number.isFinite(len) || len < 0) throw new Error('the .cud payload is truncated');
+        // v6：length 0 = 只引用（音视频不内嵌），没有字节可跳；图像仍必须带 payload。
+        if (len <= 0) continue;
+        if (cursor + len > bytes.length) throw new Error('the .cud payload is truncated');
+        const blob = new Blob([bytes.subarray(cursor, cursor + len)], { type: 'image/png' });
+        // 两个键都放：老字段 rec.image 是数字序号，v6 的 rec.buffer 是哈希。同一个 Map 里
+        // 数字与字符串不会撞键，读端因此可以只写一句 blobs.get(ref)。
+        blobs.set(a.id, blob);
+        if (a.hash) blobs.set(a.hash, blob);
         cursor += len;
     }
     // v5 的图层记录只剩一串 guid,值住在这张表里。就地展开成"带 guid 的条目":guid 就是那一枚 attribute
@@ -12275,6 +12509,9 @@ async function openCudDocument(file, doc) {
     setStatus(`Opening ${file.name}…`);
     try {
         const { header, blobs } = decodeCud(await file.arrayBuffer());
+        // v6：内嵌图像先落回仓库（已有即跳过）。放在解码图层之前 —— 下面按 hash 取字节时，
+        // 仓库与 payload 两条路都通。
+        await storeCudImages(header, blobs);
         // 共享的那枚面在两层之间只解一次:表键就是这份缓存的索引 (见 resolveRecAttrs)。
         const attrDecoded = new Map();
         // 每个 Layer 段那套图层（见 layerSets）：先在这里定下这份文件的列表，下面几处（有内容判定、
@@ -12286,7 +12523,9 @@ async function openCudDocument(file, doc) {
         const buildRecords = async recs => {
             const records = [];
             for (const rec of (Array.isArray(recs) ? recs : [])) {
-                const hasImage = rec && rec.image !== null && rec.image !== undefined;
+                // v6 的图层记录写 { buffer, source }，老字段 image（资产表序号）仍在；两个都认。
+                const imgRef = rec && (rec.buffer !== null && rec.buffer !== undefined ? rec.buffer : rec.image);
+                const hasImage = imgRef !== null && imgRef !== undefined;
                 const textDesc = rec && !rec.raster ? sanitizeTextDescriptor(rec.text) : null;
                 // 老字段只当**迁移原料**:文件里真写了姿态才立一枚 Direction。sanitizeDirectionDescriptor 对
                 // null 交回的是恒等姿态 (它要给工具小窗一个可编辑的初始值),所以照 text 那样无条件过一遍,
@@ -12305,8 +12544,10 @@ async function openCudDocument(file, doc) {
                     // 各自的 sync 在第一次折叠前重算 —— 底不再是渲染,它只是格子。
                     img = makeBlankCanvas(pw, ph);
                 } else {
-                    const imgBlob = blobs.get(rec.image);
+                    const imgBlob = blobs.get(imgRef) || (typeof imgRef === 'string' ? await assetFetchBlob(imgRef) : null);
                     if (!imgBlob) { skipped++; continue; }        // a genuinely unreadable asset
+                    const row = (Array.isArray(header.assets) ? header.assets : []).find(a => a && (a.id === imgRef || a.hash === imgRef));
+                    const blobHash = (typeof imgRef === 'string' ? imgRef : null) || (row && row.hash) || null;
                     if (rec.raster) {
                         // A raster row's buffer must arrive as a canvas, not the <img> a smart row keeps:
                         // effectiveTransform() reads its content box with getImageData and every
@@ -12321,7 +12562,7 @@ async function openCudDocument(file, doc) {
                         url = decoded.url;
                         // 保存提速 (2.1a): 把这份资产的原 Blob 挂在图上 —— 没动过的层保存时直取原字节,
                         // 0 编码。链接它的是对象身份, 而这张图从不被原地修改。
-                        cudAssetBytes.set(img, { part: imgBlob, len: imgBlob.size });
+                        cudAssetBytes.set(img, { part: imgBlob, len: imgBlob.size, hash: blobHash });
                     }
                 }
                 const tr = rec.transform || {};
@@ -12329,6 +12570,10 @@ async function openCudDocument(file, doc) {
                     id: (Number.isInteger(rec.id) && rec.id > 0) ? rec.id : ++layerSeq,
                     // 图层自带像素，不绑任何图池 id —— 跨会话导入天然无悬空引用。
                     name: rec.name || 'Layer', src: url, img,
+                    // v6：这一层的像素从哪张资产来（staging 拖入 / 文件导入可查）。buffer 是保存那一刻
+                    // 的像素哈希；编辑期它只是内存里的 raster，下一次物化才更新。
+                    asset: typeof rec.source === 'string' ? rec.source : null,
+                    buffer: typeof rec.buffer === 'string' ? rec.buffer : null,
                     visible: rec.visible !== false,
                     fragment: !!rec.fragment,
                     raster: !!rec.raster,
@@ -12402,9 +12647,21 @@ async function openCudDocument(file, doc) {
         // 保留 id 整池同步宿主（见 postStagingSync）。这里不再直接上传 —— 追加会把
         // 上一个工程的图留进新工程。
         const entry = createDocument((doc && doc.name) || file.name, doc || null, ctx, false);
-        entry.staging = Array.isArray(header.staging) ? header.staging.filter(s => s && s.src) : [];
-        activateDocument(entry);
         if (!ctx.canvasW || !ctx.canvasH) applyCanvasSize();   // no usable size in the file — derive it
+        // v6 的 staging 只带 { asset }：把字节从内嵌（或仓库）取回来，补成宿主认识的 src。
+        // `asset` 原样留着 —— 下次保存仍写 hash，不再把 base64 写进文件。
+        const staged = [];
+        for (const s of (Array.isArray(header.staging) ? header.staging : [])) {
+            if (!s) continue;
+            let src = typeof s.src === 'string' ? s.src : '';
+            if (!src && s.asset) {
+                const blob = blobs.get(s.asset) || await assetFetchBlob(s.asset);
+                if (blob) { try { src = await blobToDataURL(blob); } catch (e) { src = ''; } }
+            }
+            if (src) staged.push(Object.assign({}, s, { src }));
+        }
+        entry.staging = staged;
+        activateDocument(entry);
         setStatus(`Opened ${entry.name} · ${layerCount} layer${layerCount === 1 ? '' : 's'}${skipped ? ` · ${skipped} unreadable skipped` : ''}`, 'success');
         return true;
     } catch (err) {
@@ -12528,7 +12785,8 @@ async function flattenCudStack(header, blobs, mapKeys) {
         if (!rec || rec.visible === false || rec.stack === GUIDANCE_STACK) continue;
         if (rec.stash) continue;        // Stash 复读的是它下面的合成 —— 自底向上折到它时那句话已经画在画布上了
         let src = null;
-        if (rec.image === null || rec.image === undefined) {
+        const imgRef = rec.buffer !== null && rec.buffer !== undefined ? rec.buffer : rec.image;
+        if (imgRef === null || imgRef === undefined) {
             // 生成器行没有自己的像素 (底就是一张空白格子):按文件里的格子重建,面由 sync 现算。
             if (!rec.raster) {
                 const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec.pw) || 1)));
@@ -12536,7 +12794,7 @@ async function flattenCudStack(header, blobs, mapKeys) {
                 src = makeBlankCanvas(pw, ph);
             }
         } else {
-            const blob = blobs.get(rec.image);
+            const blob = blobs.get(imgRef);
             if (blob) src = await blobToCanvas(blob);
         }
         if (!src) continue;
@@ -13367,7 +13625,7 @@ function exportLayerToStaging(id) {
 function addStagingAsLayer(id, stack) {
     const s = stagingItems.find(x => String(x.id) === String(id));
     if (!s || !s.src) { setStatus('That workspace image is gone', 'error'); return; }
-    addLayer({ src: s.src, name: s.name || 'Staged', smart: true }, stack);
+    addLayer({ src: s.src, name: s.name || 'Staged', smart: true, asset: s.asset || null }, stack);
     setStatus(`「${s.name || 'Staged'}」added from the workspace as a smart layer`);
 }
 

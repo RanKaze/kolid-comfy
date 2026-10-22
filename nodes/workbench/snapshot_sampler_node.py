@@ -548,6 +548,36 @@ def _vid_media_dir():
     return os.path.join(data_dir('sampler'), 'media', 'vid')
 
 
+def _vid_media_path(ref):
+    """媒体引用 → 盘上路径（A5：字节的家搬进资产仓库后，这里就是那个兼容 resolver）。
+
+    `ref` 三种写法都收，因为文件里、旧工程里、新代码里三种都还在：
+      · `/api/vid_media/<file>` 或裸 `<file>` —— 老 URL 面，继续有效；
+      · `/api/asset_media/<hash>` 或裸 `<hash>` —— 仓库正身（A5 起的原件）；
+      · 绝对路径只在"它确实就在这两个目录里"时放行（老 .cud 写过路径）。
+
+    先看 media/vid（老货 + 派生缓存：波形、抽帧、merge 产物），再看仓库。找不到返回 None ——
+    调用方据此报 404 / 画"缺失"，**不要**退回"随便找一个同名的"。
+    """
+    s = str(ref or '').strip()
+    if not s:
+        return None
+    for pre in ('/api/vid_media/', '/api/asset_media/', '/api/global_media/'):
+        if s.startswith(pre):
+            s = s[len(pre):]
+            break
+    s = unquote(s.split('?', 1)[0])
+    name = os.path.basename(s)
+    if not name:
+        return None
+    p = os.path.join(_vid_media_dir(), name)
+    if os.path.isfile(p):
+        return p
+    # 仓库认 hash（带不带扩展名都行：`<md5>`、`<md5>.mp4`）。
+    rec = asset_store.get(name) or asset_store.get(os.path.splitext(name)[0])
+    return rec['path'] if rec else None
+
+
 # =============================================================================
 # 全局资产库（Assets 窗的 Global 开关读的就是这一份）
 #
@@ -604,7 +634,17 @@ def _global_assets_list():
     d = _global_assets_dir()
     items = []
     try:
-        for rec in asset_store.records():
+        recs = asset_store.records()
+        # A5：转码代理是**内部件**（时间线拿它播，用户不该在窗里看见第二张卡）。
+        # 原件那一条带上 `playHash`：拖进时间线/播放一律用可播的那份，`hash` 仍是正身。
+        proxy_of = {}
+        for rec in recs:
+            po = (rec.get('meta') or {}).get('proxyOf')
+            if po:
+                proxy_of.setdefault(str(po), rec['id'])
+        for rec in recs:
+            if (rec.get('meta') or {}).get('proxyOf'):
+                continue
             items.append({
                 'name': rec['file'],
                 'url': '/api/global_media/' + quote(rec['file']),
@@ -614,7 +654,11 @@ def _global_assets_list():
                 'hasAudio': None,
                 'duration': 0,
                 'hash': rec['id'],
+                'playHash': proxy_of.get(rec['id']),
                 'inLibrary': rec['inLibrary'],
+                'origin': rec['origin'],
+                'displayName': rec['name'],
+                'tags': list(rec.get('tags') or []),
                 'thumb': ('/api/asset_thumb/' + rec['id']) if rec['kind'] == 'image' else None,
             })
     except Exception as e:
@@ -805,7 +849,9 @@ def _vid_strip(path, n):
     except (TypeError, ValueError):
         n = 16
     stem = os.path.splitext(os.path.basename(path))[0]
-    d = os.path.dirname(path) or _vid_media_dir()
+    # 缩略帧是**派生缓存**，永远落 media/vid —— 源文件现在住在仓库里（A5），
+    # 跟着源路径写就会把 jpg 当成新资产铺进 data/assets（还会被清单数成货）。
+    d = _vid_media_dir()
     outs = [os.path.join(d, f'{stem}_s{i:03d}.jpg') for i in range(n)]
     if not all(os.path.exists(p) for p in outs):
         probe = _vid_ffprobe(path) or {}
@@ -1269,36 +1315,62 @@ def _vid_ingest(raw, name):
     stem, ext = os.path.splitext(base)
     ext = ext.lower() or '.mp4'
     stem = re.sub(r'[^\w\-. ]+', '_', stem)[:60] or 'media'
-    h = hashlib.sha1(raw).hexdigest()[:16]
     d = _vid_media_dir()
     os.makedirs(d, exist_ok=True)
-    inbox = os.path.join(d, f'{h}_{stem}{ext}')
-    if not os.path.exists(inbox):
-        tmp = inbox + '.part'
-        with open(tmp, 'wb') as f:
-            f.write(raw)
-        os.replace(tmp, inbox)
+    # A5：原件按内容进资产仓库（`<md5>.<ext>`），media/vid 只剩派生缓存（波形/抽帧/merge 产物）。
+    # `src` 仍返回 `/api/vid_media/<file>` —— 那是 URL 面，不是落点；`/api/vid_media/` 现在
+    # 经 `_vid_media_path` 落到仓库。老 .cud 里那些 `sha1_名字.mp4` 也照旧在 media/vid 里活着。
+    rec = asset_store.put_bytes(raw, name=base, origin='vid-ingest')
+    if not rec:
+        return {'ok': False, 'error': 'asset store refused the bytes'}
+    # 非库成员的 put_bytes 不落元数据行，清单只能读到哈希文件名。用户拖进来的片子得有个
+    # 认得出的名字（`Rabbit Dance_.mp4`），所以这里补一行：只写名字/来源，member 仍是 False。
+    # 同字节已经在库、而且用户已经给它起过名 → 一个字都不动（拖一次文件不改别人的名字）。
+    _cur = asset_store.get(rec['id']) or {}
+    if not _cur.get('inLibrary') and _cur.get('name') in (None, _cur.get('file')):
+        asset_store.update_meta(rec['id'], name=base, meta={'origin': 'vid-ingest'})
+    inbox = os.path.join(asset_store.asset_dir(), rec['file'])
     probe = _vid_ffprobe(inbox)
     if probe is None or (not probe['vcodec'] and not probe['acodec']):
         return {'ok': False, 'error': 'not decodable media (ffprobe found no streams)'}
     audio_only = not probe['vcodec']
     src = inbox
+    proxy = None
     transcoded = False
     if not audio_only and not _vid_browser_ok(ext, probe):
-        out = os.path.join(d, f'{h}_{stem}_proxy.mp4')
-        if not os.path.exists(out):
+        # 代理片也是一份字节：先落临时文件给 ffmpeg，再整份进仓库（同一份代理只存一次）。
+        tmp_out = os.path.join(d, f'_tmp_{rec["id"][:16]}_proxy.mp4')
+        try:
             r = subprocess.run(
                 [ff, '-y', '-i', inbox, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(_VID_CRF),
-                 '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', out],
+                 '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', tmp_out],
                 capture_output=True, timeout=600)
-            if r.returncode != 0 or not os.path.exists(out):
+            if r.returncode != 0 or not os.path.exists(tmp_out):
                 tail = r.stderr.decode('utf-8', 'replace')[-300:] if r.stderr else 'unknown'
                 return {'ok': False, 'error': 'transcode failed: ' + tail}
-        src = out
-        transcoded = True
+            with open(tmp_out, 'rb') as f:
+                praw = f.read()
+            prec = asset_store.put_bytes(praw, name=f'{stem}_proxy.mp4', origin='vid-proxy')
+            if not prec:
+                return {'ok': False, 'error': 'asset store refused the proxy'}
+            # 代理是**派生件**：记一笔"我是谁的代理"，清单据此把两张卡并成一张（原件那张
+            # 带 playHash），GC 也据此知道两个哈希是同一件货的两份字节。
+            asset_store.update_meta(prec['id'], name=f'{stem}_proxy.mp4',
+                                    meta={'proxyOf': rec['id'], 'origin': 'vid-proxy'})
+            src = os.path.join(asset_store.asset_dir(), prec['file'])
+            proxy = prec['id']
+            transcoded = True
+        finally:
+            try:
+                if os.path.isfile(tmp_out):
+                    os.remove(tmp_out)
+            except OSError:
+                pass
     previews = _vid_previews(src, probe, d)
     return {'ok': True,
             'src': '/api/vid_media/' + os.path.basename(src),
+            'asset': rec['id'],
+            'proxy': proxy,
             'name': base,
             'duration': probe['duration'],
             'hasAudio': bool(probe['acodec']),
@@ -1330,9 +1402,8 @@ def _vid_merge(parts, name='merged'):
         if not isinstance(pt, dict):
             return {'ok': False, 'error': f'part {i} is not an object'}
         raw = str(pt.get('f') or '')
-        fname = os.path.basename(unquote(raw))
-        path = os.path.join(d, fname)
-        if not raw.startswith('/api/vid_media/') or not fname or not os.path.isfile(path):
+        path = _vid_media_path(raw)
+        if not path or not os.path.isfile(path):
             return {'ok': False, 'error': f'part {i}: media file not found'}
         try:
             a = max(0.0, float(pt.get('in') or 0))
@@ -2065,9 +2136,23 @@ class SnapshotDetailerSamplerServer:
                 h, w = shp[0], shp[1]
         # 保留 tensor 引用
         self._staging_tensors[sid] = image
+        # 字节进仓库（A2）：图池不再"只活在内存里" —— 每一张都落到 data/assets/，id 由内容决定
+        # （同一张图只存一份）。条目上记 `asset`（hash）与 `url`（可直接喂 <img>），`src` 仍留一份
+        # base64 给还没改完的调用方（页面的 .cud 保存、旧 chip 渲染）—— 等 v6 把文档改成存 hash，
+        # 这一份才退休。存失败不影响图池本身：`asset` 为 None 时一切照旧走 base64。
+        src = tensor_to_base64(image)
+        asset = None
+        try:
+            raw = asset_store.dataurl_bytes(src)
+            rec = asset_store.put_bytes(raw, name=name, origin='staging', library=False) if raw else None
+            asset = rec['id'] if rec else None
+        except Exception as e:
+            print(f"[Staging] asset store skipped: {e}")
         entry = {
             'id': sid,
-            'src': tensor_to_base64(image),
+            'src': src,
+            'asset': asset,
+            'url': ('/api/asset_media/' + asset) if asset else None,
             'name': name or f'#{self._staging_counter}',
             'width': w,
             'height': h,
@@ -2086,8 +2171,13 @@ class SnapshotDetailerSamplerServer:
         return sid
 
     def get_staging_list(self):
-        """返回工作区条目列表（base64 图，宿主直接可渲染）。"""
+        """返回工作区条目列表（base64 图，宿主直接可渲染）。
+
+        `asset` / `url` 是 A2 加的两条：这张图在**仓库**里的 id 与字节地址。老调用方只认 `src`
+        也照常工作 —— 但新代码（Assets 窗、特效绑定）应该按 `asset` 走，那才是唯一副本。
+        """
         return [{'id': s['id'], 'name': s['name'], 'src': s['src'],
+                 'asset': s.get('asset'), 'url': s.get('url'),
                  'width': s.get('width', 0), 'height': s.get('height', 0),
                  'hidden': bool(s.get('hidden')), 'place': s.get('place')}
                 for s in self.staging_items]
@@ -3463,27 +3553,28 @@ class SnapshotDetailerSamplerServer:
                 return
 
             # 资产媒体库：Video 工程 Assets 的文件伺服（带 Range —— <video> 的 seek 靠它）。
+            # A5 起 `_vid_media_path` 会先看 media/vid（派生缓存/老货）、再看资产仓库：
+            # 同一张 URL 面，字节的家已经搬进 `data/assets/`。
             if self.path.startswith('/api/vid_media/'):
                 # 文件名里的空格/中文等会被浏览器百分号编码（`Rabbit%20Dance_.mp4`）：这里必须解码
                 # 回来，否则拼出的路径永远对不上盘上的文件 → 404 → <video> 报
                 # MEDIA_ERR_SRC_NOT_SUPPORTED（videoWidth=0，播放头照走、画面全空）。
-                fname = os.path.basename(unquote(urlparse(self.path).path[len('/api/vid_media/'):]))
-                if not _send_media_file(self, os.path.join(_vid_media_dir(), fname)):
+                path = _vid_media_path(unquote(urlparse(self.path).path[len('/api/vid_media/'):]))
+                if not (path and _send_media_file(self, path)):
                     self.send_error(404)
                 return
 
             # 按需帧提取：片段的头/尾帧（t 跟着片段的 offset/duration 走，裁剪即新帧）。
             if self.path.startswith('/api/vid_frame'):
                 qs = parse_qs(urlparse(self.path).query)
-                fname = os.path.basename((qs.get('f') or [''])[0])
-                # 同上：`d=global` = 这件货在全局资产库里。
-                root = _global_assets_dir() if (qs.get('d') or [''])[0] == 'global' else _vid_media_dir()
-                path = os.path.join(root, fname)
+                # `f` 是媒体引用：老 `<file>` / 新 `<hash>.<ext>` 都行；`d=global` 仍被接受，
+                # 但解析已经统一走 `_vid_media_path`（仓库那一侧自己会兜住）。
+                path = _vid_media_path((qs.get('f') or [''])[0])
                 try:
                     t = float((qs.get('t') or ['0'])[0])
                 except ValueError:
                     t = 0.0
-                jpg = _vid_frame(path, t)
+                jpg = _vid_frame(path, t) if path else None
                 if not jpg:
                     self.send_error(404)
                     return
@@ -3499,15 +3590,14 @@ class SnapshotDetailerSamplerServer:
             # 整条缩略帧：一次抽 n 张铺满全片，供时间线拖动/裁剪时跟手预览。
             if self.path.startswith('/api/vid_strip'):
                 qs = parse_qs(urlparse(self.path).query)
-                fname = os.path.basename((qs.get('f') or [''])[0])
                 try:
                     n = int((qs.get('n') or ['16'])[0])
                 except ValueError:
                     n = 16
-                # `d=global` = 这件货在**全局资产库**里（其余一律当工程媒体库）。
-                # 两条路同一个抽条函数，只是落点不同 —— 全局那批也能吃上后端落盘的缩略帧。
-                root = _global_assets_dir() if (qs.get('d') or [''])[0] == 'global' else _vid_media_dir()
-                urls = _vid_strip(os.path.join(root, fname), n)
+                # 解析同 `/api/vid_frame`：`f` 可以是老文件名或仓库哈希；`d=global` 不再需要，
+                # 但仍然接受（老页面/老探针还在发）。
+                path = _vid_media_path((qs.get('f') or [''])[0])
+                urls = _vid_strip(path, n) if path else []
                 self._send_json({'ok': bool(urls), 'urls': urls or []})
                 return
 
@@ -3809,7 +3899,7 @@ class SnapshotDetailerSamplerServer:
                         self._send_json({'ok': False, 'error': 'No id'}, 400)
                         return
                     if urlparse(self.path).path == '/api/asset_update':
-                        rec = asset_store.set_library(
+                        rec = asset_store.update_meta(
                             aid, name=body.get('name'), tags=body.get('tags'))
                         if not rec:
                             self._send_json({'ok': False, 'error': 'not found', 'id': aid}, 404)
@@ -7606,7 +7696,7 @@ class SnapshotDetailerSamplerNode:
             raise ValueError('No video input for the preset run')
 
         fname = os.path.basename(str(spec.get('file') or ''))
-        vpath = os.path.join(_vid_media_dir(), fname)
+        vpath = _vid_media_path(spec.get('file')) or os.path.join(_vid_media_dir(), fname)
         frames = _vid_frames(vpath, ss=spec.get('ss', 0), t=spec.get('t'),
                              n=spec.get('n'), fps=spec.get('fps'), f0=spec.get('f0'))
         if not frames:
@@ -7625,7 +7715,7 @@ class SnapshotDetailerSamplerNode:
         m_in = action.get('mask_input')
         if isinstance(m_in, dict) and m_in.get('file'):
             mname = os.path.basename(str(m_in.get('file') or ''))
-            mpath = os.path.join(_vid_media_dir(), mname)
+            mpath = _vid_media_path(m_in.get('file')) or os.path.join(_vid_media_dir(), mname)
             mask_frames = _vid_frames(mpath, ss=m_in.get('ss', 0), t=m_in.get('t'),
                                       n=m_in.get('n') or len(frames), fps=m_in.get('fps') or enc_fps,
                                       f0=m_in.get('f0'))
@@ -7908,7 +7998,7 @@ class SnapshotDetailerSamplerNode:
             if not isinstance(spec, dict):
                 continue
             fname = os.path.basename(str(spec.get('file') or ''))
-            vpath = os.path.join(_vid_media_dir(), fname)
+            vpath = _vid_media_path(spec.get('file')) or os.path.join(_vid_media_dir(), fname)
             frames = _vid_frames(vpath, ss=spec.get('ss', 0), t=spec.get('t'),
                                  n=spec.get('n'), fps=spec.get('fps'), f0=spec.get('f0'))
             if not frames:

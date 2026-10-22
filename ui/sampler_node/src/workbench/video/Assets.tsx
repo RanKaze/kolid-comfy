@@ -47,9 +47,21 @@ export type StoreAsset = {
   hash?: string;
   /** A0：是不是库成员（不在库里的 = session 临时产物）。 */
   inLibrary?: boolean;
+  /** A5：可播字节的哈希（转码代理）。有它就用它播 —— 原件的容器浏览器可能咬不动。 */
+  playHash?: string | null;
+  /** A0：表里的显示名（可改）。老服务没有这一项 ⇒ 退回文件名。 */
+  displayName?: string;
+  /** A0：来源（legacy / upload / run / staging …）。 */
+  origin?: string;
+  /** A0：标签。 */
+  tags?: string[];
   /** A0：缩略图 URL（图片才有，后端按需生成并落盘缓存）。 */
   thumb?: string | null;
 };
+
+/** A5：仓库条目怎么播 —— 转码过的原件浏览器咬不动，`playHash` 才是能播的那份字节。 */
+const playUrlOf = (s: StoreAsset): string =>
+  s.playHash ? '/api/asset_media/' + encodeURIComponent(s.playHash) : s.url;
 
 const rowBtn: React.CSSProperties = {
   flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -412,10 +424,12 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
     if (scope === 'library' && s.inLibrary === false) return false;
     if (scope === 'session' && s.inLibrary !== false) return false;
     if (kind !== 'all' && s.kind !== kind) return false;
-    return hits(s.name, s.hash);
+    return hits(s.displayName || s.name, s.hash);
   });
-  const projectItems = p.assets.filter(a => {
-    if (scope === 'library' || scope === 'session') return false;
+  // Project 是**本工程资产表**（可能指向 vid_media / 图池 URL）；All/Library/Session 只列仓库。
+  // 一件货被收进工程后又出现在 All 里是正常的（同一个字节的两条身份），但**同一个视图里**
+  // 不能因为"它既在工程又在库"就画两遍。
+  const projectItems = scope !== 'project' ? [] : p.assets.filter(a => {
     const k = isImageAsset(a) ? 'image' : a.kind;
     if (kind !== 'all' && k !== kind) return false;
     return hits(a.name);
@@ -426,7 +440,10 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
   const claimStore = (s: StoreAsset) => {
     if (s.kind === 'image') return;
     vid.update(proj => addAsset(proj, {
-      id: newVidId('as'), name: s.name, src: s.url, origin: 'file',
+      id: newVidId('as'), name: s.displayName || s.name, src: playUrlOf(s), origin: 'file',
+      // 仓库里那一件的正身：`url` 是门面（可能带端口），`hash` 才是身份。
+      asset: s.hash || undefined,
+      play: s.playHash || undefined,
       kind: s.kind === 'audio' ? 'audio' : 'video',
       duration: s.duration, hasAudio: s.hasAudio === true,
     }), 'Add library asset');
@@ -435,8 +452,9 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
   const renameStore = async (s: StoreAsset) => {
     const id = s.hash;
     if (!id) return;
-    const next = window.prompt('Rename asset', s.name);
-    if (!next || next === s.name) return;
+    const cur = s.displayName || s.name;
+    const next = window.prompt('Rename asset', cur);
+    if (!next || next === cur) return;
     const r = await fetch('/api/asset_update', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, name: next }),
@@ -448,8 +466,9 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
   const deleteStore = async (s: StoreAsset) => {
     const id = s.hash;
     if (!id) return;
+    const label = s.displayName || s.name;
     const ok = window.confirm(
-      `Delete「${s.name}」from the asset store?\n\nThe file and its record are removed. ` +
+      `Delete「${label}」from the asset store?\n\nThe file and its record are removed. ` +
       `Clips already on the timeline keep their own reference.`);
     if (!ok) return;
     const r = await fetch('/api/asset_delete', {
@@ -480,6 +499,7 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
     if (ing) {
       vid.update(proj => addAsset(proj, {
         id: newVidId('as'), name: ing.name, src: ing.src, origin: 'file',
+        asset: ing.asset, play: ing.play,
         kind: ing.audioOnly ? 'audio' : 'video',
         duration: ing.duration, hasAudio: ing.hasAudio,
         waveform: ing.waveform,
@@ -496,11 +516,11 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
     }));
   };
 
-  const collectSource = async (src: string, name: string) => {
+  const collectSource = async (src: string, name: string, asset?: string, play?: string) => {
     const info = await probeMedia(src, isAudioName(name) ? 'audio' : 'video');
     if (!info) return;
     vid.update(proj => addAsset(proj, {
-      id: newVidId('as'), name, src, origin: 'staging',
+      id: newVidId('as'), name, src, origin: 'staging', asset, play,
       kind: info.audioOnly ? 'audio' : 'video',
       duration: info.duration, hasAudio: info.hasAudio,
     }));
@@ -518,8 +538,8 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
     const aRaw = e.dataTransfer.getData(ASSET_ITEM_TYPE);
     if (aRaw) {
       try {
-        const a = JSON.parse(aRaw) as { url?: string; name?: string; kind?: string };
-        if (a?.url && a.kind !== 'image') { void collectSource(a.url, a.name || a.url); return; }
+        const a = JSON.parse(aRaw) as { id?: string; url?: string; name?: string; kind?: string; play?: string | null };
+        if (a?.url && a.kind !== 'image') { void collectSource(a.url, a.name || a.url, a.id, a.play || undefined); return; }
       } catch { /* 不是我们写的那份：继续看文件 */ }
     }
     const files = Array.from(e.dataTransfer.files || []);
@@ -642,23 +662,26 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
 
         {storeItems.map(s => {
           const id = s.hash || s.name;
-          const payload = { id, url: s.url, name: s.name, kind: s.kind };
+          const label = s.displayName || s.name;
+          const play = playUrlOf(s);
+          const payload = { id, url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash };
           return (
             <Card
               key={'s:' + id}
               it={{
-                name: s.name, kind: s.kind, src: s.url, duration: s.duration, hasAudio: s.hasAudio,
+                name: label, kind: s.kind, src: s.kind === 'image' ? s.url : play, duration: s.duration, hasAudio: s.hasAudio,
                 poster: s.kind === 'image' ? (s.thumb || s.url) : null,
-                byteFrom: 'store', origin: s.inLibrary === false ? 'session' : 'library',
-                usedBy: usedBy(s.url),
+                byteFrom: 'store',
+                origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
+                usedBy: usedBy(play),
                 drag: {
                   [ASSET_ITEM_TYPE]: JSON.stringify(payload),
-                  [GLOBAL_ITEM_TYPE]: JSON.stringify({ url: s.url, name: s.name, kind: s.kind }),
+                  [GLOBAL_ITEM_TYPE]: JSON.stringify({ url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash }),
                 },
                 actions: (
                   <span style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
                     {s.kind !== 'image' && (
-                      <button title={'Claim「' + s.name + '」into this project'} onClick={() => claimStore(s)} style={rowBtn}>
+                      <button title={'Claim「' + label + '」into this project'} onClick={() => claimStore(s)} style={rowBtn}>
                         <PlusIcon />
                       </button>
                     )}
@@ -669,7 +692,7 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
                             <path d="M8 2l2 2-6 6H2V8z" />
                           </svg>
                         </button>
-                        <button title={'Delete「' + s.name + '」from the store'} onClick={() => void deleteStore(s)} style={rowBtn}>
+                        <button title={'Delete「' + label + '」from the store'} onClick={() => void deleteStore(s)} style={rowBtn}>
                           <CrossIcon />
                         </button>
                       </>

@@ -2,10 +2,13 @@
 // <img>,GL 侧只看到像素。契约见 fx/core.js 顶部。
 
 // ---- 特效绑定的外部贴图 (bound maps) ----
-// 深度图/法线图进 params 的永远只是一句 {key, name}:params 要进 fxSignature(每次缓存判定都要
+// 深度图/法线图进 params 的永远只是一句引用:params 要进 fxSignature(每次缓存判定都要
 // JSON.stringify)、进 undo 深拷贝、进 .cud 记录 —— 往里塞几 MB 的 data URL,这三处全都垮掉。
-// key 有两个来源:工作区图池的 id(staging_N,宿主镜像过来的),和本地池的 id(map_N,来自文件
-// 选择或 .cud 资产)。两条路都只在这里解析成像素,GL 侧只看到一张已解码的 <img>。
+// v6 起引用的**正身是仓库里的内容哈希** `{asset, name}`(A3):`asset` 就是 data/assets/<hash>
+// 的文件名 stem,`/api/asset_media/<hash>` 就是它的字节。仓库是唯一副本,图池条目只是引用。
+// 老档还留着 `{key: 'staging_N' | 'map_N', name}`:key 只是过渡期的别名,读的时候按图池/本地
+// 池兜底(见 fxMapSource),新绑定不再产生它。`fileAsset` 只在 .cud 里出现,指文件内嵌的
+// PNG 资产序号 —— 给"换机器、本机仓库里没有这份 hash"留的逃生口。
 // 引用对象一律整体替换、绝不原地改字段:cloneEffects 深拷贝只到 params 这一层,里面的 map 对象
 // 是共享引用,原地写会把 undo 指着的旧步骤一起改掉。
 // 一条特效可以占两个槽:主槽永远是 params.map(引擎传到 texMap,注册数据用 needsMap 声明它),
@@ -15,9 +18,13 @@
 let fxMapSeq = 0;
 let fxMapTagSeq = 0;
 let fxSrcSeq = 0;
-const fxMapPool = new Map();        // map_N -> { name, src }
+const fxMapPool = new Map();        // map_N -> { name, src }  【legacy 读档用,新绑定不再写】
 const fxMapDecoded = new Map();     // src -> {} 解码中 | { img, tag } | { img: null } 解不开
 const fxSrcIds = new Map();         // src -> 短号;缓存身份要用它,不能拿长字符串比
+
+function fxAssetUrl(asset) {
+    return '/api/asset_media/' + encodeURIComponent(String(asset || ''));
+}
 
 function fxSrcId(src) {
     let v = fxSrcIds.get(src);
@@ -40,15 +47,39 @@ function fxMapSlots(effect) {
 
 function fxMapRef(effect, key) {
     const m = effect.params && effect.params[key || 'map'];
-    return (m && typeof m.key === 'string' && m.key) ? m : null;
+    if (!m) return null;
+    // 新绑定 `{asset}`(仓库哈希);老档 `{key}`(图池/本地池别名);再老一点只留 `{url}`。
+    if (typeof m.asset === 'string' && m.asset) return m;
+    if (typeof m.key === 'string' && m.key) return m;
+    if (typeof m.url === 'string' && m.url) return m;
+    return null;
 }
 
+// 引用 → 可加载的字节地址。三条路按新鲜度排:
+//   1. `asset` = 仓库哈希 —— 唯一副本,跨文档/跨会话都稳定(A3 起的新绑定);
+//   2. 图池条目 —— 老档的 `staging_N`;A2 之后条目自带 `asset`/`url`,优先走它们(不再搬 base64);
+//   3. `map_N` 本地池 —— 只给老档读,新绑定不再写(文件选择已经直接进仓库)。
 function fxMapSource(ref) {
-    if (!ref || !ref.key) return null;
-    const s = stagingItems.find(it => it && it.id === ref.key && it.src);
-    if (s) return { src: s.src, name: ref.name || s.name || ref.key };
+    if (!ref) return null;
+    const name = ref.name || '';
+    if (typeof ref.asset === 'string' && ref.asset) {
+        return { src: fxAssetUrl(ref.asset), name: name || ref.asset, asset: ref.asset };
+    }
+    if (typeof ref.url === 'string' && ref.url) {
+        return { src: ref.url, name: name || ref.url };
+    }
+    if (typeof ref.key !== 'string' || !ref.key) return null;
+    const s = stagingItems.find(it => it && it.id === ref.key && (it.src || it.url));
+    if (s) {
+        const asset = s.asset;
+        return {
+            src: s.url || (asset ? fxAssetUrl(asset) : s.src),
+            name: name || s.name || ref.key,
+            asset: asset || undefined,
+        };
+    }
     const p = fxMapPool.get(ref.key);
-    if (p && p.src) return { src: p.src, name: ref.name || p.name };
+    if (p && p.src) return { src: p.src, name: name || p.name };
     return null;
 }
 
@@ -76,7 +107,8 @@ function fxMapIdentity(effect, key) {
     if (!ref) return `${id}:0#0`;
     const found = fxMapSource(ref);
     const hit = found ? fxMapDecoded.get(found.src) : null;
-    return `${id}:${ref.key}@${found ? fxSrcId(found.src) : 0}#${hit && hit.tag ? hit.tag : 0}`;
+    const refId = ref.asset || ref.key || ref.url || '?';
+    return `${id}:${refId}@${found ? fxSrcId(found.src) : 0}#${hit && hit.tag ? hit.tag : 0}`;
 }
 
 // 整条 strip 上所有槽的身份串成一句,进链的缓存身份。一枚容器的绑定换了图,另一枚没换,
@@ -94,13 +126,30 @@ function fxMapStamp(l) {
     return s;
 }
 
-// 文件选来的图不进工作区(那是一张深度图,不是参考图),它住在本地池里;.cud 存档会把它的像素
-// 写成资产,所以重开还能被同一个 key 解析到。
+// 【legacy】老档的读食道:把文件内嵌的 PNG 解成 data URL 暂存本地池,供还写着 `map_N` 的引用解析。
+// 新绑定不再走这里 —— 文件选择直接把字节导进仓库,引用写 `{asset: hash}`(见 fxImportMap)。
 function fxAddLocalMap(name, src) {
     const key = `map_${++fxMapSeq}`;
     const nm = name || 'Map';
     fxMapPool.set(key, { name: nm, src });
     return { key, name: nm };
+}
+
+// 文件选择的**新落点**:字节进仓库(data/assets,内容寻址),绑定写 `{asset: hash, name}`。
+// 不进图池条带(那是一张深度图,不是参考图),也不在内存里留 data URL —— 关掉页面重开,
+// 只要仓库还在,引用就还解得开。
+async function fxImportMap(name, dataUrl) {
+    const res = await fetch('/api/asset_import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ images: [dataUrl], names: [name || 'Map'], library: true, origin: 'map' }),
+    });
+    const data = await res.json().catch(() => null);
+    const rec = data && data.added && data.added[0];
+    if (!data || !data.ok || !rec || !rec.id) {
+        throw new Error((data && data.error) || 'the asset store rejected that image');
+    }
+    return { asset: rec.id, name: name || rec.name || rec.id };
 }
 
 // 这个槽装的是哪一类贴图 (Depth / Normal / Noise / Lookup) —— 面板上那行的名字、读数里缺图时的那
@@ -153,13 +202,32 @@ function fxMapBoxStamp(l) {
 // .cud v3 把绑定的贴图写成随文件的资产;重开时资产像素落进本地池,引用换成新 mint 的 key(图池
 // 那句 id 是宿主重新编号的,原样留着就是死引用)。资产读不出就退回旧引用本行 —— 按钮转红、链上
 // 写明跳过,总比悄悄换一张图当真。每个声明了的槽各存各的资产。
+// A3 起 `m.asset` 是**仓库哈希**(字符串):本机仓库就是唯一副本,原样收下、直接按
+// `/api/asset_media/<hash>` 取字节,不必再把像素搬进内存池。`m.fileAsset` 指文件里那份
+// 内嵌 PNG,留给换机器时兜底(v6 再接)。老档的 `m.asset` 是数字(文件资产表序号),
+// 仍走下面那段"解码 → 本地池"的兼容路。
 // `mapKeys`(可省)是「资产 id → 池 key」的备忘:传了它,同一份资产跨多次读档只进池一次 ——
 // cud 链接的按存刷新每次都重折整份文件,没有这张表它每存一次就多 mint 一份几 MB 的 data URL。
 async function restoreFxMaps(list, blobs, mapKeys) {
     for (const e of list) {
         for (const slot of fxMapSlots(e)) {
             const m = e.params && e.params[slot.key];
-            if (!m || m.asset === null || m.asset === undefined) continue;
+            if (!m || (!m.hash && (m.asset === null || m.asset === undefined))) continue;
+            // A3 存档形状：{asset:<文件资产序号>, hash:<仓库哈希>, name}。hash 优先 ——
+            // 它就是仓库里的唯一副本；asset 只用来在老机器上找文件内嵌的那份 PNG。
+            if (typeof m.hash === 'string' && m.hash) {
+                const ref = { asset: m.hash, name: m.name };
+                if (typeof m.asset === 'number') ref.fileAsset = m.asset;
+                e.params[slot.key] = ref;
+                continue;
+            }
+            // 兼容中间版本（直接写 asset=hash 的档）。
+            if (typeof m.asset === 'string' && m.asset) {
+                const ref = { asset: m.asset, name: m.name };
+                if (m.fileAsset !== undefined && m.fileAsset !== null) ref.fileAsset = m.fileAsset;
+                e.params[slot.key] = ref;
+                continue;
+            }
             const pooled = mapKeys && mapKeys.get(m.asset);
             if (pooled && fxMapPool.has(pooled)) { e.params[slot.key] = { key: pooled, name: m.name }; continue; }
             const blob = blobs.get(m.asset);

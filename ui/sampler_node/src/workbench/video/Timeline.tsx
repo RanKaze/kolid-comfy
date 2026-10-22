@@ -364,16 +364,17 @@ export const VidTimeline: React.FC<{
   //    没有 ffmpeg 时回退 blob + 前端探测（blob 活不过刷新，读档自会剪掉）。
   const importSource = useCallback(async (
     src: string, name: string, origin: 'staging' | 'file', trackId: string | null, at: number,
+    asset?: string, play?: string,
   ) => {
     const info = await probeMedia(src, isAudioName(name) ? 'audio' : 'video');
     if (!info) return;
-    vid.update(proj => importToTrack(proj, { src, name, origin }, info, trackId, at), 'Add clip');
+    vid.update(proj => importToTrack(proj, { src, name, origin, asset, play }, info, trackId, at), 'Add clip');
   }, [vid]);
 
   const importFile = useCallback(async (f: File, trackId: string | null, at: number) => {
     const ing = await ingestFile(f);
     if (ing) {
-      vid.update(proj => importToTrack(proj, { src: ing.src, name: ing.name, origin: 'file' },
+      vid.update(proj => importToTrack(proj, { src: ing.src, name: ing.name, origin: 'file', asset: ing.asset, play: ing.play },
         { duration: ing.duration, hasAudio: ing.hasAudio, audioOnly: ing.audioOnly }, trackId, at), 'Add clip');
       return;
     }
@@ -932,9 +933,9 @@ export const VidTimeline: React.FC<{
     const aRaw = e.dataTransfer.getData('application/x-asset');
     if (aRaw) {
       try {
-        const a = JSON.parse(aRaw) as { url?: string; name?: string; kind?: string };
+        const a = JSON.parse(aRaw) as { url?: string; name?: string; kind?: string; asset?: string; play?: string | null };
         if (a?.url && a.kind !== 'image') {
-          void importSource(a.url, a.name || a.url, 'file', trackId, at);
+          void importSource(a.url, a.name || a.url, 'file', trackId, at, a.asset, a.play || undefined);
           return;
         }
       } catch { /* 不是我们写的那份：继续往下看 */ }
@@ -945,8 +946,8 @@ export const VidTimeline: React.FC<{
     const gRaw = e.dataTransfer.getData(GLOBAL_ITEM_TYPE);
     if (gRaw) {
       try {
-        const g = JSON.parse(gRaw) as { url?: string; name?: string };
-        if (g?.url) { void importSource(g.url, g.name || g.url, 'file', trackId, at); return; }
+        const g = JSON.parse(gRaw) as { url?: string; name?: string; asset?: string; play?: string | null };
+        if (g?.url) { void importSource(g.url, g.name || g.url, 'file', trackId, at, g.asset, g.play || undefined); return; }
       } catch { /* 载荷不是我们写的那份：当没发生过，继续看后面几种 */ }
     }
     const stagingId = e.dataTransfer.getData(STAGING_ITEM_TYPE);

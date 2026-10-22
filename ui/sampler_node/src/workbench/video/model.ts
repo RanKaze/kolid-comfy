@@ -43,6 +43,10 @@ export type VidAsset = {
   src: string;
   origin: 'staging' | 'file';
   kind: 'video' | 'audio';
+  /** 原件的内容哈希（A5，仓库 id）：认货的正身。缺 = 老存档 / blob: 回退。 */
+  asset?: string;
+  /** 可播字节的哈希（转码过的源指向代理片；否则与 asset 相同或留空）。 */
+  play?: string;
   /** 源长（s），导入时探测一次就记下。 */
   duration: number;
   hasAudio: boolean;
@@ -58,6 +62,11 @@ export type VidClip = {
   /** 播放源：图池/资产条目的 URL（可持久）或本地文件的 objectURL（刷新即失效）。
    *  Layer 段没有播放源（它是合成的容器，不是素材），这里留空串。 */
   src: string;
+  /** 原件的内容哈希（A5）。`src` 是"怎么播"，`asset` 是"是哪一件货" —— 缺了能按它 relink，
+   *  仓库里没有就能画"缺失"。 */
+  asset?: string;
+  /** 可播字节的哈希（转码代理）。src 丢了/换了端口时按它重建。 */
+  play?: string;
   /** Layer 段绑定的图层集 key（= 这一段的 id）。切到某一段时，Layers 窗换成这一套。 */
   layerKey?: string;
   origin: 'staging' | 'file' | 'asset';
@@ -473,7 +482,7 @@ export const moveTrack = (p: VidProject, trackId: string, to: number): VidProjec
  *  = 视频段 + 拆一条联动音频段。纯函数，返回新 project。 */
 export const placeImport = (
   p: VidProject,
-  src: { src: string; name: string; origin: 'staging' | 'file' | 'asset' },
+  src: { src: string; name: string; origin: 'staging' | 'file' | 'asset'; asset?: string; play?: string },
   info: MediaInfo,
   trackId: string | null,
   at: number,
@@ -498,6 +507,7 @@ export const placeImport = (
   const start = snapPlace(p, track.id, at);
   const clip: VidClip = {
     id: newVidId('clip'), trackId: track.id, kind: track.kind, name: src.name, src: src.src,
+    asset: src.asset, play: src.play,
     origin: src.origin, start, duration: info.duration, offset: 0,
     srcDuration: info.duration, hasAudio: info.hasAudio,
     groupId: track.kind === 'video' && info.hasAudio ? groupId : undefined,
@@ -514,6 +524,7 @@ export const placeImport = (
     }
     clips.push({
       id: newVidId('clip'), trackId: audio.id, kind: 'audio', name: src.name, src: src.src,
+      asset: src.asset, play: src.play,
       origin: src.origin, start, duration: info.duration, offset: 0,
       srcDuration: info.duration, hasAudio: true, groupId,
     });
@@ -526,7 +537,7 @@ export const placeImport = (
 export const placeAsset = (p: VidProject, asset: VidAsset, trackId: string | null, at: number): VidProject =>
   placeImport(
     p,
-    { src: asset.src, name: asset.name, origin: 'asset' },
+    { src: asset.src, name: asset.name, origin: 'asset', asset: asset.asset, play: asset.play },
     { duration: asset.duration, hasAudio: asset.hasAudio, audioOnly: asset.kind === 'audio' },
     trackId,
     at,
@@ -536,7 +547,7 @@ export const placeAsset = (p: VidProject, asset: VidAsset, trackId: string | nul
  *  先入资产库（同 src 认领已有的那件），时间线再落一段引用它的片段。不存在"直接进轨道"的路。 */
 export const importToTrack = (
   p: VidProject,
-  src: { src: string; name: string; origin: 'staging' | 'file' },
+  src: { src: string; name: string; origin: 'staging' | 'file'; asset?: string; play?: string },
   info: MediaInfo,
   trackId: string | null,
   at: number,
@@ -546,6 +557,7 @@ export const importToTrack = (
   if (!asset) {
     asset = {
       id: newVidId('as'), name: src.name, src: src.src, origin: src.origin,
+      asset: src.asset, play: src.play,
       kind: info.audioOnly ? 'audio' : 'video', duration: info.duration, hasAudio: info.hasAudio,
     };
     next = addAsset(next, asset);
@@ -1055,6 +1067,16 @@ const migrateWindows = (
  *  形状不对的部分当场剪掉 —— 一份坏数据不该把时间线整个掀了。 */
 export const normalizeVidProject = (raw: unknown): VidProject => {
   const base = defaultVidProject();
+  // 仓库里的可播 URL（A5）：`play` = 转码代理优先，其次原件。两样都没有 = 没有哈希可依。
+  const storeUrl = (play?: string, asset?: string): string =>
+    (play || asset) ? '/api/asset_media/' + encodeURIComponent(String(play || asset)) : '';
+  /** 这一行"怎么播"：能用的 src 原样留着；src 是 blob:/空的，就按哈希重建。两样都靠不住就是空串
+   *  —— 调用方据此把这一行当"没了"（老存档里那些 blob: 且没哈希的段）。 */
+  const recover = (row: { src?: string; play?: string; asset?: string }): string => {
+    const src = String(row.src || '');
+    if (src && !src.startsWith('blob:')) return src;
+    return storeUrl(row.play, row.asset);
+  };
   try {
     const p = raw as VidProject;
     if (!p || !Array.isArray(p.tracks) || !Array.isArray(p.clips)) return base;
@@ -1067,7 +1089,8 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       if (!Number.isFinite(c.start) || !Number.isFinite(c.duration) || !(c.duration > 0)) return false;
       if (c.pending) return true;   // 占位段没有 src（等跑完才有）—— 快照要活过重开，照常回来
       if (c.kind === 'layer') return c.src === '' || !c.src;
-      return !!c.src && !c.src.startsWith('blob:');
+      // A5：有哈希的段永远收回来（src 可由 play/asset 重建）；只有"既没 src 又没哈希"的老 blob: 行丢掉。
+      return !!recover(c);
     }).map(c => {
       if (c.pending) {
         // 占位段的输入窗口统一成帧段（旧存档的 ss/t 在这里换掉 —— 存档不再写秒）。
@@ -1075,10 +1098,13 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
         const maskInputs = migrateWindows(c.pending.maskInputs, fps);
         return { ...c, pending: { ...c.pending, inputs, ...(maskInputs ? { maskInputs } : { maskInputs: undefined }) } };
       }
-      return c.kind === 'layer' ? { ...c, src: '', layerKey: c.layerKey || c.id } : c;
+      if (c.kind === 'layer') return { ...c, src: '', layerKey: c.layerKey || c.id };
+      const src = recover(c);
+      return src === c.src ? c : { ...c, src };
     });
-    const assets = (Array.isArray(p.assets) ? p.assets : []).filter(a => a && a.src && !a.src.startsWith('blob:')
-      && Number.isFinite(a.duration) && a.duration > 0);
+    const assets = (Array.isArray(p.assets) ? p.assets : [])
+      .filter(a => a && recover(a) && Number.isFinite(a.duration) && a.duration > 0)
+      .map(a => { const src = recover(a); return src === a.src ? a : { ...a, src }; });
     // mute / solo 的轨道 id：只留还活着的轨（删轨后重开不该把悬空 id 带回来）。
     const pickIds = (v: unknown): string[] => Array.isArray(v)
       ? [...new Set(v.filter((x): x is string => typeof x === 'string' && trackIds.has(x)))]

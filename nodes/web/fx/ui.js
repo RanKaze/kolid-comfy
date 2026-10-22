@@ -512,9 +512,10 @@ const fxMapFileBtnEl = document.getElementById('fxMapFileBtn');
 const fxMapFileInput = document.getElementById('fxMapFile');
 const fxMapSubDefault = fxMapSubEl ? fxMapSubEl.textContent : '';   // 两副面孔各自的说明句, 绑图这副的原文要留着
 let fxMapTarget = null;        // { onPick } —— 一次只收一张图
+let fxMapOpenSeq = 0;          // 每次开窗/关窗 +1：异步补进来的 Library 分组不能落到下一次窗里
 
 function fxMapModalOpen() { return fxMapModalEl.classList.contains('open'); }
-function closeFxMapModal() { fxMapModalEl.classList.remove('open'); fxMapTarget = null; syncBrushCursor(); }
+function closeFxMapModal() { fxMapOpenSeq++; fxMapModalEl.classList.remove('open'); fxMapTarget = null; syncBrushCursor(); }
 
 function bindFxMap(ref) {
     const t = fxMapTarget;
@@ -541,7 +542,9 @@ function fxMapCardGroup(title, items) {
         card.title = `${s.name}${s.width ? ` · ${s.width}×${s.height}` : ''}`;
         const img = document.createElement('img');
         img.className = 'tag-mode-thumb';
-        img.src = s.src;
+        // 图池条目从 A2 起带 `url`(仓库地址) —— 卡片优先用它,免得每次挑图都把几 MB 的 base64
+        // 塞进一个 <img>。老条目没有 url 才退回 src。
+        img.src = s.url || s.src;
         img.alt = s.name;
         img.draggable = false;
         const nm = document.createElement('span');
@@ -549,7 +552,10 @@ function fxMapCardGroup(title, items) {
         nm.textContent = s.name;
         card.appendChild(img);
         card.appendChild(nm);
-        card.addEventListener('click', () => bindFxMap(s.ref || { key: s.id, name: s.name }));
+        // 绑定的正身:条目自带 `asset`(仓库哈希)就写 `{asset}`,老条目才退回 `{key: staging_N}`。
+        card.addEventListener('click', () => bindFxMap(s.ref || (s.asset
+            ? { asset: s.asset, name: s.name }
+            : { key: s.id, name: s.name })));
         cards.appendChild(card);
     }
     group.appendChild(head);
@@ -557,9 +563,34 @@ function fxMapCardGroup(title, items) {
     return group;
 }
 
+// 资产仓库里的图片补成第二组(Library)。图池那一组是"本会话的工作区",这一组是"跨文档的
+// 库成员" —— A3 之后两者都按同一个 `{asset: hash}` 绑,删掉图池索引也不会把特效弄丢。
+// 清单只在开窗时问一次;异步回来晚了(窗已关/已重开)就丢掉这一份。
+async function appendFxLibraryGroup(seq, exclude) {
+    try {
+        const res = await fetch('/api/global_assets');
+        const data = await res.json();
+        if (seq !== fxMapOpenSeq || !fxMapModalOpen()) return;
+        const items = (data && data.assets || [])
+            .filter(a => a && a.kind === 'image' && a.hash && !(exclude && exclude.has(a.hash)))
+            .map(a => ({
+                id: a.hash, asset: a.hash,
+                name: a.displayName || a.name || a.hash,
+                url: '/api/asset_media/' + encodeURIComponent(a.hash),
+                src: '/api/asset_media/' + encodeURIComponent(a.hash),
+            }));
+        if (!items.length) return;
+        for (const h of fxMapGroupsEl.querySelectorAll('.modal-hint')) h.remove();
+        fxMapGroupsEl.appendChild(fxMapCardGroup('Library', items));
+    } catch (err) {
+        // 仓库不在/清单读不出来:Workspace 与 From file 仍然可用,不把整窗弄挂。
+    }
+}
+
 function openFxMapModal(l, effect, slotKey, opts) {
-    // 卡片的载荷默认还是 {key, name} —— 绑图要的就是这两下;别的用途(姿态识别)让条目自带
-    // ref,把"这是工作区的第几号图"还是"这是那一层的这张 PNG"分清楚。
+    const seq = ++fxMapOpenSeq;
+    // 卡片的载荷默认是 `{asset, name}`(A3:仓库哈希);老条目没有 asset 才退回 `{key, name}`。
+    // 别的用途(姿态识别)让条目自带 ref,把"这是仓库里的哪张图"还是"这是那一层的这张 PNG"分清楚。
     let spec;
     if (opts) {
         spec = {
@@ -613,14 +644,28 @@ function openFxMapModal(l, effect, slotKey, opts) {
     }
     if (fxMapFileBtnEl) fxMapFileBtnEl.style.display = spec.file ? '' : 'none';
     fxMapModalEl.classList.add('open');
+    if (!opts) {
+        // Workspace 里已经画过的那些不再在 Library 里重复出现。
+        const exclude = new Set(stagingItems.map(s => s && s.asset).filter(Boolean));
+        void appendFxLibraryGroup(seq, exclude);
+    }
     syncBrushCursor();
 }
 
-// 文件的落点:本地池 + data URL。它不进工作区条带(那是一张深度图,不是参考图),但会随 .cud
-// 一起存档,所以重开项目还认得这个 key。
+// 文件的落点:直接导进仓库(data/assets,内容寻址),绑定写 `{asset: hash, name}`。它不进工作区
+// 条带(那是一张深度图,不是参考图),也不再在内存里留一份 data URL —— 重开项目只要仓库还在,
+// 引用就还解得开。
 function readFxMapFile(file) {
+    if (!file) return;
     const r = new FileReader();
-    r.onload = () => bindFxMap(fxAddLocalMap(baseName(file && file.name), r.result));
+    r.onload = async () => {
+        setStatus(`Importing「${baseName(file.name)}」…`, 'info');
+        try {
+            bindFxMap(await fxImportMap(baseName(file.name), r.result));
+        } catch (err) {
+            setStatus('Could not import that map file: ' + (err && err.message || err), 'error');
+        }
+    };
     r.onerror = () => setStatus('Could not read that map file', 'error');
     r.readAsDataURL(file);
 }

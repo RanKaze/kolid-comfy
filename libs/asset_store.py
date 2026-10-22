@@ -178,6 +178,11 @@ def bootstrap_library():
         return True
 
 
+def _is_member(meta):
+    """表里这一行算不算库成员。老表没有 `member` 字段（= 首次认领写下的那些）默认是成员。"""
+    return bool(meta) and meta.get('member', True) is not False
+
+
 def records(refresh=False):
     """列一遍仓库：每件货一条记录（新的在前）。
 
@@ -201,10 +206,11 @@ def records(refresh=False):
             'size': f['size'],
             'mtime': f['mtime'],
             'name': meta.get('name') or f['file'],
-            'inLibrary': f['id'] in members,
-            'origin': meta.get('origin') or 'legacy',
+            'inLibrary': _is_member(meta),
+            'origin': meta.get('origin') or ('legacy' if _is_member(meta) else 'session'),
             'created': meta.get('created') or f['mtime'],
             'tags': list(meta.get('tags') or []),
+            'meta': dict(meta),
             'url': '/api/asset_media/' + f['id'],
             'thumb': ('/api/asset_thumb/' + f['id']) if f['kind'] == 'image' else None,
         })
@@ -323,6 +329,40 @@ def dataurl_bytes(u):
     return _b64(s)
 
 
+def _ensure_index_exists():
+    """把"表存在"这件事先钉下来（空表也算）。
+
+    为什么要在第一次**写入**时就建表：`_load()` 的首次认领靠"表在不在"判定。如果第一次写进来的是
+    一张 session 图（库里还没有表），之后任何一次读取都会触发认领，把它错误地升成库成员。
+    先落一张空表，认领就只可能发生在"老库、从没写过"的那种情况下。
+    """
+    with _LOCK:
+        if os.path.exists(_index_path()):
+            return
+        try:
+            _atomic_write(_index_path(),
+                          json.dumps({'version': 1, 'bootstrapped': True, 'assets': {}},
+                                     ensure_ascii=False, indent=1).encode('utf-8'))
+        except OSError:
+            pass
+
+
+def _existing_stem(aid):
+    """仓库里是否已有这个 hash 的文件（任何扩展名）。返回文件名或 None。
+
+    内容寻址的 id 是文件 stem —— 同一份字节必须只有**一个**文件。老代码先信名字里的扩展名，
+    A4 的 `.cud` 导入又把名字一律写成 `role-id.png`（字节可能是 GIF/JPEG 原件），于是同一
+    hash 会同时存在 `.gif` 和 `.png` 两份，`records()` 数出两件货、`get()` 只会碰到其中一份。
+    """
+    try:
+        for f in os.listdir(asset_dir()):
+            if f.startswith(aid + '.'):
+                return f
+    except OSError:
+        pass
+    return None
+
+
 def put_bytes(data, name=None, ext=None, origin='upload', library=False, tags=None, meta=None):
     """把一份字节放进仓库。返回记录（含 id / url）。
 
@@ -331,19 +371,38 @@ def put_bytes(data, name=None, ext=None, origin='upload', library=False, tags=No
     """
     if not data:
         return None
-    aid = hashlib.md5(bytes(data)).hexdigest()
-    ext = (ext or os.path.splitext(str(name or ''))[1] or sniff_ext(data) or '').lower()
+    raw = bytes(data)
+    aid = hashlib.md5(raw).hexdigest()
+    # 扩展名先信**魔数**，再信名字：字节是真理，名字是提示（见 _existing_stem）。
+    ext = (ext or sniff_ext(raw) or os.path.splitext(str(name or ''))[1] or '').lower()
     if ext and not ext.startswith('.'):
         ext = '.' + ext
     if not kind_of('x' + ext):
-        ext = sniff_ext(data) or ext or '.png'
+        ext = sniff_ext(raw) or ext or '.png'
     fname = aid + ext
     path = os.path.join(asset_dir(), fname)
     if not os.path.exists(path):
-        _atomic_write(path, bytes(data))
+        sibling = _existing_stem(aid)
+        if sibling:
+            fname, path = sibling, os.path.join(asset_dir(), sibling)
+    if not os.path.exists(path):
+        try:
+            _atomic_write(path, raw)
+        except OSError:
+            # 并发导入同一份字节（A4 的保存会并发问哈希）时，另一个线程可能刚把它落好；
+            # 也可能它正被读到（Windows 下 replace 会 PermissionError）。字节相同，
+            # 文件在就算成功。
+            if not os.path.exists(path):
+                raise
+    _ensure_index_exists()          # 先钉住"表存在"：否则首次读取会把这张图误认成库成员
     if library:
         set_library(aid, name=name, origin=origin, tags=tags, meta=meta)
-    return get(aid)
+        return get(aid)
+    # 不做库成员时**不查表**（records() 是一次目录扫描）：图池每条都调这里，
+    # 一次扫 154 个文件的代价不该压在热路径上。返回值按已知事实拼即可。
+    return {'id': aid, 'file': fname, 'kind': kind_of(fname) or 'image',
+            'size': len(data), 'url': '/api/asset_media/' + aid,
+            'name': name or aid, 'inLibrary': False, 'origin': origin}
 
 
 def set_library(ref, name=None, origin=None, tags=None, meta=None, on=True):
@@ -356,6 +415,7 @@ def set_library(ref, name=None, origin=None, tags=None, meta=None, on=True):
     if on:
         cur = dict(members.get(aid) or {})
         cur.setdefault('created', time.time())
+        cur['member'] = True
         if name:
             cur['name'] = str(name)
         if origin:
@@ -366,7 +426,45 @@ def set_library(ref, name=None, origin=None, tags=None, meta=None, on=True):
             cur.update({str(k): v for k, v in meta.items()})
         members[aid] = cur
     else:
-        members.pop(aid, None)
+        # 撤销库成员身份：字节与名字/标签都留着，只把 member 落下 —— 重命名过的临时产物
+        # 再被踢出库时不该把名字一起忘掉（A1 的 scope 是派生的，这张表也装非成员的元数据）。
+        cur = dict(members.get(aid) or {})
+        cur['member'] = False
+        members[aid] = cur
+    _save(idx)
+    return get(aid)
+
+
+def update_meta(ref, name=None, tags=None, meta=None):
+    """只改元数据（名字/标签/附属字段），**不动库成员身份**。
+
+    和 `set_library` 的区别：set_library 是「把货收进库 / 移出库」，默认 `on=True`；
+    拿它来改名会把一张 session 图顺手升成库成员。A1 的卡片对两种作用域都给了改名键，
+    所以这里单独开一条口，缺表时按 `member: False` 落一行（改名不能改变它属于哪一档）。
+
+    `meta` 是机械字段的合并口（A5 起 `proxyOf` 这类"谁是谁的派生物"住这儿）：
+    只并进去，不删键；给 None 的值就是显式删掉那个键。
+    """
+    aid = resolve(ref)
+    if not aid:
+        return None
+    idx = _load()
+    members = idx.setdefault('assets', {})
+    cur = dict(members.get(aid) or {})
+    if aid not in members:
+        cur.setdefault('created', time.time())
+        cur['member'] = False
+    if name is not None:
+        cur['name'] = str(name)
+    if tags is not None:
+        cur['tags'] = [str(t) for t in (tags or [])]
+    if meta:
+        for k, v in dict(meta).items():
+            if v is None:
+                cur.pop(str(k), None)
+            else:
+                cur[str(k)] = v
+    members[aid] = cur
     _save(idx)
     return get(aid)
 

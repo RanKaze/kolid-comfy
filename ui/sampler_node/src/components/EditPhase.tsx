@@ -860,7 +860,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             if (!ing) continue;       // 后端没 ffmpeg 且本地也解不动：放弃这一件
             // 落在播放头处、轨自动挑（placeImport：null trackId = 第一条视频轨，纯音频自动进音频轨）
             vidUpdate(proj => importToTrack(proj,
-              { src: ing.src, name: ing.name, origin: 'file' },
+              { src: ing.src, name: ing.name, origin: 'file', asset: ing.asset, play: ing.play },
               { duration: ing.duration, hasAudio: ing.hasAudio, audioOnly: ing.audioOnly },
               null, vidTransport.get()), 'Add clip');
           }
