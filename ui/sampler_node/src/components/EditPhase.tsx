@@ -14,7 +14,7 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidGenFrameRef, type VidGenPending, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, relinkAsset, saveVidProject, vidAssetRefs, vgenDurationOf, vgenGet, vgenWith, vgenWithDuration } from '../workbench/video/model';
+import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidGenFrameRef, type VidGenTrackCfg, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
@@ -23,7 +23,7 @@ import { getBlendUi, setBlendUi } from '../workbench/store';
 import { ingestFile } from '../workbench/video/ingest';
 import { clearProcFill, clearProcQueue, dequeueProcClip, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, vidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
-import { VidAssets } from '../workbench/video/Assets';
+import { VidAssets, Card, type StoreAsset } from '../workbench/video/Assets';
 import { VidPlayer } from '../workbench/video/Player';
 
 // The rename field of a preset row.
@@ -349,6 +349,58 @@ const RunIcon: React.FC<{ framed: boolean; size?: number }> = ({ framed, size = 
   </svg>
 );
 
+/** 首帧/末帧绑定 → 后端认的输入键（资产按内容哈希、.cud 按路径）。 */
+const vgenFrameKey = (ref: VidGenFrameRef | null | undefined): string =>
+  ref?.kind === 'asset' ? `asset:${ref.hash}` : ref?.kind === 'cud' ? `cud:${ref.path}` : '';
+
+/** 这一段自己那把首帧喂什么、从哪儿来。链着前一段时**链优先**（前段绑了末帧卡用那张，
+ *  否则把它产物的末帧交给后端现抽 —— 后端不认识那个文件就当场报错，不静默丢图）。 */
+const vgenFrameInputsOf = (
+  p: VidProject, clip: VidClip,
+): { image_keys: Record<string, string>; chain_frames: Record<string, { src: string; fps?: number }> } => {
+  const v = clip.vgen;
+  const image_keys: Record<string, string> = {};
+  const chain_frames: Record<string, { src: string; fps?: number }> = {};
+  if (!v) return { image_keys, chain_frames };
+  const prev = vgenChainPrevOf(p, clip);
+  if (v.ports.first_frame) {
+    if (prev) {
+      const ref = prev.vgen?.last_frame;
+      const k = vgenFrameKey(ref);
+      if (k) image_keys[String(v.ports.first_frame)] = k;
+      else {
+        const out = outputClipOf(p, prev);
+        if (!out) throw new Error(`「${prev.name}」 has no result yet — its last frame is the first frame of this segment.`);
+        // fps = 工程 fps：后端按工程网格算"最后一个正在显示"的源帧号。
+        chain_frames[String(v.ports.first_frame)] = { src: out.src, fps: p.fps };
+      }
+    } else if (v.first_frame) {
+      const k = vgenFrameKey(v.first_frame);
+      if (k) image_keys[String(v.ports.first_frame)] = k;
+    }
+  }
+  if (v.ports.last_frame && v.last_frame) {
+    const k = vgenFrameKey(v.last_frame);
+    if (k) image_keys[String(v.ports.last_frame)] = k;
+  }
+  return { image_keys, chain_frames };
+};
+
+/** 跑 target 之前必须先跑的链上前段（早 → 晚，不含自己）。前段绑了末帧卡就没有依赖；
+ *  没绑才要它产物的末帧 —— 产物不在就先跑它，逐级往前推。 */
+const vgenRunPlanBefore = (p: VidProject, target: VidClip): VidClip[] => {
+  const chain = vgenChainTo(p, target);
+  const need = new Set<string>([target.id]);
+  for (let i = chain.length - 1; i >= 1; i--) {
+    const cur = chain[i];
+    if (!need.has(cur.id)) continue;
+    const prev = chain[i - 1];
+    if (prev.vgen?.last_frame || outputClipOf(p, prev)) continue;
+    need.add(prev.id);
+  }
+  return chain.filter(c => c.id !== target.id && need.has(c.id));
+};
+
 interface EditPhaseProps {
   tab: Tab;
   onTabChange: (tab: Tab) => void;
@@ -430,6 +482,9 @@ interface EditPhaseProps {
   /** 最近 32 条行为记录（工作台每次 setStatus + 宿主自身动作）。画布上那颗常显状态药丸撤掉后，
    *  反馈就攒在这里，由 Context 标题行的 Log 按钮按需展开。 */
   actionLog: ActionLogEntry[];
+  /** 宿主的 Log 追加口（App.pushLog 同一支笔）：跳转被后端拒绝这类"页面这头失败了"的
+   *  事，工作台的状态行看不见，只能落在这里。 */
+  pushLog?: (text: string, kind?: ActionLogEntry['kind']) => void;
   /** 工作台报上来的打开中的文档：一颗 dock 窗口一个，`activeUid` 那才是工作流真正执行的那块画布。 */
   blendDocs: BlendDocs;
   /** 每个非激活文档最后一次画出来的那一帧（uid → PNG data URL）。切换前由工作台自己拍下来。 */
@@ -468,7 +523,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   pipelinePackages, pipelineSettings, loadedPipelineName, onSwitchPipeline, onPipelineSettingsChange, onSetPresetPipeline,
   archSettings, onArchSettingsChange, onAddArchRule, onDuplicateArchRule, onRemoveArchRule, onReorderArchRules,
   openWithApp, onOpenWithAppChange,
-  actionLog, blendDocs, docStills, onDocCommand, onBlendUiCommand,
+  actionLog, pushLog, blendDocs, docStills, onDocCommand, onBlendUiCommand,
   stageUpload, stageRemove,
 }) => {
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
@@ -517,6 +572,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [vidMode, setVidModeState] = useState<VidMode>(vidMode0);
   const vidModeRef = useRef(vidMode);
   vidModeRef.current = vidMode;
+  // ── Video 工程状态 ── 权威在宿主：Player / Tracks 两扇窗都从这里拿快照（VidController），
+  // **按文档分桶**：Video 工程随 .cud 走（保存时 iframe 来要快照、读档时送回来），桶键 = 文档
+  // uid；写入落进活跃文档的桶，切文档 = 换一份工程。
+  const vidByDoc = useRef(new Map<number, VidProject>());
+  const activeUid = blendDocs.activeUid;
+  const activeUidRef = useRef(activeUid); activeUidRef.current = activeUid;
   // Video 工程的"脏"记在宿主：工程随 .cud 走，而工作台的 dirty 只看图层，
   // 光动 Assets/Tracks 它不会亮 —— 所以这一份要宿主自己记，存盘后清掉。
   const vidDirty = useRef(new Set<number>());
@@ -551,7 +612,29 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, []);
   // 模式切换不动树：vtracks / vassets 本来就是默认提供的窗（起手树 / fitLayout 补缺都保证它们在）。
   // 切换只换 canvas 格的正文 —— 画布 ↔ 播放器 —— Tracks / Assets 与其它每一扇窗原地不动。
+  // 模式同时是**工程自己的属性**（随 .cud 走）：写进活跃文档的桶并置脏，下一次落盘就带进
+  // 文件 —— 重开这份工程时落回它自己的模式，不再是页面级的一颗开关。不算一步时间线编辑，
+  // 不进撤销摞。
   const setVidMode = useCallback((m: VidMode) => {
+    if (m === vidModeRef.current) return;
+    try { localStorage.setItem(VID_MODE_STORE, m); } catch { /* in-memory only */ }
+    vidModeRef.current = m;
+    setVidModeState(m);
+    const uid = activeUidRef.current;
+    if (uid == null) return;
+    const cur = vidByDoc.current.get(uid);
+    if (cur && cur.mode !== m) {
+      const next = { ...cur, mode: m };
+      vidByDoc.current.set(uid, next);
+      // ref 当场跟上：同一事件里紧接着的 vidUpdate 要以这份为准，别拿旧工程把 mode 冲掉。
+      vidProjectRef.current = next;
+      setVidProject(next);
+      markVidDirty(uid);
+    }
+  }, [markVidDirty]);
+  // 页面这份模式态只是**活跃工程 mode 的投影**：切文档 / 读档回来时跟着工程走（打开哪份
+  // .cud 就显示它自己的设置）。
+  const syncVidMode = useCallback((m: VidMode) => {
     if (m === vidModeRef.current) return;
     try { localStorage.setItem(VID_MODE_STORE, m); } catch { /* in-memory only */ }
     vidModeRef.current = m;
@@ -567,7 +650,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 页面存档（localStorage）只是"刷新之后手上还没有任何 .cud"时的起手工程：它喂给**这次开机见到
   // 的第一份文档**，之后就作废。绝不渗进之后打开/新建的任何文档 —— 那些的正身要么在 .cud 里
   // （blend-vid-restore 送来），要么就是空白。
-  const vidSeedRef = useRef<{ p: VidProject } | null>({ p: loadVidProject() });
+  const vidSeedRef = useRef<{ p: VidProject } | null>((() => {
+    const p = loadVidProject();
+    // 页面起手工程的老档没有 mode 字段：沿用页面存档那一位（刷新后留在上次的模式里），
+    // 别把 boot 文档拽回 image。之后每次切模式都随工程存档，这位只在开机喂第一份文档。
+    return { p: { ...p, mode: vidMode0 } };
+  })());
   const [vidProject, setVidProject] = useState<VidProject>(() => vidSeedRef.current!.p);
   const vidProjectRef = useRef(vidProject); vidProjectRef.current = vidProject;
   const [vidTransport] = useState(createVidTransport);
@@ -592,9 +680,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 测量挂在 render 之外，拿不到 state 闭包，所以走 ref。
   const vidCanvasRef = useRef(false);
   vidCanvasRef.current = vidMode === 'video';
-  const vidByDoc = useRef(new Map<number, VidProject>());
-  const activeUid = blendDocs.activeUid;
-  const activeUidRef = useRef(activeUid); activeUidRef.current = activeUid;
   // 工程里的"顺带状态"（范围、mute/solo）改完找机会落盘：拖一次把手会连发几十次改动 ——
   // 停手后再写，一次手势 = 一次盘。与"跑完一段自动保存"同一口径：工作台只对已绑过文件的
   // 文档写，没绑的它自己返回（不弹目录框）。
@@ -734,7 +819,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const vidUpdate = useCallback((fn: (p: VidProject) => VidProject, label?: string) => {
     const uid = activeUidRef.current;
     const prev = vidProjectRef.current;
-    const next = fn(prev);
+    // 每一次工程变更都顺手收掉不再成立的生成器链接（拖开/裁开/删段/改轨）——
+    // 自动断开只在这一处发生，读链的函数因此可以信任存档里的 chainPrev。
+    const next = pruneVgenChains(fn(prev));
     if (next === prev) return;                 // 没变：不进历史、不置脏
     vidProjectRef.current = next;
     setVidProject(next);
@@ -761,8 +848,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       map.set(uid, seed ? seed.p : defaultVidProject());
       vidSeedRef.current = null;
     }
-    setVidProject(map.get(uid)!);
-  }, [blendDocs.activeUid]);
+    const proj = map.get(uid)!;
+    setVidProject(proj);
+    // 模式跟着工程走：打开哪份文档就落回它自己的 Image / Video 设置。
+    syncVidMode(proj.mode === 'video' ? 'video' : 'image');
+  }, [blendDocs.activeUid, syncVidMode]);
   // 文档关掉了 → 它那一桶（工程 + 脏标记）跟着走。uid 是工作台**每次开机从 1 重新发**的，
   // 留着旧的会在下一次复用同一个 uid 时串台（新文档凭空多出上一位的片段）。
   // 关掉的是**最后一份**时，屏幕上那份工程也必须一起走：Tracks / Assets 读的就是 vidProject，
@@ -834,7 +924,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         vidHist.current.delete(uid);
         vidEditAt.current = 0;
         bumpVidHist();
-        if (uid === activeUidRef.current) setVidProject(proj);
+        if (uid === activeUidRef.current) {
+          setVidProject(proj);
+          // 文件里带的模式跟着落地：打开这份 .cud 就显示它自己的设置。
+          syncVidMode(proj.mode === 'video' ? 'video' : 'image');
+        }
       } else if (d.type === 'blend-saved') {
         // 工作台把 .cud 落盘了 —— Video 工程就在这份文件里，这一桶可以清脏了。
         const uid = Math.round(Number(d.uid) || 0);
@@ -869,7 +963,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     };
     window.addEventListener('message', onMsg);
     return () => window.removeEventListener('message', onMsg);
-  }, []);
+    // syncVidMode 恒稳（[] 依赖）：写进来只是给 lint 看，订阅不会因此重建。
+  }, [syncVidMode]);
   // History 那一格读的是**只读投影**：图层步（页面播报的）在前、视频步接在后面。
   // 视频的工程快照留在上面的摞里，这里只交名字 —— 面板不该为了显示一行字拿一份几十兆的工程。
   useEffect(() => {
@@ -1349,77 +1444,133 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setVidProcRun({ state: 'idle', msg: '' });
   }, [interfaces, vgenCfgOf, vgenDefaults, vidUpdate, vidTransport]);
 
-  /** 跑一段生成器：段上那套参数原样进 interface，首末帧按绑定喂进它们那一口。
-   *  产物从 video 口回来，落到输出轨的对应位置（段自己原地保留，可以反复重跑）。 */
-  const runVideoGenSegment = useCallback(async (clipId: string) => {
-    if (vidProcBusy.current) {
-      setVidProcRun({ state: 'error', msg: 'A run is already in flight — wait for it or cancel it first.' });
-      return;
-    }
-    const clip = vidProjectRef.current.clips.find(c => c.id === clipId);
+  /** 跑一段生成器（只这一段）：段上那套参数原样进 interface，首末帧（含从链上前段共享来的）
+   *  喂进它们那一口，产物落到输出轨的对应位置。调用方负责忙碌闸门与进度条收尾。 */
+  const execVgenClip = useCallback(async (clipId: string): Promise<{
+    dur: number; frames: number; stitched: boolean;
+  }> => {
+    const proj = vidProjectRef.current;
+    const clip = proj.clips.find(c => c.id === clipId);
     const v = clip?.vgen;
-    if (!clip || !v) return;
+    if (!clip || !v) throw new Error('The generator segment is gone.');
     const byName = interfaces.findIndex(i => i.name === v.iface);
     const idx = byName >= 0 ? byName : v.ifaceNum;
     if (idx < 0 || idx >= interfaces.length) {
-      setVidProcRun({ state: 'error', msg: `「${v.iface}」 is not connected (package disconnected?).` });
-      return;
+      throw new Error(`「${v.iface}」 is not connected (package disconnected?).`);
     }
-    const keyOf = (ref?: VidGenFrameRef | null): string =>
-      ref?.kind === 'asset' ? `asset:${ref.hash}` : ref?.kind === 'cud' ? `cud:${ref.path}` : '';
-    const image_keys: Record<string, string> = {};
-    if (v.ports.first_frame && v.first_frame) {
-      const k = keyOf(v.first_frame);
-      if (k) image_keys[String(v.ports.first_frame)] = k;
+    // 共享帧在**跑的这一刻**才解析：前段可能刚在这一趟里跑完，产物才落位。
+    const { image_keys, chain_frames } = vgenFrameInputsOf(proj, clip);
+    // 分辨率也是跑的这一刻才定：轨上开了 from canvas 就按当下的画布 × scale 覆写宽高口；
+    // 轨上没设置过（老存档）就沿用段上那份旧参数。
+    const res = vgenResolutionOf(proj, clip, getBlendUi().canvas);
+    let params = v.params;
+    if (res) {
+      if (v.ports.width) params = { ...params, [String(v.ports.width)]: res.w };
+      if (v.ports.height) params = { ...params, [String(v.ports.height)]: res.h };
     }
-    if (v.ports.last_frame && v.last_frame) {
-      const k = keyOf(v.last_frame);
-      if (k) image_keys[String(v.ports.last_frame)] = k;
+    // 帧率同样按轨走：轨上设了 fps 就覆写 fps 口 —— 但 **Fixed FPS 的段不吃这个**
+    // （它的输出帧率写死在生成器上，轨上的数喂进去是误会）。
+    const trackFps = vgenFpsOf(proj, clip);
+    if (trackFps && v.ports.fps && !v.fixed_fps) {
+      params = { ...params, [String(v.ports.fps)]: trackFps };
     }
-    if (procSlotBusy(vidProjectRef.current, v.port ?? 0, clip.start, clip.duration, clip.id)) {
-      setVidProcRun({ state: 'error', msg: 'The output track already has a clip over this segment — move or delete it first.' });
-      return;
-    }
-    vidProcBusy.current = true;
-    vidCancelRef.current = false;
+    setProcFill(clipId, 0);
     try {
-      const metas = await executeSeg(idx, v.params, {}, `Generating with 「${v.iface}」…`, 0, 1,
+      const metas = await executeSeg(idx, params, {}, `Generating with 「${v.iface}」…`, 0, 1,
         segP => setProcFill(clipId, segP),
         // 段自己揣着那份绑定（接口后来改了绑定，老段仍按自己当时那份跑）—— 所以这里把
         // 槽位表一并交给后端：它据此决定那一口是"回片"还是"回一批帧、得现编"。
-        { offline: true, image_keys, vgen: { ports: v.ports, fixed_fps: !!v.fixed_fps,
-          fixed_fps_value: v.fixed_fps_value } });
+        // 提示词的两颗 preset id 也一并带上：后端按"端口纯文本 → 段 preset → 轨 preset"
+        // 的顺序拼成这一段的 prompt。
+        { offline: true, image_keys, chain_frames,
+          vgen: { ports: v.ports, fixed_fps: !!v.fixed_fps, fixed_fps_value: v.fixed_fps_value,
+            ...(v.promptPresetId ? { prompt_preset_id: v.promptPresetId } : {}),
+            ...(proj.tracks.find(t => t.id === clip.trackId)?.vgenPromptPresetId
+              ? { track_prompt_preset_id: proj.tracks.find(t => t.id === clip.trackId)!.vgenPromptPresetId } : {}) } });
       const mine = metas.find(m => m.port === v.port && m.video) || metas.find(m => m.video);
       if (!mine) throw new Error('The generator finished with no video result.');
       // 落位长度 = **段自己的长度**（不按帧数 ÷ 帧率折算）：生成器按 16fps 出、工程是
       // 30fps 这种对不上是常态，段长就是用户在时间线上看到的那一截。
       const frames = Number(mine.frames || 0);
       const dur = clip.duration > 0 ? clip.duration : (vgenDurationOf(v) || 0.1);
-      vidUpdate(proj => placeVideoGenOutput(proj, clipId, mine.video as string,
+      vidUpdate(proj2 => placeVideoGenOutput(proj2, clipId, mine.video as string,
         clip.name || v.iface, dur), 'Generator → output');
       autoSaveCud();
-      const how = mine.stitched
-        ? `stitched ${frames > 0 ? `${frames} frames` : 'the returned frames'} into a clip`
+      return { dur, frames, stitched: !!mine.stitched };
+    } finally {
+      clearProcFill(clipId);
+    }
+  }, [interfaces, executeSeg, vidUpdate, autoSaveCud]);
+
+  /** 点一段生成器的 ▶：链上前段还没产物的，先按早 → 晚把它们跑出来（后一段的首帧就是
+   *  前一段的末帧），最后才跑被点的那一段。整条计划开跑前先验一遍接口与输出槽位。 */
+  const runVideoGenSegment = useCallback(async (clipId: string) => {
+    if (vidProcBusy.current) {
+      setVidProcRun({ state: 'error', msg: 'A run is already in flight — wait for it or cancel it first.' });
+      return;
+    }
+    const proj = vidProjectRef.current;
+    const clip = proj.clips.find(c => c.id === clipId);
+    if (!clip?.vgen) return;
+    const before = vgenRunPlanBefore(proj, clip);
+    for (const seg of [...before, clip]) {
+      const v = seg.vgen!;
+      const byName = interfaces.findIndex(i => i.name === v.iface);
+      const idx = byName >= 0 ? byName : v.ifaceNum;
+      if (idx < 0 || idx >= interfaces.length) {
+        setVidProcRun({ state: 'error', msg: `「${v.iface}」 is not connected (package disconnected?).` });
+        return;
+      }
+      if (procSlotBusy(proj, v.port ?? 0, seg.start, seg.duration, seg.id)) {
+        setVidProcRun({ state: 'error', msg: `「${seg.name}」 cannot run — the output track already has a clip over ${seg.start.toFixed(1)}s–${(seg.start + seg.duration).toFixed(1)}s.` });
+        return;
+      }
+    }
+    vidProcBusy.current = true;
+    vidCancelRef.current = false;
+    let runningId = clipId;
+    try {
+      for (const seg of before) {
+        if (vidCancelRef.current) throw new Error('cancelled');
+        runningId = seg.id;
+        setVidProcRun({ state: 'running', msg: `Generating 「${seg.name}」 first — its last frame is the next segment's first frame…` });
+        await execVgenClip(seg.id);
+      }
+      runningId = clip.id;
+      const r = await execVgenClip(clip.id);
+      const how = r.stitched
+        ? `stitched ${r.frames > 0 ? `${r.frames} frames` : 'the returned frames'} into a clip`
         : 'clip';
-      setVidProcRun({ state: 'done', msg: `Done — 「${v.iface}」 ${how} landed on the output track (${dur.toFixed(1)}s).` });
+      const chained = before.length
+        ? ` · ${before.length} linked segment${before.length > 1 ? 's' : ''} run first` : '';
+      setVidProcRun({ state: 'done', msg: `Done — 「${clip.vgen.iface}」 ${how} landed on the output track (${r.dur.toFixed(1)}s)${chained}.` });
     } catch (e: unknown) {
-      setVidProcRun(vidCancelRef.current
-        ? { state: 'cancelled', msg: 'Generator run cancelled.' }
-        : { state: 'error', msg: `Generator failed — ${e instanceof Error ? e.message : String(e)}` });
+      const cancelled = vidCancelRef.current;
+      const stopped = cancelled && vidStopRef.current === runningId;
+      setVidProcRun(stopped
+        ? { state: 'cancelled', msg: 'Generator stopped.' }
+        : cancelled
+          ? { state: 'cancelled', msg: 'Generator run cancelled.' }
+          : { state: 'error', msg: `Generator failed — ${e instanceof Error ? e.message : String(e)}` });
     } finally {
       clearProcFill(clipId);
       vidStagingOverlay.busy = false;
       vidStagingOverlay.progress = -1;
       pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
       vidCancelRef.current = false;
+      if (before.some(s => s.id === vidStopRef.current) || vidStopRef.current === clipId) vidStopRef.current = null;
       vidProcBusy.current = false;
     }
-  }, [interfaces, executeSeg, vidUpdate, autoSaveCud]);
+  }, [interfaces, execVgenClip]);
 
   // 段的首/末帧绑定：挑一张图片资产，或磁盘上一份 .cud 工程（后端读它的合成图）。
   const [vgenFramePick, setVgenFramePick] = useState<{ clipId: string; which: 'first_frame' | 'last_frame' } | null>(null);
-  // 段的设置（齿轮）：宽高 / 时长 / 帧率 / 提示词 / 首末帧都在这里改。
-  const [vgenSettingsId, setVgenSettingsId] = useState<string | null>(null);
+  // 生成器轨的设置（轨头齿轮）：宽高 / from canvas / scale / fps —— 轨上所有段共享。
+  const [vgenTrackSettingsId, setVgenTrackSettingsId] = useState<string | null>(null);
+  // 生成器轨的轨级提示词（轨头 prompt 图标）：prompt block 同一套编辑弹窗。
+  const [vgenTrackPromptId, setVgenTrackPromptId] = useState<string | null>(null);
+  // 生成器段的段级提示词（段上 prompt 图标）：同一扇弹窗，preset 记在段自己的 vgen 上。
+  const [vgenSegPromptId, setVgenSegPromptId] = useState<string | null>(null);
 
   /** 首/末帧绑定写回（解绑传 null）。 */
   const setVgenFrame = useCallback((clipId: string, which: 'first_frame' | 'last_frame',
@@ -2366,6 +2517,62 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     return null;
   }, []);
 
+  /** 打开生成器轨的轨级提示词弹窗。轨上还没有 preset（或引用的那颗被删了）就先建一颗
+   *  并把 id 记到轨上 —— preset 是共享持久化的，轨上所有段跑的时候都读它。 */
+  const openVgenTrackPrompt = useCallback(async (trackId: string) => {
+    const track = vidProjectRef.current.tracks.find(t => t.id === trackId);
+    if (!track || track.role !== 'vgen') return;
+    let pid = track.vgenPromptPresetId;
+    if (!pid || !promptPresets.some(p => p.id === pid)) {
+      const created = await createPromptPreset();
+      if (!created) return;
+      pid = created.id;
+      vidUpdate(proj => setVideoGenTrackPreset(proj, trackId, pid!), 'Track prompt');
+    }
+    setVgenTrackPromptId(trackId);
+  }, [vidProjectRef, promptPresets, createPromptPreset, vidUpdate]);
+
+  /** 打开生成器段的段级提示词弹窗。段上还没有 preset（或引用的那颗被删了）就先建一颗
+   *  并把 id 记到段的 vgen 上 —— 跑的时候渲染成串，拼在段 prompt 纯文本后、轨级 preset 前。 */
+  const openVgenSegPrompt = useCallback(async (clipId: string) => {
+    const clip = vidProjectRef.current.clips.find(c => c.id === clipId);
+    if (!clip?.vgen) return;
+    let pid = clip.vgen.promptPresetId;
+    if (!pid || !promptPresets.some(p => p.id === pid)) {
+      const created = await createPromptPreset();
+      if (!created) return;
+      pid = created.id;
+      const newPid = pid;
+      vidUpdate(proj => ({
+        ...proj,
+        clips: proj.clips.map(c => (c.id === clipId && c.vgen
+          ? { ...c, vgen: { ...c.vgen, promptPresetId: newPid } } : c)),
+      }), 'Segment prompt');
+    }
+    setVgenSegPromptId(clipId);
+  }, [vidProjectRef, promptPresets, createPromptPreset, vidUpdate]);
+
+  // .cud 帧卡的跳转：把用户挑进工程的路径 mint 成对话框同形的描述符（/api/cud_open），
+  // 交给工作台的 blend-reopen-cud —— 已开着就切换过去，没开着就 Load 开新窗。
+  // 后端拒了（非 .cud / 文件不在了）什么都不发生，帧绑定不动 —— 但要在 Log 里说一声，
+  // "点了没反应"和"点了两下开了两个 tab"都得有得查。
+  const openVgenCud = useCallback(async (path: string) => {
+    try {
+      const r = await fetch('/api/cud_open', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      }).then(x => x.json());
+      if (r?.ok && r.doc) {
+        blendIframeRef.current?.contentWindow?.postMessage(
+          { type: 'blend-reopen-cud', doc: r.doc, reason: '' }, '*');
+      } else {
+        pushLog?.(`Jump refused: ${(r && r.error) || 'not a readable .cud'} — ${path}`, 'error');
+      }
+    } catch (e) {
+      pushLog?.(`Jump failed: ${(e && (e as Error).message) || e}`, 'error');
+    }
+  }, [blendIframeRef, pushLog]);
+
   const renamePromptPreset = useCallback(async (id: string, name: string) => {
     try {
       const res = await fetch('/api/prompt_presets', {
@@ -2409,12 +2616,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, [onQueryAnswer, pendingQuery, refreshPromptPresets]);
 
   // The preset-scope prompt iframe saves to the shared preset through the backend AND
-  // notifies us — refresh the list (new content) and close the editor.
+  // notifies us — refresh the list (new content) and close whichever editor is open
+  // (a prompt block's editor, or the generator track prompt modal).
   useEffect(() => {
     const onSaved = (event: MessageEvent) => {
       if (event.data?.type !== 'prompt-preset-saved') return;
       void refreshPromptPresets();
       setEditingPromptPresetId(null);
+      setVgenTrackPromptId(null);
+      setVgenSegPromptId(null);
     };
     window.addEventListener('message', onSaved);
     return () => window.removeEventListener('message', onSaved);
@@ -2848,7 +3058,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 : <VidTimeline vid={vidCtl} onSettingsPlaceholders={setProcSettingsIds}
                     onRunVGen={id => { void runVideoGenSegment(id); }}
                     onPickVGenFrame={(id, which) => setVgenFramePick({ clipId: id, which })}
-                    onSettingsVGen={setVgenSettingsId} />,
+                    onVGenTrackSettings={setVgenTrackSettingsId}
+                    onVGenTrackPrompt={openVgenTrackPrompt}
+                    onVGenPrompt={id => { void openVgenSegPrompt(id); }}
+                    onVGenCudOpen={path => { void openVgenCud(path); }} />,
               vassets: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
                 : <VidAssets vid={vidCtl} />,
@@ -3415,42 +3628,57 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           />
         );
       })()}
-      {/* video generator 段的设置：段上那套参数的全部 —— 位置/时长（与 duration 参数一回事）、
-          宽高、帧率、提示词、首末帧绑定。 */}
-      {vgenSettingsId && (() => {
-        const clip = vidProject.clips.find(c => c.id === vgenSettingsId);
-        if (!clip?.vgen) return null;
+      {/* 生成器轨/段的提示词：prompt block 同一套编辑弹窗 —— 完整的 prompt_node UI 以
+          preset scope 挂进来，选择保存进共享 preset（服务端持久化）。 */}
+      {vgenTrackPromptId && (() => {
+        const track = vidProject.tracks.find(t => t.id === vgenTrackPromptId);
+        const pid = track?.vgenPromptPresetId;
+        if (!track || track.role !== 'vgen' || !pid) return null;
         return (
-          <VideoGenSettingsModal
-            clip={clip}
-            vgen={clip.vgen}
-            onApply={patch => {
-              const id = clip.id;
-              setVgenSettingsId(null);
-              vidUpdate(proj => ({
-                ...proj,
-                clips: proj.clips.map(c => {
-                  if (c.id !== id || !c.vgen) return c;
-                  let v = c.vgen;
-                  if (patch.width != null) v = vgenWith(v, 'width', patch.width);
-                  if (patch.height != null) v = vgenWith(v, 'height', patch.height);
-                  if (patch.fps != null) v = vgenWith(v, 'fps', patch.fps);
-                  if (patch.prompt != null) v = vgenWith(v, 'prompt', patch.prompt);
-                  // 时长与段长是同一件事：改哪一头另一头都跟着走。
-                  if (patch.duration != null) v = vgenWithDuration(v, patch.duration);
-                  return {
-                    ...c,
-                    name: patch.name ?? c.name,
-                    start: patch.start != null ? Math.max(0, patch.start) : c.start,
-                    duration: patch.duration != null ? Math.max(0.1, patch.duration) : c.duration,
-                    srcDuration: patch.duration != null ? Math.max(0.1, patch.duration) : c.srcDuration,
-                    vgen: v,
-                  };
-                }),
-              }), 'Generator settings');
+          <PromptPresetModal
+            title={`Track prompt — ${track.name}`}
+            subtitle="追加在这条轨每段自己的提示词后面 · 共享持久化"
+            promptUrl={promptUrl}
+            presetId={pid}
+            onClose={() => setVgenTrackPromptId(null)}
+          />
+        );
+      })()}
+      {vgenSegPromptId && (() => {
+        const clip = vidProject.clips.find(c => c.id === vgenSegPromptId);
+        const pid = clip?.vgen?.promptPresetId;
+        if (!clip?.vgen || !pid) return null;
+        return (
+          <PromptPresetModal
+            title={`Segment prompt — ${clip.name}`}
+            subtitle="这一段自己的选择 · 跑时拼在段 prompt 纯文本后、轨级提示词前"
+            promptUrl={promptUrl}
+            presetId={pid}
+            onClose={() => setVgenSegPromptId(null)}
+          />
+        );
+      })()}
+      {/* 生成器轨的设置：宽高 / from canvas / scale，轨上所有段共享。 */}
+      {vgenTrackSettingsId && (() => {
+        const track = vidProject.tracks.find(t => t.id === vgenTrackSettingsId);
+        if (!track || track.role !== 'vgen') return null;
+        const first = vidProject.clips.find(c => c.trackId === track.id && c.vgen)?.vgen;
+        const paramNum = (slot: 'width' | 'height'): number => {
+          const port = first?.ports[slot];
+          const n = port ? Number(first!.params[String(port)]) : NaN;
+          return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+        };
+        return (
+          <VideoGenTrackModal
+            track={track}
+            seed={{ width: paramNum('width') || 832, height: paramNum('height') || 480 }}
+            canvas={getBlendUi().canvas}
+            onApply={cfg => {
+              const tid = track.id;
+              setVgenTrackSettingsId(null);
+              vidUpdate(proj => setVideoGenTrackCfg(proj, tid, cfg), 'Generator track settings');
             }}
-            onBindFrame={which => setVgenFramePick({ clipId: clip.id, which })}
-            onClose={() => setVgenSettingsId(null)}
+            onClose={() => setVgenTrackSettingsId(null)}
           />
         );
       })()}
@@ -3476,137 +3704,151 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   );
 };
 
-// ── Video Generator 的两扇小窗 ─────────────────────────────────────────────────────────────
-// 设置（齿轮）与首/末帧绑定：值都住在段上（params / vgen 引用），所以这两扇窗只是"把值交
-// 给段"，不认识接口、也不认识执行。
+// ── Video Generator 的小窗 ────────────────────────────────────────────────────────────────
+// 首/末帧绑定：值住在段上（vgen 引用），这扇窗只是"把引用交给段"，不认识接口、也不认识执行。
 
-/** video generator 段的设置：段上那套参数的全部。
- *  时长那一栏是**双向绑定**的：改它段就跟着变长变短，拖段尾也会写回这里。 */
-const VideoGenSettingsModal: React.FC<{
-  clip: VidClip;
-  vgen: VidGenPending;
-  onApply: (patch: { name?: string; start?: number; duration?: number;
-    width?: number; height?: number; fps?: number; prompt?: string }) => void;
-  onBindFrame: (which: 'first_frame' | 'last_frame') => void;
+/** prompt block 同款编辑弹窗：完整的 prompt_node UI 以 preset scope 挂进来，选择保存进
+ *  共享 preset（服务端持久化）。生成器轨的轨级提示词与段的提示词共用这一扇。 */
+const PromptPresetModal: React.FC<{
+  title: string;
+  subtitle: string;
+  promptUrl: string;
+  presetId: string;
   onClose: () => void;
-}> = ({ clip, vgen, onApply, onBindFrame, onClose }) => {
-  const num0 = (slot: 'width' | 'height' | 'fps'): string => {
-    const v = vgenGet(vgen, slot);
-    return v === undefined || v === null || v === '' ? '' : String(v);
-  };
-  const [name, setName] = useState(clip.name);
-  const [start, setStart] = useState(clip.start.toFixed(2));
-  const [duration, setDuration] = useState((vgenDurationOf(vgen) || clip.duration).toFixed(2));
-  const [w, setW] = useState(num0('width'));
-  const [h, setH] = useState(num0('height'));
-  const [fps, setFps] = useState(num0('fps'));
-  // Fixed FPS：整台生成器写死的那个数（段上带一份快照，改它去 Interface tab）。
-  const fixedFps = Number(vgen.fixed_fps_value) > 0 ? Number(vgen.fixed_fps_value) : 16;
-  const [prompt, setPrompt] = useState(String(vgenGet(vgen, 'prompt') ?? ''));
-  const dirty = name !== clip.name
-    || Math.abs(Number(start) - clip.start) > 1e-6
-    || Math.abs(Number(duration) - (vgenDurationOf(vgen) || clip.duration)) > 1e-6
-    || w !== num0('width') || h !== num0('height') || fps !== num0('fps')
-    || prompt !== String(vgenGet(vgen, 'prompt') ?? '');
+}> = ({ title, subtitle, promptUrl, presetId, onClose }) => {
+  const params = 'sampler_base=' + encodeURIComponent(window.location.origin)
+    + '&scope=prompt_preset&preset_id=' + encodeURIComponent(presetId);
+  const src = (promptUrl || '/prompt_node.html') + (promptUrl.includes('?') ? '&' : '?') + params;
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1000,
+      background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }} onClick={onClose}>
+      <div style={{
+        width: '94vw', height: '92vh', background: '#0d0d0d', borderRadius: 14,
+        border: '0.5px solid rgba(255,255,255,0.12)', display: 'flex', flexDirection: 'column',
+        overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+      }} onClick={(e) => e.stopPropagation()}>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '10px 16px', flexShrink: 0, borderBottom: '0.5px solid rgba(255,255,255,0.08)',
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: '#64d2ff' }}>
+            {title}
+            <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.45)', marginLeft: 8 }}>
+              {subtitle}
+            </span>
+          </div>
+          <button
+            style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}
+            title="Close"
+            onClick={onClose}
+          >✕</button>
+        </div>
+        <iframe
+          src={src}
+          title="Prompt preset editor"
+          style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#0d0d0d' }}
+        />
+      </div>
+    </div>
+  );
+};
+
+/** 生成器**轨**的设置：这条轨上所有段跑的时候用的宽高与帧率。From canvas 开着 = 工作台画布 ×
+ *  scale（跑的这一刻现算），宽高灰掉、只留 scale；关着就是两个固定数。fps 只覆写没开
+ *  Fixed FPS 的段。 */
+const VideoGenTrackModal: React.FC<{
+  track: { name: string; port?: number; vgenCfg?: VidGenTrackCfg };
+  seed: { width: number; height: number };
+  canvas: { w: number; h: number };
+  onApply: (cfg: VidGenTrackCfg) => void;
+  onClose: () => void;
+}> = ({ track, seed, canvas, onApply, onClose }) => {
+  const cfg = track.vgenCfg;
+  const [fromCanvas, setFromCanvas] = useState(!!cfg?.fromCanvas);
+  const [w, setW] = useState(String(cfg?.width ?? seed.width));
+  const [h, setH] = useState(String(cfg?.height ?? seed.height));
+  const [scale, setScale] = useState(String(cfg?.scale ?? 1));
+  const [fps, setFps] = useState(cfg?.fps != null ? String(cfg.fps) : '');
+  const s = Number(scale);
+  const scaleOk = Number.isFinite(s) && s > 0;
+  const factor = scaleOk ? s : 1;
+  const fpsOk = fps === '' || (Number.isFinite(Number(fps)) && Number(fps) >= 1);
+  // 画布量到了才显示得出换算结果；没量到（工作台没开/还没播报）就灰着显示旧值。
+  const resolved = canvas.w > 0 && canvas.h > 0
+    ? { w: Math.max(1, Math.round(canvas.w * factor)), h: Math.max(1, Math.round(canvas.h * factor)) }
+    : null;
+  const dirty = !cfg || cfg.fromCanvas !== fromCanvas
+    || (!fromCanvas && (Math.round(Number(w)) !== cfg.width || Math.round(Number(h)) !== cfg.height))
+    || (fromCanvas && Math.abs((scaleOk ? s : 1) - cfg.scale) > 1e-6)
+    || ((cfg?.fps != null ? String(cfg.fps) : '') !== fps);
   const row: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 };
   const lab: React.CSSProperties = { fontSize: 11.5, fontWeight: 600, color: 'rgba(255,255,255,0.62)', width: 92, flexShrink: 0 };
   const inp: React.CSSProperties = {
     flex: 1, minWidth: 0, background: 'rgba(0,0,0,0.35)', border: '0.5px solid rgba(255,255,255,0.16)',
     borderRadius: 6, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none',
   };
-  const frameName = (which: 'first_frame' | 'last_frame'): string => {
-    const ref = which === 'first_frame' ? vgen.first_frame : vgen.last_frame;
-    if (!ref) return '— not bound —';
-    return ref.name || (ref.kind === 'cud' ? ref.path.split(/[\\/]/).pop() || ref.path : ref.hash);
+  const dim = (on: boolean): React.CSSProperties => on ? {} : { opacity: 0.35, cursor: 'default' };
+  const mini: React.CSSProperties = {
+    flexShrink: 0, fontSize: 10.5, fontWeight: 700, padding: '3px 10px', borderRadius: 5, cursor: 'pointer',
+    background: 'rgba(0,0,0,0.35)', color: 'rgba(255,255,255,0.55)', border: '0.5px solid rgba(255,255,255,0.16)',
   };
   return (
     <div style={styles.overlay} onClick={onClose}>
-      <div style={{ ...styles.dialog, width: 520, display: 'flex', flexDirection: 'column' }}
+      <div style={{ ...styles.dialog, width: 460, display: 'flex', flexDirection: 'column' }}
         onClick={e => e.stopPropagation()}>
-        <div style={styles.dialogTitle}>Video generator segment</div>
+        <div style={styles.dialogTitle}>Generator track settings</div>
         <div style={styles.dialogSubtitle}>
-          「{vgen.iface}」 · port {vgen.port}{vgen.fixed_fps ? ' · fixed fps' : ''} — the values here go straight
-          into the interface when you press ▶ on the segment.
+          「{track.name}」{track.port ? ` · port ${track.port}` : ''} — every generator segment on this track runs
+          at this resolution. From canvas follows the workbench canvas × scale at the moment a segment runs.
         </div>
         <div style={row}>
-          <span style={lab}>Name</span>
-          <input style={inp} value={name} onChange={e => setName(e.target.value)}
-            onKeyDown={e => e.stopPropagation()} />
+          <span style={lab}>Size</span>
+          <button style={{ ...mini, ...(fromCanvas ? { color: '#fff', background: 'rgba(10,132,255,0.35)', borderColor: 'rgba(10,132,255,0.75)' } : {}) }}
+            onClick={() => setFromCanvas(false)}>Fixed</button>
+          <button style={{ ...mini, ...(!fromCanvas ? { color: '#fff', background: 'rgba(10,132,255,0.35)', borderColor: 'rgba(10,132,255,0.75)' } : {}) }}
+            onClick={() => setFromCanvas(true)}>From canvas</button>
+        </div>
+        <div style={row} title={fromCanvas
+          ? 'Width / height follow the workbench canvas × scale — fixed values are off.'
+          : undefined}>
+          <span style={lab}>Width</span>
+          <input style={{ ...inp, ...dim(fromCanvas) }} type="number" min={1} step={1}
+            value={fromCanvas ? String(resolved?.w ?? w) : w} disabled={fromCanvas}
+            onChange={e => setW(e.target.value)} onKeyDown={e => e.stopPropagation()} />
         </div>
         <div style={row}>
-          <span style={lab}>Start (s)</span>
-          <input style={inp} type="number" min={0} step={0.1} value={start}
-            onChange={e => setStart(e.target.value)} onKeyDown={e => e.stopPropagation()} />
+          <span style={lab}>Height</span>
+          <input style={{ ...inp, ...dim(fromCanvas) }} type="number" min={1} step={1}
+            value={fromCanvas ? String(resolved?.h ?? h) : h} disabled={fromCanvas}
+            onChange={e => setH(e.target.value)} onKeyDown={e => e.stopPropagation()} />
         </div>
-        <div style={row}>
-          <span style={lab} title="The segment length and the duration parameter are the same thing — change either and the other follows.">Duration (s)</span>
-          <input style={inp} type="number" min={0.1} step={0.1} value={duration}
-            onChange={e => setDuration(e.target.value)} onKeyDown={e => e.stopPropagation()} />
+        {fromCanvas && (
+          <div style={row} title={resolved
+            ? `The canvas is ${canvas.w}×${canvas.h} — × ${factor.toFixed(2)} = ${resolved.w}×${resolved.h}.`
+            : 'The workbench canvas has not reported a size yet — the stored width / height are used as the fallback.'}>
+            <span style={lab}>Scale</span>
+            <input style={inp} type="number" min={0.01} step={0.05} value={scale}
+              onChange={e => setScale(e.target.value)} onKeyDown={e => e.stopPropagation()} />
+          </div>
+        )}
+        {/* 轨级 FPS：跑的时候覆写每一段 fps 口喂进去的值 —— Fixed FPS 开着的段不吃这个
+            （它的输出帧率写死在生成器上）。留空 = 不动段上的旧参数。 */}
+        <div style={row} title="Overrides the FPS parameter of every generator segment on this track when it runs. Segments with Fixed FPS turned on are not affected. Leave empty to keep each segment's own value.">
+          <span style={lab}>FPS</span>
+          <input style={{ ...inp, ...(!fpsOk ? { borderColor: 'rgba(255,69,58,0.75)' } : {}) }}
+            type="number" min={1} step={0.1} placeholder="segment's own" value={fps}
+            onChange={e => setFps(e.target.value)} onKeyDown={e => e.stopPropagation()} />
         </div>
-        {vgen.ports.width && (
-          <div style={row}>
-            <span style={lab}>Width (value{vgen.ports.width})</span>
-            <input style={inp} type="number" min={1} step={1} value={w}
-              onChange={e => setW(e.target.value)} onKeyDown={e => e.stopPropagation()} />
-          </div>
-        )}
-        {vgen.ports.height && (
-          <div style={row}>
-            <span style={lab}>Height (value{vgen.ports.height})</span>
-            <input style={inp} type="number" min={1} step={1} value={h}
-              onChange={e => setH(e.target.value)} onKeyDown={e => e.stopPropagation()} />
-          </div>
-        )}
-        {vgen.ports.fps && (
-          <div style={row}>
-            <span style={lab} title="Fixed FPS is off — this value is fed into the FPS port; the clip keeps whatever rate the generator returns. The segment length never depends on it.">
-              FPS (value{vgen.ports.fps})
-            </span>
-            <input style={inp} type="number" min={1} step={0.1} value={fps}
-              onChange={e => setFps(e.target.value)} onKeyDown={e => e.stopPropagation()} />
-          </div>
-        )}
-        {/* Fixed FPS：帧率是整台生成器写死的（改它去 Interface tab），段上只读地报一下。 */}
-        {vgen.fixed_fps && (
-          <div style={row}>
-            <span style={lab} title="Fixed FPS is on — this generator has one fixed output rate (set in the Interface tab), so there is no FPS port to feed. The segment length is the segment's own length; a rate that differs from the project fps is normal.">
-              FPS (fixed)
-            </span>
-            <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: 'rgba(255,255,255,0.75)' }}>
-              {fixedFps} fps
-              <span style={{ marginLeft: 6, fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
-                ({Math.max(1, Math.round((Number(duration) || clip.duration) * fixedFps))} frames)
-              </span>
-            </span>
-          </div>
-        )}
-        {vgen.ports.prompt && (
-          <div style={{ ...row, alignItems: 'flex-start' }}>
-            <span style={lab}>Prompt (value{vgen.ports.prompt})</span>
-            <textarea style={{ ...inp, minHeight: 90, resize: 'vertical', lineHeight: 1.5 }}
-              value={prompt} onChange={e => setPrompt(e.target.value)}
-              onKeyDown={e => e.stopPropagation()} />
-          </div>
-        )}
-        {(['first_frame', 'last_frame'] as const).filter(k => vgen.ports[k]).map(k => (
-          <div key={k} style={row}>
-            <span style={lab}>{k === 'first_frame' ? 'First frame' : 'Last frame'} (value{vgen.ports[k]})</span>
-            <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: 'rgba(255,255,255,0.75)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-              title={frameName(k)}>{frameName(k)}</span>
-            <button style={styles.cancelBtn} onClick={() => onBindFrame(k)}>Bind…</button>
-          </div>
-        ))}
         <div style={styles.dialogActions}>
           <button style={styles.cancelBtn} onClick={onClose}>Cancel</button>
-          <button style={{ ...styles.confirmBtn, opacity: dirty ? 1 : 0.45 }} disabled={!dirty}
+          <button style={{ ...styles.confirmBtn, opacity: dirty && fpsOk ? 1 : 0.45 }} disabled={!dirty || !fpsOk}
             onClick={() => onApply({
-              name,
-              ...(Number.isFinite(Number(start)) ? { start: Number(start) } : {}),
-              ...(Number.isFinite(Number(duration)) ? { duration: Number(duration) } : {}),
-              ...(vgen.ports.width && w !== '' ? { width: Math.round(Number(w)) } : {}),
-              ...(vgen.ports.height && h !== '' ? { height: Math.round(Number(h)) } : {}),
-              ...(vgen.ports.fps && fps !== '' ? { fps: Number(fps) } : {}),
-              ...(vgen.ports.prompt ? { prompt } : {}),
+              width: Math.max(1, Math.round(Number(w)) || seed.width),
+              height: Math.max(1, Math.round(Number(h)) || seed.height),
+              fromCanvas, scale: scaleOk ? s : 1,
+              ...(fps !== '' && fpsOk ? { fps: Number(fps) } : {}),
             })}>Apply</button>
         </div>
       </div>
@@ -3614,10 +3856,8 @@ const VideoGenSettingsModal: React.FC<{
   );
 };
 
-/** 一枚仓库里的图片（/api/global_assets 的响应项，只取用到的几个字段）。 */
-type StoreImageRow = { name: string; hash?: string; url?: string; displayName?: string };
-
-/** 段的首/末帧：挑一张图片资产，或磁盘上一份 .cud 工程。 */
+/** 段的首/末帧：从仓库挑一张图（**Assets 窗同款卡片**，同一套缩略/角标/名字长相），
+ *  或磁盘上一份 .cud 工程（当前绑定也画成一张卡，缩略走同一接口）。 */
 const VideoGenFrameModal: React.FC<{
   which: 'first_frame' | 'last_frame';
   ifaceName: string;
@@ -3625,15 +3865,17 @@ const VideoGenFrameModal: React.FC<{
   onPick: (ref: VidGenFrameRef | null) => void;
   onClose: () => void;
 }> = ({ which, ifaceName, current, onPick, onClose }) => {
-  const [rows, setRows] = useState<StoreImageRow[]>([]);
+  const [rows, setRows] = useState<StoreAsset[]>([]);
+  const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   useEffect(() => {
     let alive = true;
-    void fetch('/api/global_assets').then(r => r.json()).then((d: { assets?: StoreImageRow[] } | StoreImageRow[]) => {
+    void fetch('/api/global_assets').then(r => r.json()).then((d: { assets?: StoreAsset[] } | StoreAsset[]) => {
       if (!alive) return;
       const list = Array.isArray(d) ? d : (d?.assets || []);
-      setRows(list.filter(a => a && (a.hash || a.name)));
+      // 挑帧只用图：带 kind 的按 kind 过滤；老服务没有 kind 的行保留（宁可多显示）。
+      setRows(list.filter(a => a && (a.hash || a.name) && (!a.kind || a.kind === 'image')));
     }).catch(() => { if (alive) setErr('The asset store did not answer.'); });
     return () => { alive = false; };
   }, []);
@@ -3657,54 +3899,81 @@ const VideoGenFrameModal: React.FC<{
       setBusy(false);
     }
   };
-  const cell: React.CSSProperties = {
-    width: 84, border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, overflow: 'hidden',
-    background: 'rgba(255,255,255,0.04)', cursor: 'pointer', padding: 0, display: 'flex',
-    flexDirection: 'column', alignItems: 'stretch', color: '#fff',
-  };
+  const needle = q.trim().toLowerCase();
+  const shown = rows.filter(a => !needle
+    || (a.displayName || a.name || '').toLowerCase().includes(needle)
+    || (a.hash || '').toLowerCase().includes(needle));
+  // 当前绑的 .cud 也占一张卡：缩略与时间线帧卡同一条 /api/cud_frame_thumb。点它 = 再开一次
+  // 对话框换一份 .cud（换绑定仍然只有一个入口）。
+  const cudPath = current?.kind === 'cud' ? current.path : '';
   return (
     <div style={styles.overlay} onClick={onClose}>
-      <div style={{ ...styles.dialog, width: 620, maxHeight: '76vh', display: 'flex', flexDirection: 'column' }}
+      <div data-vid-frame-modal=""
+        style={{ ...styles.dialog, width: 640, maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}
         onClick={e => e.stopPropagation()}>
         <div style={styles.dialogTitle}>{label}</div>
         <div style={styles.dialogSubtitle}>
           「{ifaceName}」 — bind an image asset, or a .cud project (its composite is read as this frame).
         </div>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexShrink: 0, alignItems: 'center' }}>
           <button style={{ ...styles.cancelBtn, opacity: busy ? 0.5 : 1 }}
             disabled={busy} onClick={() => { void pickCud(); }}>Open a .cud…</button>
           {current && (
             <button style={styles.cancelBtn} onClick={() => onPick(null)}>Unbind</button>
           )}
+          <span style={{ flex: 1 }} />
+          <input
+            value={q}
+            onChange={e => setQ(e.target.value)}
+            placeholder="Search…"
+            spellCheck={false}
+            style={{
+              width: 150, height: 20, fontSize: 10, color: 'rgba(255,255,255,0.75)',
+              background: '#1b1b1e', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 4,
+              padding: '0 5px', outline: 'none',
+            }}
+          />
         </div>
         {err && <div style={{ fontSize: 11, color: '#ff9f0a', marginBottom: 8 }}>{err}</div>}
-        <div style={{ flex: 1, minHeight: 120, overflowY: 'auto' }}>
-          {rows.length === 0
-            ? <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)' }}>
-                {err ? '' : 'The asset store has no images yet — import one, or open a .cud.'}
-              </div>
-            : (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {rows.map(a => {
-                  const id = a.hash || a.name;
-                  const url = a.hash ? `/api/asset_media/${encodeURIComponent(a.hash)}` : (a.url || '');
-                  const on = !!current && current.kind === 'asset' && current.hash === id;
-                  return (
-                    <button key={id} style={{ ...cell, border: on ? '1px solid #0a84ff' : cell.border }}
-                      title={a.displayName || a.name}
-                      onClick={() => onPick({ kind: 'asset', hash: id, name: a.displayName || a.name })}>
-                      <div style={{ height: 56, background: '#0d0d0d', overflow: 'hidden' }}>
-                        {url && <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
-                      </div>
-                      <div style={{ fontSize: 9.5, padding: '3px 4px', textAlign: 'left', overflow: 'hidden',
-                        textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'rgba(255,255,255,0.8)' }}>
-                        {a.displayName || a.name}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+        <div style={{
+          flex: 1, minHeight: 140, overflowY: 'auto', scrollbarWidth: 'thin',
+          padding: 2, display: 'grid', gap: 6, alignContent: 'start',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))',
+        }}>
+          {cudPath && (
+            <Card
+              it={{
+                name: current?.name || cudPath.split(/[\\/]/).pop() || cudPath,
+                kind: 'image', src: '', duration: 0, hasAudio: null,
+                poster: `/api/cud_frame_thumb?path=${encodeURIComponent(cudPath)}&w=160`,
+                origin: '.cud project',
+              }}
+              selected
+              onClick={() => { void pickCud(); }}
+            />
+          )}
+          {shown.map(s => {
+            const id = s.hash || s.name;
+            const on = !!current && current.kind === 'asset' && current.hash === id;
+            return (
+              <Card
+                key={'s:' + id}
+                it={{
+                  name: s.displayName || s.name,
+                  kind: 'image', src: s.url || '', duration: 0, hasAudio: null,
+                  poster: s.thumb || s.url || null,
+                  byteFrom: 'store', origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
+                }}
+                selected={on}
+                onClick={() => onPick({ kind: 'asset', hash: id, name: s.displayName || s.name })}
+              />
+            );
+          })}
+          {!cudPath && shown.length === 0 && (
+            <div style={{ gridColumn: '1 / -1', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8 }}>
+              {err ? '' : 'The asset store has no images yet — import one in Assets, or open a .cud.'}
+            </div>
+          )}
         </div>
         <div style={styles.dialogActions}>
           <button style={styles.cancelBtn} onClick={onClose}>Close</button>

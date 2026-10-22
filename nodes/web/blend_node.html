@@ -12695,10 +12695,16 @@ async function openCudDocument(file, doc) {
 }
 
 // The same file opened twice is the same project: a backend document matches on its path (every
-// dialog hands out a fresh token for it), a browser handle on its own identity.
+// dialog hands out a fresh token for it), a browser handle on its own identity. Path compare is
+// case-insensitive — the two descriptors were minted in different dialogs, and Windows preserves
+// whatever casing each one navigated to, so an exact compare misses and every Jump opens a
+// duplicate tab of a file that is already open.
 function findOpenDocument(doc) {
     if (!doc) return null;
-    if (doc.path) return documents.find(d => d.doc && d.doc.path === doc.path) || null;
+    if (doc.path) {
+        const want = String(doc.path).toLowerCase();
+        return documents.find(d => d.doc && d.doc.path && String(d.doc.path).toLowerCase() === want) || null;
+    }
     return documents.find(d => d.doc === doc) || null;
 }
 

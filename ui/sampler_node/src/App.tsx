@@ -1861,6 +1861,7 @@ const App: React.FC = () => {
         onRemoveArchRule={handleRemoveArchRule}
         onReorderArchRules={handleReorderArchRules}
         actionLog={actionLog}
+        pushLog={pushLog}
       />
 
       {refRequest && (() => {

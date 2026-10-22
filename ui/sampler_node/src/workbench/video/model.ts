@@ -36,6 +36,11 @@ export type VidTrack = {
   role?: 'output' | 'vgen';
   /** 输出轨对应的输出口（缺省 0；preset 恒 0）。process 段按 pending.port 找自己的输出轨。 */
   port?: number;
+  /** 生成器轨（role 'vgen'）的分辨率设置：轨上所有段共享，段上不再有宽高。 */
+  vgenCfg?: VidGenTrackCfg;
+  /** 生成器轨的**轨级提示词**（prompt preset 的 id）：轨上所有段共享，跑的时候渲染成串
+   *  追加在每段自己的提示词后面（段在前、轨在后）。空/找不到 = 没配。 */
+  vgenPromptPresetId?: string;
 };
 
 /** 资产库的一件货：视频/音频源，URL 收藏在这里，时间线上的片段按 src/资产来引用 ——
@@ -165,6 +170,13 @@ export type VidGenPending = {
   params: Record<string, unknown>;
   first_frame?: VidGenFrameRef | null;
   last_frame?: VidGenFrameRef | null;
+  /** 链着的前一段（= 前一段的 clip id）：后一段的首帧用前一段的末帧。
+   *  只在同轨且首尾紧贴时成立，挪开就自动断开（见 pruneVgenChains）。 */
+  chainPrev?: string;
+  /** 段自己的 prompt preset（轨级提示词之外、这一段独有的那份）。跑的时候渲染成串，
+   *  拼在段 prompt 口的纯文本后面、轨级 preset 之前（端口在前、段在后、轨最后）。
+   *  空/找不到 = 没配，段 prompt 就是端口里的纯文本。 */
+  promptPresetId?: string;
 };
 
 /** 一段生成器的**时长参数**（秒）。读的就是 duration 槽绑的那一口。 */
@@ -182,6 +194,48 @@ export const vgenWithDuration = (v: VidGenPending, dur: number): VidGenPending =
   const next = Math.max(0.1, Math.round(dur * 100) / 100);
   return { ...v, params: { ...v.params, [String(port)]: next } };
 };
+
+/** 生成器**轨**的设置：轨上所有生成器段共享（段上不再有宽高/帧率）。
+ *  `fromCanvas` 开着时宽高 = 工作台画布 × scale（跑的这一刻现算），width/height 灰掉。
+ *  `fps` 缺省/空 = 不动段的帧率参数；设了 = 跑时覆盖 —— 只对**没开 Fixed FPS**的段生效。 */
+export type VidGenTrackCfg = { width: number; height: number; fromCanvas: boolean; scale: number; fps?: number };
+
+/** 把轨上的分辨率设置写回去（轨设置弹窗的 Apply）。 */
+export const setVideoGenTrackCfg = (p: VidProject, trackId: string, cfg: VidGenTrackCfg): VidProject => ({
+  ...p,
+  tracks: p.tracks.map(t => (t.id === trackId ? { ...t, vgenCfg: cfg } : t)),
+});
+
+/** 跑这一段时真正的分辨率：轨上有设置就按它 —— fromCanvas 用**当下**的画布尺寸 × scale
+ *  （画布没量到就退回存的宽高），否则用存的宽高；轨上还没设置过（老存档）返回 null，
+ *  调用方沿用段上的旧参数。 */
+export const vgenResolutionOf = (
+  p: VidProject, clip: VidClip, canvas?: { w: number; h: number },
+): { w: number; h: number } | null => {
+  const cfg = p.tracks.find(t => t.id === clip.trackId)?.vgenCfg;
+  if (!cfg) return null;
+  if (cfg.fromCanvas && canvas && canvas.w > 0 && canvas.h > 0) {
+    const s = Number(cfg.scale) > 0 ? Number(cfg.scale) : 1;
+    return { w: Math.max(1, Math.round(canvas.w * s)), h: Math.max(1, Math.round(canvas.h * s)) };
+  }
+  return { w: Math.max(1, Math.round(Number(cfg.width)) || 1), h: Math.max(1, Math.round(Number(cfg.height)) || 1) };
+};
+
+/** 跑这一段时真正的帧率：轨上设了就用它 —— 但**只对没开 Fixed FPS 的段**生效（Fixed FPS
+ *  的段输出帧率写死在生成器上，轨上的数喂进去也是误会）。轨上没设返回 null，调用方沿用
+ *  段上的旧参数。 */
+export const vgenFpsOf = (p: VidProject, clip: VidClip): number | null => {
+  const cfg = p.tracks.find(t => t.id === clip.trackId)?.vgenCfg;
+  const n = Number(cfg?.fps);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/** 把轨上的**轨级提示词**（prompt preset id）写回去；传 null/空 = 清掉。 */
+export const setVideoGenTrackPreset = (p: VidProject, trackId: string, presetId: string | null): VidProject => ({
+  ...p,
+  tracks: p.tracks.map(t => (t.id === trackId
+    ? { ...t, vgenPromptPresetId: presetId || undefined } : t)),
+});
 
 /** 一号槽的**参数值**读写（值都住在 params 里，键是端口号字符串）。 */
 export const vgenGet = (v: VidGenPending, slot: keyof VideoGenPorts): unknown => {
@@ -216,6 +270,9 @@ export type VidProject = {
   /** solo 的轨道 id，音频与视频分开记。随工程走，与 `muteIds` 同理。 */
   soloAudioIds?: string[];
   soloVideoIds?: string[];
+  /** 这份工程的**查看模式**（Image / Video）。它是文档的属性、随 .cud 走：
+   *  打开哪份工程就落回它自己存的模式，不再是页面级的一颗开关。旧档没有这个字段 → 'image'。 */
+  mode?: 'image' | 'video';
 };
 
 /** solo 状态：**音频与视频分开记** —— 一边亮着不影响另一边。空集 = 没有 solo（全部照常）。
@@ -440,9 +497,9 @@ export const trimClip = (p: VidProject, id: string, edge: 'l' | 'r', t: number, 
     ...p,
     clips: p.clips.map(c => {
       if (!ids.has(c.id)) return c;
-      // Layer 段没有源文件：两条边都不受"源长"限制（它的 srcDuration 只是造段时的默认 5s），
-      // 只受时间线 0 与 MIN_CLIP 约束 —— 否则永远拉不过 5 秒。
-      const timeless = c.kind === 'layer';
+      // Layer / process（生成器、处理器占位）段没有源文件：两条边都不受"源长"限制
+      // （它们的 srcDuration 只是造段那一刻的时长）—— 否则永远拉不过造出来时的长度。
+      const timeless = c.kind === 'layer' || c.kind === 'process';
       if (edge === 'l') {
         // 左边：start 最多退到 start-offset（源的开头），最多进到 start+duration-MIN。
         const lo = timeless ? 0 : Math.max(0, c.start - c.offset);
@@ -796,6 +853,103 @@ export const placeVideoGenSegment = (
 export const placeVideoGenOutput = (
   p: VidProject, clipId: string, src: string, name: string, duration: number,
 ): VidProject => placeProcOutput(p, clipId, src, name, duration);
+
+// ── 生成器段的链条 ──────────────────────────────────────────────────────────────────────────
+// 同一条轨上首尾紧贴的两枚生成器段可以**串成一条链**：后一段的首帧就是前一段的末帧
+// （前一段若绑了末帧卡就用那张图，否则用它产物的最后一帧）。链只记在**后一段**身上
+// （`vgen.chainPrev` = 前一段的 clip id），前段不必知道谁接在后面。
+// 挪开/裁开/删掉任一段，这条链就不再成立 —— 每次工程变更都过 pruneVgenChains 收掉。
+const VGEN_TOUCH_EPS = 0.002;
+
+/** `clip` 链着的前一段（不合法 = null）。同轨、都是生成器、首尾紧贴，缺一不可；
+ *  后一段还必须绑了首帧口 —— 没有那一口，共享来的帧没处喂。 */
+export const vgenChainPrevOf = (p: VidProject, clip: VidClip): VidClip | null => {
+  const prevId = clip.vgen?.chainPrev;
+  if (!prevId || prevId === clip.id || !clip.vgen?.ports.first_frame) return null;
+  const prev = p.clips.find(c => c.id === prevId);
+  if (!prev || !prev.vgen || prev.id === clip.id) return null;
+  if (prev.trackId !== clip.trackId) return null;
+  if (Math.abs(prev.start + prev.duration - clip.start) > VGEN_TOUCH_EPS) return null;
+  return prev;
+};
+
+/** 两段能不能连：同轨、都是生成器、首尾紧贴、后一段绑了首帧口。 */
+export const canVgenChain = (p: VidProject, prevId: string, nextId: string): boolean => {
+  const prev = p.clips.find(c => c.id === prevId);
+  const next = p.clips.find(c => c.id === nextId);
+  return !!prev && !!next && prev.id !== next.id && !!prev.vgen && !!next.vgen
+    && !!next.vgen?.ports.first_frame
+    && prev.trackId === next.trackId
+    && Math.abs(prev.start + prev.duration - next.start) <= VGEN_TOUCH_EPS;
+};
+
+/** Ctrl+左键点接缝：已连着就断开，没连就连上。不成立的接缝原样返回。 */
+export const toggleVgenChain = (p: VidProject, prevId: string, nextId: string): VidProject => {
+  const next = p.clips.find(c => c.id === nextId);
+  if (!next?.vgen) return p;
+  if (next.vgen.chainPrev === prevId) {
+    return {
+      ...p,
+      clips: p.clips.map(c => (c.id === nextId && c.vgen)
+        ? { ...c, vgen: { ...c.vgen, chainPrev: undefined } } : c),
+    };
+  }
+  if (!canVgenChain(p, prevId, nextId)) return p;
+  return {
+    ...p,
+    clips: p.clips.map(c => (c.id === nextId && c.vgen)
+      ? { ...c, vgen: { ...c.vgen, chainPrev: prevId } } : c),
+  };
+};
+
+/** 收掉不再成立的链（挪开 / 裁开 / 删段 / 读档时的悬空 id）。没有要收的原样返回。 */
+export const pruneVgenChains = (p: VidProject): VidProject => {
+  const broken = new Set<string>();
+  for (const c of p.clips) {
+    if (c.vgen?.chainPrev && !vgenChainPrevOf(p, c)) broken.add(c.id);
+  }
+  if (!broken.size) return p;
+  return {
+    ...p,
+    clips: p.clips.map(c => (broken.has(c.id) && c.vgen)
+      ? { ...c, vgen: { ...c.vgen, chainPrev: undefined } } : c),
+  };
+};
+
+/** 这一段已经跑出来的产物（输出轨上 procOwner 认亲的那一段）；还没跑过 = null。 */
+export const outputClipOf = (p: VidProject, clip: VidClip): VidClip | null =>
+  p.clips.find(c => c.procOwner === clip.id && !!c.src) ?? null;
+
+/** 链从头到 `clip` 的顺序（早 → 晚，含自己）。断在哪就停在哪。 */
+export const vgenChainTo = (p: VidProject, clip: VidClip): VidClip[] => {
+  const out: VidClip[] = [clip];
+  const seen = new Set<string>([clip.id]);
+  let cur = clip;
+  for (;;) {
+    const prev = vgenChainPrevOf(p, cur);
+    if (!prev || seen.has(prev.id)) break;
+    out.unshift(prev);
+    seen.add(prev.id);
+    cur = prev;
+  }
+  return out;
+};
+
+/** 时间线上所有**可连的接缝**（同轨、首尾紧贴的生成器段对），`linked` = 后段已链到前段。
+ *  接缝的视觉与 Ctrl 点击都照这份表来。 */
+export const vgenSeamsOf = (p: VidProject): { prev: VidClip; next: VidClip; linked: boolean }[] => {
+  const vgens = p.clips.filter(c => c.vgen && c.vgen.ports.first_frame);
+  const out: { prev: VidClip; next: VidClip; linked: boolean }[] = [];
+  for (const prev of p.clips) {
+    if (!prev.vgen) continue;
+    for (const next of vgens) {
+      if (next.id === prev.id || next.trackId !== prev.trackId) continue;
+      if (Math.abs(prev.start + prev.duration - next.start) > VGEN_TOUCH_EPS) continue;
+      out.push({ prev, next, linked: next.vgen?.chainPrev === prev.id });
+    }
+  }
+  return out;
+};
 
 /** 产物输出轨查找：每个输出口一条（缺省 0）。没有 = 还没跑过这一口。 */
 export const outputTrackOf = (p: VidProject, port: number): VidTrack | null =>
@@ -1166,6 +1320,7 @@ export const defaultVidProject = (): VidProject => ({
   inPoint: 0,
   outPoint: 0,
   fps: 30,
+  mode: 'image',
 });
 
 export const loadVidProject = (): VidProject => {
@@ -1256,7 +1411,7 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
     const pickIds = (v: unknown): string[] => Array.isArray(v)
       ? [...new Set(v.filter((x): x is string => typeof x === 'string' && trackIds.has(x)))]
       : [];
-    return {
+    return pruneVgenChains({
       tracks: p.tracks, clips, assets,
       inPoint: Math.max(0, +p.inPoint || 0), outPoint: Math.max(0, +p.outPoint || 0),
       fps: clampFps(Number(p.fps)),
@@ -1266,7 +1421,8 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       muteIds: pickIds(p.muteIds),
       soloAudioIds: pickIds(p.soloAudioIds),
       soloVideoIds: pickIds(p.soloVideoIds),
-    };
+      mode: p.mode === 'video' ? 'video' : 'image',
+    });
   } catch { return base; }
 };
 

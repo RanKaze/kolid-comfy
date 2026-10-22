@@ -257,7 +257,7 @@ const Thumb: React.FC<{ m: CardMedia; poster: string | null }> = ({ m, poster })
 // 差别全由数据说：字节来源（LOCAL / IN DOC / MISSING）画在缩略图右上，来源与"谁在用"
 // 写在名字下面那行。老的 AssetCard / GlobalCard 就是因为这一个差别写了两遍，现在没有第二套。
 
-type CardItem = {
+export type CardItem = {
   name: string;
   kind: 'video' | 'audio' | 'image';
   src: string;
@@ -307,13 +307,16 @@ const ClipIcon = () => (
   </svg>
 );
 
-const Card: React.FC<{ it: CardItem }> = ({ it }) => {
+/** 资产卡片的唯一长相（Assets 窗在用；绑帧弹窗等挑选场景也复用它 —— 选中态用 selected，
+ *  整卡可点用 onClick，都不给就是窗里那张默认卡）。 */
+export const Card: React.FC<{ it: CardItem; selected?: boolean; onClick?: () => void }> = ({ it, selected, onClick }) => {
   const poster = useCardThumb(it.kind, it.src, it.poster);
   const [over, setOver] = useState(false);
   const badge = it.byteFrom ? BYTE_BADGE[it.byteFrom] : null;
   return (
     <div
       draggable={!!it.drag}
+      onClick={onClick}
       onDragStart={e => {
         if (!it.drag) return;
         for (const k of Object.keys(it.drag)) {
@@ -326,10 +329,11 @@ const Card: React.FC<{ it: CardItem }> = ({ it }) => {
       title={it.usedBy ? `${it.name} — ${it.usedBy}` : it.name}
       style={{
         display: 'flex', flexDirection: 'column', minWidth: 0, borderRadius: 6,
-        border: '0.5px solid ' + (it.byteFrom === 'missing'
-          ? 'rgba(255,69,58,0.45)'
-          : over ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.1)'),
-        background: '#0f0f11', cursor: it.drag ? 'grab' : 'default', userSelect: 'none',
+        border: selected ? '1px solid #0a84ff'
+          : '0.5px solid ' + (it.byteFrom === 'missing'
+            ? 'rgba(255,69,58,0.45)'
+            : over ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.1)'),
+        background: '#0f0f11', cursor: onClick ? 'pointer' : it.drag ? 'grab' : 'default', userSelect: 'none',
       }}
     >
       <div style={{ position: 'relative' }}>

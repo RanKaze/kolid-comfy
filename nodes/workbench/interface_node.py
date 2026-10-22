@@ -1386,28 +1386,36 @@ class InterfaceExecutor:
             return {}
         link_names = set()
         widget_types = {}
+        declared_order = []  # INPUT_TYPES 声明序里的 widget 参数名
         for cat in ("required", "optional", "hidden"):
             ci = input_types.get(cat, {})
             if isinstance(ci, dict):
                 for name, val in ci.items():
-                    if isinstance(val, tuple) and len(val) >= 1:
-                        t = val[0]
-                        opts = val[1] if len(val) >= 2 and isinstance(val[1], dict) else {}
-                        if opts.get("forceInput", False):
-                            link_names.add(name)
-                        # All hidden inputs are system-provided, never mapped from widgets_values
-                        if cat == "hidden":
-                            link_names.add(name)
-                            continue
-                        if isinstance(t, str) and t in ("STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"):
-                            # New ComfyUI API nodes use string type tags like "COMBO";
-                            # old API nodes use a raw list for combo boxes.
-                            widget_types[name] = t
-                        elif isinstance(t, list):
-                            widget_types[name] = "COMBO"
-                        else:
-                            link_names.add(name)
-        widget_params = [p for p in param_names if p not in link_names]
+                    if not isinstance(val, tuple) or len(val) < 1:
+                        continue
+                    t = val[0]
+                    opts = val[1] if len(val) >= 2 and isinstance(val[1], dict) else {}
+                    # All hidden inputs are system-provided, never mapped from widgets_values
+                    if cat == "hidden" or opts.get("forceInput", False):
+                        link_names.add(name)
+                        continue
+                    if isinstance(t, str) and t in ("STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"):
+                        # New ComfyUI API nodes use string type tags like "COMBO";
+                        # old API nodes use a raw list for combo boxes.
+                        widget_types[name] = t
+                    elif isinstance(t, list):
+                        widget_types[name] = "COMBO"
+                    else:
+                        link_names.add(name)
+                        continue
+                    declared_order.append(name)
+        # 存档里 widgets_values 是前端按 INPUT_TYPES 声明序摆的, 消费也必须按这个序 ——
+        # 有些第三方节点 (如 essentials 的 ImageResize) execute 签名把两个参数写反了,
+        # 按签名序对位会把 method 的值喂给 interpolation。签名里有但 INPUT_TYPES 没声明的
+        # 参数 (前端画不出 widget, 不占槽) 只在还有剩余槽位时才消费。
+        widget_params = list(declared_order)
+        seen = set(widget_params)
+        widget_params += [p for p in param_names if p not in link_names and p not in seen]
         cag_flags = set()
         for i, name in enumerate(widget_params):
             for cat in ("required", "optional"):

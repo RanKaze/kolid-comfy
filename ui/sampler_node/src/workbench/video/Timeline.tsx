@@ -2,9 +2,9 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSy
 import { createPortal } from 'react-dom';
 import {
   type VidClip, type VidController, type VidTrack, type VidMergeProbe,
-  addLayerClip, addTrack, clipAtSolo, fmtTime, importToTrack, isAudioName, isVideoName, mergeVidClips, moveClip, moveTrack, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack,
-  replaceVidClipsWithMerged, setMaskTrack, splitClip, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
-  vgenWithDuration,
+  addLayerClip, addTrack, clipAtSolo, fmtTime, importToTrack, isAudioName, isVideoName, mergeVidClips, moveClip, moveTrack, outputClipOf, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack,
+  replaceVidClipsWithMerged, setMaskTrack, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
+  vgenChainPrevOf, vgenSeamsOf, vgenWithDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
 import { probeMedia } from './audio';
@@ -120,10 +120,25 @@ const IconGear: React.FC = () => (
     <path d="M8 2.2v1.4M8 12.4v1.4M2.2 8h1.4M12.4 8h1.4M4 4l1 1M11 11l1 1M12 4l-1 1M5 11l-1 1" />
   </svg>
 );
+// 生成器轨的轨级提示词：点开 prompt 弹窗（与 prompt block 的编辑器同一套界面）。
+const IconPrompt: React.FC = () => (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M13.4 8.6a5.4 5.4 0 10-2.4 2.6l2.9 0.7z" />
+    <path d="M5.4 6.6h5.2M5.4 9h3.2" />
+  </svg>
+);
 const IconLink: React.FC = () => (
   <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor"
     strokeWidth="1.7" strokeLinecap="round">
     <path d="M6.5 9.5l3-3M6.8 4.6l1-1a2.6 2.6 0 013.7 3.7l-1 1M9.2 11.4l-1 1a2.6 2.6 0 01-3.7-3.7l1-1" />
+  </svg>
+);
+/** 跳转：方框 + 出去的箭头（external-link 读法）——.cud 预览角上那颗"去编辑这份工程"。 */
+const IconJump: React.FC = () => (
+  <svg width="7" height="7" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+    strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3.5 8.5l5-5M5 3.5h3.5V7" />
   </svg>
 );
 // 生成器段的运行 / 停止：段上不写 "Run" / "Stop" 两个字，三角形与方块自己说话。
@@ -203,14 +218,22 @@ export const VidTimeline: React.FC<{
   onRunVGen?: (clipId: string) => void;
   /** video generator 段的首/末帧卡片：挑一张图片资产或磁盘上的 .cud 工程。 */
   onPickVGenFrame?: (clipId: string, which: 'first_frame' | 'last_frame') => void;
-  /** video generator 段的齿轮（设置：提示词也在这扇窗里）。 */
-  onSettingsVGen?: (clipId: string) => void;
-}> = ({ vid, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onSettingsVGen }) => {
+  /** video generator 轨头上的齿轮（轨设置：宽高 / from canvas / scale / fps —— 轨上所有段共享）。 */
+  onVGenTrackSettings?: (trackId: string) => void;
+  /** video generator 轨头上的 prompt 图标（轨级提示词：prompt 弹窗，段提示词在 Segment 之外）。 */
+  onVGenTrackPrompt?: (trackId: string) => void;
+  /** video generator 段的 prompt 图标（段自己的提示词：prompt 弹窗）。 */
+  onVGenPrompt?: (clipId: string) => void;
+  /** .cud 帧卡预览上的跳转按钮：把那份工程送进 blend 编辑器（已开着就切换过去）。 */
+  onVGenCudOpen?: (path: string, name?: string) => void;
+}> = ({ vid, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, onVGenCudOpen }) => {
   const { project: p, transport, pps } = vid;
   // 占位段队列（多选 ▶ 排出的那一队）：还没轮到的段画 ⏸，正在跑的（有填充进度）画 ■。
   // 订阅放在时间线这一层：一条队只敲一次重渲，不按片段各订一遍。
   const procQueue = useSyncExternalStore(subscribeProcQueue, getProcQueue);
   const dur = vidDuration(p);
+  // 生成器段的接缝（可连的两两一对）：接缝徽章与 Ctrl 点击都照这份表来，按轨过滤后各画各的。
+  const seams = vgenSeamsOf(p);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -426,11 +449,47 @@ export const VidTimeline: React.FC<{
     return () => { un1(); un2(); window.removeEventListener('blur', blur); };
   }, []);
 
+  // ── Ctrl 按住：接缝上的连接/断开徽章才显形、才吃指针 ──
+  // 平时接缝那一小块留给两侧的裁剪把手；按住 Ctrl 才换成链接开关（用户点名的手势）。
+  const [ctrlHeld, setCtrlHeld] = useState(false);
+  const ctrlHeldRef = useRef(false);
+  useEffect(() => {
+    const set = (v: boolean) => {
+      if (ctrlHeldRef.current === v) return;
+      ctrlHeldRef.current = v;
+      setCtrlHeld(v);
+    };
+    const down = (e: KeyboardEvent) => { if (e.key === 'Control' || e.key === 'Meta') set(true); };
+    const up = (e: KeyboardEvent) => { if (e.key === 'Control' || e.key === 'Meta') set(false); };
+    const blur = () => set(false);
+    const un1 = onGlobalKey(down);
+    const un2 = onGlobalKeyUp(up);
+    window.addEventListener('blur', blur);
+    return () => { un1(); un2(); window.removeEventListener('blur', blur); };
+  }, []);
+
+  // 这一段的哪一边是可连的生成器接缝：'r' = 接在它后面的那颗，'l' = 在它前面的那颗。
+  // 已经连着也算（Ctrl+点 = 断开）。
+  const vgenSeamAt = (clip: VidClip, edge: 'l' | 'r') => edge === 'r'
+    ? seams.find(s => s.prev.id === clip.id) ?? null
+    : seams.find(s => s.next.id === clip.id) ?? null;
+
   // ── 片段拖动 / 裁剪 ── pointer capture 挂在被按的那个元素上，move/up 都回到它身上。
   const startClipDrag = (e: React.PointerEvent, mode: 'move' | 'l' | 'r', clip: VidClip) => {
     e.stopPropagation();
     // 右键留给片段的合并菜单（见 openMergeMenu）：不在这里选中、不抓指针、不拖不裁。
     if (e.button !== 0) return;
+    // Ctrl/⌘ + 左键点**接缝**（两侧的裁剪把手）= 连接/断开这两枚生成器段。
+    // 接缝只由相邻的两段构成；不在接缝上的边照旧是普通裁剪（Ctrl 只临时关吸附）。
+    if ((e.ctrlKey || e.metaKey) && mode !== 'move') {
+      const seam = vgenSeamAt(clip, mode);
+      if (seam) {
+        e.preventDefault();
+        vid.update(proj => toggleVgenChain(proj, seam.prev.id, seam.next.id),
+          seam.linked ? 'Unlink generators' : 'Link generators');
+        return;
+      }
+    }
     if (bladeRef.current) {
       // 剃刀优先于拖拽：切口落在指针处，片段不动。
       e.preventDefault();
@@ -1170,6 +1229,30 @@ export const VidTimeline: React.FC<{
                   <span data-vid-out-badge="" title="Output track — every finished Processor / Preset segment lands here at its placeholder's timeline position. Placeholders stay where they are and can be run again."
                     style={{ flexShrink: 0, fontSize: 8, fontWeight: 800, letterSpacing: 0.3, color: '#30d158', background: 'rgba(48,209,88,0.16)', border: '0.5px solid rgba(48,209,88,0.5)', borderRadius: 3, padding: '1px 3px', lineHeight: 1.1 }}>OUT</span>
                 )}
+                {/* 生成器轨的设置：宽高 / from canvas / scale / fps —— 轨上所有段共享，
+                    段上不再有这些旋钮。fps 只对没开 Fixed FPS 的段生效。 */}
+                {tr.role === 'vgen' && onVGenTrackSettings && (
+                  <button
+                    data-vid-vgen-track-settings={tr.id}
+                    title={`Generator track settings — the width / height every generator segment on 「${tr.name}」 runs at: fixed values, or the workbench canvas scaled by a factor. Plus a track FPS that overrides the fps parameter of every segment here — segments with Fixed FPS turned on are not affected.`}
+                    onPointerDown={e => e.stopPropagation()}
+                    onClick={e => { e.stopPropagation(); onVGenTrackSettings(tr.id); }}
+                    style={{ flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: 'none', border: 'none', borderRadius: 4, color: 'rgba(255,255,255,0.45)', cursor: 'pointer', padding: 0 }}
+                  ><IconGear /></button>
+                )}
+                {/* 生成器轨的轨级提示词：点开 prompt 编辑弹窗（prompt block 同一套界面）。
+                    跑的时候渲染成串追加在每段自己的提示词后面 —— 段在前、轨在后。 */}
+                {tr.role === 'vgen' && onVGenTrackPrompt && (
+                  <button
+                    data-vid-vgen-track-prompt={tr.id}
+                    title={`Track prompt — extra prompt applied to every generator segment on 「${tr.name}」, appended after each segment's own prompt. Edit it in the full prompt UI (same editor as a Pipeline prompt block).`}
+                    onPointerDown={e => e.stopPropagation()}
+                    onClick={e => { e.stopPropagation(); onVGenTrackPrompt(tr.id); }}
+                    style={{ flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: 'none', border: 'none', borderRadius: 4, color: tr.vgenPromptPresetId ? '#64d2ff' : 'rgba(255,255,255,0.45)', cursor: 'pointer', padding: 0 }}
+                  ><IconPrompt /></button>
+                )}
                 {/* mute：**所有轨类型都有**（Layer 轨也有 —— 它的段不合成）。亮着 = 这条轨不参与
                     输出（音频不响 / 视频不显示 / Layer 段不合成），且**优先于 solo**。再点一次取消。
                     process 轨不给（占位段本来就不出声不出画，静音没有意义）。 */}
@@ -1258,6 +1341,9 @@ export const VidTimeline: React.FC<{
               >
                 {p.clips.filter(c => c.trackId === tr.id).map(c => {
                   const gid = c.groupId;
+                  // 生成器段链着的前一段 + 它已经跑出来的产物（首帧卡片的共享预览要用）。
+                  const chainPrev = c.vgen ? vgenChainPrevOf(p, c) : null;
+                  const chainOut = chainPrev ? outputClipOf(p, chainPrev) : null;
                   // 首尾相接的左邻：两段各画各的左边框/右边框，接缝就会叠成 2px
                   // （0.5px 在 1x 屏上各自进成 1px）。只留左邻那条右边框，缝统一 1px。
                   const touchesLeft = p.clips.some(x =>
@@ -1301,9 +1387,43 @@ export const VidTimeline: React.FC<{
                       } : undefined}
                       onVGenRun={onRunVGen}
                       onVGenFrame={onPickVGenFrame}
-                      onVGenSettings={onSettingsVGen} />
+                      onVGenPrompt={onVGenPrompt}
+                      onVGenCudOpen={onVGenCudOpen}
+                      chainPrev={chainPrev}
+                      chainOut={chainOut} />
                   );
                 })}
+                {/* 生成器段的接缝：Ctrl+左键连接/断开。已连着的常驻一颗链标；没连的只在
+                    Ctrl 按住时显形（平时这块地方属于两侧的裁剪把手）。z 在片段之上。 */}
+                {seams.filter(s => s.prev.trackId === tr.id).map(s => (
+                  <div
+                    key={`seam-${s.prev.id}-${s.next.id}`}
+                    data-vid-vgen-seam={`${s.prev.id}|${s.next.id}`}
+                    data-vid-vgen-seam-linked={s.linked ? '1' : '0'}
+                    title={s.linked
+                      ? `Linked — 「${s.prev.name}」's last frame becomes 「${s.next.name}」's first frame when it runs. Ctrl-click the seam to disconnect.`
+                      : `Ctrl-click to share frames: 「${s.prev.name}」's last frame becomes 「${s.next.name}」's first frame when it runs.`}
+                    onPointerDown={e => {
+                      if (!(e.ctrlKey || e.metaKey)) return;
+                      e.stopPropagation();
+                      e.preventDefault();
+                      vid.update(proj => toggleVgenChain(proj, s.prev.id, s.next.id),
+                        s.linked ? 'Unlink generators' : 'Link generators');
+                    }}
+                    style={{
+                      position: 'absolute', left: s.next.start * pps - 9, top: '50%',
+                      transform: 'translateY(-50%)', width: 18, height: 18, zIndex: 3,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      borderRadius: 999,
+                      background: s.linked ? 'rgba(12,12,14,0.88)' : 'rgba(10,132,255,0.22)',
+                      border: s.linked ? '1px solid rgba(255,255,255,0.7)' : '1px dashed rgba(140,205,255,0.95)',
+                      color: s.linked ? '#fff' : 'rgba(215,238,255,0.95)',
+                      boxShadow: s.linked ? '0 1px 4px rgba(0,0,0,0.55)' : 'none',
+                      cursor: 'pointer',
+                      pointerEvents: ctrlHeld ? 'auto' : 'none',
+                    }}
+                  ><IconLink /></div>
+                ))}
               </div>
             </div>
             );
@@ -1505,9 +1625,15 @@ const Clip: React.FC<{
   onVGenRun?: (clipId: string) => void;
   /** video generator 段的首/末帧卡片：点一下挑图（图片资产或磁盘上的 .cud 工程）。 */
   onVGenFrame?: (clipId: string, which: 'first_frame' | 'last_frame') => void;
-  /** video generator 段的齿轮（设置：宽高/时长/帧率/提示词）。 */
-  onVGenSettings?: (clipId: string) => void;
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenSettings }) => {
+  /** video generator 段的 prompt 图标（段自己的提示词：prompt 弹窗）。 */
+  onVGenPrompt?: (clipId: string) => void;
+  /** .cud 帧卡预览上的跳转按钮：把那份工程送进 blend 编辑器（已开着就切换过去）。 */
+  onVGenCudOpen?: (path: string, name?: string) => void;
+  /** 生成器段链着的前一段（null = 没链）：首帧卡片的共享预览与"链优先"语义都要它。 */
+  chainPrev?: VidClip | null;
+  /** 前一段已经跑出来的产物（末帧预览取它的最后一帧；没跑过 = null）。 */
+  chainOut?: VidClip | null;
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onVGenCudOpen, chainPrev, chainOut }) => {
   const isAudio = c.kind === 'audio';
   // 缺失：只有"真有来源"的段才可能缺（Layer 段、占位段、生成器段都没有仓库来源）。
   const gone = !!missing && c.kind !== 'layer' && !c.pending && !c.vgen;
@@ -1625,7 +1751,7 @@ const Clip: React.FC<{
       onClick={e => e.stopPropagation()}
       onDoubleClick={e => e.stopPropagation()}
       title={isVGen && c.vgen
-        ? `${c.name} — video generator segment for 「${c.vgen.iface}」 (${fmtTime(c.duration)}${c.vgen.fixed_fps ? ', fixed fps' : ''}). ${c.vgen.ports.first_frame ? 'The left frame card binds the first frame; ' : ''}${c.vgen.ports.last_frame ? 'the right frame card binds the last frame; ' : ''}The gear edits every saved field (prompt, width / height / duration / fps, frame bindings); ▶ sends them into the interface and the finished video lands on the output track above at this position. The segment stays, so it can be run again.`
+        ? `${c.name} — video generator segment for 「${c.vgen.iface}」 (${fmtTime(c.duration)}${c.vgen.fixed_fps ? ', fixed fps' : ''}). ${chainPrev ? `Linked to 「${chainPrev.name}」 — its last frame is this segment's first frame (Ctrl-click the seam to disconnect). ` : ''}${c.vgen.ports.first_frame ? 'The left frame card binds the first frame; ' : ''}${c.vgen.ports.last_frame ? 'the right frame card binds the last frame; ' : ''}Width / height / fps are the track settings (the gear on the track header) and the track prompt is the speech bubble next to it; ▶ sends the segment's values into the interface and the finished video lands on the output track above at this position. The segment stays, so it can be run again.`
         : isPending && c.pending
         ? `${c.name} — ${c.pending.kind === 'preset' ? 'Pipeline Preset' : 'Processor'} placeholder, segment ${c.pending.segIndex + 1}/${c.pending.segCount} of 「${c.pending.iface}」 (nothing to show until it runs). Click ▶ Run to execute just this segment from its stored snapshot; the result lands on the output track above and this placeholder stays, so it can be run again. Drag/trim/delete like any clip.`
         : `${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}${gone ? ' · MEDIA MISSING from the asset store — pick the original file in the Assets window (Project scope) to relink' : ''}`}
@@ -1758,25 +1884,53 @@ const Clip: React.FC<{
         const v = c.vgen;
         const frameCard = (which: 'first_frame' | 'last_frame') => {
           if (!v.ports[which]) return null;
-          const ref = which === 'first_frame' ? v.first_frame : v.last_frame;
+          // 首帧卡在链着前一段时**链优先**：显示的是前一段的末帧（它绑了末帧卡用那张卡，
+          // 否则用它产物的最后一帧），段自己绑的首帧让位 —— 断开链接才回来。
+          const linked = which === 'first_frame' && !!chainPrev;
+          const ref = linked ? (chainPrev!.vgen?.last_frame ?? null)
+            : which === 'first_frame' ? v.first_frame : v.last_frame;
+          // 前段没绑末帧卡 → 共享帧来自它的产物：走 /api/vid_frame 按需取末帧（盘上有缓存）。
+          const outFile = linked && !ref && chainOut
+            && /^\/api\/(?:vid|asset|global)_media\//.test(chainOut.src)
+            ? chainOut.src.split('/').pop() : undefined;
           // 图片资产走**缩略图**接口（后端按 w 生成并落盘缓存）—— 卡片不该解码整张原图。
+          // .cud 走合成图缩略（同一落盘缓存的另一族）：预览就是"那份工程现在的画面"，
+          // 与图片资产同款满铺，不再只是 CUD 字样。
           const thumb = ref?.kind === 'asset' && ref.hash
-            ? `/api/asset_thumb/${encodeURIComponent(ref.hash)}?w=96` : '';
-          // 绑了图就是视频段首/尾帧那种**整高、无边框**的预览条；虚线框只留给未绑定
-          // （或 .cud 这种没有画面可铺）的占位卡。
+            ? `/api/asset_thumb/${encodeURIComponent(ref.hash)}?w=96`
+            : ref?.kind === 'cud' && ref.path
+              ? `/api/cud_frame_thumb?path=${encodeURIComponent(ref.path)}&w=96`
+              : outFile
+                ? `/api/vid_frame?f=${encodeURIComponent(outFile)}&t=${Math.max(0, chainOut!.duration - 0.05).toFixed(2)}`
+                : '';
+          // 绑了东西（图片资产 / .cud 工程 / 链上前段的末帧）就是视频段首/尾帧那种**整高、
+          // 无边框**的预览条；虚线框只留给什么都没有的占位卡 —— 链上的占位卡也算"有内容"，
+          // 它说"末帧会来"。预览图加载失败时底下的 FF/LF/CUD 垫字露出来。
           const preview = !!thumb;
           // 卡片贴着段边，四边再各描一条就和段自己的边框叠成双线：只留**朝内**那一条虚线
           // 当分隔（左卡留右、右卡留左），上下和贴边那侧都不画。四边逐条写死宽度 ——
           // 简写碰到 undefined 会被 React 拆成 longhand，掉回浏览器默认的 medium。
-          const divider = `1px dashed ${ref ? 'rgba(255,255,255,0.55)' : PK.edge}`;
+          const divider = `1px dashed ${ref || linked ? 'rgba(255,255,255,0.55)' : PK.edge}`;
+          const chainTip = linked
+            ? (chainPrev!.vgen?.last_frame
+              ? `First frame is shared with the previous generator segment 「${chainPrev!.name}」 — it uses that segment's bound last-frame card. Ctrl-click the seam to disconnect.`
+              : chainOut
+                ? `First frame is shared with the previous generator segment 「${chainPrev!.name}」 — it uses the last frame of that segment's result. Ctrl-click the seam to disconnect.`
+                : `First frame will be shared with the previous generator segment 「${chainPrev!.name}」 — running this segment runs that one first and takes its last frame. Ctrl-click the seam to disconnect.`)
+            : null;
           return (
             <button
               data-vid-vgen-frame={which}
-              title={which === 'first_frame'
-                ? 'First frame — bind an image asset or a .cud project (its canvas is read as the first frame). Click to pick; the value feeds the port this generator declared.'
-                : 'Last frame — bind an image asset or a .cud project (its canvas is read as the last frame). Click to pick; the value feeds the port this generator declared.'}
+              data-vid-vgen-chain={linked ? '1' : '0'}
+              title={chainTip ?? (which === 'first_frame'
+                ? 'First frame — bind an image asset or a .cud project (its canvas is read as the first frame). Click to pick; the value feeds the port this generator declared.' + (ref?.kind === 'cud' ? ' The ⤴ badge on the preview opens that project in the blend editor.' : '')
+                : 'Last frame — bind an image asset or a .cud project (its canvas is read as the last frame). Click to pick; the value feeds the port this generator declared.' + (ref?.kind === 'cud' ? ' The ⤴ badge on the preview opens that project in the blend editor.' : ''))}
               onPointerDown={e => e.stopPropagation()}
-              onClick={e => { e.stopPropagation(); onVGenFrame?.(c.id, which); }}
+              onClick={e => {
+                e.stopPropagation();
+                if (linked) return;   // 链优先：这张卡显示的是前一段的末帧，要换绑定先断链
+                onVGenFrame?.(c.id, which);
+              }}
               style={{
                 flexShrink: 0, width: cardW, height: '100%',
                 padding: 0, borderRadius: 0, position: 'relative', overflow: 'hidden',
@@ -1785,16 +1939,36 @@ const Clip: React.FC<{
                 borderTop: 'none', borderBottom: 'none',
                 borderLeft: !preview && which === 'last_frame' ? divider : 'none',
                 borderRight: !preview && which === 'first_frame' ? divider : 'none',
-                color: PK.fg, cursor: 'pointer', fontSize: 7.5, fontWeight: 800, lineHeight: 1,
+                color: PK.fg, cursor: linked ? 'default' : 'pointer', fontSize: 7.5, fontWeight: 800, lineHeight: 1,
               }}
             >
               {/* 占位文字垫在底下：预览图加载失败时它露出来，卡片不会变成一块空白。 */}
-              <span style={{ position: 'relative', opacity: ref ? 0.9 : 0.5 }}>
+              <span style={{ position: 'relative', opacity: ref || linked ? 0.9 : 0.5 }}>
                 {ref ? (ref.kind === 'cud' ? 'CUD' : 'IMG') : (which === 'first_frame' ? 'FF' : 'LF')}
               </span>
               {preview && (
                 <img src={thumb} alt="" onError={hideImg}
                   style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+              )}
+              {linked && (
+                <span style={{ position: 'absolute', right: 1.5, top: 1.5, width: 12, height: 12,
+                  borderRadius: 999, background: 'rgba(12,12,14,0.82)', border: '0.5px solid rgba(255,255,255,0.55)',
+                  color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><IconLink /></span>
+              )}
+              {/* .cud 绑定的跳转徽章：预览右上（链徽章占了右上的链卡挪到左上，两枚都在）。
+                  点它 = 把这份工程送进 blend 编辑器（已开着就切换），不当成"重挑绑定"。
+                  两侧各有一条 7px 宽的裁剪把手盖在段缘上 —— 徽章退到把手内侧，整枚都可点。 */}
+              {ref?.kind === 'cud' && onVGenCudOpen && (
+                <span
+                  data-vid-vgen-cud-jump=""
+                  title={`Open 「${ref.name || ref.path}」 in the blend editor to edit it — if it is already open, this just switches to that window. The frame binding stays as it is.`}
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); onVGenCudOpen(ref.path, ref.name); }}
+                  style={{ position: 'absolute', right: linked ? undefined : 9, left: linked ? 9 : undefined, top: 1.5,
+                    width: 12, height: 12, borderRadius: 999,
+                    background: 'rgba(12,12,14,0.82)', border: '0.5px solid rgba(255,255,255,0.55)',
+                    color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+                ><IconJump /></span>
               )}
             </button>
           );
@@ -1808,15 +1982,17 @@ const Clip: React.FC<{
           <>
             {frameCard('first_frame')}
             <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, position: 'relative' }}>
-              {/* 设置：宽高 / 时长 / 帧率 / 提示词 / 首末帧都在这里改。 */}
-              {onVGenSettings && (
+              {/* 段自己的提示词：prompt block 同一套编辑弹窗。跑的时候渲染成串，拼在段
+                  prompt 口的纯文本后面、轨级 preset 之前（端口在前、段在后、轨最后）。 */}
+              {onVGenPrompt && v.ports.prompt && (
                 <button
-                  data-vid-vgen-settings=""
-                  title="Generator settings — name, position, duration, width / height / fps, prompt and the frame bindings."
+                  data-vid-vgen-prompt=""
+                  title={`Segment prompt — edit this segment's own prompt in the full prompt UI (same editor as a Pipeline prompt block). When it runs: the prompt port text first, then this selection, then the track prompt.`}
                   onPointerDown={e => e.stopPropagation()}
-                  onClick={e => { e.stopPropagation(); onVGenSettings(c.id); }}
-                  style={{ ...iconBtn, background: 'rgba(0,0,0,0.3)', border: `0.5px solid ${PK.edge}`, color: PK.fg, cursor: 'pointer' }}
-                ><IconGear /></button>
+                  onClick={e => { e.stopPropagation(); onVGenPrompt(c.id); }}
+                  style={{ ...iconBtn, background: 'rgba(0,0,0,0.3)', border: `0.5px solid ${PK.edge}`,
+                    color: v.promptPresetId ? '#64d2ff' : PK.fg, cursor: 'pointer' }}
+                ><IconPrompt /></button>
               )}
               {/* 运行 / 停止：一颗图标，不写文字。 */}
               <button
@@ -1826,7 +2002,7 @@ const Clip: React.FC<{
                   ? 'Stop this segment.'
                   : continueBlocked
                     ? `The output track already has a clip over ${fmtTime(c.start)}–${fmtTime(c.start + c.duration)} — move or delete it before running this segment again.`
-                    : `Run this generator with the values configured on the segment (prompt, width / height / duration / fps${v.ports.first_frame ? ', first frame' : ''}${v.ports.last_frame ? ', last frame' : ''}) — the video lands on the output track at ${fmtTime(c.start)}.`}
+                    : `Run this generator with the values configured on the segment (prompt, width / height / duration / fps${v.ports.first_frame ? ', first frame' : ''}${v.ports.last_frame ? ', last frame' : ''}) — the video lands on the output track at ${fmtTime(c.start)}.${chainPrev ? ` Linked to 「${chainPrev.name}」: if that segment has no result yet, it is generated first.` : ''}`}
                 onPointerDown={e => e.stopPropagation()}
                 onClick={e => {
                   e.stopPropagation();

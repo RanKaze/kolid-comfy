@@ -381,6 +381,51 @@ def cud_composite_bytes(path):
         return None
 
 
+def cud_thumb_path(path, w=96):
+    """一份 .cud 合成图的**缩略图**落盘路径（按需生成，取不到返回 None）。
+
+    缓存落在资产仓库的 .thumbs/ 里（cud_ 前缀 + 路径哈希 + mtime —— 工程一存盘 mtime 变，
+    键就换，旧图自然失效），画质规则照抄 asset_store.thumb_path：透明压到 #141416 上，
+    深色界面不白底发光。
+    """
+    try:
+        w = max(32, min(1024, int(w)))
+    except (TypeError, ValueError):
+        w = 96
+    try:
+        abspath = os.path.abspath(path)
+        mt = os.path.getmtime(abspath)
+    except OSError:
+        return None
+    d = os.path.join(asset_store.asset_dir(), asset_store.THUMB_DIR)
+    os.makedirs(d, exist_ok=True)
+    key = hashlib.md5(abspath.lower().encode('utf-8')).hexdigest()[:16]
+    tp = os.path.join(d, 'cud_%s_%d_%d.jpg' % (key, int(mt), w))
+    if os.path.exists(tp):
+        return tp
+    raw = cud_composite_bytes(abspath)
+    if not raw:
+        return None
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(raw)) as im:
+            if im.mode in ('RGBA', 'LA', 'P'):
+                rgba = im.convert('RGBA')
+                bg = Image.new('RGB', rgba.size, (20, 20, 22))
+                bg.paste(rgba, mask=rgba.split()[-1])
+                im = bg
+            else:
+                im = im.convert('RGB')
+            im.thumbnail((w, w), Image.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, 'JPEG', quality=82, optimize=True)
+        asset_store._atomic_write(tp, buf.getvalue())
+        return tp
+    except Exception as e:
+        print(f'[CudFrame] thumb failed for {path}: {type(e).__name__}: {e}')
+        return None
+
+
 def processor_input_tensor(key, server):
     """Processor 的 image_keys 一项 → [1,H,W,C] tensor（取不到返回 None）。
 
@@ -1813,6 +1858,23 @@ class DocumentIo:
     def forget(self, token):
         with self._lock:
             self._tokens.pop(token or '', None)
+
+    def open_path(self, path, kind='cud'):
+        """把一条**早已落袋**的路径收进登记表，返回与对话框同形的文档描述符。
+
+        与 _document 的差别只在入口约束：路径必须确实是该类别的文件且仍在盘上。唯一的调用
+        方是时间线帧卡的跳转 —— 那条路径是用户当年从对话框挑进工程的，这里只是把它重新
+        mint 成 token 交给工作台的 Load 通道，不新增"页面指定任意路径"的面。
+        """
+        if not isinstance(path, str) or not path:
+            return None
+        spec = IO_FILE_KINDS.get(kind) or IO_FILE_KINDS['cud']
+        ext = spec.get('extension')
+        if ext and not path.lower().endswith(ext):
+            return None
+        if not os.path.isfile(path):
+            return None
+        return self._document(path, kind)
 
     # ---- 最近一份 .cud ----
     def _remember_cud(self, path):
@@ -3775,6 +3837,28 @@ class SnapshotDetailerSamplerServer:
                 self.wfile.write(data)
                 return
 
+            if req.path == '/api/cud_frame_thumb':
+                # ?path=<.cud 绝对路径>&w=96 — 时间线帧卡上的 .cud 绑定预览：合成图的缩略。
+                # 路径只来自用户挑进工程的绑定（kind:'cud' 的帧引用），非 .cud / 不在盘上一律 404。
+                qs = parse_qs(req.query)
+                p = (qs.get('path') or [''])[0]
+                try:
+                    tw = int((qs.get('w') or ['96'])[0])
+                except (TypeError, ValueError):
+                    tw = 96
+                tp = cud_thumb_path(p, tw) if p.lower().endswith('.cud') else None
+                if not tp:
+                    self.send_error(404)
+                    return
+                data = open(tp, 'rb').read()
+                self.send_response(200)
+                self.send_header('Content-type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-cache')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
             if req.path.startswith('/api/asset/'):
                 ref = unquote(req.path[len('/api/asset/'):]).strip('/')
                 rec = asset_store.get(ref)
@@ -4656,6 +4740,23 @@ class SnapshotDetailerSamplerServer:
                 return
 
             # ---- 文档 IO：对话框由后端弹，路径只在服务端流转 ----
+            if self.path == '/api/cud_open':
+                # {path: '<.cud 绝对路径>'} → {ok, doc:{token,name,path,size,mime}}
+                # 跳转通道：帧卡绑的 .cud 要打开编辑时，把那条**用户挑进工程的**路径重新
+                # mint 成对话框同形的描述符；前端拿它走 blend-reopen-cud（已开着就切换，
+                # 没开着就 Load 开新窗）。约束在 open_path 里：非 .cud / 不在盘上一律拒绝。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    doc = doc_io.open_path(str(body.get('path') or ''), 'cud')
+                    if doc is None:
+                        self._send_json({'ok': False, 'error': 'not a readable .cud'})
+                    else:
+                        self._send_json({'ok': True, 'doc': doc})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
+                return
+
             if self.path == '/api/io_pick':
                 # {mode: 'open'|'save', kind: 'cud'|'png'|'image', suggested, multiple}
                 # → {cancelled, picks:[{token,name,path,size,mime}]}
@@ -5056,12 +5157,17 @@ class SnapshotDetailerSamplerNode:
         sel = server._prompt_preset_selection((block_params or {}).get('preset_id'))
         return self._resolve_prompt_selection(server, sel)
 
-    def _resolve_prompt_selection(self, server, sel):
+    def _resolve_prompt_selection(self, server, sel, merge_global=True):
         """Resolve one raw selection into (user_positive, user_loras) for the detailers AFTER it.
 
         Shared by the prompt block (whose selection is a persisted preset) and the Query
         block (whose selection is picked by the user at run time) — both are transient
         injections with identical semantics.
+
+        `merge_global=False`（生成器轨的轨级提示词）：只渲染 preset 本身，不合并 prompt tab
+        的全局选择、不碰 temporary_prompts、也不覆写 last_effective_prompt_selection /
+        _last_trigger_str —— 产出的串由调用方自己拼接（追加在段提示词后面），不是一次
+        detailer 级的整条替换。
 
         Semantics (与产品确认过的行为一致):
           - 合并 = prompt 节点全局最终选择（selected_prompts/loras/prefabs，已是全局
@@ -5090,20 +5196,22 @@ class SnapshotDetailerSamplerNode:
                 else:
                     parts.append('(non-dict){}'.format(l))
             print(f"[QueryLora] {tag}: {parts}")
-        _lora_diag('global selected_loras', getattr(ps, 'selected_loras', None))
+        if merge_global:
+            _lora_diag('global selected_loras', getattr(ps, 'selected_loras', None))
         _lora_diag('block selection loras', sel.get('loras'))
 
         # --- 合并 tags：全局在前（text -> 单 tag TagGroup），block 在后 ---
         merged_tags = []
-        for p in (getattr(ps, 'selected_prompts', None) or []):
-            text = p.get('text') if isinstance(p, dict) else str(p)
-            src = p.get('source', 'normal') if isinstance(p, dict) else 'normal'
-            if text.startswith('<') and text.endswith('>'):
-                text = text[1:-1]
-            if not text:
-                continue
-            merged_tags.append({'tags': [{'name': text, 'prompt': text, 'category': ''}],
-                                'strength': 1.0, 'source': src})
+        if merge_global:
+            for p in (getattr(ps, 'selected_prompts', None) or []):
+                text = p.get('text') if isinstance(p, dict) else str(p)
+                src = p.get('source', 'normal') if isinstance(p, dict) else 'normal'
+                if text.startswith('<') and text.endswith('>'):
+                    text = text[1:-1]
+                if not text:
+                    continue
+                merged_tags.append({'tags': [{'name': text, 'prompt': text, 'category': ''}],
+                                    'strength': 1.0, 'source': src})
         for g in (sel.get('tags') or []):
             if isinstance(g, dict) and g.get('source', 'normal') == 'program':
                 continue
@@ -5122,7 +5230,8 @@ class SnapshotDetailerSamplerNode:
             return ps._resolve_lora_file_path(fp) if hasattr(ps, '_resolve_lora_file_path') else fp
         merged_loras = []
         seen_lora = set()
-        for l in list(getattr(ps, 'selected_loras', None) or []) + list(sel.get('loras') or []):
+        global_loras = list(getattr(ps, 'selected_loras', None) or []) if merge_global else []
+        for l in global_loras + list(sel.get('loras') or []):
             if not isinstance(l, dict):
                 continue
             key = _lora_identity(l)
@@ -5132,7 +5241,8 @@ class SnapshotDetailerSamplerNode:
             merged_loras.append(copy.deepcopy(l))
         merged_prefabs = []
         seen_guid = set()
-        for p in list(getattr(ps, 'selected_prefabs', None) or []) + list(sel.get('prefabs') or []):
+        global_prefabs = list(getattr(ps, 'selected_prefabs', None) or []) if merge_global else []
+        for p in global_prefabs + list(sel.get('prefabs') or []):
             if not isinstance(p, dict):
                 continue
             guid = p.get('guid')
@@ -5141,7 +5251,10 @@ class SnapshotDetailerSamplerNode:
             seen_guid.add(guid)
             merged_prefabs.append(copy.deepcopy(p))
 
-        custom_parts = [c for c in [getattr(ps, 'custom_prompts', '') or '', sel.get('custom_prompts') or ''] if c]
+        custom_parts = [c for c in
+                        ([getattr(ps, 'custom_prompts', '') or ''] if merge_global else [])
+                        + [sel.get('custom_prompts') or '']
+                        if c]
         merged_custom = '\n'.join(custom_parts)
 
         # --- block 的 programs 在合并 selection 上执行（无 programs = 原样通过）---
@@ -5160,7 +5273,8 @@ class SnapshotDetailerSamplerNode:
         if result['result_custom_prompts']:
             parts.append(result['result_custom_prompts'])
         # Same as _parse_prompt: the last tag's unparseable segments are this pass's prompt.
-        parts.extend(getattr(ps, 'temporary_prompts', None) or [])
+        if merge_global:
+            parts.extend(getattr(ps, 'temporary_prompts', None) or [])
         user_positive = ','.join(parts)
 
         loras = list(result['result_loras'])
@@ -5197,15 +5311,18 @@ class SnapshotDetailerSamplerNode:
                 lora_str_parts.append(str(lora_item))
         user_loras = ','.join(lora_str_parts)
         # Same leading position as _parse_prompt: trigger words before every other segment.
-        # 这里替换的是整条 user_positive，所以触发词串也以这次为准覆写（同上，供
-        # Enable Output 剥离用）。
+        # merge_global=False 只把触发词编进**这次返回的串**（调用方自己拼接），
+        # 不覆写 _last_trigger_str —— 那颗记的是整条 run 真正生效的合并选择。
         self._last_trigger_str = ''
         if trigger_words:
             trigger_str = ', '.join(trigger_words)
             user_positive = trigger_str + (', ' + user_positive if user_positive else '')
-            self._last_trigger_str = trigger_str
+            if merge_global:
+                self._last_trigger_str = trigger_str
         for text in prefab_texts:
             user_positive = f"{user_positive}, {text}" if user_positive else text
+        if not merge_global:
+            return user_positive, user_loras
         # 诊断：库里 trainedWords（lora_data[*]['tags']）能不能兜住这次的空 active_tags。
         lib_tags = {}
         for items in (getattr(ps, 'lora_data', None) or {}).values():
@@ -8266,6 +8383,80 @@ class SnapshotDetailerSamplerNode:
                 else:
                     dbg.record_image(f'视频输入 · {_pname}', vals[0], detail=f'{fname} 抽 {len(vals)} 帧')
             print(f"[InterfaceExec] Port {port_num_str} video input: {fname} → {len(vals)} frames")
+
+        # 生成器链条的共享帧：前一段的**产物末帧**喂进这一段的首帧口。src 是 placeProcOutput
+        # 落位时入库的那份（资产库/媒体库 URL），这里解回盘上路径、按源帧号抽末帧 ——
+        # 前段绑了末帧卡时前端直接给 image_keys，不走这里。
+        chain_frames = exec_options.get('chain_frames') or {}
+        for port_num_str, spec in chain_frames.items():
+            if not isinstance(spec, dict):
+                continue
+            src = str(spec.get('src') or '')
+            vpath = _vid_media_path(src)
+            if not vpath:
+                raise ValueError(f'Chained first frame for port {port_num_str}: cannot resolve media {src!r} '
+                                 f"— the previous segment's result is missing from the asset store.")
+            probe = _vid_ffprobe(vpath)
+            if not probe or not probe.get('duration'):
+                raise ValueError(f'Chained first frame for port {port_num_str}: no duration probed from '
+                                 f'{os.path.basename(vpath)}.')
+            try:
+                pf = float(spec.get('fps') or 0)
+            except (TypeError, ValueError):
+                pf = 0.0
+            if pf <= 0:
+                pf = 30.0
+            # 最后一个"正在显示"的源帧号：dur*pf 落在网格上时 -ε 才不会多出一格。
+            last_f = max(0, int(probe['duration'] * pf - 1e-6))
+            frames = None
+            for f0 in (last_f, max(0, last_f - 1)):
+                frames = _vid_frames(vpath, ss=0.0, t=1.0 / pf, n=1, fps=pf, f0=f0)
+                if frames:
+                    last_f = f0
+                    break
+            if not frames:
+                raise ValueError(f'Chained first frame for port {port_num_str}: no frames extracted from '
+                                 f'{os.path.basename(vpath)}.')
+            declared = start_types.get(str(port_num_str))
+            val = staging_image_to_mask(frames[0]) if declared == 'MASK' else frames[0]
+            port_overrides[int(port_num_str)] = val
+            if own_trace:
+                _pname = _start_names.get(str(port_num_str)) or f'value{port_num_str}'
+                _detail = f'{os.path.basename(vpath)} 末帧（帧号 {last_f}）'
+                if declared == 'MASK':
+                    dbg.record_mask(f'链式首帧 · {_pname}', val, detail=_detail + '（亮度转 mask）')
+                else:
+                    dbg.record_image(f'链式首帧 · {_pname}', val, detail=_detail)
+            print(f"[InterfaceExec] Port {port_num_str} chained first frame: "
+                  f"{os.path.basename(vpath)} f0={last_f} ({declared or 'IMAGE'})")
+
+        # 生成器的**提示词 preset**（段级 + 轨级）：各自渲染成串**按序追加**在段 prompt 口
+        # 的纯文本后面 —— 端口纯文本在前、段 preset 在后、轨级 preset 最后（与前端约定的
+        # 三层合并一致）。merge_global=False：只渲染 preset 本身，不掺 prompt tab 的全局
+        # 选择 —— 这些是段/轨自己的附加词，与 prompt tab 那份无关。
+        _vg_track = exec_options.get('vgen') if isinstance(exec_options.get('vgen'), dict) else None
+        _vg_prompt_port = ((_vg_track.get('ports') or {}).get('prompt')
+                           if isinstance(_vg_track, dict) and isinstance(_vg_track.get('ports'), dict) else None)
+        _vg_preset_ids = []
+        if isinstance(_vg_track, dict):
+            for _key, _label in (('prompt_preset_id', '段提示词 preset'),
+                                 ('track_prompt_preset_id', '轨道提示词 preset')):
+                if _vg_track.get(_key):
+                    _vg_preset_ids.append((_key, _label, _vg_track.get(_key)))
+        if _vg_preset_ids and _vg_prompt_port and not chain_mode:
+            _key = str(_vg_prompt_port)
+            for _pkey, _label, _pid in _vg_preset_ids:
+                _sel = server._prompt_preset_selection(_pid) \
+                    if hasattr(server, '_prompt_preset_selection') else None
+                _pos, _ = self._resolve_prompt_selection(server, _sel, merge_global=False)
+                if not _pos:
+                    continue
+                _base = manual_values.get(_key) if isinstance(manual_values, dict) else None
+                manual_values[_key] = f"{_base}, {_pos}" if _base else _pos
+                if own_trace:
+                    dbg.record_prompt(f'{_label}（追加到段提示词后）', _pos)
+                print(f"[InterfaceExec] vgen {_label} {_pid} appended to "
+                      f"port {_vg_prompt_port}: '{_pos[:120]}'")
 
         injected_img = base_img
         injected_mask = base_mask

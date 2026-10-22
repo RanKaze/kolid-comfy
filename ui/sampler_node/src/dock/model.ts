@@ -482,10 +482,28 @@ export const revealDoc = (dock: Dock, id: UnitId): Dock => {
   return { ...dock, tree };
 };
 
+// 文档 tab 在前、常驻单元（Pipeline Graph 等）在后：一条 tab 条里文档们永远排前面 ——
+// 用户点名要 "xxx0.cud, xxx1.cud, Pipeline Graph"，别让常驻单元把文档串隔成两截。
+// 只动文档落进的那条 `default` 块，两段的相对次序各自保留；容器（v/h 叠放）没有 tab 条，
+// 不归它管。每次有文档落进来都重排一遍：已存档里的旧交错局面在下一份文档开进来时就地痊愈。
+const docsToFront = (dock: Dock, id: UnitId): Dock => {
+  const tree = rewriteHolder(dock.tree, id, h => {
+    if (h.t !== 'b' || h.mode !== 'default' || !h.ids.some(u => !!docUidOf(u))) return h;
+    const docs = h.ids.filter(u => !!docUidOf(u));
+    const rest = h.ids.filter(u => !docUidOf(u));
+    if (!docs.length || !rest.length) return h;
+    const ids = [...docs, ...rest];
+    // sel 跟单元走不跟下标走：重排前后正在显示的是同一个。
+    const shown = h.ids[h.sel];
+    return { ...h, ids, sel: Math.max(0, ids.indexOf(shown)) };
+  });
+  return { ...dock, tree };
+};
+
 function placeDoc(dock: Dock, id: UnitId): Dock {
   const shown = dockUnits(dock.tree).find(u => !!docUidOf(u));
   // 住进现成的文档窗：接完 tab 把选中项拨到新来的这一份 —— 否则 Load 之后屏幕上还是上一份工程。
-  if (shown) return revealDoc(dropInDock(dock, id, shown, 'center'), id);
+  if (shown) return revealDoc(docsToFront(dropInDock(dock, id, shown, 'center'), id), id);
   const leaf: DockNode = block(id);
   return { ...dock, tree: appendToWork(dock.tree, leaf) || appendToRow(dock.tree, leaf) || { t: 's', d: 'h', ks: [dock.tree, leaf] } };
 }
