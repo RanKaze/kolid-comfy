@@ -151,6 +151,18 @@ payload = 依次拼接 length > 0 的那些资产的字节（PNG / WEBP 原样�
 - **在磁盘上显示**
 - 拖拽协议统一成 `application/x-asset = {hash}`，替掉现在的 `x-vid-asset` / `x-vid-global` / `x-blend-staging`
 
+**已落地（2026-10-22）**：图卡（`kind: image`）的载荷是 `application/x-asset = {id,url,name,kind,asset}`，
+三个落点都认（`temporary/_probe_asset_drag.cjs`，24/24 连跑两次）：
+
+| 落点 | 谁收 | 落地动作 |
+|---|---|---|
+| Staging 条 | 宿主 `staging.tsx` | 读字节 → data URL → 与拖本地文件同一个上传口（`/api/staging` 新条目，图池权威仍在后端） |
+| Layers / Guidances 两摞 | 宿主 `layerRow.tsx` | 宿主读载荷、发 `layer-from-asset`，页面 `addAssetAsLayer` 按 URL 建智能图层（`source` = `asset`） |
+| 画布 | `blend_node.html` 自己的 window drop | 同上，跨 iframe 一口 drop 直接收，不经宿主 |
+
+`url` 优先指仓库地址（`/api/asset_media/<hash>`，跨 iframe 也读得到），仓库里缺了才退回资产自己的 `src`
+（A4 内嵌的那份字节还在）。图片不再发 `x-vid-global`（时间线上没有片段可落），音视频照旧两种载荷都带。
+
 ### 4.4 缺失与 relink（B 决策必须配的一步）—— **已落地（A5b）**
 
 音视频不内嵌 ⇒ 把 .cud 挪到别的机器/仓库，它们一定缺。现在：

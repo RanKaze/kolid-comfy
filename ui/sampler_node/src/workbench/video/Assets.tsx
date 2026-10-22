@@ -714,10 +714,19 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
               it={{
                 name: a.name, kind: k, src: a.src, duration: a.duration, hasAudio: img ? null : a.hasAudio,
                 byteFrom: miss ? 'missing' : 'store', origin: a.origin, usedBy: usedBy(a.src),
-                drag: img ? undefined : {
-                  'application/x-vid-asset': a.id,
-                  [ASSET_ITEM_TYPE]: JSON.stringify({ id: a.id, url: a.src, name: a.name, kind: k, asset: a.asset, play: a.play }),
-                },
+                drag: (() => {
+                  // 图卡也要能拖走（Staging / Layers 两处都收 `application/x-asset`）；时间线那枚老载荷
+                  // 只给音视频（图片没有片段可落）。有哈希就指仓库地址 —— 同一份字节，跨 iframe 也读得到；
+                  // 仓库里缺了就退回资产自己的 src（A4 内嵌的那份 bytes 还在，别把一张活图判死）。
+                  const url = a.asset && !miss
+                    ? '/api/asset_media/' + encodeURIComponent(a.asset)
+                    : a.src;
+                  const out: Record<string, string> = {
+                    [ASSET_ITEM_TYPE]: JSON.stringify({ id: a.id, url, name: a.name, kind: k, asset: a.asset, play: a.play }),
+                  };
+                  if (!img) out['application/x-vid-asset'] = a.id;
+                  return out;
+                })(),
                 actions: (
                   <>
                     {miss && (
@@ -776,10 +785,14 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
                 byteFrom: 'store',
                 origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
                 usedBy: usedBy(play),
-                drag: {
-                  [ASSET_ITEM_TYPE]: JSON.stringify(payload),
-                  [GLOBAL_ITEM_TYPE]: JSON.stringify({ url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash }),
-                },
+                drag: (() => {
+                  const out: Record<string, string> = { [ASSET_ITEM_TYPE]: JSON.stringify(payload) };
+                  // 老载荷只给音视频：图片落到时间线上没有片段可落，发出去只会让落点白忙一趟。
+                  if (s.kind !== 'image') {
+                    out[GLOBAL_ITEM_TYPE] = JSON.stringify({ url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash });
+                  }
+                  return out;
+                })(),
                 actions: (
                   <span style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
                     {s.kind !== 'image' && (

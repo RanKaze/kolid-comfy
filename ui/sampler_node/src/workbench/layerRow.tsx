@@ -26,6 +26,8 @@ let fxDragRef: { layerId: number; attrId: string; stepId: number } | null = null
  *  blend_node.html 的 STAGING_LAYER_TYPE / STAGING_ITEM_TYPE 同一份，退休 DOM 之前两边不会走散。 */
 const STAGING_LAYER_TYPE = 'application/x-blend-layer';
 const STAGING_ITEM_TYPE = 'application/x-blend-staging';
+/** 资产仓库卡片（Assets 窗）的统一载荷：`{id,url,name,kind,asset}`。落在这一摞 = 以智能图层加入。 */
+const ASSET_ITEM_TYPE = 'application/x-asset';
 const hasType = (dt: DataTransfer | null, t: string) => !!dt && Array.from(dt.types).includes(t);
 // 外部文件那一岔：操作系统拖进来的东西在 types 里只有一个词 'Files'（页面的 dropHasFiles 同一句）。
 const hasFiles = (dt: DataTransfer | null) => hasType(dt, 'Files');
@@ -787,6 +789,13 @@ export const LayerListView = ({ stack, rows, send, video }:
   return (
     <div className={'layer-list' + (over ? ' drop-target' : '')}
       onDragOver={ev => {
+        // 资产仓库的图卡 = 智能图层落点（画布之外的第二落点，guidance 栈同理）。dragover 阶段
+        // 只看得见类型名，看不出 kind —— 音视频在这一落点是空操作，drop 那一步才判。
+        if (hasType(ev.dataTransfer, ASSET_ITEM_TYPE)) {
+          ev.preventDefault(); ev.stopPropagation(); ev.dataTransfer.dropEffect = 'copy';
+          setRowUi({ over: { key: listKey } });
+          return;
+        }
         // 工作区条目 = 智能图层落点（画布之外的第二落点，guidance 栈同理）。
         if (hasType(ev.dataTransfer, STAGING_ITEM_TYPE)) {
           ev.preventDefault(); ev.stopPropagation(); ev.dataTransfer.dropEffect = 'copy';
@@ -805,6 +814,15 @@ export const LayerListView = ({ stack, rows, send, video }:
       onDragLeave={() => { if (st.over?.key === listKey) setRowUi({ over: null }); }}
       onDrop={ev => {
         setRowUi({ over: null });
+        if (hasType(ev.dataTransfer, ASSET_ITEM_TYPE)) {
+          ev.preventDefault(); ev.stopPropagation();
+          let a: { url?: string; name?: string; kind?: string; asset?: string } | null = null;
+          try { a = JSON.parse(ev.dataTransfer.getData(ASSET_ITEM_TYPE)); } catch { a = null; }
+          if (a && a.url && (!a.kind || a.kind === 'image')) {
+            send('layer-from-asset', { url: a.url, name: a.name || 'Asset', hash: a.asset || '', stack });
+          }
+          return;
+        }
         if (hasType(ev.dataTransfer, STAGING_ITEM_TYPE)) {
           ev.preventDefault(); ev.stopPropagation();
           let sid = '';

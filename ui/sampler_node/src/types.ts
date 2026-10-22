@@ -971,6 +971,9 @@ export type BlendUiAction =
   | 'processor-run' | 'processor-reset'
   | 'staging-prompt' | 'staging-blend' | 'staging-tag' | 'staging-cancel'
   | 'stage-layer' | 'layer-from-staging'
+  /** 资产仓库图卡落到 Layers / Guidances 某一摞：宿主读载荷，页面按 URL 建智能图层（跨 iframe
+   *  那一口 drop 只有画布收得到，这两摞住在宿主，只能走消息）。 */
+  | 'layer-from-asset'
   | 'visible-faces';
 
 /** 每个动作键的载荷形状，一条边界一个作者：`undefined` = 这一条不需要取值。
@@ -1161,6 +1164,9 @@ export type BlendUiPayloads = {
   'staging-cancel': undefined;
   'stage-layer': { id: number };
   'layer-from-staging': { id: string; stack?: BlendStack };
+  /** 仓库图卡：`url` 是仓库地址（/api/asset_media/<hash> 或 /api/global_media/<file>），
+   *  `hash` 是内容哈希（落进图层 source），`name` 是显示名。 */
+  'layer-from-asset': { url: string; name?: string; hash?: string; stack?: BlendStack };
 };
 
 /** 发送口：泛型把动作键和它的载荷绑死 —— `'visible-faces'` 不给数组就编译不过，旋钮给了字符串也编译不过。

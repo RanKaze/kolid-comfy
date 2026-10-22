@@ -18,6 +18,8 @@ import type { WorkbenchUnit, WorkbenchUnitProps } from './registry';
 // 图池条 = 把这一层的合成结果导出进图池。两边不会走散。
 const STAGING_LAYER_TYPE = 'application/x-blend-layer';
 const STAGING_ITEM_TYPE = 'application/x-blend-staging';
+/** 资产仓库卡片（Assets 窗）的统一载荷：`{id,url,name,kind,asset}`。落进图池 = 读字节再上传。 */
+const ASSET_ITEM_TYPE = 'application/x-asset';
 const GUIDANCE_ID = 'staging_guidance';
 const ZWSP = '\u200B';
 const IMAGE_ID_TOKEN = /<image_id:([^>\s]+)>/g;
@@ -133,6 +135,22 @@ function dropHasFiles(dt: DataTransfer | null): boolean {
 function dragHasType(e: React.DragEvent | DragEvent, t: string): boolean {
   const dt = e.dataTransfer;
   return !!dt && Array.prototype.indexOf.call(dt.types || [], t) >= 0;
+}
+
+/** 仓库地址 → data URL。`/api/staging` 吃的是 base64（dataurl_to_tensor），宿主的上传口也只认这个形状，
+ *  所以图卡拖进来先把字节读一遍 —— 内容寻址之后这份字节本来就在盘上，这一趟只是过个手。 */
+async function assetUrlToDataUrl(url: string): Promise<string | null> {
+  try {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) return null;
+    const blob = await r.blob();
+    return await new Promise<string | null>(res => {
+      const fr = new FileReader();
+      fr.onload = () => res(typeof fr.result === 'string' ? fr.result : null);
+      fr.onerror = () => res(null);
+      fr.readAsDataURL(blob);
+    });
+  } catch { return null; }
 }
 
 const StagingBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
@@ -297,13 +315,15 @@ const StagingBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
   const onStripDragOver = (e: React.DragEvent) => {
     const hasFiles = dropHasFiles(e.dataTransfer);
     const hasLayer = dragHasType(e, STAGING_LAYER_TYPE);
-    if (!hasFiles && !hasLayer) {
+    // 图卡也收（dragover 阶段读不到载荷，只能按类型放行；音视频在 drop 那一步被忽略）。
+    const hasAsset = dragHasType(e, ASSET_ITEM_TYPE);
+    if (!hasFiles && !hasLayer && !hasAsset) {
       if (dragHasType(e, STAGING_ITEM_TYPE)) { e.stopPropagation(); }   // 自家条目路过自己：别亮任何东西
       return;
     }
     e.preventDefault();
     e.stopPropagation();
-    e.dataTransfer.dropEffect = hasFiles ? 'copy' : 'move';
+    e.dataTransfer.dropEffect = hasLayer ? 'move' : 'copy';
     setDragOver(true);
   };
   const onStripDragLeave = (e: React.DragEvent) => {
@@ -314,13 +334,23 @@ const StagingBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
   const onStripDrop = (e: React.DragEvent) => {
     const hasFiles = dropHasFiles(e.dataTransfer);
     const hasLayer = dragHasType(e, STAGING_LAYER_TYPE);
-    if (!hasFiles && !hasLayer) {
+    const hasAsset = dragHasType(e, ASSET_ITEM_TYPE);
+    if (!hasFiles && !hasLayer && !hasAsset) {
       if (dragHasType(e, STAGING_ITEM_TYPE)) e.stopPropagation();
       return;
     }
     e.preventDefault();
     e.stopPropagation();
     setDragOver(false);
+    if (hasAsset) {
+      // 图卡 → 图池：读字节，走与"拖本地文件"同一条上传口（图池权威在后端，条目是新的）。
+      let a: { url?: string; name?: string; kind?: string } | null = null;
+      try { a = JSON.parse(e.dataTransfer.getData(ASSET_ITEM_TYPE)); } catch { a = null; }
+      if (a && a.url && (!a.kind || a.kind === 'image')) {
+        void assetUrlToDataUrl(a.url).then(u => { if (u) host.stageUpload([u], [a!.name || 'Asset']); });
+      }
+      return;
+    }
     if (hasFiles) { stageFiles(e.dataTransfer.files); return; }
     try { send('stage-layer', { id: Number(e.dataTransfer.getData(STAGING_LAYER_TYPE)) }); } catch { /* ignore */ }
   };
@@ -387,6 +417,7 @@ const StagingBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
       {/* 图池条：两张钉死卡片恒在最左（Context / Guidance），其后是图池条目。拖文件进来上传；
           点条目 = 在 Extra Prompt 光标处插 <image_id:…>；✕ 移除；条目拖出去 = 以智能图层加入。 */}
       <div
+        data-staging-strip=""
         onDragOver={onStripDragOver}
         onDragLeave={onStripDragLeave}
         onDrop={onStripDrop}

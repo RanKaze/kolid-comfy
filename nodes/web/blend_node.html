@@ -9041,9 +9041,19 @@ function dragHasType(e, t) { return !!e.dataTransfer && Array.prototype.indexOf.
 //   x-blend-staging = 工作区条目起拖，落到画布 / 图层列表 = 以智能图层加入
 const STAGING_LAYER_TYPE = 'application/x-blend-layer';
 const STAGING_ITEM_TYPE = 'application/x-blend-staging';
+// 资产仓库（Assets 窗）的卡片：`application/x-asset` = {id, url, name, kind, asset}。那一窗住在
+// 宿主那一页，画布在这个 iframe 里 —— 同源、同一趟拖拽，落点这一侧直接读得到，不必绕宿主的消息。
+const ASSET_ITEM_TYPE = 'application/x-asset';
 function baseName(name) { return String(name || 'Layer').replace(/\.[^.]+$/, '') || 'Layer'; }
 
 window.addEventListener('dragover', e => {
+    // 资产仓库的图卡：画布 / 图层列表都是它的落点（与工作区条目同一条提示）。
+    if (dragHasType(e, ASSET_ITEM_TYPE)) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        dropOverlay.style.display = 'flex';
+        return;
+    }
     // 工作区条目拖进来：画布 = 智能图层落点，亮同一块全屏提示。
     if (dragHasType(e, STAGING_ITEM_TYPE)) {
         e.preventDefault();
@@ -9060,6 +9070,15 @@ window.addEventListener('dragleave', e => {
     if (!e.relatedTarget) dropOverlay.style.display = 'none';   // only when the pointer leaves the frame
 });
 window.addEventListener('drop', e => {
+    // 资产仓库的图卡落在画布 = 以智能图层加入（图层列表自己接的先 stopPropagation）。
+    if (dragHasType(e, ASSET_ITEM_TYPE)) {
+        e.preventDefault();
+        dropOverlay.style.display = 'none';
+        let a = null;
+        try { a = JSON.parse(e.dataTransfer.getData(ASSET_ITEM_TYPE)); } catch (err) { a = null; }
+        if (a) addAssetAsLayer(a, WORK_STACK);
+        return;
+    }
     // 工作区条目落在画布上 = 以智能图层加入（工作区条 / 图层列表自己接的先 stopPropagation）。
     if (dragHasType(e, STAGING_ITEM_TYPE)) {
         e.preventDefault();
@@ -13521,6 +13540,12 @@ const UI_COMMANDS = {
         // 新的图层必须落进某一摞：说不清的时候照今天画布那一口 drop 的读法进工作摞。
         addStagingAsLayer(String(o.id), uiStack(o.stack) || WORK_STACK);
     },
+    // 资产仓库的卡片落在宿主那两摞之一（Assets 窗与 Layers 窗同页，跨 iframe 的拖拽只有坐标
+    // 过不来，所以宿主读载荷、这一侧建图层 —— 与 staging 那条同一条路）。
+    'layer-from-asset': v => {
+        const o = uiRow(v);
+        addAssetAsLayer(o, uiStack(o.stack) || WORK_STACK);
+    },
 };
 importFileInput.addEventListener('change', () => {
     // Snapshot the FileList before clearing the input — clearing it empties the live list too.
@@ -13627,6 +13652,21 @@ function addStagingAsLayer(id, stack) {
     if (!s || !s.src) { setStatus('That workspace image is gone', 'error'); return; }
     addLayer({ src: s.src, name: s.name || 'Staged', smart: true, asset: s.asset || null }, stack);
     setStatus(`「${s.name || 'Staged'}」added from the workspace as a smart layer`);
+}
+
+// 资产仓库的卡片拖到画布 / 图层列表：同一条"以智能图层加入"，只是源换成了仓库地址。
+// 载荷：{ id, url, name, kind, asset }（asset = 内容哈希，落进图层的 source）。字节不搬家 ——
+// 图层记的是这个 URL，A4 的物化点会按哈希把字节写回仓库（同一个 hash 只有一份）。
+function addAssetAsLayer(o, stack) {
+    const url = String((o && o.url) || '');
+    if (!url) return;
+    if (o.kind && o.kind !== 'image') {
+        setStatus('Only images can be added as layers — audio / video go on the timeline', 'error');
+        return;
+    }
+    addLayer({ src: url, name: String(o.name || 'Asset'), smart: true, asset: o.asset || o.hash || null },
+        stack || WORK_STACK);
+    setStatus(`「${o.name || 'Asset'}」added from the asset store`);
 }
 
 // ==================== Processor 工具 ====================
