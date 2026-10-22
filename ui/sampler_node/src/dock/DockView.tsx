@@ -412,6 +412,10 @@ const stackStyle = (mode: 'v' | 'h'): React.CSSProperties => ({
 // 一扇窗收成一条 bar：没有正文，也没有下挂的容器。条上每一颗图标就是一个 tab（一格里可能是好几个
 // 单元，那就并排几颗）；点一颗，在条子边上展开一个小窗显示那一格的正文，再点一次收起。
 //
+// 图标既然是 tab，就也得是**那一个单元**的拖拽源：拖一颗只搬这一个，条子空白处 / 六点才搬整扇窗。
+// 不给它自己的话，浏览器会把指针按下的按钮归给最近的可拖祖先（整条 bar），于是"拖一颗图标"被读成
+// "拖整条 toolbar" —— 这正是 toolbar 模式刚出来时用户报的那一手。
+//
 // 小窗走 portal + viewport 坐标：块的 scroller 和 dock 根的 overflow 都会剪掉绝对定位的子节点，
 // 而小窗必须能盖到隔壁块上。整页同时只开一扇 —— `ctx.tbPopover` 记着现在是谁，别的条子看到它
 // 换了人就收起自己的那一扇。
@@ -477,6 +481,12 @@ const ToolbarStrip: React.FC<{
     return { x: Math.min(Math.max(6, anchor.x), window.innerWidth - W - 6), y, w: W, h: H };
   })();
   const act = dockStyles.tbAct;
+  // 条上的动作按钮是控件，不是把手：让每颗按钮自己当拖拽源并当场取消，整条 bar 的 dragstart 就不会
+  // 从按钮底下发起。少了这一手，按着按钮稍微一移，浏览器归给最近的可拖祖先 —— 整条 toolbar 被搬走。
+  const noDrag = {
+    draggable: true,
+    onDragStart: (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); },
+  };
   return (
     <>
       <div data-dock-toolbar={dir} ref={stripRef} style={V ? dockStyles.tbStripV : dockStyles.tbStripH}
@@ -488,13 +498,13 @@ const ToolbarStrip: React.FC<{
           style={{ ...dockStyles.dockGrip, padding: V ? '1px 0' : '0 1px' }}><GripDots /></span>
         <div style={V ? dockStyles.tbActsV : dockStyles.tbActsH}>
           {/* 回到整扇窗：这颗就是标题条上那颗"收成 toolbar"的回程票。 */}
-          <button className="dock-h" data-dock-tb-toggle="" style={act}
+          <button className="dock-h" data-dock-tb-toggle="" style={act} {...noDrag}
             title="Back to a full window — same place in the layout, body and all"
             onClick={e => { e.stopPropagation(); close(); onUnshrink(); }}>
             <WindowIcon />
           </button>
           {/* 浮出 / 收回：与标题条上那颗一字不差，条子上也留一份。 */}
-          <button className="dock-h" data-dock-tb-popout="" style={act}
+          <button className="dock-h" data-dock-tb-popout="" style={act} {...noDrag}
             title={float ? 'Dock this window back into the layout' : 'Pop this window out as a floating window'}
             onClick={e => {
               e.stopPropagation();
@@ -505,7 +515,7 @@ const ToolbarStrip: React.FC<{
           </button>
           {/* 横 / 竖：只有 default 块和浮窗有这一手 —— 容器里的方向由块的轴说。 */}
           {canDir && (
-            <button className="dock-h" data-dock-tb-dir="" style={act}
+            <button className="dock-h" data-dock-tb-dir="" style={act} {...noDrag}
               title={V ? 'Lay this toolbar out horizontally (a row)' : 'Lay this toolbar out vertically (a column)'}
               onClick={e => { e.stopPropagation(); onDir(); }}>
               <DirIcon dir={V ? 'h' : 'v'} />
@@ -515,8 +525,10 @@ const ToolbarStrip: React.FC<{
         <span style={V ? dockStyles.tbDividerV : dockStyles.tbDividerH} />
         <div style={V ? dockStyles.tbUnitsV : dockStyles.tbUnitsH}>
           {ids.map((u, i) => (
+            // 和名字条上的 tab 同一个身份：拖它只带走这一个单元，拖条子空白处 / 六点才带走整扇窗。
             <button key={u} data-dock-tb-icon={u} style={{ ...dockStyles.tbUnit, ...(open === u ? dockStyles.tbUnitOn : null) }}
-              title={nameTip(ctx, u) + ' — click for its panel beside this strip'}
+              title={nameTip(ctx, u) + ' — click for its panel beside this strip; drag to pull just this one out'}
+              {...grab(ctx, [u])}
               onClick={e => { e.stopPropagation(); pick(u, i, e.currentTarget); }}>
               {ctx.rules.icon(u)}
             </button>

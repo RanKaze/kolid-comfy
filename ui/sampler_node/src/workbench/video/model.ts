@@ -11,7 +11,7 @@
 //  * 持久化（localStorage 'sampler.videoProject'）只存 tracks/clips/入出点。本地图（objectURL）
 //    活不过一次刷新，读档时把 blob: 的片段剪掉 —— 图池条目的 URL 是持久的，照常回来。
 
-import type { StagingItem } from '../../types';
+import type { StagingItem, VideoGenPorts } from '../../types';
 import type { MediaInfo } from './audio';
 
 // 四种轨：
@@ -29,8 +29,11 @@ export type VidTrack = {
   kind: VidTrackKind;
   name: string;
   /** `'output'` = **产物输出轨**：Processor / Preset 的 process 段跑完，成品固定落在这一条
-   *  上层轨的对应时间位置（占位段自己留在原地，可以反复重跑）。每条输出口一条，懒建。 */
-  role?: 'output';
+   *  上层轨的对应时间位置（占位段自己留在原地，可以反复重跑）。每条输出口一条，懒建。
+   *  `'vgen'` = **生成器段所在的 process 轨**（紧贴对应输出轨下方、每个输出口一条、懒建复用）：
+   *  与 processor 那条 process 轨是两回事 —— 生成器段不是"那段视频抽几帧"的占位，它自有
+   *  一套参数，所以另起一条、按 role 认，免得两条路的段混在一条轨上互相绊。 */
+  role?: 'output' | 'vgen';
   /** 输出轨对应的输出口（缺省 0；preset 恒 0）。process 段按 pending.port 找自己的输出轨。 */
   port?: number;
 };
@@ -85,6 +88,10 @@ export type VidClip = {
   /** Processor 占位段（见 VidProcPending）：产物落在输出轨上，占位段自己**原地保留**
    *  （可以反复 ▶ 重跑）；重跑会把它自己上一次的产物换掉。撤掉它 = 放弃这个 process 段。 */
   pending?: VidProcPending;
+  /** Video Generator 段（见 VidGenPending）：与占位段同一条 process 轨、同一套"产物落到
+   *  输出轨"的规矩，但参数不是"那段视频抽几帧"，而是生成器自己的一套（提示词 / 宽高 /
+   *  时长 / 帧率 / 首末帧）。两者互斥：一段要么是处理器占位，要么是生成器。 */
+  vgen?: VidGenPending;
   /** 输出轨上的产物由哪个占位段生成（= 占位段的 clip id）。重跑同一个占位段时按它认亲，
    *  自己的旧产物不算"占位"，会被原地换掉；别的东西占着才是真占。 */
   procOwner?: string;
@@ -127,6 +134,64 @@ export type VidProcPending = {
   /** 第几段（0 起）/ 共几段。 */
   segIndex: number;
   segCount: number;
+};
+
+/** 首帧 / 末帧绑的东西：一枚图片资产（按内容哈希认货），或磁盘上一份 .cud 工程
+ *  （后端读它的画面当这一帧）。两者都只在**跑的那一刻**才解析成张量。 */
+export type VidGenFrameRef =
+  | { kind: 'asset'; hash: string; name?: string }
+  | { kind: 'cud'; path: string; name?: string };
+
+/** Video Generator 段的执行快照：这一段要怎么把那台生成器跑一遍。
+ *  `ports` 是 Interface tab 里那八个槽绑出来的端口表（**快照**在段上 —— 接口后来改了绑定，
+ *  老段仍然按自己当时那份跑），`params` 是端口号 → 值（提示词、宽、高、时长、帧率都在里面）。
+ *  时长与段长是**一回事**：改参数段跟着变长变短，拖段尾反过来写回参数。 */
+export type VidGenPending = {
+  kind: 'video_gen';
+  /** 同一趟添加共用一颗（播报/统计用）。 */
+  runId: string;
+  /** 生成器的身份：名字（续跑按名解析）+ 下标兜底。 */
+  iface: string;
+  ifaceNum: number;
+  /** 产物从哪个出口回来（= 输出轨的口）。 */
+  port: number;
+  ports: VideoGenPorts;
+  /** Fixed FPS：开着 = 这台生成器有一个写死的输出帧率（不往图里喂 fps 端口）。
+   *  生成出来的片与工程帧率对不上是正常的 —— 段长只按段自己的长度走。 */
+  fixed_fps: boolean;
+  /** Fixed FPS 的那个数（1..120）。只在 `fixed_fps` 开着时有意义。 */
+  fixed_fps_value?: number;
+  /** 参数快照（manual_values：端口号字符串 → 值）。 */
+  params: Record<string, unknown>;
+  first_frame?: VidGenFrameRef | null;
+  last_frame?: VidGenFrameRef | null;
+};
+
+/** 一段生成器的**时长参数**（秒）。读的就是 duration 槽绑的那一口。 */
+export const vgenDurationOf = (v: VidGenPending): number => {
+  const port = v.ports.duration;
+  if (!port) return 0;
+  const n = Number(v.params[String(port)]);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+
+/** 段长写回 duration 参数（双向绑定的另一头）。没绑 duration 口就原样返回。 */
+export const vgenWithDuration = (v: VidGenPending, dur: number): VidGenPending => {
+  const port = v.ports.duration;
+  if (!port) return v;
+  const next = Math.max(0.1, Math.round(dur * 100) / 100);
+  return { ...v, params: { ...v.params, [String(port)]: next } };
+};
+
+/** 一号槽的**参数值**读写（值都住在 params 里，键是端口号字符串）。 */
+export const vgenGet = (v: VidGenPending, slot: keyof VideoGenPorts): unknown => {
+  const port = v.ports[slot];
+  return port ? v.params[String(port)] : undefined;
+};
+export const vgenWith = (v: VidGenPending, slot: keyof VideoGenPorts, value: unknown): VidGenPending => {
+  const port = v.ports[slot];
+  if (!port) return v;
+  return { ...v, params: { ...v.params, [String(port)]: value } };
 };
 
 export type VidProject = {
@@ -683,6 +748,55 @@ export const placeProcPlaceholders = (
   return { ...out.p, tracks, clips: [...out.p.clips, ...clips] };
 };
 
+/** 生成器轨就位：每个输出口一条（紧贴它那条输出轨下面，懒建、之后复用 —— 用户往同一条
+ *  上接着加段，不该每次多开一条空轨）。 */
+export const ensureVideoGenTrack = (p: VidProject, port: number): { p: VidProject; track: VidTrack } => {
+  const found = p.tracks.find(t => t.role === 'vgen' && (t.port ?? 0) === port);
+  if (found) return { p, track: found };
+  const out = ensureOutputTrack(p, port);
+  const track: VidTrack = {
+    id: newVidId('trk'), kind: 'process', role: 'vgen', port,
+    name: port ? `Video Gen ${port}` : 'Video Gen',
+  };
+  const tracks = [...out.p.tracks];
+  tracks.splice(tracks.findIndex(t => t.id === out.track.id) + 1, 0, track);
+  return { p: { ...out.p, tracks }, track };
+};
+
+/** 摆一枚 **video generator 段**：输出轨 + 生成器轨先就位，段落在生成器轨上播放头处。
+ *  与 processor 占位段同一套规矩 —— 段自己原地保留（改参数、换提示词、反复重跑），
+ *  产物落到上方输出轨的对应时间位置。 */
+export const placeVideoGenSegment = (
+  p: VidProject,
+  item: {
+    name: string; runId: string; port: number; iface: string; ifaceNum: number;
+    ports: VideoGenPorts; fixed_fps: boolean; fixed_fps_value?: number;
+    params: Record<string, unknown>;
+    start: number; duration: number;
+  },
+): VidProject => {
+  const { p: withTrack, track } = ensureVideoGenTrack(p, item.port);
+  const duration = Math.max(0.1, item.duration);
+  const clip: VidClip = {
+    id: newVidId('clip'), trackId: track.id, kind: 'process', name: item.name,
+    src: '', origin: 'file', start: Math.max(0, item.start), duration,
+    offset: 0, srcDuration: duration, hasAudio: false,
+    vgen: {
+      kind: 'video_gen', runId: item.runId, port: item.port,
+      iface: item.iface, ifaceNum: item.ifaceNum,
+      ports: item.ports, fixed_fps: item.fixed_fps, fixed_fps_value: item.fixed_fps_value,
+      params: item.params,
+    },
+  };
+  return { ...withTrack, clips: [...withTrack.clips, clip] };
+};
+
+/** 一段跑完：把生成器的产物换进去（自己的旧产物按 procOwner 认亲原地换掉）。
+ *  生成器段与占位段共用这一条 —— 输出轨、槽位占用、资产入库全是同一套。 */
+export const placeVideoGenOutput = (
+  p: VidProject, clipId: string, src: string, name: string, duration: number,
+): VidProject => placeProcOutput(p, clipId, src, name, duration);
+
 /** 产物输出轨查找：每个输出口一条（缺省 0）。没有 = 还没跑过这一口。 */
 export const outputTrackOf = (p: VidProject, port: number): VidTrack | null =>
   p.tracks.find(t => t.role === 'output' && (t.port ?? 0) === port) ?? null;
@@ -784,8 +898,9 @@ export const placeProcOutput = (
   p: VidProject, clipId: string, src: string, name: string, duration: number,
 ): VidProject => {
   const clip = p.clips.find(c => c.id === clipId);
-  if (!clip || !clip.pending) return p;
-  const port = clip.pending.port ?? 0;
+  if (!clip || !(clip.pending || clip.vgen)) return p;
+  // 生成器段与处理器占位段共用这一条：口 = 各自的产物出口（占位段记在 pending，生成器记在 vgen）。
+  const port = clip.pending?.port ?? clip.vgen?.port ?? 0;
   const dur = Math.max(0.1, duration);
   const { p: withTrack, track } = ensureOutputTrack(p, port);
   const withAsset = addAsset(withTrack, {
@@ -1118,7 +1233,8 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
     const clips = p.clips.filter(c => {
       if (!c || !trackIds.has(c.trackId)) return false;
       if (!Number.isFinite(c.start) || !Number.isFinite(c.duration) || !(c.duration > 0)) return false;
-      if (c.pending) return true;   // 占位段没有 src（等跑完才有）—— 快照要活过重开，照常回来
+      // 占位段没有 src（等跑完才有）—— 快照要活过重开，照常回来；生成器段同理。
+      if (c.pending || c.vgen) return true;
       if (c.kind === 'layer') return c.src === '' || !c.src;
       // A5：有哈希的段永远收回来（src 可由 play/asset 重建）；只有"既没 src 又没哈希"的老 blob: 行丢掉。
       return !!recover(c);

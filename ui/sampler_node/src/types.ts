@@ -502,13 +502,69 @@ export interface InterfacePort {
   options?: string[];
 }
 
+// ── Video Generator ────────────────────────────────────────────────────────────────────────
+// 一个开了 Video Generator 的 interface 被**声明**成一台视频生成器：八个固定槽（prompt /
+// 宽 / 高 / 时长 / 帧率 / 首帧 / 末帧 / 视频出口）各绑一个真实端口，时间线上的 video generator
+// 段就照这份绑定去填参数、去接产物。绑哪个端口是用户的事（enum 下拉），槽位本身是死的 ——
+// 这样段那一侧永远知道"提示词往哪口喂、产物从哪口出"，不必认识任何具体接口。
+export type VideoGenSlot =
+  | 'prompt' | 'width' | 'height' | 'duration' | 'fps'
+  | 'first_frame' | 'last_frame' | 'video';
+
+/** 槽位 → 端口的绑定表。键是槽位，值是端口号（1 起，与 InterfacePort.num 同一套）。 */
+export type VideoGenPorts = Partial<Record<VideoGenSlot, number>>;
+
+export interface VideoGenConfig {
+  ports: VideoGenPorts;
+  /** Fixed FPS：开着 = 这一台生成器**有一个写死的输出帧率**（`fixed_fps_value`，比如 16），
+   *  不再往图里喂 fps —— 所以 fps 槽那一口此时**不绑**（下拉也不出现）。
+   *  关着 = fps 槽绑一个端口，段把用户填的值原样喂进去，产物帧率以生成器返回为准。
+   *  两种情况下**段长都只按段自己的长度走**：生成出来的片与工程帧率对不上是正常的。 */
+  fixed_fps?: boolean;
+  /** Fixed FPS 的那个数（1..120）。只在 `fixed_fps` 开着时有意义。 */
+  fixed_fps_value?: number;
+}
+
+/** 槽位表：显示名、在接口的哪一侧、允许绑的端口类型、以及是不是**必绑**。
+ *  宽 / 高 / 时长 / 帧率必绑 —— 段上没有这四个数就既不知道画多大、也不知道该占多长。
+ *  prompt 与首末帧是可选的：没有就是"不喂"，生成器按自己那套默认走。 */
+export const VIDEO_GEN_SLOTS: {
+  key: VideoGenSlot; label: string; side: 'start' | 'end';
+  types: string[]; required?: boolean; tip: string;
+}[] = [
+  { key: 'prompt', label: 'Prompt', side: 'start', types: ['STRING'],
+    tip: 'The prompt port — the segment shows a button that opens the prompt editor for it.' },
+  { key: 'width', label: 'Width', side: 'start', types: ['INT'], required: true,
+    tip: 'Output width, in pixels. Must be bound — the segment cannot run without it.' },
+  { key: 'height', label: 'Height', side: 'start', types: ['INT'], required: true,
+    tip: 'Output height, in pixels. Must be bound — the segment cannot run without it.' },
+  { key: 'duration', label: 'Duration', side: 'start', types: ['FLOAT', 'INT'], required: true,
+    tip: 'Length of the generated clip, in seconds. Must be bound — it is also the segment length on the timeline (the two stay in sync).' },
+  { key: 'fps', label: 'FPS', side: 'start', types: ['FLOAT', 'INT'], required: true,
+    tip: 'Frames per second — fed into the graph as a value. Must be bound, unless Fixed FPS is on: then the rate is declared once for the whole interface and this port is not used at all.' },
+  { key: 'first_frame', label: 'First frame', side: 'start', types: ['IMAGE'],
+    tip: 'An image input the segment can bind on its left edge — an image asset or a .cud file.' },
+  { key: 'last_frame', label: 'Last frame', side: 'start', types: ['IMAGE'],
+    tip: 'An image input the segment can bind on its right edge — an image asset or a .cud file.' },
+  { key: 'video', label: 'Video', side: 'end', types: ['VIDEO', 'IMAGE'],
+    tip: 'The output — where the finished clip comes back. A VIDEO port hands back a clip as-is; an IMAGE port hands back frames, which the run stitches into a clip at the FPS you bound (same landing spot on the output track either way).' },
+];
+
+/** 必绑槽位里还没绑的那些（空数组 = 这份配置可以拿去跑）。
+ *  fps 在 Fixed FPS 开着时**不算缺** —— 那一口本来就不该绑（帧率是整台生成器写死的）。 */
+export const videoGenMissing = (cfg?: VideoGenConfig | null): VideoGenSlot[] =>
+  VIDEO_GEN_SLOTS.filter(s => s.required && !(s.key === 'fps' && cfg?.fixed_fps)
+    && (cfg?.ports?.[s.key] ?? 0) <= 0).map(s => s.key);
+
 export interface InterfaceInfo {
   name: string;
   start_ports: InterfacePort[];
   end_ports: InterfacePort[];
   /** Interface tab 贴在包上的标注（/api/package 已按名字合并）。 */
-  modes?: { block: boolean; processor: boolean };
+  modes?: { block: boolean; processor: boolean; video_generator?: boolean };
   block_ports?: { in?: number; out?: number };
+  /** Video Generator 的槽位绑定（/api/interfaces 已按名字合并进这里）。 */
+  video_gen?: VideoGenConfig;
   /** image/mask 出口的默认落位（键 = 端口号字符串），Processor 小窗拿它当初值。 */
   output_targets?: Record<string, string>;
   /** image/mask 入口的默认来源（键 = 端口号字符串），Processor 小窗拿它当初值。 */
@@ -532,8 +588,10 @@ export type ProcessorSrc = 'layers' | 'selected' | 'asset' | 'main_mask' | 'sele
  *  端口名只是展示 —— 执行全程按端口号走。names 的键是端口号字符串。 */
 export interface InterfaceMetaEntry {
   names?: { start?: Record<string, string>; end?: Record<string, string> };
-  modes?: { block: boolean; processor: boolean };
+  modes?: { block: boolean; processor: boolean; video_generator?: boolean };
   block_ports?: { in?: number; out?: number };
+  /** Video Generator：开了那个 toggle 才有 —— 八个固定槽各绑一个端口。 */
+  video_gen?: VideoGenConfig;
   /** image/mask 出口的默认落位（键 = 端口号字符串），后端归一化时按枚举收敛。 */
   output_targets?: Partial<Record<string, ProcessorDst>>;
   /** image/mask 入口的默认来源（键 = 端口号字符串），后端归一化时按枚举收敛。 */

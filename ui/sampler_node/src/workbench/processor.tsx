@@ -227,6 +227,9 @@ const ProcessorBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
         </div>
       ))}
 
+      {/* Video Generator 不在这里 —— 它单独占一扇窗（Tools → Video Generator）：段是"在时间线上
+          占一段时间"的东西，与"拿图层跑一次离线处理"是两件事，挤在一格里两头都说不清。 */}
+
       <div style={{ ...wbStyles.row, marginTop: 2 }}>
         <button type="button" style={wbStyles.btn}
           title="Forget every value typed in this window — each parameter goes back to the value the graph carries"

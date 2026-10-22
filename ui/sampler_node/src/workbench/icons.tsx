@@ -128,6 +128,14 @@ const VAssets: UnitIcon = p => <Svg {...p}>
   <path d="M5.4 6.4V3.4h5.2v3" />
   <path d="M7 9.1 9.7 10.5 7 11.9z" fill="currentColor" stroke="none" />
 </Svg>;
+// Video Generator：一条片子（竖着的胶片，两侧齿孔）加右上角一枚"生成"的星 —— 与 VPlayer 那一块
+// 幕布分开：这一格是**造**片子的，不是放片子的。
+const VideoGen: UnitIcon = p => <Svg {...p}>
+  <rect x="2.2" y="2.6" width="7.2" height="10.8" rx="1.4" />
+  <path d="M4 4.6v7M7.6 4.6v7" opacity="0.55" />
+  <path d="M12.1 2.9l.78 1.92 1.92.78-1.92.78-.78 1.92-.78-1.92L9.4 5.6l1.92-.78z"
+    fill="currentColor" stroke="none" />
+</Svg>;
 
 // 一格分栏：外框里一条竖缝、一条横缝。它是一份**摆法**的记号，不是任何一扇窗的。
 const Layout: UnitIcon = p => <Svg {...p}>
@@ -189,7 +197,7 @@ export const UNIT_ICONS: Record<string, UnitIcon> = {
   brush: Brush, bucket: Bucket, eraser: Eraser, selection: Selection, view: View,
   text: Text, geometry: Geometry, scene3d: Scene3d, pose: Pose, detector: Detector,
   processor: Processor, guidances: Guidances, layers: Layers, history: History, fxParams: FxParams,
-  layout: Layout,
+  layout: Layout, videoGen: VideoGen,
   // Video 模式
   vplayer: VPlayer, vtracks: VTracks, vassets: VAssets,
   // 宿主

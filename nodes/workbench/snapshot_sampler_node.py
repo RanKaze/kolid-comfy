@@ -37,6 +37,7 @@ except ImportError as e:
 
 from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl, merge_mask_alpha, recover_scale_image, _geo_info_at
 from ...libs.mask_utils import expand_mask
+from ...libs.video_utils import get_video_metadata
 from ...libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from ..pipeline.sampler_node import get_loras_from_string, ConditioningCacheStore
@@ -333,12 +334,61 @@ def staging_image_to_mask(img):
     return None
 
 
+def cud_composite_bytes(path):
+    """读一份 .cud 的**合成图**字节（PNG/JPEG），取不到返回 None。
+
+    .cud v5 的排布：`CUD1` + 4 字节头长（小端）+ JSON 头 + 一串按 assets 顺序首尾相接的
+    字节。头里的 `composite` 指名哪一枚 asset 是"整幅合成"，每一枚自带 `length` ——
+    偏移量就是排在它前面那些 length 的和。生成器要的首/末帧正是这一幅：用户眼里"这份工程
+    现在的画面"，而不是某一层的原始像素。
+    """
+    try:
+        if not path or not str(path).lower().endswith('.cud'):
+            return None
+        with open(path, 'rb') as f:
+            blob = f.read()
+        if len(blob) < 12 or blob[:4] != b'CUD1':
+            print(f'[CudFrame] not a .cud (bad magic): {path}')
+            return None
+        import struct
+        hlen = struct.unpack('<I', blob[4:8])[0]
+        head = json.loads(blob[8:8 + hlen].decode('utf-8'))
+        assets = head.get('assets') or []
+        if not assets:
+            print(f'[CudFrame] no assets in {path}')
+            return None
+        # 合成那一枚：头里指了就用指的那枚，没指就用第一枚合成图（role == 'composite'）。
+        want = head.get('composite')
+        pick = None
+        if isinstance(want, int):
+            pick = next((a for a in assets if a.get('id') == want), None)
+        if pick is None:
+            pick = next((a for a in assets if a.get('role') == 'composite'), None)
+        if pick is None:
+            pick = assets[0]
+        off = 8 + hlen
+        for a in assets:
+            if a is pick:
+                break
+            off += int(a.get('length') or 0)
+        n = int(pick.get('length') or 0)
+        if n <= 0 or off + n > len(blob):
+            print(f'[CudFrame] truncated payload in {path}')
+            return None
+        return blob[off:off + n]
+    except Exception as e:
+        print(f'[CudFrame] cannot read {path}: {type(e).__name__}: {e}')
+        return None
+
+
 def processor_input_tensor(key, server):
     """Processor 的 image_keys 一项 → [1,H,W,C] tensor（取不到返回 None）。
 
     `asset:<哈希>` 是 Assets 来源：仓库里那份字节就是正身，按内容地址直接读 —— 不经过
-    图池，也就不存在"同一张图再塞一份"和指错条目。其余（数字 staging id）仍走内存里的
-    tensor 引用：画布派生的输入是在途数据，不属于仓库。
+    图池，也就不存在"同一张图再塞一份"和指错条目。
+    `cud:<路径>` 是 .cud 工程来源（video generator 的首/末帧）：后端自己读那份工程的
+    **合成图**当这一帧 —— 工程不用先打开，字节也不必绕一圈浏览器。
+    其余（数字 staging id）仍走内存里的 tensor 引用：画布派生的输入是在途数据，不属于仓库。
     """
     s = str(key or '')
     if s.startswith('asset:'):
@@ -351,6 +401,16 @@ def processor_input_tensor(key, server):
                 return image_bytes_to_tensor(f.read())
         except Exception as e:
             print(f'[InterfaceExec] asset input {s}: {e}')
+            return None
+    if s.startswith('cud:'):
+        raw = cud_composite_bytes(s[len('cud:'):])
+        if not raw:
+            print(f'[InterfaceExec] cud input {s}: no composite image')
+            return None
+        try:
+            return image_bytes_to_tensor(raw)
+        except Exception as e:
+            print(f'[InterfaceExec] cud input {s}: {e}')
             return None
     return server.get_staging_image(s)
 
@@ -454,6 +514,12 @@ IO_FILE_KINDS = {
         'mime': 'image/*',
     },
 }
+
+# Video Generator 的八个固定槽（与前端 types.ts 的 VIDEO_GEN_SLOTS 逐条同名）：
+# 一个开了 Video Generator 的 interface 被声明成一台视频生成器 —— 这些槽各绑一个真实端口，
+# 时间线上的 generator 段照这份绑定填参数、接产物。
+VIDEO_GEN_SLOTS = ('prompt', 'width', 'height', 'duration', 'fps',
+                   'first_frame', 'last_frame', 'video')
 
 # 工作台自己那三份用户内容（blocks 链与 DEFAULT SETTING、Prompt 预设、最近一份 .cud 的路径）
 # 住 data/sampler/，与 data/prompt、data/switch 同级，整目录进 .gitignore。以前它们躺在 nodes/
@@ -1206,6 +1272,29 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None):
     return frames
 
 
+def _vid_frames_of(val):
+    """一枚 IMAGE/MASK 结果 → **逐帧** list。
+
+    图片口的生成器有两种吐法：一颗 `[B,H,W,C]`（一批帧叠在一张 tensor 上，ComfyUI 的
+    IMAGE 就是它）或 list 模式下每帧一枚 `[H,W,C]`。编码只认逐帧，所以这里统一拆开 ——
+    其余形状（裸 `[H,W]` 的 mask）原样当一帧。
+    """
+    if val is None:
+        return []
+    if isinstance(val, (list, tuple)):
+        out = []
+        for v in val:
+            out.extend(_vid_frames_of(v))
+        return out
+    shp = getattr(val, 'shape', None)
+    if shp is None or len(shp) <= 3:
+        return [val]
+    try:
+        return [val[k] for k in range(int(shp[0]))]
+    except Exception:
+        return [val]
+
+
 def _vid_encode(frames, fps=30, name='proc'):
     """把一列 [1,H,W,3]（或 [1,H,W] mask）float tensor 编码成一段 H.264 mp4。
 
@@ -1326,6 +1415,94 @@ def _vid_encode(frames, fps=30, name='proc'):
         return None
     print(f'[VidEncode] {len(frames)} frames {w}x{h}@{fps:.0f}fps → {os.path.basename(out)}')
     return '/api/vid_media/' + os.path.basename(out)
+
+
+def _vid_publish(val, name='vgen', want_fps=None):
+    """把一枚 **VIDEO 产物**搬进视频媒体库，返回 (url, frames, fps) 或 (None, 0, 0)。
+
+    `val` 是生成器自己吐出来的 VIDEO 对象（VideoFromFile / VideoFromComponents 都是它）：
+    它的字节可能躺在 videocache 里的一份临时文件上，也可能是一段内存流（BytesIO）——
+    两种都得先落成一个**持久**文件，时间线上那段刷新之后才还播得出来。落点照 `_vid_encode`
+    那一套（media/vid，按内容指纹命名 —— 同内容复用同一份，重跑不会堆一摞副本）。
+
+    `want_fps`（Fixed FPS 那颗开关带来的目标帧率）给了就顺手把容器的帧率钉死：
+    生成器的帧数已经是 duration × fps，差的是"说好 24fps、出来 23.976"这半帧 ——
+    段长按 fps 折算时长，差半帧就是差几十毫秒，段与段之间会挤出缝。
+    """
+    try:
+        src = val.get_stream_source() if hasattr(val, 'get_stream_source') else val
+    except Exception as e:
+        print(f'[VidPublish] cannot read the VIDEO object: {type(e).__name__}: {e}')
+        return (None, 0, 0.0)
+    if hasattr(src, 'read'):                      # 内存流：先落盘再谈其余（ffmpeg 也只认路径）
+        try:
+            from ...libs.video_transform import video_stream_to_file
+            src = video_stream_to_file(src)
+        except Exception as e:
+            print(f'[VidPublish] cannot spill the video stream to disk: {type(e).__name__}: {e}')
+            return (None, 0, 0.0)
+    try:
+        src = os.fspath(src)
+    except TypeError:
+        print('[VidPublish] VIDEO object carries no usable path')
+        return (None, 0, 0.0)
+    if not src or not os.path.exists(src):
+        print(f'[VidPublish] video file is gone: {src}')
+        return (None, 0, 0.0)
+
+    d = _vid_media_dir()
+    os.makedirs(d, exist_ok=True)
+    stem = re.sub(r'[^\w\-. ]+', '_', str(name or 'vgen'))[:60] or 'vgen'
+    # 指纹 = 文件内容的哈希（生成器每次吐的文件名可能一样、内容不同，按名会撞）。
+    try:
+        with open(src, 'rb') as fh:
+            _h = hashlib.sha1()
+            for chunk in iter(lambda: fh.read(1 << 20), b''):
+                _h.update(chunk)
+        h16 = _h.hexdigest()[:16]
+    except Exception:
+        h16 = 'vgen'
+    out = os.path.join(d, f'{h16}_{stem}.mp4')
+    try:
+        if os.path.abspath(src) != os.path.abspath(out):
+            shutil.copyfile(src, out)
+    except Exception as e:
+        print(f'[VidPublish] copy failed: {type(e).__name__}: {e}')
+        return (None, 0, 0.0)
+
+    # Fixed FPS：目标帧率给了、且实际帧率对不上（容差 0.01fps）就重编码一次钉死它。
+    try:
+        meta = get_video_metadata(out)
+        frames = int(meta.get('frame_count') or 0)
+        fps = float(meta.get('fps') or 0)
+    except Exception as e:
+        print(f'[VidPublish] probe failed ({e}) — keeping the file as-is')
+        return ('/api/vid_media/' + os.path.basename(out), 0, 0.0)
+    try:
+        want = float(want_fps) if want_fps is not None else 0.0
+    except (TypeError, ValueError):
+        want = 0.0
+    if want > 0 and fps > 0 and abs(fps - want) > 0.01:
+        ff = _ff_bin('ffmpeg')
+        fixed = os.path.join(d, f'{h16}_{stem}_fps{int(round(want))}.mp4')
+        if ff and not os.path.exists(fixed):
+            cmd = [ff, '-v', 'error', '-y', '-i', out, '-c:v', 'libx264',
+                   '-preset', _VID_PRESET, '-crf', str(_VID_CRF),
+                   '-vf', f'fps={want:.6f}', '-pix_fmt', 'yuv420p',
+                   '-movflags', '+faststart', fixed]
+            try:
+                rc = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, timeout=900).returncode
+                if rc == 0 and os.path.exists(fixed):
+                    out = fixed
+                    fps = want
+                    print(f'[VidPublish] re-stamped to {fps:.3f}fps → {os.path.basename(out)}')
+                else:
+                    print(f'[VidPublish] fps re-stamp failed rc={rc} — keeping {fps:.3f}fps')
+            except Exception as e:
+                print(f'[VidPublish] fps re-stamp threw: {type(e).__name__}: {e}')
+    print(f'[VidPublish] {os.path.basename(out)} — {frames} frames @ {fps:.3f}fps')
+    return ('/api/vid_media/' + os.path.basename(out), frames, fps)
 
 
 def _vid_ingest(raw, name):
@@ -2728,7 +2905,33 @@ class SnapshotDetailerSamplerServer:
             modes = entry.get('modes')
             if isinstance(modes, dict):
                 one['modes'] = {'block': bool(modes.get('block')),
-                                'processor': bool(modes.get('processor'))}
+                                'processor': bool(modes.get('processor')),
+                                # Video Generator：把这个包声明成一台视频生成器（八个固定槽各绑一个端口）。
+                                'video_generator': bool(modes.get('video_generator'))}
+            # Video Generator 的槽位绑定：槽名 → 端口号（1..20）。槽名出表就丢 —— 未知的槽
+            # 段那一侧不认，留着只会让"这段到底绑了什么"说不清。
+            # Fixed FPS 开着时前端根本不给 fps 槽，这里也就把那一口摘掉（万一老配置里还留着）。
+            vg = entry.get('video_gen')
+            if isinstance(vg, dict):
+                vg_ports = {}
+                raw_ports = vg.get('ports')
+                if isinstance(raw_ports, dict):
+                    for slot, num in raw_ports.items():
+                        if slot in VIDEO_GEN_SLOTS and isinstance(num, int) and 1 <= num <= 20:
+                            vg_ports[slot] = num
+                vg_fixed = bool(vg.get('fixed_fps'))
+                if vg_fixed:
+                    vg_ports.pop('fps', None)
+                # 固定帧率：1..120，读不出来退 16（前端同一个兜底）。
+                vg_val = 16.0
+                try:
+                    _f = float(vg.get('fixed_fps_value'))
+                    if 1.0 <= _f <= 120.0:
+                        vg_val = _f
+                except (TypeError, ValueError):
+                    pass
+                one['video_gen'] = {'ports': vg_ports, 'fixed_fps': vg_fixed,
+                                    'fixed_fps_value': vg_val}
             bp = entry.get('block_ports')
             if isinstance(bp, dict):
                 ports = {}
@@ -3391,8 +3594,11 @@ class SnapshotDetailerSamplerServer:
                         'name': iface_name,
                         'start_ports': start_ports,
                         'end_ports': end_ports,
-                        'modes': meta.get('modes') or {'block': False, 'processor': False},
+                        'modes': meta.get('modes') or {'block': False, 'processor': False,
+                                                       'video_generator': False},
                         'block_ports': meta.get('block_ports') or {},
+                        # Video Generator：八个固定槽各绑了哪个端口（空表 = 还没绑 / 没开这个模式）。
+                        'video_gen': meta.get('video_gen') or {},
                         # image/mask 出口的默认落位与入口的默认来源（Processor 小窗的初值），没有就是空表。
                         'output_targets': meta.get('output_targets') or {},
                         'input_sources': meta.get('input_sources') or {},
@@ -8209,7 +8415,127 @@ class SnapshotDetailerSamplerNode:
                 print(f"[InterfaceExec] offline processor (video): "
                       f"{len(server.interface_result_meta)} video results, pipeline untouched")
                 return None
+            # Video Generator：VIDEO 出口的产物原样搬进媒体库回给宿主。
+            # 帧率只决定"片怎么编 / 怎么钉容器"，**与段长无关** —— 段长是时间线上那一截
+            # （前端按 clip.duration 落位）：生成器按 16fps 出、工程是 30fps，对不上是常态。
+            # 段自己揣着一份绑定快照（exec_options.vgen）：接口后来改了绑定，老段仍按自己
+            # 当时那份跑 —— 所以段给的优先，没有才退回 server.interface_meta 上现在这份。
+            _vg_cfg = exec_options.get('vgen') if isinstance(exec_options.get('vgen'), dict) else None
+            if not _vg_cfg:
+                _vg_cfg = ((getattr(server, 'interface_meta', None) or {})
+                           .get(pkg.get('name', '')) or {}).get('video_gen') or {}
+            _vg_ports = _vg_cfg.get('ports') if isinstance(_vg_cfg, dict) else None
+            _vg_ports = _vg_ports if isinstance(_vg_ports, dict) else {}
+            _vg_fixed = bool(_vg_cfg.get('fixed_fps')) if isinstance(_vg_cfg, dict) else False
+            _vg_vport = _vg_ports.get('video') or None
+            # 帧率的两个来源：Fixed FPS 开着 = 这台生成器**写死**的那个数（不进图、不绑端口，
+            # 由前端那颗开关旁边的框填，比如 16）；关着 = fps 槽那一口喂进去的值。
+            # 图片型出口**无论如何都得有个帧率**去编码，所以关着时也读一份（读不到再反推/兜 30）。
+            # 注意它只决定"片怎么编/怎么钉"，**与段长无关** —— 段长是时间线上那一截，
+            # 生成器 16fps 出、工程 30fps，对不上是常态。
+            _vg_fps = None
+            if _vg_fixed:
+                try:
+                    _v = float(_vg_cfg.get('fixed_fps_value'))
+                    if _v > 0:
+                        _vg_fps = _v
+                except (TypeError, ValueError):
+                    _vg_fps = None
+                if not _vg_fps:
+                    _vg_fps = 16.0
+            elif _vg_ports.get('fps'):
+                try:
+                    _v = float((manual_values or {}).get(str(_vg_ports['fps'])))
+                    if _v > 0:
+                        _vg_fps = _v
+                except (TypeError, ValueError, KeyError):
+                    _vg_fps = None
+            _want_fps = _vg_fps if _vg_fixed else None
+            _vg_dur = None
+            if _vg_ports.get('duration'):
+                try:
+                    _d = float((manual_values or {}).get(str(_vg_ports['duration'])))
+                    if _d > 0:
+                        _vg_dur = _d
+                except (TypeError, ValueError, KeyError):
+                    _vg_dur = None
+            # 被生成器接走的结果下标 —— 后面那趟"其余结果进图池"要跳过它们（否则图片型
+            # 生成器的帧既成了视频、又塞一份进图池）。
+            _vg_taken = set()
             for i, (ptype, val, name) in enumerate(results):
+                if ptype != 'VIDEO':
+                    continue
+                port_num = result_ports[i] if i < len(result_ports) else None
+                url, frames, fps = _vid_publish(
+                    val, name=f"{pkg.get('name', 'vgen')}_v{port_num}", want_fps=_want_fps)
+                if not url:
+                    continue
+                _vg_taken.add(i)
+                server.interface_result_keys.append('')
+                server.interface_result_meta.append(
+                    {'key': None, 'port': port_num, 'type': 'VIDEO', 'name': name,
+                     'video': url, 'frames': frames, 'fps': fps})
+                print(f"[InterfaceExec] video generator: port {port_num} → {url} "
+                      f"({frames} frames @ {fps:.3f}fps)")
+                if own_trace:
+                    _pname = (_end_names.get(str(port_num)) if port_num is not None else None) or name
+                    dbg.record_stage('输出 · ' + str(_pname),
+                                     f'{frames} 帧 @ {fps:.3f}fps → {url}')
+            # video 槽绑在 **IMAGE 口**上的那一类生成器：产物是一批帧而不是一个 mp4 ——
+            # 就在这里把它们现编成一段（帧率 = fps 槽喂进去的那个数），于是时间线上
+            # 图片型生成器与真·视频生成器长得一模一样：段按 frames/fps 落位、照常重跑。
+            if _vg_vport:
+                _vframes, _vname = [], ''
+                for i, (ptype, val, name) in enumerate(results):
+                    if ptype != 'IMAGE' or i in _vg_taken:
+                        continue
+                    port_num = result_ports[i] if i < len(result_ports) else None
+                    if port_num != _vg_vport:
+                        continue
+                    _vg_taken.add(i)
+                    _vname = _vname or name
+                    _vframes.extend(_vid_frames_of(val))
+                if _vframes:
+                    if _vg_fps and _vg_fps > 0:
+                        _enc = _vg_fps
+                    elif _vg_dur and _vg_dur > 0:
+                        _enc = len(_vframes) / _vg_dur
+                    else:
+                        _enc = 30.0
+                    _enc = max(1.0, min(120.0, float(_enc)))
+                    # Fixed FPS：帧率是写死的，于是"这段该有多少帧"也是可算的（duration × fps）。
+                    # 少了几帧就用最后一帧顶上（**只补不裁**，且只补小缺口 —— 差一半以上说明
+                    # 生成器另有打算，别硬凑；段长仍然是段自己的长度，不受它影响）。
+                    if _vg_fixed and _vg_dur:
+                        _want_n = int(round(_vg_dur * _enc))
+                        while 0 < len(_vframes) < _want_n and _want_n - len(_vframes) <= max(2, _want_n // 2):
+                            _vframes.append(_vframes[-1])
+                        if len(_vframes) < _want_n:
+                            print(f'[InterfaceExec] image out: {len(_vframes)} frames for '
+                                  f'{_vg_dur}s @ {_enc:.3f}fps (want {_want_n}) — leaving it as the '
+                                  f'generator returned it')
+                    url = _vid_encode(_vframes, fps=_enc,
+                                      name=f"{pkg.get('name', 'vgen')}_v{_vg_vport}")
+                    if url:
+                        server.interface_result_keys.append('')
+                        server.interface_result_meta.append(
+                            {'key': None, 'port': _vg_vport, 'type': 'IMAGE', 'name': _vname,
+                             'video': url, 'frames': len(_vframes), 'fps': _enc, 'stitched': True})
+                        print(f"[InterfaceExec] video generator (image out): port {_vg_vport} → {url} "
+                              f"({len(_vframes)} frames @ {_enc:.3f}fps, stitched)")
+                        if own_trace:
+                            _pname = _end_names.get(str(_vg_vport)) or _vname
+                            dbg.record_image(f'输出 · {_pname}', _vframes[0],
+                                             detail=f'{len(_vframes)} 帧现编成视频 {url}')
+                    else:
+                        # 编码没成（多半是 ffmpeg 不在）：撤销"接走"，让这批帧照常进图池，
+                        # 用户至少能看到图 —— 段那一侧报"没有视频产物"。
+                        for i in [k for k, (pt, _, _) in enumerate(results)
+                                  if pt == 'IMAGE' and (result_ports[k] if k < len(result_ports) else None) == _vg_vport]:
+                            _vg_taken.discard(i)
+            for i, (ptype, val, name) in enumerate(results):
+                if i in _vg_taken:
+                    continue
                 port_num = result_ports[i] if i < len(result_ports) else None
                 if ptype == 'IMAGE':
                     sid = server.add_staging(val, name=name, hidden=True)

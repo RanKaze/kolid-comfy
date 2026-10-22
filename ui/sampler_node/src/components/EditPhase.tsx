@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react';
-import type { PipelineBlock, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi } from '../types';
-import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, preprocessFlag } from '../types';
+import type { PipelineBlock, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi, VideoGenConfig, VideoGenSlot } from '../types';
+import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, preprocessFlag, VIDEO_GEN_SLOTS, videoGenMissing } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
 import RunStatusSeg from './RunStatusSeg';
@@ -14,7 +14,7 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, placeProcAssets, placeProcOutput, placeProcPlaceholders, procSlotBusy, relinkAsset, saveVidProject, vidAssetRefs } from '../workbench/video/model';
+import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidGenFrameRef, type VidGenPending, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, relinkAsset, saveVidProject, vidAssetRefs, vgenDurationOf, vgenGet, vgenWith, vgenWithDuration } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
@@ -1008,7 +1008,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       : { name: first.asset.name, start: 0, span: first.asset.duration, total: Math.floor(first.asset.duration * fps + 1e-6), kind: 'asset' as const };
     return { proc, iface, idx, fps, rows, anchor };
   };
-  type SegMeta = { port: number; type: string; name: string; video: string; frames?: number };
+  // `fps` 只有生成器那条路会报（VIDEO 产物自带帧率；Processor 那条路的帧率就是抽帧帧率）。
+  /** 一段产物的回执。`stitched` = 这一口是**图片口**：帧回来之后由后端按 fps 现编成一段。 */
+  type SegMeta = { port: number; type: string; name: string; video: string; frames?: number; fps?: number; stitched?: boolean };
   // 跑一段 Processor：POST → 轮询 → 收这一段的视频产物。整趟分段跑与占位续跑共用这一条 ——
   // 轮询口径与宿主那条 processor 相同（started 后第一次 status 可能还是 idle，所以 idle
   // 不算收尾；10 分钟没动静就当失败，别让这一趟永远挂在 running）。取消旗子在轮询的
@@ -1019,6 +1021,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     videoInputs: Record<string, ProcFrameWindow>,
     segMsg: string, segAt: number, segCount: number,
     onSegProgress?: (segP: number) => void,
+    /** 换掉整包 exec_options（video generator 那条路用它：不吃视频帧，只喂首末帧）。 */
+    execOverride?: Record<string, unknown>,
   ): Promise<SegMeta[]> => {
     const setSegProgress = (segP: number) => {
       const p = segCount > 1 ? (segAt + segP) / segCount : segP;
@@ -1036,7 +1040,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       body: JSON.stringify({
         interface_index: ifaceIdx,
         manual_values: manualValues,
-        exec_options: { offline: true, list_mode: true, video_inputs: videoInputs },
+        exec_options: execOverride ?? { offline: true, list_mode: true, video_inputs: videoInputs },
       }),
     });
     const deadline = Date.now() + 10 * 60 * 1000;
@@ -1264,6 +1268,168 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       vidProcBusy.current = false;
     }
   }, [interfaces, vidTransport, vidUpdate, autoSaveCud]);
+
+  // ── Video Generator ────────────────────────────────────────────────────────────────────
+  // 一台"视频生成器"就是一个开了 Video Generator 的 interface：Interface tab 里那八个固定槽
+  // 各绑了一个端口，于是**段**这一侧不必认识任何具体接口 —— 它只知道"提示词往哪口喂、宽高
+  // 时长帧率往哪口喂、首末帧往哪口喂、产物从哪口回来"。段自己揣着这份绑定与参数（快照），
+  // 所以接口后来改了绑定、老段仍然按自己当时那份跑。
+  /** Video Generator 那份配置以 **interfaceMeta（本地真值）** 为准：interfaces 是后端快照，
+   *  拨开关 / 绑槽只 POST 配置、不重拉 /api/interfaces —— 照它判会把刚打开的 Fixed FPS 当成
+   *  没开、于是又把 fps 算进必绑槽，Add segment 就永远灰着（正是这么坏过一次）。 */
+  const vgenCfgOf = useCallback((itf: InterfaceInfo): VideoGenConfig =>
+    interfaceMeta[itf.name]?.video_gen || itf.video_gen || { ports: {} }, [interfaceMeta]);
+
+  const videoGenList = useMemo(() => interfaces.map((itf, index) => ({ itf, index }))
+    .filter(({ itf }) => (interfaceMeta[itf.name]?.modes?.video_generator
+      ?? itf.modes?.video_generator) === true)
+    .map(({ itf, index }) => {
+      const cfg = vgenCfgOf(itf);
+      const missing = videoGenMissing(cfg);
+      return {
+        name: itf.name, index,
+        ports: cfg.ports || {}, fixed_fps: !!cfg.fixed_fps,
+        fixed_fps_value: cfg.fixed_fps ? (Number(cfg.fixed_fps_value) || 16) : undefined,
+        missing: missing as string[],
+        /** 必绑的槽都绑齐了才能跑（Fixed FPS 开着时 fps 不算必绑 —— 那一口本来就不该绑）。 */
+        ready: missing.length === 0,
+      };
+    }), [interfaces, vgenCfgOf]);
+
+  /** 段上那些参数的**默认值**：端口自己在图里带着的那一份（widget 默认值）优先，
+   *  没有就退一个说得过去的兜底（宽高 512、时长 2s、帧率 = 工程帧率）。 */
+  const vgenDefaults = useCallback((itf: InterfaceInfo, ports: VideoGenConfig['ports'],
+    projFps: number): { params: Record<string, unknown>; duration: number } => {
+    const valueOf = (num?: number): unknown => {
+      if (!num) return undefined;
+      const p = itf.start_ports?.find(x => x.num === num);
+      return p ? p.value : undefined;
+    };
+    const numOf = (slot: VideoGenSlot, dflt: number): number => {
+      const v = Number(valueOf(ports[slot]));
+      return Number.isFinite(v) && v > 0 ? v : dflt;
+    };
+    const params: Record<string, unknown> = {};
+    if (ports.width) params[String(ports.width)] = Math.round(numOf('width', 512));
+    if (ports.height) params[String(ports.height)] = Math.round(numOf('height', 512));
+    if (ports.duration) params[String(ports.duration)] = numOf('duration', 2);
+    // Fixed FPS 开着时 fps 槽不绑（帧率是整台生成器写死的），这里也就没有值要喂。
+    if (ports.fps) params[String(ports.fps)] = numOf('fps', projFps);
+    if (ports.prompt) {
+      const v = valueOf(ports.prompt);
+      params[String(ports.prompt)] = typeof v === 'string' ? v : '';
+    }
+    const duration = Number(params[String(ports.duration ?? '')]) || 2;
+    return { params, duration: Math.max(0.1, duration) };
+  }, []);
+
+  /** 往生成器轨上摆一段（播放头处）。参数用端口默认值打底，之后在段上改。 */
+  const addVideoGenSegment = useCallback((ifaceIndex: number) => {
+    const itf = interfaces[ifaceIndex];
+    if (!itf) return;
+    const cfg = vgenCfgOf(itf);
+    const ports = cfg.ports || {};
+    const missing = videoGenMissing(cfg);
+    if (missing.length) {
+      setVidProcRun({ state: 'error', msg: `「${itf.name}」 still needs ${missing.join(', ')} bound in the Interface tab.` });
+      return;
+    }
+    const { params, duration } = vgenDefaults(itf, ports, vidProjectRef.current.fps);
+    const start = Math.max(0, vidTransport.get());
+    if (procSlotBusy(vidProjectRef.current, ports.video ?? 0, start, duration)) {
+      setVidProcRun({ state: 'error', msg: `The output track already has a clip at ${start.toFixed(1)}s — move it or add the segment elsewhere.` });
+      return;
+    }
+    vidUpdate(proj => placeVideoGenSegment(proj, {
+      name: itf.name, runId: `vgen-${Date.now()}`, port: ports.video ?? 0,
+      iface: itf.name, ifaceNum: ifaceIndex, ports, fixed_fps: !!cfg.fixed_fps,
+      fixed_fps_value: cfg.fixed_fps ? (Number(cfg.fixed_fps_value) || 16) : undefined,
+      params, start, duration,
+    }), 'Add video generator');
+    setVidProcRun({ state: 'idle', msg: '' });
+  }, [interfaces, vgenCfgOf, vgenDefaults, vidUpdate, vidTransport]);
+
+  /** 跑一段生成器：段上那套参数原样进 interface，首末帧按绑定喂进它们那一口。
+   *  产物从 video 口回来，落到输出轨的对应位置（段自己原地保留，可以反复重跑）。 */
+  const runVideoGenSegment = useCallback(async (clipId: string) => {
+    if (vidProcBusy.current) {
+      setVidProcRun({ state: 'error', msg: 'A run is already in flight — wait for it or cancel it first.' });
+      return;
+    }
+    const clip = vidProjectRef.current.clips.find(c => c.id === clipId);
+    const v = clip?.vgen;
+    if (!clip || !v) return;
+    const byName = interfaces.findIndex(i => i.name === v.iface);
+    const idx = byName >= 0 ? byName : v.ifaceNum;
+    if (idx < 0 || idx >= interfaces.length) {
+      setVidProcRun({ state: 'error', msg: `「${v.iface}」 is not connected (package disconnected?).` });
+      return;
+    }
+    const keyOf = (ref?: VidGenFrameRef | null): string =>
+      ref?.kind === 'asset' ? `asset:${ref.hash}` : ref?.kind === 'cud' ? `cud:${ref.path}` : '';
+    const image_keys: Record<string, string> = {};
+    if (v.ports.first_frame && v.first_frame) {
+      const k = keyOf(v.first_frame);
+      if (k) image_keys[String(v.ports.first_frame)] = k;
+    }
+    if (v.ports.last_frame && v.last_frame) {
+      const k = keyOf(v.last_frame);
+      if (k) image_keys[String(v.ports.last_frame)] = k;
+    }
+    if (procSlotBusy(vidProjectRef.current, v.port ?? 0, clip.start, clip.duration, clip.id)) {
+      setVidProcRun({ state: 'error', msg: 'The output track already has a clip over this segment — move or delete it first.' });
+      return;
+    }
+    vidProcBusy.current = true;
+    vidCancelRef.current = false;
+    try {
+      const metas = await executeSeg(idx, v.params, {}, `Generating with 「${v.iface}」…`, 0, 1,
+        segP => setProcFill(clipId, segP),
+        // 段自己揣着那份绑定（接口后来改了绑定，老段仍按自己当时那份跑）—— 所以这里把
+        // 槽位表一并交给后端：它据此决定那一口是"回片"还是"回一批帧、得现编"。
+        { offline: true, image_keys, vgen: { ports: v.ports, fixed_fps: !!v.fixed_fps,
+          fixed_fps_value: v.fixed_fps_value } });
+      const mine = metas.find(m => m.port === v.port && m.video) || metas.find(m => m.video);
+      if (!mine) throw new Error('The generator finished with no video result.');
+      // 落位长度 = **段自己的长度**（不按帧数 ÷ 帧率折算）：生成器按 16fps 出、工程是
+      // 30fps 这种对不上是常态，段长就是用户在时间线上看到的那一截。
+      const frames = Number(mine.frames || 0);
+      const dur = clip.duration > 0 ? clip.duration : (vgenDurationOf(v) || 0.1);
+      vidUpdate(proj => placeVideoGenOutput(proj, clipId, mine.video as string,
+        clip.name || v.iface, dur), 'Generator → output');
+      autoSaveCud();
+      const how = mine.stitched
+        ? `stitched ${frames > 0 ? `${frames} frames` : 'the returned frames'} into a clip`
+        : 'clip';
+      setVidProcRun({ state: 'done', msg: `Done — 「${v.iface}」 ${how} landed on the output track (${dur.toFixed(1)}s).` });
+    } catch (e: unknown) {
+      setVidProcRun(vidCancelRef.current
+        ? { state: 'cancelled', msg: 'Generator run cancelled.' }
+        : { state: 'error', msg: `Generator failed — ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      clearProcFill(clipId);
+      vidStagingOverlay.busy = false;
+      vidStagingOverlay.progress = -1;
+      pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
+      vidCancelRef.current = false;
+      vidProcBusy.current = false;
+    }
+  }, [interfaces, executeSeg, vidUpdate, autoSaveCud]);
+
+  // 段的首/末帧绑定：挑一张图片资产，或磁盘上一份 .cud 工程（后端读它的合成图）。
+  const [vgenFramePick, setVgenFramePick] = useState<{ clipId: string; which: 'first_frame' | 'last_frame' } | null>(null);
+  // 段的设置（齿轮）：宽高 / 时长 / 帧率 / 提示词 / 首末帧都在这里改。
+  const [vgenSettingsId, setVgenSettingsId] = useState<string | null>(null);
+
+  /** 首/末帧绑定写回（解绑传 null）。 */
+  const setVgenFrame = useCallback((clipId: string, which: 'first_frame' | 'last_frame',
+    ref: VidGenFrameRef | null) => {
+    vidUpdate(proj => ({
+      ...proj,
+      clips: proj.clips.map(c => (c.id === clipId && c.vgen)
+        ? { ...c, vgen: { ...c.vgen, [which]: ref } } : c),
+    }), 'Bind frame');
+  }, [vidUpdate]);
 
   // ── Pipeline Preset 的视频路（骨架与 Processor 视频路同一套）────────────────────────────
   // 差别只在"预设没有输入口"：喂哪段视频由**每次运行**的 modal 定（Tracks / Sel. Track /
@@ -1871,9 +2037,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const wbHost = useMemo(() => ({
     staging, blendPreview, guidanceCard, stageUpload, stageRemove,
     layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock },
-    video: { mode: vidMode, fps: vidProject.fps, setFps: setVidFps, tracks: vidTrackList, assets: vidAssetList },
+    video: {
+      mode: vidMode, fps: vidProject.fps, setFps: setVidFps, tracks: vidTrackList, assets: vidAssetList,
+      // Video Generator：Processor 那一格要能列出"哪些接口是生成器"并发起添加（段的位置/时长
+      // 只有宿主知道，所以添加这个动作也住在宿主 —— 窗口只挑哪一台）。
+      videoGen: { list: videoGenList, add: addVideoGenSegment },
+    },
   }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock,
-    vidMode, vidProject.fps, setVidFps, vidTrackList, vidAssetList]);
+    vidMode, vidProject.fps, setVidFps, vidTrackList, vidAssetList, videoGenList, addVideoGenSegment]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
   // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
   // 所以：**空列表在启动期是歧义的**，要等它至少说过一次"我有文档"，此后再说空才算关闭。
@@ -2674,7 +2845,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               // 一句空态，不能把刚关掉那份的轨道/资产继续摆着（它们属于文档，不属于页面）。
               vtracks: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — Tracks belong to a document.</div>
-                : <VidTimeline vid={vidCtl} onSettingsPlaceholders={setProcSettingsIds} />,
+                : <VidTimeline vid={vidCtl} onSettingsPlaceholders={setProcSettingsIds}
+                    onRunVGen={id => { void runVideoGenSegment(id); }}
+                    onPickVGenFrame={(id, which) => setVgenFramePick({ clipId: id, which })}
+                    onSettingsVGen={setVgenSettingsId} />,
               vassets: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
                 : <VidAssets vid={vidCtl} />,
@@ -3241,6 +3415,301 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           />
         );
       })()}
+      {/* video generator 段的设置：段上那套参数的全部 —— 位置/时长（与 duration 参数一回事）、
+          宽高、帧率、提示词、首末帧绑定。 */}
+      {vgenSettingsId && (() => {
+        const clip = vidProject.clips.find(c => c.id === vgenSettingsId);
+        if (!clip?.vgen) return null;
+        return (
+          <VideoGenSettingsModal
+            clip={clip}
+            vgen={clip.vgen}
+            onApply={patch => {
+              const id = clip.id;
+              setVgenSettingsId(null);
+              vidUpdate(proj => ({
+                ...proj,
+                clips: proj.clips.map(c => {
+                  if (c.id !== id || !c.vgen) return c;
+                  let v = c.vgen;
+                  if (patch.width != null) v = vgenWith(v, 'width', patch.width);
+                  if (patch.height != null) v = vgenWith(v, 'height', patch.height);
+                  if (patch.fps != null) v = vgenWith(v, 'fps', patch.fps);
+                  if (patch.prompt != null) v = vgenWith(v, 'prompt', patch.prompt);
+                  // 时长与段长是同一件事：改哪一头另一头都跟着走。
+                  if (patch.duration != null) v = vgenWithDuration(v, patch.duration);
+                  return {
+                    ...c,
+                    name: patch.name ?? c.name,
+                    start: patch.start != null ? Math.max(0, patch.start) : c.start,
+                    duration: patch.duration != null ? Math.max(0.1, patch.duration) : c.duration,
+                    srcDuration: patch.duration != null ? Math.max(0.1, patch.duration) : c.srcDuration,
+                    vgen: v,
+                  };
+                }),
+              }), 'Generator settings');
+            }}
+            onBindFrame={which => setVgenFramePick({ clipId: clip.id, which })}
+            onClose={() => setVgenSettingsId(null)}
+          />
+        );
+      })()}
+      {/* video generator 段的首/末帧绑定：图片资产（按哈希直读仓库字节）或磁盘上一份 .cud
+          工程（后端读它的合成图当这一帧）。 */}
+      {vgenFramePick && (() => {
+        const clip = vidProject.clips.find(c => c.id === vgenFramePick.clipId);
+        if (!clip?.vgen) return null;
+        return (
+          <VideoGenFrameModal
+            which={vgenFramePick.which}
+            ifaceName={clip.vgen.iface}
+            current={vgenFramePick.which === 'first_frame' ? clip.vgen.first_frame : clip.vgen.last_frame}
+            onPick={ref => {
+              setVgenFrame(clip.id, vgenFramePick.which, ref);
+              setVgenFramePick(null);
+            }}
+            onClose={() => setVgenFramePick(null)}
+          />
+        );
+      })()}
+    </div>
+  );
+};
+
+// ── Video Generator 的两扇小窗 ─────────────────────────────────────────────────────────────
+// 设置（齿轮）与首/末帧绑定：值都住在段上（params / vgen 引用），所以这两扇窗只是"把值交
+// 给段"，不认识接口、也不认识执行。
+
+/** video generator 段的设置：段上那套参数的全部。
+ *  时长那一栏是**双向绑定**的：改它段就跟着变长变短，拖段尾也会写回这里。 */
+const VideoGenSettingsModal: React.FC<{
+  clip: VidClip;
+  vgen: VidGenPending;
+  onApply: (patch: { name?: string; start?: number; duration?: number;
+    width?: number; height?: number; fps?: number; prompt?: string }) => void;
+  onBindFrame: (which: 'first_frame' | 'last_frame') => void;
+  onClose: () => void;
+}> = ({ clip, vgen, onApply, onBindFrame, onClose }) => {
+  const num0 = (slot: 'width' | 'height' | 'fps'): string => {
+    const v = vgenGet(vgen, slot);
+    return v === undefined || v === null || v === '' ? '' : String(v);
+  };
+  const [name, setName] = useState(clip.name);
+  const [start, setStart] = useState(clip.start.toFixed(2));
+  const [duration, setDuration] = useState((vgenDurationOf(vgen) || clip.duration).toFixed(2));
+  const [w, setW] = useState(num0('width'));
+  const [h, setH] = useState(num0('height'));
+  const [fps, setFps] = useState(num0('fps'));
+  // Fixed FPS：整台生成器写死的那个数（段上带一份快照，改它去 Interface tab）。
+  const fixedFps = Number(vgen.fixed_fps_value) > 0 ? Number(vgen.fixed_fps_value) : 16;
+  const [prompt, setPrompt] = useState(String(vgenGet(vgen, 'prompt') ?? ''));
+  const dirty = name !== clip.name
+    || Math.abs(Number(start) - clip.start) > 1e-6
+    || Math.abs(Number(duration) - (vgenDurationOf(vgen) || clip.duration)) > 1e-6
+    || w !== num0('width') || h !== num0('height') || fps !== num0('fps')
+    || prompt !== String(vgenGet(vgen, 'prompt') ?? '');
+  const row: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 };
+  const lab: React.CSSProperties = { fontSize: 11.5, fontWeight: 600, color: 'rgba(255,255,255,0.62)', width: 92, flexShrink: 0 };
+  const inp: React.CSSProperties = {
+    flex: 1, minWidth: 0, background: 'rgba(0,0,0,0.35)', border: '0.5px solid rgba(255,255,255,0.16)',
+    borderRadius: 6, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none',
+  };
+  const frameName = (which: 'first_frame' | 'last_frame'): string => {
+    const ref = which === 'first_frame' ? vgen.first_frame : vgen.last_frame;
+    if (!ref) return '— not bound —';
+    return ref.name || (ref.kind === 'cud' ? ref.path.split(/[\\/]/).pop() || ref.path : ref.hash);
+  };
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={{ ...styles.dialog, width: 520, display: 'flex', flexDirection: 'column' }}
+        onClick={e => e.stopPropagation()}>
+        <div style={styles.dialogTitle}>Video generator segment</div>
+        <div style={styles.dialogSubtitle}>
+          「{vgen.iface}」 · port {vgen.port}{vgen.fixed_fps ? ' · fixed fps' : ''} — the values here go straight
+          into the interface when you press ▶ on the segment.
+        </div>
+        <div style={row}>
+          <span style={lab}>Name</span>
+          <input style={inp} value={name} onChange={e => setName(e.target.value)}
+            onKeyDown={e => e.stopPropagation()} />
+        </div>
+        <div style={row}>
+          <span style={lab}>Start (s)</span>
+          <input style={inp} type="number" min={0} step={0.1} value={start}
+            onChange={e => setStart(e.target.value)} onKeyDown={e => e.stopPropagation()} />
+        </div>
+        <div style={row}>
+          <span style={lab} title="The segment length and the duration parameter are the same thing — change either and the other follows.">Duration (s)</span>
+          <input style={inp} type="number" min={0.1} step={0.1} value={duration}
+            onChange={e => setDuration(e.target.value)} onKeyDown={e => e.stopPropagation()} />
+        </div>
+        {vgen.ports.width && (
+          <div style={row}>
+            <span style={lab}>Width (value{vgen.ports.width})</span>
+            <input style={inp} type="number" min={1} step={1} value={w}
+              onChange={e => setW(e.target.value)} onKeyDown={e => e.stopPropagation()} />
+          </div>
+        )}
+        {vgen.ports.height && (
+          <div style={row}>
+            <span style={lab}>Height (value{vgen.ports.height})</span>
+            <input style={inp} type="number" min={1} step={1} value={h}
+              onChange={e => setH(e.target.value)} onKeyDown={e => e.stopPropagation()} />
+          </div>
+        )}
+        {vgen.ports.fps && (
+          <div style={row}>
+            <span style={lab} title="Fixed FPS is off — this value is fed into the FPS port; the clip keeps whatever rate the generator returns. The segment length never depends on it.">
+              FPS (value{vgen.ports.fps})
+            </span>
+            <input style={inp} type="number" min={1} step={0.1} value={fps}
+              onChange={e => setFps(e.target.value)} onKeyDown={e => e.stopPropagation()} />
+          </div>
+        )}
+        {/* Fixed FPS：帧率是整台生成器写死的（改它去 Interface tab），段上只读地报一下。 */}
+        {vgen.fixed_fps && (
+          <div style={row}>
+            <span style={lab} title="Fixed FPS is on — this generator has one fixed output rate (set in the Interface tab), so there is no FPS port to feed. The segment length is the segment's own length; a rate that differs from the project fps is normal.">
+              FPS (fixed)
+            </span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: 'rgba(255,255,255,0.75)' }}>
+              {fixedFps} fps
+              <span style={{ marginLeft: 6, fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
+                ({Math.max(1, Math.round((Number(duration) || clip.duration) * fixedFps))} frames)
+              </span>
+            </span>
+          </div>
+        )}
+        {vgen.ports.prompt && (
+          <div style={{ ...row, alignItems: 'flex-start' }}>
+            <span style={lab}>Prompt (value{vgen.ports.prompt})</span>
+            <textarea style={{ ...inp, minHeight: 90, resize: 'vertical', lineHeight: 1.5 }}
+              value={prompt} onChange={e => setPrompt(e.target.value)}
+              onKeyDown={e => e.stopPropagation()} />
+          </div>
+        )}
+        {(['first_frame', 'last_frame'] as const).filter(k => vgen.ports[k]).map(k => (
+          <div key={k} style={row}>
+            <span style={lab}>{k === 'first_frame' ? 'First frame' : 'Last frame'} (value{vgen.ports[k]})</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: 'rgba(255,255,255,0.75)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              title={frameName(k)}>{frameName(k)}</span>
+            <button style={styles.cancelBtn} onClick={() => onBindFrame(k)}>Bind…</button>
+          </div>
+        ))}
+        <div style={styles.dialogActions}>
+          <button style={styles.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={{ ...styles.confirmBtn, opacity: dirty ? 1 : 0.45 }} disabled={!dirty}
+            onClick={() => onApply({
+              name,
+              ...(Number.isFinite(Number(start)) ? { start: Number(start) } : {}),
+              ...(Number.isFinite(Number(duration)) ? { duration: Number(duration) } : {}),
+              ...(vgen.ports.width && w !== '' ? { width: Math.round(Number(w)) } : {}),
+              ...(vgen.ports.height && h !== '' ? { height: Math.round(Number(h)) } : {}),
+              ...(vgen.ports.fps && fps !== '' ? { fps: Number(fps) } : {}),
+              ...(vgen.ports.prompt ? { prompt } : {}),
+            })}>Apply</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/** 一枚仓库里的图片（/api/global_assets 的响应项，只取用到的几个字段）。 */
+type StoreImageRow = { name: string; hash?: string; url?: string; displayName?: string };
+
+/** 段的首/末帧：挑一张图片资产，或磁盘上一份 .cud 工程。 */
+const VideoGenFrameModal: React.FC<{
+  which: 'first_frame' | 'last_frame';
+  ifaceName: string;
+  current?: VidGenFrameRef | null;
+  onPick: (ref: VidGenFrameRef | null) => void;
+  onClose: () => void;
+}> = ({ which, ifaceName, current, onPick, onClose }) => {
+  const [rows, setRows] = useState<StoreImageRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let alive = true;
+    void fetch('/api/global_assets').then(r => r.json()).then((d: { assets?: StoreImageRow[] } | StoreImageRow[]) => {
+      if (!alive) return;
+      const list = Array.isArray(d) ? d : (d?.assets || []);
+      setRows(list.filter(a => a && (a.hash || a.name)));
+    }).catch(() => { if (alive) setErr('The asset store did not answer.'); });
+    return () => { alive = false; };
+  }, []);
+  const label = which === 'first_frame' ? 'First frame' : 'Last frame';
+  // 磁盘上的 .cud：走后端那扇原生对话框（浏览器拿不到真实路径），挑中后**只记路径** ——
+  // 字节在跑的那一刻才由后端读（它认得 .cud 里那一幅合成图）。
+  const pickCud = async () => {
+    setBusy(true); setErr('');
+    try {
+      const r = await fetch('/api/io_pick', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'open', kind: 'cud' }),
+      }).then(r => r.json());
+      const picks: { token?: string; name?: string; path?: string }[] = r?.picks || [];
+      const first = picks.find(p => p && (p.path || p.token));
+      if (!first) { setBusy(false); return; }       // 取消
+      onPick({ kind: 'cud', path: String(first.path || first.token || ''),
+        name: first.name || String(first.path || '').split(/[\\/]/).pop() });
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+  const cell: React.CSSProperties = {
+    width: 84, border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, overflow: 'hidden',
+    background: 'rgba(255,255,255,0.04)', cursor: 'pointer', padding: 0, display: 'flex',
+    flexDirection: 'column', alignItems: 'stretch', color: '#fff',
+  };
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={{ ...styles.dialog, width: 620, maxHeight: '76vh', display: 'flex', flexDirection: 'column' }}
+        onClick={e => e.stopPropagation()}>
+        <div style={styles.dialogTitle}>{label}</div>
+        <div style={styles.dialogSubtitle}>
+          「{ifaceName}」 — bind an image asset, or a .cud project (its composite is read as this frame).
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexShrink: 0 }}>
+          <button style={{ ...styles.cancelBtn, opacity: busy ? 0.5 : 1 }}
+            disabled={busy} onClick={() => { void pickCud(); }}>Open a .cud…</button>
+          {current && (
+            <button style={styles.cancelBtn} onClick={() => onPick(null)}>Unbind</button>
+          )}
+        </div>
+        {err && <div style={{ fontSize: 11, color: '#ff9f0a', marginBottom: 8 }}>{err}</div>}
+        <div style={{ flex: 1, minHeight: 120, overflowY: 'auto' }}>
+          {rows.length === 0
+            ? <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)' }}>
+                {err ? '' : 'The asset store has no images yet — import one, or open a .cud.'}
+              </div>
+            : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {rows.map(a => {
+                  const id = a.hash || a.name;
+                  const url = a.hash ? `/api/asset_media/${encodeURIComponent(a.hash)}` : (a.url || '');
+                  const on = !!current && current.kind === 'asset' && current.hash === id;
+                  return (
+                    <button key={id} style={{ ...cell, border: on ? '1px solid #0a84ff' : cell.border }}
+                      title={a.displayName || a.name}
+                      onClick={() => onPick({ kind: 'asset', hash: id, name: a.displayName || a.name })}>
+                      <div style={{ height: 56, background: '#0d0d0d', overflow: 'hidden' }}>
+                        {url && <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+                      </div>
+                      <div style={{ fontSize: 9.5, padding: '3px 4px', textAlign: 'left', overflow: 'hidden',
+                        textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'rgba(255,255,255,0.8)' }}>
+                        {a.displayName || a.name}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+        </div>
+        <div style={styles.dialogActions}>
+          <button style={styles.cancelBtn} onClick={onClose}>Close</button>
+        </div>
+      </div>
     </div>
   );
 };
@@ -3540,9 +4009,40 @@ const InterfaceTab: React.FC<{
     const nextNames: InterfaceMeta[string]['names'] = Object.keys(names).length ? names : undefined;
     patchMeta(iface, { names: nextNames });
   };
-  const setIfaceMode = (iface: string, key: 'block' | 'processor', on: boolean) => {
+  const setIfaceMode = (iface: string, key: 'block' | 'processor' | 'video_generator', on: boolean) => {
     const cur = metaFor(iface);
-    patchMeta(iface, { modes: { block: false, processor: false, ...(cur.modes || {}), [key]: on } });
+    patchMeta(iface, {
+      modes: { block: false, processor: false, video_generator: false, ...(cur.modes || {}), [key]: on },
+    });
+  };
+  // Video Generator：八个固定槽各绑一个端口。绑的是**端口号**（执行全程按号走），
+  // 槽位名是这个端口在这一台生成器里扮演的角色。
+  const setVideoGenPort = (iface: string, slot: VideoGenSlot, num: number) => {
+    const cur = metaFor(iface);
+    const ports = { ...((cur.video_gen?.ports) || {}) };
+    if (num > 0) ports[slot] = num; else delete ports[slot];
+    const next: VideoGenConfig = { ...(cur.video_gen || {}), ports };
+    patchMeta(iface, { video_gen: next });
+  };
+  const setVideoGenFixedFps = (iface: string, on: boolean) => {
+    const cur = metaFor(iface);
+    // 打开时顺手把 fps 槽解绑（帧率改由这颗开关上的数字定，端口不再参与），
+    // 关掉时把数字留着（来回切的时候不用重填）。
+    const ports = { ...((cur.video_gen?.ports) || {}) };
+    if (on) delete ports.fps;
+    patchMeta(iface, {
+      video_gen: {
+        ...(cur.video_gen || {}), ports, fixed_fps: on,
+        fixed_fps_value: Number(cur.video_gen?.fixed_fps_value) > 0 ? cur.video_gen?.fixed_fps_value : 16,
+      },
+    });
+  };
+  /** Fixed FPS 的那个数（1..120）。空/非法按下一次能解析出来的值兜底。 */
+  const setVideoGenFixedFpsValue = (iface: string, text: string) => {
+    const cur = metaFor(iface);
+    const n = Number(text);
+    const val = Number.isFinite(n) ? Math.max(1, Math.min(120, n)) : (Number(cur.video_gen?.fixed_fps_value) || 16);
+    patchMeta(iface, { video_gen: { ...(cur.video_gen || { ports: {} }), fixed_fps_value: val } });
   };
   const setBlockPort = (iface: string, side: 'in' | 'out', num: number) => {
     const cur = metaFor(iface);
@@ -3667,6 +4167,10 @@ const InterfaceTab: React.FC<{
                   const mediaOut = iface.end_ports?.filter(p => ['IMAGE', 'MASK', 'PIPELINE_DATA'].includes(p.type)) ?? [];
                   const canBlock = pipelineIn.length > 0 && pipelineOut.length > 0;
                   const canProcessor = mediaIn.length > 0 && mediaOut.length > 0;
+                  // Video Generator：至少要有一个出口（VIDEO 直接回片；IMAGE 回一批帧，
+                  // 跑完由后端按 fps 现编成一段 —— 两种都能往输出轨上落）。
+                  const videoOut = iface.end_ports?.filter(p => p.type === 'VIDEO' || p.type === 'IMAGE') ?? [];
+                  const canVideoGen = videoOut.length > 0;
                   const toggleRow = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 } as React.CSSProperties;
                   const toggleLabel = { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.65)' } as React.CSSProperties;
                   return (
@@ -3685,6 +4189,17 @@ const InterfaceTab: React.FC<{
                           setIfaceMode(iface.name, 'processor', v);
                         }} />
                       </div>
+                      {/* Video Generator：把这个包**声明**成一台视频生成器 —— 八个固定槽各绑
+                          一个端口，时间线上的 video generator 段照这份绑定填参数、接产物。
+                          绑哪些是用户的事，槽位本身是死的：段那一侧因此不必认识任何具体接口。 */}
+                      <div style={{ ...toggleRow, marginBottom: 0 }}>
+                        <span style={toggleLabel} title="Video Generator 模式：把这个包当成一台视频生成器 —— 下面这八个固定槽各绑一个端口，Processor 窗就能往 process 轨上摆 video generator 段。">Video Generator</span>
+                        <IOSToggle checked={!!modes.video_generator} onChange={v => {
+                          if (v && !canVideoGen) { setModeHint(prev => ({ ...prev, [idx]: 'Video Generator mode needs at least one VIDEO or IMAGE output port.' })); return; }
+                          setModeHint(prev => ({ ...prev, [idx]: '' }));
+                          setIfaceMode(iface.name, 'video_generator', v);
+                        }} />
+                      </div>
                       {/* Allow List：只在 Processor 开着时给。开着 = 这一口吃一整列图/mask（视频逐帧、
                           多张 staging），吐出来也是 list；执行时按每个内部节点是不是 INPUT_IS_LIST
                           分流（直通 list / 逐帧跑再合并）。视频模式下 Processor 窗的 image 输入行
@@ -3698,6 +4213,87 @@ const InterfaceTab: React.FC<{
                           }} />
                         </div>
                       )}
+                      {/* Video Generator 的槽位绑定：每个槽一枚 enum 下拉（只列类型对得上的
+                          端口）。带 * 的是必绑 —— 少了它们段既不知道画多大、也不知道该占多长。 */}
+                      {modes.video_generator && (() => {
+                        const vg: VideoGenConfig = meta.video_gen || { ports: {} };
+                        const ports = vg.ports || {};
+                        const missing = videoGenMissing(vg);
+                        const opt = { background: '#1c1c1e', color: '#fff' } as React.CSSProperties;
+                        return (
+                          <div style={{ marginTop: 6, paddingTop: 6, borderTop: '0.5px solid rgba(191,90,242,0.18)' }}>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.65)', margin: '2px 0 4px' }}>
+                              Video Generator ports
+                            </div>
+                            {/* Fixed FPS 开着 = 帧率是整台生成器写死的（`fixed_fps_value`），
+                                fps 槽那一口因此**整行不出现**（也不必绑）。 */}
+                            {VIDEO_GEN_SLOTS.filter(s => !(s.key === 'fps' && vg.fixed_fps)).map(slot => {
+                              const list = ((slot.side === 'start' ? iface.start_ports : iface.end_ports) ?? [])
+                                .filter(p => slot.types.includes(p.type));
+                              const cur = ports[slot.key] ?? 0;
+                              const bad = slot.required && cur <= 0;
+                              return (
+                                <div key={slot.key} style={{ ...toggleRow, marginBottom: 0 }}>
+                                  <span style={{
+                                    ...toggleLabel, minWidth: 74,
+                                    color: bad ? '#ff9f0a' : (cur > 0 ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.38)'),
+                                  }} title={slot.tip}>{slot.label}{slot.required ? ' *' : ''}</span>
+                                  <select style={{ ...styles.paramSelect, flex: 1 }} value={cur}
+                                    onChange={e => setVideoGenPort(iface.name, slot.key, parseInt(e.target.value, 10) || 0)}
+                                    title={slot.tip}>
+                                    <option value={0} style={opt}>{list.length ? '— none —' : `no ${slot.types.join('/')} port`}</option>
+                                    {list.map(p => (
+                                      <option key={p.num} value={p.num} style={opt}>
+                                        {portDisplay(iface.name, slot.side, p)}（value{p.num}）
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              );
+                            })}
+                            {/* video 槽绑在图片口上的时候把话说清楚：产物是一批帧，跑完
+                                由后端按 fps 那一口现编成一段（落到输出轨的位置是一样的）。 */}
+                            {(() => {
+                              const p = (iface.end_ports ?? []).find(x => x.num === (ports.video ?? 0));
+                              if (!p || p.type !== 'IMAGE') return null;
+                              return (
+                                <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
+                                  Image output — the frames come back as images and the run stitches them into a clip
+                                  at {vg.fixed_fps ? `the fixed ${Number(vg.fixed_fps_value) > 0 ? vg.fixed_fps_value : 16}fps`
+                                    : 'the FPS port'}. The clip still lands with the segment&apos;s own length.
+                                </div>
+                              );
+                            })()}
+                            <div style={{ ...toggleRow, marginBottom: 0, marginTop: 4 }}>
+                              <span style={toggleLabel} title="Fixed FPS：开着 = 这台生成器有一个写死的输出帧率（右边那个数，比如 16），fps 槽那一口不再绑、值也不往图里喂；关着 = fps 绑一个端口，段把用户填的值原样喂进去。两种情况下段长都只按段自己的长度走 —— 生成的片与工程帧率对不上是正常的。">Fixed FPS</span>
+                              <IOSToggle checked={!!vg.fixed_fps}
+                                onChange={v => setVideoGenFixedFps(iface.name, v)} />
+                              {/* 开了就给一个填帧率的框：这是**整台生成器**的输出帧率
+                                  （不是工程帧率），段长照旧按段自己那一截取。 */}
+                              {!!vg.fixed_fps && (
+                                <>
+                                  <span style={{ ...toggleLabel, marginLeft: 10, color: 'rgba(255,255,255,0.5)' }}
+                                    title="这台生成器出片的帧率（1..120）。工程帧率与之不同很正常 —— 段长不受它影响。">fps</span>
+                                  <input type="number" min={1} max={120} step={1}
+                                    value={String(Number(vg.fixed_fps_value) > 0 ? vg.fixed_fps_value : 16)}
+                                    onChange={e => setVideoGenFixedFpsValue(iface.name, e.target.value)}
+                                    style={{ ...styles.paramInput, flex: '0 0 68px', textAlign: 'right' }}
+                                    title="这台生成器出片的帧率（1..120）。工程帧率与之不同很正常 —— 段长不受它影响。" />
+                                </>
+                              )}
+                            </div>
+                            {missing.length > 0 && (
+                              <div style={{ fontSize: 11, color: '#ff9f0a', marginTop: 4 }}>
+                                Bind {missing.join(', ')} — a video generator segment cannot run without them.
+                              </div>
+                            )}
+                            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
+                              Segments are added from the Video Generator window (its own dock window,
+                              next to Processor) — it drops one at the playhead.
+                            </div>
+                          </div>
+                        );
+                      })()}
                       {modeHint[idx] && <div style={{ fontSize: 11, color: '#ff9f0a', marginBottom: 4 }}>{modeHint[idx]}</div>}
                       {modes.block && pipelineIn.length > 0 && pipelineOut.length > 0 && (() => {
                         const blockPorts = meta.block_ports || {};

@@ -20,6 +20,7 @@ import { poseUnit } from './pose';
 import { detectorUnit } from './detector';
 import { processorUnit } from './processor';
 import { stagingUnit } from './staging';
+import { videoGenUnit } from './videoGen';
 
 /** 一格工作台正文能碰到的宿主事实：图池镜像（App 的 staging）、画布合成预览、以及图池的两个后端写口。
  *  绝大多数格子用不到 —— 只有 Staging 那一格要，因为它摆的就是宿主自己的那条图池条，条目 / 上传 /
@@ -45,6 +46,14 @@ export type WorkbenchHostCtx = {
     mode: 'image' | 'video'; fps: number; setFps: (v: number) => void;
     tracks: { id: string; name: string }[];
     assets: { id: string; name: string }[];
+    /** Video Generator（它自己那一格用）：哪几个接口开了 Video Generator 模式、各自八个槽
+     *  绑了哪些端口、还缺哪几个必绑槽，以及"往 process 轨上摆一段"这个写口（段的位置/时长
+     *  只有宿主知道）。 */
+    videoGen: {
+      list: { name: string; index: number; ports: Record<string, number>;
+              fixed_fps: boolean; fixed_fps_value?: number; missing: string[]; ready: boolean }[];
+      add: (ifaceIndex: number) => void;
+    };
   };
 };
 
@@ -83,6 +92,9 @@ export const WORKBENCH_UNITS: WorkbenchUnit[] = [
   canvasUnit, transformUnit, colorUnit, brushUnit, bucketUnit, eraserUnit, selectionUnit, viewUnit,
   // 侧栏那六格工具小窗：Text、Geometry、3D、Pose、Detector、Processor（序 = 页面那一列的序）。
   textUnit, geometryUnit, scene3dUnit, poseUnit, detectorUnit, processorUnit,
+  // Video Generator 单独一扇窗：它原来压在 Processor 窗里，可两件事不是一件事 —— Processor 是
+  // "拿图层跑一次离线处理"，它是"在时间线上占一段时间、跑完吐一段片子"（且只有视频模式用得上）。
+  videoGenUnit,
   guidancesUnit, layersUnit, historyUnit,
   // Layout 压在最末：它不画页面上的任何东西，只记别人怎么摆 —— 摆法用不上时它就该在最不碍事的地方。
   layoutUnit,

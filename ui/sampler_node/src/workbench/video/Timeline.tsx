@@ -4,6 +4,7 @@ import {
   type VidClip, type VidController, type VidTrack, type VidMergeProbe,
   addLayerClip, addTrack, clipAtSolo, fmtTime, importToTrack, isAudioName, isVideoName, mergeVidClips, moveClip, moveTrack, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack,
   replaceVidClipsWithMerged, setMaskTrack, splitClip, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
+  vgenWithDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
 import { probeMedia } from './audio';
@@ -125,6 +126,17 @@ const IconLink: React.FC = () => (
     <path d="M6.5 9.5l3-3M6.8 4.6l1-1a2.6 2.6 0 013.7 3.7l-1 1M9.2 11.4l-1 1a2.6 2.6 0 01-3.7-3.7l1-1" />
   </svg>
 );
+// 生成器段的运行 / 停止：段上不写 "Run" / "Stop" 两个字，三角形与方块自己说话。
+const IconPlay: React.FC = () => (
+  <svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor" stroke="none">
+    <path d="M5.3 3.3 12.3 8l-7 4.7z" />
+  </svg>
+);
+const IconStop: React.FC = () => (
+  <svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor" stroke="none">
+    <rect x="4.4" y="4.4" width="7.2" height="7.2" rx="1.1" />
+  </svg>
+);
 // 合并：两段并成一段。
 const IconMerge: React.FC = () => (
   <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
@@ -187,7 +199,13 @@ export const VidTimeline: React.FC<{
   /** 占位段的齿轮（设置入口）：参数 = 这一批要一起改的占位段 id。
    *  点中的段在现有多选里 → 整个多选集合；否则只它自己。 */
   onSettingsPlaceholders?: (clipIds: string[]) => void;
-}> = ({ vid, onSettingsPlaceholders }) => {
+  /** video generator 段的 ▶：按段上那份配置把这台生成器跑一遍。 */
+  onRunVGen?: (clipId: string) => void;
+  /** video generator 段的首/末帧卡片：挑一张图片资产或磁盘上的 .cud 工程。 */
+  onPickVGenFrame?: (clipId: string, which: 'first_frame' | 'last_frame') => void;
+  /** video generator 段的齿轮（设置：提示词也在这扇窗里）。 */
+  onSettingsVGen?: (clipId: string) => void;
+}> = ({ vid, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onSettingsVGen }) => {
   const { project: p, transport, pps } = vid;
   // 占位段队列（多选 ▶ 排出的那一队）：还没轮到的段画 ⏸，正在跑的（有填充进度）画 ■。
   // 订阅放在时间线这一层：一条队只敲一次重渲，不按片段各订一遍。
@@ -248,6 +266,9 @@ export const VidTimeline: React.FC<{
     setSelIds(picked);
   };
   const [dropLane, setDropLane] = useState<string | null>(null);
+  // 裁剪中的时长浮签：段面上平时不写时长，只有按住边缘拖的那一小段时间才报一下。
+  // 浮签挂到 body（fixed）：片段自己的 overflow:hidden 与 lane 的裁剪都剪不到它。
+  const [trimHint, setTrimHint] = useState<{ id: string; x: number; y: number } | null>(null);
 
   // ── 播放头直改 DOM ── 线、三角、时间读数、底注、跟随滚动都不走 React。
   const lineRef = useRef<HTMLDivElement | null>(null);
@@ -442,6 +463,8 @@ export const VidTimeline: React.FC<{
     vid.focusClip(clip);
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 指针已失活/合成事件：不挡手势 */ }
     dragRef.current = { mode, id: clip.id, x0: e.clientX, start0: clip.start };
+    // 按在边缘上 = 即将裁剪：时长浮签从按下的这一刻就跟着指针（还没动也报当前值）。
+    if (mode !== 'move') setTrimHint({ id: clip.id, x: e.clientX, y: e.clientY });
   };
   const onClipPointerMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
@@ -472,10 +495,29 @@ export const VidTimeline: React.FC<{
       const t = timeAt(e.clientX);
       const hit = noSnap || !clip ? null : snapEdge(t, movingIds(clip, linked));
       showSnap(hit);
+      // 浮签跟着指针走；字数从本帧的 project 读（trim 之后下一帧就是新长度）。
+      setTrimHint(h => (h && h.id === dragId ? { ...h, x: e.clientX, y: e.clientY } : h));
       vid.update(proj => trimClip(proj, dragId, edge, hit ? hit.t : t, linked), 'Trim clip');
     }
   };
-  const endClipDrag = () => { dragRef.current = null; clearSnap(); };
+  const endClipDrag = () => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    clearSnap();
+    setTrimHint(null);
+    // 生成器段：段长就是 duration 参数（双向绑定）—— 拖/裁完把新的长度写回那一口。
+    // 与上面那一步裁剪同一个 label，撤销时两笔合成一步。
+    if (d && (d.mode === 'l' || d.mode === 'r')) {
+      const clip = p.clips.find(c => c.id === d.id);
+      if (clip?.vgen) {
+        vid.update(proj => ({
+          ...proj,
+          clips: proj.clips.map(c => (c.id === d.id && c.vgen)
+            ? { ...c, vgen: vgenWithDuration(c.vgen, c.duration) } : c),
+        }), 'Trim clip');
+      }
+    }
+  };
 
   // ── 标尺 scrub ──
   const scrubRef = useRef(false);
@@ -1221,9 +1263,11 @@ export const VidTimeline: React.FC<{
                   const touchesLeft = p.clips.some(x =>
                     x.trackId === tr.id && x.id !== c.id
                     && Math.abs((x.start + x.duration) - c.start) <= 0.002);
-                  // 这个占位的产物槽位是不是已经被别的东西占了（占了 ▶ 置灰 —— 自己的旧产物不算）。
-                  const continueBlocked = c.pending
-                    ? procSlotBusy(p, c.pending.port ?? 0, c.start, c.duration, c.id) : false;
+                  // 这个段（占位段或生成器段）的产物槽位是不是已经被别的东西占了
+                  // （占了 ▶ 置灰 —— 自己的旧产物不算占）。
+                  const outPort = c.pending?.port ?? c.vgen?.port;
+                  const continueBlocked = (c.pending || c.vgen)
+                    ? procSlotBusy(p, outPort ?? 0, c.start, c.duration, c.id) : false;
                   return (
                     <Clip key={c.id} clip={c} pps={pps} selected={selIds.has(c.id)} blade={blade} muted={isMuted}
                       touchesLeft={touchesLeft}
@@ -1254,7 +1298,10 @@ export const VidTimeline: React.FC<{
                           ? p.clips.filter(x => selIds.has(x.id) && x.pending).map(x => x.id)
                           : [id];
                         onSettingsPlaceholders(ids.length ? ids : [id]);
-                      } : undefined} />
+                      } : undefined}
+                      onVGenRun={onRunVGen}
+                      onVGenFrame={onPickVGenFrame}
+                      onVGenSettings={onSettingsVGen} />
                   );
                 })}
               </div>
@@ -1397,6 +1444,25 @@ export const VidTimeline: React.FC<{
           </div>
         );
       })(), document.body)}
+
+      {/* 裁剪时长浮签：段上平时不写时长，只有按着左右边缘拖的时候才把当前长度报出来。
+          挂 body 上 fixed 定位（不受轨道滚动/裁剪），跟着指针走，不吃任何指针事件。 */}
+      {trimHint && (() => {
+        const c = p.clips.find(x => x.id === trimHint.id);
+        if (!c) return null;
+        return createPortal(
+          <div data-vid-trim-hint="1" style={{
+            position: 'fixed', zIndex: 9999, pointerEvents: 'none', whiteSpace: 'nowrap',
+            left: Math.max(8, Math.min(trimHint.x + 14, window.innerWidth - 88)),
+            top: Math.max(8, trimHint.y - 28),
+            padding: '2px 7px', borderRadius: 5, fontSize: 10.5, fontWeight: 700,
+            fontVariantNumeric: 'tabular-nums', color: '#241c00',
+            background: 'rgba(255,214,10,0.94)', border: '0.5px solid rgba(0,0,0,0.25)',
+            boxShadow: '0 3px 10px rgba(0,0,0,0.45)',
+          }}>{fmtTime(c.duration)}</div>,
+          document.body,
+        );
+      })()}
     </div>
   );
 };
@@ -1435,20 +1501,41 @@ const Clip: React.FC<{
   onStop?: (clipId: string) => void;
   /** 它引用的仓库哈希已经不在仓库里（A5）：段面盖红斜纹 + 「!」—— 去 Assets 窗的 Project 档 relink。 */
   missing?: boolean;
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing }) => {
+  /** video generator 段的 ▶（按段上那份配置跑这台生成器）；undefined = 宿主没接（按钮不画）。 */
+  onVGenRun?: (clipId: string) => void;
+  /** video generator 段的首/末帧卡片：点一下挑图（图片资产或磁盘上的 .cud 工程）。 */
+  onVGenFrame?: (clipId: string, which: 'first_frame' | 'last_frame') => void;
+  /** video generator 段的齿轮（设置：宽高/时长/帧率/提示词）。 */
+  onVGenSettings?: (clipId: string) => void;
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenSettings }) => {
   const isAudio = c.kind === 'audio';
-  // 缺失：只有"真有来源"的段才可能缺（Layer 段与占位段没有仓库来源）。
-  const gone = !!missing && c.kind !== 'layer' && !c.pending;
+  // 缺失：只有"真有来源"的段才可能缺（Layer 段、占位段、生成器段都没有仓库来源）。
+  const gone = !!missing && c.kind !== 'layer' && !c.pending && !c.vgen;
   // Layer 段没有源文件：不抽条、不取首尾帧，只画一块"合成区间"。
   const isLayer = c.kind === 'layer';
   // Processor 占位段同样没有源（等跑完才有）：不抽条不取帧，画一块带快照的"待跑坑"。
   const isPending = !!c.pending;
+  // Video Generator 段：与占位段同一条 process 轨、同一套"产物落到输出轨"的规矩，但装的是
+  // 生成器自己的一套（提示词 / 宽高 / 时长 / 帧率 / 首末帧），段面因此多几个控件。
+  const isVGen = !!c.vgen;
+  // 两者都没有播放源 —— 抽条 / 取帧那几条路对它们一律不接。
+  const noMedia = isLayer || isPending || isVGen;
   // 普通视频段不画名字/时长：画面本身就是标识，文字只留给 tooltip。
   const isVideoClip = c.kind === 'video' && !isPending;
   // 占位段的宽度命运：一段常常只有几十像素（1 秒 @ 60px/s），名字 + 段号 + ▶ Run 挤不下。
   // 窄的时候只留一颗 ▶（名字/段号/时长让位给 tooltip）—— 按钮绝不能被 overflow 裁掉。
   const clipW = Math.max(8, c.duration * pps);
-  const tight = isPending && clipW < 108;
+  // 生成器段：左右各一张帧卡片，中间「齿轮 + ▶ + 名字」。窄段先收卡片（帧卡片缩到图标大小），
+  // 再窄就只留两颗按钮 —— 名字与时长让位给 tooltip / 裁剪浮签。
+  const tight = (isPending || isVGen) && clipW < (isVGen ? 150 : 108);
+  // 生成器段的帧卡片宽度跟着段宽走：宽段铺满 64px，窄段逐步收窄（下限 24）——
+  // 中间的齿轮 / ▶ / 段名永远留得下，预览也不会在某个宽度上突然缩水。
+  const cardW = isVGen ? Math.max(24, Math.min(64, Math.round((clipW - 108) / 2))) : 0;
+  // 窄到看不清的段：内部那套控件与文字**一概不画**，只剩一块类型色（预览帧 / 波形照旧）。
+  // 阈值按那套 UI 的最小成行宽度算：生成器段 = 两张 24px 帧卡 + 齿轮/▶ 各 18 + 间距 ≈ 104；
+  // 占位段 = 齿轮 + 紧凑 ▶ + 内边距 ≈ 64；其余段的段名/徽章再窄只剩半截字，56 以下也收掉。
+  // 段本身仍是可拖/可裁/可选的实体 —— 这里只决定画不画里面的界面。
+  const micro = clipW < (isVGen ? 104 : isPending ? 64 : 56);
   const K = KIND_UI[c.kind];
   // 占位段一律用 process 轨的浅灰白 —— 旧存档里的占位段可能还躺在视频轨上（kind='video'），
   // 颜色也必须一眼认出"这是个待跑的坑"，不能跟着脚下轨道变蓝。
@@ -1464,7 +1551,7 @@ const Clip: React.FC<{
   // 拖动裁剪时**立刻**要有画面：先从缩略条上取最靠近的那一格（同步、零 seek），
   // 停手后再由下面的 effect 换成精确帧。两层合起来 = 跟手且准。
   // 音频段不给它抽条：条是视频帧，纯音频源（mp3/wav）咬不动，白占队列十几秒。
-  useStrip(isAudio || isLayer || isPending ? '' : c.src, c.srcDuration);
+  useStrip(isAudio || noMedia ? '' : c.src, c.srcDuration);
   // 静态预览的门槛：**正在裁**（需要逐帧跟手）或**这条源的条已经抽完**（索引稳定）。
   // 半成品只给拖动顶位用 —— 拿它当静态预览，抽条每发布一批画面就跳一次。
   const quickOk = performance.now() - lastTrimAt < 200 || stripComplete(c.src);
@@ -1490,7 +1577,7 @@ const Clip: React.FC<{
   const [headFrame, setHeadFrame] = useState<{ t: number; url: string } | null>(
     () => (mediaFile ? { t: headT, url: backendFrame(headT) } : null));
   useEffect(() => {
-    if (isAudio || isLayer || isPending) return;
+    if (isAudio || noMedia) return;
     let alive = true;
     const timer = setTimeout(() => {
       void (async () => {
@@ -1499,11 +1586,11 @@ const Clip: React.FC<{
       })();
     }, 120);
     return () => { alive = false; clearTimeout(timer); };
-  }, [isAudio, isLayer, mediaFile, c.src, headT]);
+  }, [isAudio, noMedia, mediaFile, c.src, headT]);
 
   const [tailFrame, setTailFrame] = useState<{ t: number; url: string } | null>(null);
   useEffect(() => {
-    if (isAudio || isLayer || isPending || !wide) return;
+    if (isAudio || noMedia || !wide) return;
     let alive = true;
     const timer = setTimeout(() => {
       void (async () => {
@@ -1512,7 +1599,7 @@ const Clip: React.FC<{
       })();
     }, 120);
     return () => { alive = false; clearTimeout(timer); };
-  }, [isAudio, mediaFile, c.src, tailT, wide]);
+  }, [isAudio, noMedia, mediaFile, c.src, tailT, wide]);
 
   // 精确帧只在"属于当前时刻"时才作数；否则用同步的缩略条格。
   const preciseHead = headFrame && Math.abs(headFrame.t - headT) < 0.02 ? headFrame.url : undefined;
@@ -1523,6 +1610,9 @@ const Clip: React.FC<{
   // -1 = 还没报出步数/没在跑 —— 画一窄条意思一下，跑完随替换一起消失。
   const fillP = useSyncExternalStore(subscribeProcFill, () => getProcFill(c.id));
   const running = fillP >= 0;   // 有填充进度 = 这一段正在跑（按钮换成 ■）
+  // 左邻相接时要把左边框让出来。宽度必须显式写回：`borderLeftWidth: undefined` 会让 React
+  // 拆开 border 简写，左边宽度掉回浏览器默认的 medium（3px）—— 预览/内容会凭空缩进 2px。
+  const edgeW = gone || selected || isPending || isVGen ? 1 : 0.5;
   return (
     <div
       data-vid-clip={c.id}
@@ -1534,7 +1624,9 @@ const Clip: React.FC<{
       // 片段上按下已经选中它了；click / dblclick 别冒泡到 lane —— 那里"点空白"会清选中、双击会再造一段。
       onClick={e => e.stopPropagation()}
       onDoubleClick={e => e.stopPropagation()}
-      title={isPending && c.pending
+      title={isVGen && c.vgen
+        ? `${c.name} — video generator segment for 「${c.vgen.iface}」 (${fmtTime(c.duration)}${c.vgen.fixed_fps ? ', fixed fps' : ''}). ${c.vgen.ports.first_frame ? 'The left frame card binds the first frame; ' : ''}${c.vgen.ports.last_frame ? 'the right frame card binds the last frame; ' : ''}The gear edits every saved field (prompt, width / height / duration / fps, frame bindings); ▶ sends them into the interface and the finished video lands on the output track above at this position. The segment stays, so it can be run again.`
+        : isPending && c.pending
         ? `${c.name} — ${c.pending.kind === 'preset' ? 'Pipeline Preset' : 'Processor'} placeholder, segment ${c.pending.segIndex + 1}/${c.pending.segCount} of 「${c.pending.iface}」 (nothing to show until it runs). Click ▶ Run to execute just this segment from its stored snapshot; the result lands on the output track above and this placeholder stays, so it can be run again. Drag/trim/delete like any clip.`
         : `${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}${gone ? ' · MEDIA MISSING from the asset store — pick the original file in the Assets window (Project scope) to relink' : ''}`}
       style={{
@@ -1542,14 +1634,14 @@ const Clip: React.FC<{
         borderRadius: 0, overflow: 'hidden', cursor: blade ? BLADE_CURSOR : 'grab', userSelect: 'none',
         // 上亮下暗的立面色：片段是"一片实体"，不是一块半透明色纸；选中时白边 + 外发光。
         // 占位段：虚线浅灰白边 —— "这里有个坑等着被填"一眼认出；跑出来的成品在输出轨上是实心蓝。
-        background: isPending ? `linear-gradient(180deg, ${PK.clipA}, ${PK.clipB})` : `linear-gradient(180deg, ${K.clipA}, ${K.clipB})`,
+        background: (isPending || isVGen) ? `linear-gradient(180deg, ${PK.clipA}, ${PK.clipB})` : `linear-gradient(180deg, ${K.clipA}, ${K.clipB})`,
         border: gone ? '1px solid rgba(255,69,58,0.9)'
           : selected ? '1px solid rgba(255,255,255,0.92)'
-          : isPending ? `1px dashed ${PK.edge}` : `0.5px solid ${K.edge}`,
+          : (isPending || isVGen) ? `1px dashed ${PK.edge}` : `0.5px solid ${K.edge}`,
         // 首尾相接时让出左边框：接缝只画左邻那条右边框，不会两条叠成 2px。
-        borderLeftWidth: touchesLeft ? 0 : undefined,
+        borderLeftWidth: touchesLeft ? 0 : edgeW,
         boxShadow: selected ? `0 0 0 1px ${K.edge}, 0 2px 8px rgba(0,0,0,0.45)` : '0 1px 3px rgba(0,0,0,0.35)',
-        display: 'flex', alignItems: 'center', padding: '0 8px', gap: 6,
+        display: 'flex', alignItems: 'center', padding: isVGen ? 0 : '0 8px', gap: 6,
         // 静音：压暗 + 去色 —— 段还在（还能拖/裁/删），只是不参与输出。
         opacity: muted ? 0.34 : 1, filter: muted ? 'saturate(0.3)' : undefined,
       }}
@@ -1581,7 +1673,7 @@ const Clip: React.FC<{
           marginLeft: `${-(c.offset / Math.max(c.duration, 0.001)) * 100}%`,
           objectFit: 'fill', opacity: 0.5, pointerEvents: 'none' }} />
       )}
-      {isLayer && (
+      {isLayer && !micro && (
         <span style={{ display: 'flex', alignItems: 'center', color: '#ffd9a8', flexShrink: 0, position: 'relative', pointerEvents: 'none' }}><IconLayers /></span>
       )}
       {/* 缺失：整段盖一层红斜纹（画面/波形还在也压得住），右边挂一颗「!」。 */}
@@ -1589,19 +1681,19 @@ const Clip: React.FC<{
         <span style={{ position: 'absolute', inset: 0, pointerEvents: 'none',
           background: 'repeating-linear-gradient(45deg, rgba(255,69,58,0.26) 0 5px, rgba(255,69,58,0.05) 5px 10px)' }} />
       )}
-      {gone && (
+      {gone && !micro && (
         <span title="MEDIA MISSING — the bytes are gone from the asset store. Relink the original file in the Assets window (Project scope)."
           style={{ position: 'relative', flexShrink: 0, fontSize: 9, fontWeight: 800, fontStyle: 'normal',
             color: '#fff', background: 'rgba(255,69,58,0.95)', borderRadius: 4, padding: '1px 5px',
             lineHeight: 1.25, pointerEvents: 'none' }}>!</span>
       )}
-      {!(tight && isPending) && !isVideoClip && (
+      {!micro && !(tight && (isPending || isVGen)) && !isVideoClip && !isVGen && (
         <span style={{ fontSize: 10.5, fontWeight: 600, color: 'rgba(255,255,255,0.94)', textShadow: '0 1px 2px rgba(0,0,0,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', pointerEvents: 'none', position: 'relative' }}>{c.name}</span>
       )}
       {/* 占位段：段号徽章 + ▶ Run。点 ▶ 只续跑这一段（快照重放），其余照常拖/裁/删。 */}
-      {isPending && c.pending && (
+      {isPending && c.pending && !micro && (
         <>
-          {(!tight || clipW >= 64) && (
+          {(!tight || clipW >= 88) && (
             <span style={{ fontSize: 9, color: PK.fg, flexShrink: 0, fontVariantNumeric: 'tabular-nums', pointerEvents: 'none', position: 'relative' }}>{c.pending.segIndex + 1}/{c.pending.segCount}</span>
           )}
           {onContinue && (
@@ -1659,10 +1751,110 @@ const Clip: React.FC<{
           )}
         </>
       )}
-      {!tight && !isVideoClip && (
-        <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.72)', flexShrink: 0, marginLeft: 'auto', fontVariantNumeric: 'tabular-nums', pointerEvents: 'none', position: 'relative', background: 'rgba(0,0,0,0.38)', padding: '1px 5px', borderRadius: 4, textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{fmtTime(c.duration)}</span>
-      )}
-      {c.groupId && (
+      {/* Video generator 段：左右两张帧卡片（虚线外框，绑了图就铺预览），中间是
+          齿轮（设置，提示词也在那扇窗里）+ ▶（一颗图标，不写 Run）+ 段名。
+          帧卡片只在这台生成器**绑了那个口**时才出现（没绑首帧口就没有"给它一张首帧"这回事）。 */}
+      {isVGen && c.vgen && !micro && (() => {
+        const v = c.vgen;
+        const frameCard = (which: 'first_frame' | 'last_frame') => {
+          if (!v.ports[which]) return null;
+          const ref = which === 'first_frame' ? v.first_frame : v.last_frame;
+          // 图片资产走**缩略图**接口（后端按 w 生成并落盘缓存）—— 卡片不该解码整张原图。
+          const thumb = ref?.kind === 'asset' && ref.hash
+            ? `/api/asset_thumb/${encodeURIComponent(ref.hash)}?w=96` : '';
+          // 绑了图就是视频段首/尾帧那种**整高、无边框**的预览条；虚线框只留给未绑定
+          // （或 .cud 这种没有画面可铺）的占位卡。
+          const preview = !!thumb;
+          // 卡片贴着段边，四边再各描一条就和段自己的边框叠成双线：只留**朝内**那一条虚线
+          // 当分隔（左卡留右、右卡留左），上下和贴边那侧都不画。四边逐条写死宽度 ——
+          // 简写碰到 undefined 会被 React 拆成 longhand，掉回浏览器默认的 medium。
+          const divider = `1px dashed ${ref ? 'rgba(255,255,255,0.55)' : PK.edge}`;
+          return (
+            <button
+              data-vid-vgen-frame={which}
+              title={which === 'first_frame'
+                ? 'First frame — bind an image asset or a .cud project (its canvas is read as the first frame). Click to pick; the value feeds the port this generator declared.'
+                : 'Last frame — bind an image asset or a .cud project (its canvas is read as the last frame). Click to pick; the value feeds the port this generator declared.'}
+              onPointerDown={e => e.stopPropagation()}
+              onClick={e => { e.stopPropagation(); onVGenFrame?.(c.id, which); }}
+              style={{
+                flexShrink: 0, width: cardW, height: '100%',
+                padding: 0, borderRadius: 0, position: 'relative', overflow: 'hidden',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: preview ? 'none' : 'rgba(0,0,0,0.28)',
+                borderTop: 'none', borderBottom: 'none',
+                borderLeft: !preview && which === 'last_frame' ? divider : 'none',
+                borderRight: !preview && which === 'first_frame' ? divider : 'none',
+                color: PK.fg, cursor: 'pointer', fontSize: 7.5, fontWeight: 800, lineHeight: 1,
+              }}
+            >
+              {/* 占位文字垫在底下：预览图加载失败时它露出来，卡片不会变成一块空白。 */}
+              <span style={{ position: 'relative', opacity: ref ? 0.9 : 0.5 }}>
+                {ref ? (ref.kind === 'cud' ? 'CUD' : 'IMG') : (which === 'first_frame' ? 'FF' : 'LF')}
+              </span>
+              {preview && (
+                <img src={thumb} alt="" onError={hideImg}
+                  style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+              )}
+            </button>
+          );
+        };
+        const iconBtn: React.CSSProperties = {
+          flexShrink: 0, width: 18, height: 18, padding: 0, borderRadius: 4,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          position: 'relative', border: 'none',
+        };
+        return (
+          <>
+            {frameCard('first_frame')}
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, position: 'relative' }}>
+              {/* 设置：宽高 / 时长 / 帧率 / 提示词 / 首末帧都在这里改。 */}
+              {onVGenSettings && (
+                <button
+                  data-vid-vgen-settings=""
+                  title="Generator settings — name, position, duration, width / height / fps, prompt and the frame bindings."
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); onVGenSettings(c.id); }}
+                  style={{ ...iconBtn, background: 'rgba(0,0,0,0.3)', border: `0.5px solid ${PK.edge}`, color: PK.fg, cursor: 'pointer' }}
+                ><IconGear /></button>
+              )}
+              {/* 运行 / 停止：一颗图标，不写文字。 */}
+              <button
+                data-vid-vgen-run=""
+                disabled={!running && continueBlocked}
+                title={running
+                  ? 'Stop this segment.'
+                  : continueBlocked
+                    ? `The output track already has a clip over ${fmtTime(c.start)}–${fmtTime(c.start + c.duration)} — move or delete it before running this segment again.`
+                    : `Run this generator with the values configured on the segment (prompt, width / height / duration / fps${v.ports.first_frame ? ', first frame' : ''}${v.ports.last_frame ? ', last frame' : ''}) — the video lands on the output track at ${fmtTime(c.start)}.`}
+                onPointerDown={e => e.stopPropagation()}
+                onClick={e => {
+                  e.stopPropagation();
+                  if (running) { onStop?.(c.id); return; }
+                  if (continueBlocked) return;
+                  if (onVGenRun) onVGenRun(c.id); else onContinue?.(c.id);
+                }}
+                style={{
+                  ...iconBtn,
+                  background: running ? 'rgba(255,69,58,0.92)'
+                    : continueBlocked ? 'rgba(255,255,255,0.14)' : PK.accent,
+                  color: running ? '#fff' : continueBlocked ? 'rgba(255,255,255,0.4)' : '#17131c',
+                  cursor: !running && continueBlocked ? 'not-allowed' : 'pointer',
+                }}
+              >{running ? <IconStop /> : <IconPlay />}</button>
+              {!tight && (
+                <span title={c.name} style={{
+                  minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  fontSize: 10.5, fontWeight: 600, color: 'rgba(255,255,255,0.94)',
+                  textShadow: '0 1px 2px rgba(0,0,0,0.55)', pointerEvents: 'none',
+                }}>{c.name}</span>
+              )}
+            </div>
+            {frameCard('last_frame')}
+          </>
+        );
+      })()}
+      {c.groupId && !micro && (
         <button
           title="Linked A/V pair — click to unlink; each side then moves/trims on its own (hold Alt while dragging for a one-off)"
           onPointerDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onUnlink(); }}
