@@ -926,6 +926,19 @@ export const VidTimeline: React.FC<{
       const asset = p.assets.find(a => a.id === sid);
       if (asset) { vid.update(proj => placeAsset(proj, asset, trackId, at), 'Add clip'); return; }
     }
+    // 仓库资产（统一的 `application/x-asset` = {id,url,name,kind}）：它可能还不是本工程的资产，
+    // 所以**不认 id、只认 url** —— 落定走 importSource，先入本工程资产库再落片段。
+    // （旧的 `x-vid-global` 也在下面接一份，老落点还没退休。）
+    const aRaw = e.dataTransfer.getData('application/x-asset');
+    if (aRaw) {
+      try {
+        const a = JSON.parse(aRaw) as { url?: string; name?: string; kind?: string };
+        if (a?.url && a.kind !== 'image') {
+          void importSource(a.url, a.name || a.url, 'file', trackId, at);
+          return;
+        }
+      } catch { /* 不是我们写的那份：继续往下看 */ }
+    }
     // 全局资产（Assets 窗接在后面的那一段共享库）：载荷是 URL 而不是资产 id —— 它此刻还不属于
     // 这份工程。落定走 importSource：**先入本工程的资产库，再落一段引用它的片段**，与图池条目
     // 同一条路（Assets 是项目所有数据的来源，不存在"直接进轨道"的路）。
@@ -1171,7 +1184,7 @@ export const VidTimeline: React.FC<{
                 onDragOver={e => {
                   if (tr.kind === 'layer' || tr.kind === 'process') return;   // 合成轨 / process 轨不收素材
                   const ts = e.dataTransfer.types;
-                  if (ts.includes(ASSET_ITEM_TYPE) || ts.includes(GLOBAL_ITEM_TYPE) || ts.includes(STAGING_ITEM_TYPE) || Array.from(ts).includes('Files')) {
+                  if (ts.includes(ASSET_ITEM_TYPE) || ts.includes('application/x-asset') || ts.includes(GLOBAL_ITEM_TYPE) || ts.includes(STAGING_ITEM_TYPE) || Array.from(ts).includes('Files')) {
                     e.preventDefault();
                     setDropLane(tr.id);
                     // 拖着素材悬停时就亮指示：落点会吸到谁，先看见再松手。

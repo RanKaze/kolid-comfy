@@ -26,6 +26,7 @@ import comfy.model_management as mm
 # =============================================================================
 from ...libs.utils import AlwaysEqualProxy
 from ...libs.data_paths import PACK_ROOT, data_dir, data_file, web_file
+from ...libs import asset_store
 
 try:
     from .prompt_node import SnapshotPromptServer, SnapshotPromptNode
@@ -554,9 +555,8 @@ def _vid_media_dir():
 # 同一个函数、同一个目录。它是跨文档共用的素材：不随任何 .cud 走，谁打开都能看见；
 # 而上面那个 `_vid_media_dir()` 是**某一份工程**自己入库的东西。
 # 别在别处再开一份"全局"目录 —— 只有一个落点，才对得起节点写进去的那些字节。
-_GA_IMG_EXT = frozenset(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif', '.tif', '.tiff'))
-_GA_VID_EXT = frozenset(('.mp4', '.webm', '.avi', '.mov', '.m4v', '.mkv'))
-_GA_AUD_EXT = frozenset(('.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'))
+#
+# 清单与 id 由 `libs/asset_store.py` 统一给（扩展名 → 种类也只剩它那一份判定）。
 
 
 def _global_assets_dir():
@@ -592,38 +592,34 @@ def _global_probe(name, path, size, mtime):
 
 def _global_assets_list():
     """列一遍全局资产：名字 / 可播 URL / 类型 / 字节数 / 落盘时间（新的在前）。
-    上传写到一半的半成品（`_tmp_`）与隐藏文件不算货；认不出类型的也不列。
+
+    清单来自资产仓库（`libs/asset_store.py`）—— 那是唯一落点，也是 id 的来源。字段与旧版
+    **逐字兼容**：`name` 仍是文件名、`url` 仍是 `/api/global_media/<文件名>`
+    （视频资产窗的拖拽载荷认的就是这两个，别动它们）。新增 `hash` / `inLibrary` / `thumb`
+    三个字段，老调用方不看即可。
+
     媒体（视频/音频）的 `hasAudio`（卡上那个 AUD 角标）与 `duration`（悬停扫片按时刻取格
-    要它）由 ffprobe 探 —— 整库并发跑一遍，只在第一次慢；图片不探。"""
+    要它）由 ffprobe 探 —— 整库并发跑一遍，只在第一次慢；图片不探。
+    """
     d = _global_assets_dir()
     items = []
     try:
-        names = os.listdir(d)
-    except OSError:
+        for rec in asset_store.records():
+            items.append({
+                'name': rec['file'],
+                'url': '/api/global_media/' + quote(rec['file']),
+                'kind': rec['kind'],
+                'size': rec['size'],
+                'mtime': rec['mtime'],
+                'hasAudio': None,
+                'duration': 0,
+                'hash': rec['id'],
+                'inLibrary': rec['inLibrary'],
+                'thumb': ('/api/asset_thumb/' + rec['id']) if rec['kind'] == 'image' else None,
+            })
+    except Exception as e:
+        print('[global_assets] list failed: %s' % e)
         return items
-    for name in names:
-        if name.startswith('.') or name.startswith('_tmp_'):
-            continue
-        p = os.path.join(d, name)
-        if not os.path.isfile(p):
-            continue
-        ext = os.path.splitext(name)[1].lower()
-        if ext in _GA_IMG_EXT:
-            kind = 'image'
-        elif ext in _GA_VID_EXT:
-            kind = 'video'
-        elif ext in _GA_AUD_EXT:
-            kind = 'audio'
-        else:
-            continue
-        try:
-            st = os.stat(p)
-        except OSError:
-            continue
-        items.append({'name': name, 'url': '/api/global_media/' + quote(name),
-                      'kind': kind, 'size': st.st_size, 'mtime': st.st_mtime,
-                      'hasAudio': None, 'duration': 0})
-    items.sort(key=lambda x: (-x['mtime'], x['name']))
     # 只有媒体（视频/音频）要探；并发 8 条 —— 一个 ffprobe 近 0.3s，串行会把第一次打开拖到十几秒。
     media = [it for it in items if it['kind'] in ('video', 'audio')]
     if media:
@@ -3397,6 +3393,75 @@ class SnapshotDetailerSamplerServer:
                     self.send_error(404)
                 return
 
+            # ── 资产仓库（A0）───────────────────────────────────────────────────────
+            # 设计见 docs/assets_single_store_design.md。这里只开"仓库"的**读口**，不改任何既有语义：
+            #   GET /api/assets              清单（?scope=library|session|all  &kind=  &q=  &refresh=1）
+            #   GET /api/asset/<ref>         单件元数据（ref 可只给前 8 位以上，唯一才认）
+            #   GET /api/asset_media/<ref>   字节（带 Range，<video> 的 seek 靠它；内容寻址，可长缓存）
+            #   GET /api/asset_thumb/<ref>   缩略图（图片才生成，落 .thumbs/；?w=160）
+            # ref = 文件名 stem（新货是 md5(bytes)，老货沿用 md5(base64) —— 见 asset_store 顶部注释）。
+            req = urlparse(self.path)
+            if req.path.rstrip('/') == '/api/assets':
+                qs = parse_qs(req.query)
+                scope = (qs.get('scope') or ['all'])[0]
+                kind = (qs.get('kind') or [''])[0]
+                needle = (qs.get('q') or [''])[0].strip().lower()
+                refresh = (qs.get('refresh') or ['0'])[0].lower() in ('1', 'true', 'yes')
+                try:
+                    items = asset_store.records(refresh=refresh)
+                    if kind and kind not in ('all', '*'):
+                        items = [it for it in items if it['kind'] == kind]
+                    if scope == 'library':
+                        items = [it for it in items if it['inLibrary']]
+                    elif scope == 'session':
+                        items = [it for it in items if not it['inLibrary']]
+                    if needle:
+                        items = [it for it in items
+                                 if needle in it['name'].lower() or needle in it['id']
+                                 or needle in it['origin'].lower()]
+                    self._send_json({'ok': True, 'dir': _global_assets_dir(), 'scope': scope,
+                                     'total': len(items), 'assets': items})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e), 'assets': []}, 500)
+                return
+
+            if req.path.startswith('/api/asset_media/'):
+                ref = unquote(req.path[len('/api/asset_media/'):]).strip('/')
+                path = asset_store.path_of(ref)
+                if not path or not _send_media_file(self, path):
+                    self.send_error(404)
+                return
+
+            if req.path.startswith('/api/asset_thumb/'):
+                ref = unquote(req.path[len('/api/asset_thumb/'):]).strip('/')
+                qs = parse_qs(req.query)
+                try:
+                    tw = int((qs.get('w') or ['160'])[0])
+                except (TypeError, ValueError):
+                    tw = 160
+                tp = asset_store.thumb_path(ref, tw)
+                if not tp:
+                    self.send_error(404)
+                    return
+                data = open(tp, 'rb').read()
+                self.send_response(200)
+                self.send_header('Content-type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'max-age=31536000, immutable')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            if req.path.startswith('/api/asset/'):
+                ref = unquote(req.path[len('/api/asset/'):]).strip('/')
+                rec = asset_store.get(ref)
+                if not rec:
+                    self._send_json({'ok': False, 'error': 'not found', 'ref': ref}, 404)
+                    return
+                rec.pop('path', None)
+                self._send_json({'ok': True, 'asset': rec})
+                return
+
             # 资产媒体库：Video 工程 Assets 的文件伺服（带 Range —— <video> 的 seek 靠它）。
             if self.path.startswith('/api/vid_media/'):
                 # 文件名里的空格/中文等会被浏览器百分号编码（`Rabbit%20Dance_.mp4`）：这里必须解码
@@ -3730,6 +3795,78 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'success': True})
                 except Exception as e:
                     self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if urlparse(self.path).path in ('/api/asset_update', '/api/asset_delete'):
+                # 仓库的管理口（A1 起的"改造/删除"）：
+                #   update {id, name?, tags?}  —— 只改表里的元数据，不碰字节
+                #   delete {id}                —— 删字节 + 缩略图 + 表记录（引用检查 A6 才做）
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    aid = str(body.get('id') or '').strip()
+                    if not aid:
+                        self._send_json({'ok': False, 'error': 'No id'}, 400)
+                        return
+                    if urlparse(self.path).path == '/api/asset_update':
+                        rec = asset_store.set_library(
+                            aid, name=body.get('name'), tags=body.get('tags'))
+                        if not rec:
+                            self._send_json({'ok': False, 'error': 'not found', 'id': aid}, 404)
+                            return
+                        rec.pop('path', None)
+                        self._send_json({'ok': True, 'asset': rec})
+                        return
+                    gone = asset_store.delete(aid)
+                    self._send_json({'ok': bool(gone), 'removed': gone})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
+                return
+
+            if urlparse(self.path).path == '/api/asset_import':
+                # 往仓库里放字节（A0 的唯一写口）：{images:[dataURL…], names:[…], library?:bool, origin?}
+                # 也收单张 {data|image:'dataURL', name}。id 由**内容**决定（md5(bytes)），
+                # 同一张图重复导入不长第二份 —— 调用方拿返回的 id 就能当引用用。
+                # `library` 默认 true：用户/接口主动导进来的货就是库成员（A1 才会出现 session 的写入方）。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    raw = body.get('images')
+                    if not isinstance(raw, list) or not raw:
+                        raw = [body.get('data') or body.get('image') or '']
+                    raw = [u for u in raw if isinstance(u, str) and u]
+                    if not raw:
+                        self._send_json({'ok': False, 'error': 'No image data'}, 400)
+                        return
+                    names = body.get('names') if isinstance(body.get('names'), list) else None
+                    library = body.get('library', True)
+                    origin = str(body.get('origin') or 'upload')
+                    added, failed = [], 0
+                    for idx, dataurl in enumerate(raw):
+                        data = asset_store.dataurl_bytes(dataurl)
+                        if not data:
+                            failed += 1
+                            continue
+                        nm = None
+                        if names and idx < len(names) and names[idx]:
+                            nm = names[idx]
+                        elif len(raw) == 1:
+                            nm = body.get('name')
+                        rec = asset_store.put_bytes(data, name=nm, origin=origin,
+                                                    library=bool(library))
+                        if rec:
+                            rec.pop('path', None)
+                            added.append(rec)
+                        else:
+                            failed += 1
+                    self._send_json({'ok': bool(added), 'added': added, 'failed': failed,
+                                     'error': None if added else 'All images failed to decode'})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
                 return
 
             if self.path == '/api/staging':

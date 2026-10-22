@@ -1,34 +1,40 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   type VidAsset, type VidController, fmtTime, isAudioName, isVideoName, addAsset, newVidId, removeAsset,
 } from './model';
 import { probeMedia } from './audio';
 import { ingestFile } from './ingest';
-import { ensureFrame, ensureWaveform, frameBackend } from './previews';
+import { ensureFrame, ensureWaveform } from './previews';
 
-// ── Assets 窗（资产库）───────────────────────────────────────────────────────────────────────
-// 时间线的素材都住这里：拖图池条目 / 本地文件进来 = 收一件资产（同 src 只留一份）；把资产卡
-// 拖到 Tracks 的某条轨上 = 落一段引用它的片段 —— 同一源泉多次复用也只是多几段引用，不复制数据。
-// 资产跟着 VidProject 持久化（blob: 的本地图活不过刷新，读档时自会剪掉）。
+// ── Assets 窗（资产库 = 唯一的家）────────────────────────────────────────────────────────────
+// 这一窗是资产仓库（data/assets/）唯一的脸：**所有字节都在这里** —— 图层用的图、图池里的图、
+// run/processor 的产出、特效贴图、视频与音频，全都是一条记录。staging 只是它上面的一个有序
+// 视图（A2），不再是另一个仓库。
+//
+// 四档作用域（顶部那条 segmented）：
+//   All     = 仓库里的一切
+//   Library = 库成员（跨文档共享：Assets 节点的产出 + 用户主动入库的货）
+//   Project = 本工程自己的资产（时间线在用的那些，跟着 VidProject 走）
+//   Session = 仓库里有、却没有库成员身份的临时产物（run / processor 的中间图）
+//
+// 拖出去：卡片带 `application/x-asset` = `{id, url, name, kind}`；本工程资产另带老的
+// `application/x-vid-asset`（时间线按 asset id 认）；旧的 `application/x-vid-global` 也一起发一份，
+// 免得还有哪个落点只认它（A2 之后可以只留 x-asset）。
 
 const STAGING_ITEM_TYPE = 'application/x-blend-staging';
-/** 全局资产拖到轨道上带的载荷：不是工程里的资产 id（它还没入库），是那件货的 URL + 名字。
- *  落定时走 Timeline 的 importSource —— 先入本工程的资产库，再落一段引用它的片段。 */
+/** 统一载荷：仓库资产拖到任何落点都带这一份。 */
+export const ASSET_ITEM_TYPE = 'application/x-asset';
+/** 老载荷：全局资产落到轨道上时带 URL + 名字（时间线拿它 importSource）。仍然发，兼容老落点。 */
 export const GLOBAL_ITEM_TYPE = 'application/x-vid-global';
 
-const rowBtn: React.CSSProperties = {
-  flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
-  background: 'none', border: 'none', borderRadius: 4, color: 'rgba(255,255,255,0.35)', cursor: 'pointer', padding: 0,
-};
+export type Scope = 'all' | 'library' | 'project' | 'session';
 
-// ── 全局资产（Global Assets）─────────────────────────────────────────────────────────────────
-// 节点那一份共享素材库（data/assets/，**不是**任何工程的私有媒体库）：跨文档共用，不随 .cud 走。
-// 这一窗默认只列本工程的资产；底栏那颗地球开关打开才把这一份接在后面（只读 —— 加货是节点的事，
-// 拖上轨道 / 点 + 时才按"同 src 认领"收进本工程）。清单与字节都走后端的 /api/global_*。
-export type GlobalAsset = {
-  /** 盘上的文件名（内容哈希名，与节点写下的那份同名）。 */
+/** 仓库里的一件货（/api/global_assets 的响应项；A0 加了 hash / inLibrary / thumb 三个字段）。
+ *  老服务没有这三个字段 —— 读的时候按"是库成员、没有 hash"兜底，窗不会白屏。 */
+export type StoreAsset = {
+  /** 盘上的文件名（新货是 md5 名，老货沿用 assets_node 写下的名字）。 */
   name: string;
-  /** 可播 URL：/api/global_media/<name>。 */
+  /** 可播 URL：/api/global_media/<文件名>。 */
   url: string;
   kind: 'image' | 'video' | 'audio';
   size: number;
@@ -37,9 +43,23 @@ export type GlobalAsset = {
   hasAudio: boolean | null;
   /** 时长（s）。悬停扫片按"指针位置 → 时刻"取格要它；图片恒 0。 */
   duration: number;
+  /** A0：内容 id = 文件名 stem。改名/删除/引用都按它。 */
+  hash?: string;
+  /** A0：是不是库成员（不在库里的 = session 临时产物）。 */
+  inLibrary?: boolean;
+  /** A0：缩略图 URL（图片才有，后端按需生成并落盘缓存）。 */
+  thumb?: string | null;
 };
 
-/** 地球：Global 开关的记号 —— 一圈经线 + 一条赤道，开着的时候点亮。 */
+const rowBtn: React.CSSProperties = {
+  flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
+  background: 'none', border: 'none', borderRadius: 4, color: 'rgba(255,255,255,0.35)', cursor: 'pointer', padding: 0,
+};
+
+// ── 全局资产（旧类型名，保留导出免得老代码引用断掉）─────────────────────────────────────────
+export type GlobalAsset = StoreAsset;
+
+/** 地球：Library 那一档的记号 —— 一圈经线 + 一条赤道，选中时点亮。 */
 const GlobeIcon: React.FC<{ size?: number }> = ({ size = 14 }) => (
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor"
     strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
@@ -54,28 +74,23 @@ const IMG_EXT = /\.(png|jpe?g|webp|gif|bmp|avif|tiff?)(?:[?#]|$)/i;
 const isImageAsset = (a: VidAsset): boolean =>
   a.src.startsWith('data:image/') || IMG_EXT.test(a.name) || IMG_EXT.test(a.src);
 
-/** 卡片缩略图：视频 = 首帧（后端有 ffmpeg 就取落盘帧，没有就客户端抓一张）；
- *  图片 = 它自己；音频 = 整段波形（有就画，没有留音符图标）。 */
-function useThumb(a: VidAsset): string | null {
-  const [url, setUrl] = useState<string | null>(null);
+/** 卡片缩略图：视频 = 首帧（客户端抓一张）；图片 = 它自己（仓库图用后端生成的 thumb）；
+ *  音频 = 整段波形（有就画，没有留音符图标）。`given` 有值就不再算 —— 省一趟解码。 */
+function useCardThumb(kind: 'video' | 'audio' | 'image', src: string, given?: string | null): string | null {
+  const [url, setUrl] = useState<string | null>(given ?? null);
   useEffect(() => {
     let alive = true;
+    if (given) { setUrl(given); return () => { alive = false; }; }
     setUrl(null);
-    if (a.kind === 'audio') {
-      if (a.waveform) { setUrl(a.waveform); return () => { alive = false; }; }
-      void ensureWaveform(a.src).then(u => { if (alive && u) setUrl(u); });
+    if (!src) return () => { alive = false; };
+    if (kind === 'image') { setUrl(src); return () => { alive = false; }; }
+    if (kind === 'audio') {
+      void ensureWaveform(src).then(u => { if (alive && u) setUrl(u); });
       return () => { alive = false; };
     }
-    if (isImageAsset(a)) { setUrl(a.src); return () => { alive = false; }; }
-    const media = a.src.startsWith('/api/vid_media/') ? (a.src.split('/').pop() || '') : '';
-    void (async () => {
-      const u = media && await frameBackend()
-        ? `/api/vid_frame?f=${encodeURIComponent(media)}&t=0.00`
-        : await ensureFrame(a.src, 0);
-      if (alive && u) setUrl(u);
-    })();
+    void ensureFrame(src, 0).then(u => { if (alive && u) setUrl(u); });
     return () => { alive = false; };
-  }, [a.id, a.src, a.kind, a.waveform, a.name]);
+  }, [kind, src, given]);
   return url;
 }
 
@@ -224,146 +239,242 @@ const Thumb: React.FC<{ m: CardMedia; poster: string | null }> = ({ m, poster })
   );
 };
 
-const AssetCard: React.FC<{ a: VidAsset; onRemove: () => void }> = ({ a, onRemove }) => {
-  const thumb = useThumb(a);
-  const img = isImageAsset(a);
+// ── 卡片 ────────────────────────────────────────────────────────────────────────────────────
+// 工程资产与仓库资产在窗里长同一个样：缩略图（可悬停扫片）+ 名字 + 一行元信息 + 动作。
+// 差别全由数据说：字节来源（LOCAL / IN DOC / MISSING）画在缩略图右上，来源与"谁在用"
+// 写在名字下面那行。老的 AssetCard / GlobalCard 就是因为这一个差别写了两遍，现在没有第二套。
+
+type CardItem = {
+  name: string;
+  kind: 'video' | 'audio' | 'image';
+  src: string;
+  duration: number;
+  hasAudio: boolean | null;
+  /** 缩略图直给（仓库图有后端生成的那张）；不给就按 kind 现算。 */
+  poster?: string | null;
+  /** 字节在哪：`store` 只在仓库；`doc` 某份文档里也内嵌了一份（A4 之后才可能出现）。 */
+  byteFrom?: 'store' | 'doc' | 'missing';
+  /** 来源徽章：upload / legacy / run / staging … */
+  origin?: string;
+  /** 谁在用它（"3 clips"）。 */
+  usedBy?: string;
+  /** 拖拽载荷（mime → 字符串）。不给 = 不可拖。 */
+  drag?: Record<string, string>;
+  /** 名字右边那颗动作按钮。 */
+  actions?: React.ReactNode;
+};
+
+const BYTE_BADGE = {
+  store: { text: 'LOCAL', color: '#8e8e93', title: 'Bytes live in the asset store (data/assets)' },
+  doc: { text: 'IN DOC', color: '#30d158', title: 'Bytes are also embedded in an open document' },
+  missing: { text: 'MISSING', color: '#ff453a', title: 'Referenced, but the bytes are gone' },
+} as const;
+
+const Chip: React.FC<{ color: string; title: string; children?: React.ReactNode }> = ({ color, title, children }) => (
+  <span title={title} style={{
+    fontSize: 7.5, fontWeight: 800, letterSpacing: 0.4, lineHeight: 1.15, color,
+    background: 'rgba(0,0,0,0.62)', borderRadius: 3, padding: '1px 3px', whiteSpace: 'nowrap',
+  }}>{children}</span>
+);
+
+const CrossIcon = () => (
+  <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+    <path d="M3 3l6 6M9 3l-6 6" />
+  </svg>
+);
+const PlusIcon = () => (
+  <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+    <path d="M6 2.5v7M2.5 6h7" />
+  </svg>
+);
+
+const Card: React.FC<{ it: CardItem }> = ({ it }) => {
+  const poster = useCardThumb(it.kind, it.src, it.poster);
+  const [over, setOver] = useState(false);
+  const badge = it.byteFrom ? BYTE_BADGE[it.byteFrom] : null;
   return (
     <div
-      draggable
-      onDragStart={e => { e.dataTransfer.setData('application/x-vid-asset', a.id); e.dataTransfer.effectAllowed = 'copy'; }}
-      title={`${a.name} — ${fmtTime(a.duration)} · drag onto a track to place a clip that references this asset`}
+      draggable={!!it.drag}
+      onDragStart={e => {
+        if (!it.drag) return;
+        for (const k of Object.keys(it.drag)) {
+          try { e.dataTransfer.setData(k, it.drag[k]); } catch { /* 类型受限：别的类型还发得出去 */ }
+        }
+        e.dataTransfer.effectAllowed = 'copy';
+      }}
+      onPointerEnter={() => setOver(true)}
+      onPointerLeave={() => setOver(false)}
+      title={it.usedBy ? `${it.name} — ${it.usedBy}` : it.name}
       style={{
         display: 'flex', flexDirection: 'column', minWidth: 0, borderRadius: 6,
-        border: '0.5px solid rgba(255,255,255,0.1)', background: '#0f0f11', cursor: 'grab', userSelect: 'none',
+        border: '0.5px solid ' + (it.byteFrom === 'missing'
+          ? 'rgba(255,69,58,0.45)'
+          : over ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.1)'),
+        background: '#0f0f11', cursor: it.drag ? 'grab' : 'default', userSelect: 'none',
       }}
     >
-      <Thumb
-        m={{ src: a.src, kind: img ? 'image' : a.kind, duration: a.duration, hasAudio: img ? null : a.hasAudio }}
-        poster={thumb}
-      />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 6px 5px', minWidth: 0 }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.82)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
-        {!img && (
-          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.42)', flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>{fmtTime(a.duration)}</span>
+      <div style={{ position: 'relative' }}>
+        <Thumb
+          m={{ src: it.src, kind: it.kind, duration: it.duration, hasAudio: it.hasAudio }}
+          poster={poster}
+        />
+        {badge && (
+          <span style={{ position: 'absolute', top: 3, right: 3, display: 'flex', pointerEvents: 'none' }}>
+            <Chip color={badge.color} title={badge.title}>{badge.text}</Chip>
+          </span>
         )}
-        <button
-          title={'Remove asset 「' + a.name + '」 from the library (clips already on the timeline keep playing)'}
-          onClick={onRemove}
-          style={rowBtn}
-        >
-          <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M3 3l6 6M9 3l-6 6" /></svg>
-        </button>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 6px 0', minWidth: 0 }}>
+        <span style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.82)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.name}</span>
+        {it.kind !== 'image' && it.duration > 0 && (
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.42)', flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>{fmtTime(it.duration)}</span>
+        )}
+        {it.actions}
+      </div>
+      <div style={{ padding: '0 6px 5px', display: 'flex', gap: 4, minWidth: 0, fontSize: 8.5, color: 'rgba(255,255,255,0.3)', whiteSpace: 'nowrap', overflow: 'hidden' }}>
+        {it.origin && <span style={{ flexShrink: 0 }}>{it.origin}</span>}
+        {it.origin && it.usedBy && <span style={{ opacity: 0.5 }}>·</span>}
+        {it.usedBy && <span style={{ color: 'rgba(120,200,255,0.72)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.usedBy}</span>}
       </div>
     </div>
   );
 };
 
-/** 全局资产卡片的缩略图：图片 = 它自己；视频 = 首帧（客户端抓一张）；音频 = 波形（有就画）。 */
-function useGlobalThumb(g: GlobalAsset): string | null {
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    setUrl(null);
-    if (g.kind === 'image') { setUrl(g.url); return () => { alive = false; }; }
-    if (g.kind === 'audio') {
-      void ensureWaveform(g.url).then(u => { if (alive && u) setUrl(u); });
-      return () => { alive = false; };
-    }
-    // 视频的首帧：后端有 ffmpeg 就取落盘那张（/api/vid_frame，按文件+秒缓存；`d=global` 告诉
-    // 后端去全局资产库那个落点取），没有就客户端自己抓一张 —— 与工程资产那条路完全一致。
-    const media = g.url.startsWith('/api/global_media/') ? (g.url.split('/').pop() || '') : '';
-    void (async () => {
-      const u = media && await frameBackend()
-        ? `/api/vid_frame?f=${encodeURIComponent(media)}&t=0.00&d=global`
-        : await ensureFrame(g.url, 0);
-      if (alive && u) setUrl(u);
-    })();
-    return () => { alive = false; };
-  }, [g.url, g.kind]);
-  return url;
-}
+const fileToDataURL = (f: File) => new Promise<string | null>(res => {
+  const r = new FileReader();
+  r.onload = () => res(typeof r.result === 'string' ? r.result : null);
+  r.onerror = () => res(null);
+  r.readAsDataURL(f);
+});
 
-/** 全局资产卡片：与工程资产同一张脸（缩略图 + 名 + 角标），只多两点 ——
- *  ① 角标带一圈"共享"的边框色；② 右下是 +（收进本工程）而不是 ✕（全局那份删不掉，
- *  它是节点的货，这一窗只有读的份）。拖到轨道上 = 直接落片段（落定时才入库）。 */
-const GlobalCard: React.FC<{ g: GlobalAsset; onClaim: () => void }> = ({ g, onClaim }) => {
-  const thumb = useGlobalThumb(g);
-  const draggable = g.kind !== 'image';   // 图片不是可播素材，拖上轨道也没有片段可落
-  return (
-    <div
-      draggable={draggable}
-      onDragStart={e => {
-        if (!draggable) return;
-        e.dataTransfer.setData(GLOBAL_ITEM_TYPE, JSON.stringify({ url: g.url, name: g.name, kind: g.kind }));
-        e.dataTransfer.effectAllowed = 'copy';
-      }}
-      title={draggable
-        ? `${g.name} — global asset · drag onto a track to place a clip (it joins this project's assets)`
-        : `${g.name} — global image asset (read-only here)`}
-      style={{
-        display: 'flex', flexDirection: 'column', minWidth: 0, borderRadius: 6,
-        border: '0.5px solid rgba(10,132,255,0.22)', background: '#0f0f11',
-        cursor: draggable ? 'grab' : 'default', userSelect: 'none',
-      }}
-    >
-      <Thumb
-        m={{ src: g.url, kind: g.kind, duration: g.duration, hasAudio: g.kind === 'audio' ? true : g.hasAudio }}
-        poster={thumb}
-      />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 6px 5px', minWidth: 0 }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.82)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.name}</span>
-        {draggable && g.duration > 0 && (
-          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.42)', flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>{fmtTime(g.duration)}</span>
-        )}
-        {draggable && (
-          <button
-            title={'Claim 「' + g.name + '」 into this project\'s assets — then it can be placed from here even with Global off'}
-            onClick={onClaim}
-            style={rowBtn}
-          >
-            <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round"><path d="M6 2.5v7M2.5 6h7" /></svg>
-          </button>
-        )}
-      </div>
-    </div>
-  );
+const SCOPES: { id: Scope; label: string; title: string }[] = [
+  { id: 'all', label: 'All', title: 'Everything in the asset store' },
+  { id: 'library', label: 'Library', title: 'Library members — shared across documents' },
+  { id: 'project', label: 'Project', title: "This project's own assets — what the timeline plays" },
+  { id: 'session', label: 'Session', title: 'In the store but not in the library — run / processor leftovers' },
+];
+
+const selStyle: React.CSSProperties = {
+  height: 18, fontSize: 9.5, color: 'rgba(255,255,255,0.6)', background: '#1b1b1e',
+  border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 4, padding: '0 2px',
+  outline: 'none', cursor: 'pointer', minWidth: 0,
 };
 
 export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
   const { project: p } = vid;
   const [over, setOver] = useState(false);
-  // 全局资产：开关一开才去问后端要清单（这一窗默认不碰那份共享库，白跑一趟没必要）。
-  const [showGlobal, setShowGlobal] = useState(false);
-  const [globals, setGlobals] = useState<GlobalAsset[] | null>(null);
-  const [gLoading, setGLoading] = useState(false);
-  // 每次打开都重问一遍（就是一次 listdir + stat，很便宜）—— 节点刚落进库里的货，下一次打开
-  // 就能看见；关掉就把清单丢掉，不留过期的副本。
+  const [scope, setScope] = useState<Scope>('all');
+  const [kind, setKind] = useState<'all' | 'image' | 'video' | 'audio'>('all');
+  const [q, setQ] = useState('');
+  const [store, setStore] = useState<StoreAsset[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  const bump = useCallback(() => setTick(t => t + 1), []);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  // 仓库清单：一次拉全（`/api/global_assets` = 仓库里的一切 + 媒体探测），四档作用域与搜索都在
+  // 本地过滤 —— 一百多件的过滤比往返一趟便宜，搜索也不必去抖。`tick` 变了就重拉（导入/删除之后）。
   useEffect(() => {
-    if (!showGlobal) { setGlobals(null); setGLoading(false); return; }
     let alive = true;
-    setGLoading(true);
+    setBusy(true);
+    setErr(null);
     fetch('/api/global_assets')
       .then(r => r.json())
-      .then(d => { if (alive) setGlobals(Array.isArray(d?.assets) ? d.assets : []); })
-      .catch(() => { if (alive) setGlobals([]); })
-      .finally(() => { if (alive) setGLoading(false); });
+      .then(d => {
+        if (!alive) return;
+        setStore(Array.isArray(d?.assets) ? d.assets : []);
+        if (d?.ok === false) setErr(d?.error || 'list failed');
+      })
+      .catch(e => { if (alive) { setStore([]); setErr(String(e)); } })
+      .finally(() => { if (alive) setBusy(false); });
     return () => { alive = false; };
-  }, [showGlobal]);
+  }, [tick]);
 
-  // 收一件全局资产进本工程：时长与音轨**后端清单里已经有了**（ffprobe 探过），不用在浏览器里
-  // 再探一遍 —— 点 + 就是立刻入库，同 src 只留一份（`addAsset` 自己认领）。
-  const claimGlobal = (g: GlobalAsset) => {
-    if (g.kind === 'image') return;
-    vid.update(proj => addAsset(proj, {
-      id: newVidId('as'), name: g.name, src: g.url, origin: 'file',
-      kind: g.kind === 'audio' ? 'audio' : 'video',
-      duration: g.duration, hasAudio: g.hasAudio === true,
-    }), 'Add global asset');
+  // 谁在用它：片段按 src 认资产（模型里片段只记 src，不记资产 id）。
+  const clipsBySrc = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of p.clips) if (c.src) m.set(c.src, (m.get(c.src) || 0) + 1);
+    return m;
+  }, [p.clips]);
+  const usedBy = (src: string) => {
+    const n = clipsBySrc.get(src) || 0;
+    return n ? `${n} clip${n > 1 ? 's' : ''}` : '';
   };
 
-  // 收一件资产。本地文件：字节 POST 给后端 ffmpeg 入库（持久 URL，见 ingest.ts）——
-  // 后端没有 ffmpeg 时回退前端探测 + blob:（活不过刷新，读档自会剪掉）。
-  // 图池条目：src 是 base64 图片，走前端探测（图片咬不动 = no-op）。
+  const needle = q.trim().toLowerCase();
+  const hits = (name: string, extra?: string) =>
+    !needle || name.toLowerCase().includes(needle) || (extra || '').toLowerCase().includes(needle);
+
+  const storeItems = (store || []).filter(s => {
+    if (scope === 'project') return false;
+    // 老服务没有 inLibrary 字段 ⇒ 当作库成员（宁可多显示，也别把整库藏起来）。
+    if (scope === 'library' && s.inLibrary === false) return false;
+    if (scope === 'session' && s.inLibrary !== false) return false;
+    if (kind !== 'all' && s.kind !== kind) return false;
+    return hits(s.name, s.hash);
+  });
+  const projectItems = p.assets.filter(a => {
+    if (scope === 'library' || scope === 'session') return false;
+    const k = isImageAsset(a) ? 'image' : a.kind;
+    if (kind !== 'all' && k !== kind) return false;
+    return hits(a.name);
+  });
+  const total = storeItems.length + projectItems.length;
+
+  // 收进本工程（视频/音频才有片段可落；图片不是可播素材）。
+  const claimStore = (s: StoreAsset) => {
+    if (s.kind === 'image') return;
+    vid.update(proj => addAsset(proj, {
+      id: newVidId('as'), name: s.name, src: s.url, origin: 'file',
+      kind: s.kind === 'audio' ? 'audio' : 'video',
+      duration: s.duration, hasAudio: s.hasAudio === true,
+    }), 'Add library asset');
+  };
+
+  const renameStore = async (s: StoreAsset) => {
+    const id = s.hash;
+    if (!id) return;
+    const next = window.prompt('Rename asset', s.name);
+    if (!next || next === s.name) return;
+    const r = await fetch('/api/asset_update', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name: next }),
+    }).then(x => x.json()).catch(() => null);
+    if (!r?.ok) setErr(r?.error || 'rename failed');
+    bump();
+  };
+
+  const deleteStore = async (s: StoreAsset) => {
+    const id = s.hash;
+    if (!id) return;
+    const ok = window.confirm(
+      `Delete「${s.name}」from the asset store?\n\nThe file and its record are removed. ` +
+      `Clips already on the timeline keep their own reference.`);
+    if (!ok) return;
+    const r = await fetch('/api/asset_delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).then(x => x.json()).catch(() => null);
+    if (!r?.ok) setErr(r?.error || 'delete failed');
+    bump();
+  };
+
+  // 导入图片进库（POST /api/asset_import）。视频/音频不走这条路：它们要 ffmpeg 入库 + 探测，
+  // 仍然落到本工程的资产里（拖文件那条老路），A5 再把它们并进仓库。
+  const importFiles = async (files: File[]) => {
+    for (const f of files) {
+      if (!/^image\//.test(f.type) && !IMG_EXT.test(f.name)) continue;
+      const dataurl = await fileToDataURL(f);
+      if (!dataurl) continue;
+      await fetch('/api/asset_import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ images: [dataurl], names: [f.name], library: true, origin: 'upload' }),
+      }).catch(() => null);
+    }
+    bump();
+  };
+
   const collectFile = async (f: File) => {
     const ing = await ingestFile(f);
     if (ing) {
@@ -403,91 +514,188 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
       const item = vid.staging.find(s => s.id === sid);
       if (item) { void collectSource(item.src, item.name || sid); return; }
     }
-    for (const f of Array.from(e.dataTransfer.files || [])) {
-      const ok = f.type.startsWith('video/') || f.type.startsWith('audio/') || isVideoName(f.name) || isAudioName(f.name);
-      if (!ok) continue;
-      void collectFile(f);
+    // 仓库卡片拖回这一窗 = 收进本工程（同一张表拖来拖去，不该什么都没发生）。
+    const aRaw = e.dataTransfer.getData(ASSET_ITEM_TYPE);
+    if (aRaw) {
+      try {
+        const a = JSON.parse(aRaw) as { url?: string; name?: string; kind?: string };
+        if (a?.url && a.kind !== 'image') { void collectSource(a.url, a.name || a.url); return; }
+      } catch { /* 不是我们写的那份：继续看文件 */ }
     }
+    const files = Array.from(e.dataTransfer.files || []);
+    const media = files.filter(f => f.type.startsWith('video/') || f.type.startsWith('audio/') || isVideoName(f.name) || isAudioName(f.name));
+    const images = files.filter(f => !media.includes(f));
+    if (images.length) void importFiles(images);
+    for (const f of media) void collectFile(f);
   };
 
   return (
     <div
-      onDragOver={e => { const ts = e.dataTransfer.types; if (ts.includes(STAGING_ITEM_TYPE) || Array.from(ts).includes('Files')) { e.preventDefault(); setOver(true); } }}
+      onDragOver={e => { const ts = e.dataTransfer.types; if (ts.includes(STAGING_ITEM_TYPE) || ts.includes(ASSET_ITEM_TYPE) || Array.from(ts).includes('Files')) { e.preventDefault(); setOver(true); } }}
       onDragLeave={() => setOver(o => (o ? false : o))}
       onDrop={onDrop}
       style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#141416', minWidth: 0, overflow: 'hidden' }}
     >
-      {/* 头一条：入库提示。 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '0.5px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
-        <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.45)', flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          Drag videos/audio here — then drag cards onto Tracks
-        </span>
+      {/* 第一行：作用域。四档 = 同一张表的三条过滤线 + 本工程那一份。 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '5px 6px 3px', flexShrink: 0 }}>
+        {SCOPES.map(s => (
+          <button
+            key={s.id}
+            title={s.title}
+            onClick={() => setScope(s.id)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 3, height: 18, padding: '0 5px',
+              fontSize: 9.5, fontWeight: 600, letterSpacing: 0.2, whiteSpace: 'nowrap',
+              border: '0.5px solid ' + (scope === s.id ? 'rgba(10,132,255,0.55)' : 'rgba(255,255,255,0.12)'),
+              borderRadius: 4, background: scope === s.id ? 'rgba(10,132,255,0.16)' : 'transparent',
+              color: scope === s.id ? '#3b9dff' : 'rgba(255,255,255,0.42)', cursor: 'pointer',
+            }}
+          >
+            {s.id === 'library' && <GlobeIcon size={9} />}
+            {s.label}
+          </button>
+        ))}
       </div>
 
-      {/* 资产卡片：卡片可拖（application/x-vid-asset），✕ 扔掉（时间线里已落地的片段不受影响）。 */}
+      {/* 第二行：种类 + 搜索 + 导入。 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px 5px', borderBottom: '0.5px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
+        <select value={kind} onChange={e => setKind(e.target.value as 'all' | 'image' | 'video' | 'audio')} style={selStyle}>
+          <option value="all">All kinds</option>
+          <option value="image">Images</option>
+          <option value="video">Video</option>
+          <option value="audio">Audio</option>
+        </select>
+        <input
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          placeholder="Search…"
+          spellCheck={false}
+          style={{
+            flex: 1, minWidth: 0, height: 18, fontSize: 9.5, color: 'rgba(255,255,255,0.75)',
+            background: '#1b1b1e', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 4,
+            padding: '0 4px', outline: 'none',
+          }}
+        />
+        <button
+          title="Import images into the library (they are copied into data/assets)"
+          onClick={() => fileRef.current?.click()}
+          style={{ ...rowBtn, width: 18, height: 18, border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 4, color: 'rgba(255,255,255,0.55)' }}
+        >
+          <PlusIcon />
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          multiple
+          style={{ display: 'none' }}
+          onChange={e => {
+            const fs = Array.from(e.target.files || []);
+            e.target.value = '';
+            void importFiles(fs);
+          }}
+        />
+      </div>
+
+      {/* 卡片网格：可拖（application/x-asset），名字右边是动作。 */}
       <div style={{
         flex: 1, minHeight: 0, overflow: 'auto', scrollbarWidth: 'thin',
         padding: 8, display: 'grid', gap: 6, alignContent: 'start',
         gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))',
         background: over ? 'rgba(10,132,255,0.06)' : 'transparent',
       }}>
-        {p.assets.length === 0 && (
+        {total === 0 && (
           <div style={{ gridColumn: '1 / -1', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8 }}>
-            No assets yet.<br />Drop video/audio files here, or drag items in from Staging.
+            {busy ? 'Loading…'
+              : scope === 'project' ? 'This project has no assets yet.\nDrop video/audio here, or claim one from Library.'
+                : scope === 'session' ? 'No leftover assets — everything in the store belongs to the library.'
+                  : 'Nothing here yet.\nDrop files here or use ＋ to import images.'}
           </div>
         )}
-        {p.assets.map(a => (
-          <AssetCard key={a.id} a={a} onRemove={() => vid.update(proj => removeAsset(proj, a.id))} />
-        ))}
 
-        {/* 全局资产：**接在本工程资产之后**，一整行分隔 + 自己那一段卡片。 */}
-        {showGlobal && (
-          <>
-            <div style={{
-              gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 6,
-              marginTop: 2, paddingTop: 6, borderTop: '0.5px solid rgba(255,255,255,0.1)',
-              fontSize: 9.5, fontWeight: 700, letterSpacing: 0.5, color: 'rgba(10,132,255,0.75)',
-            }}>
-              GLOBAL · {globals ? globals.length : '…'}
-              <span style={{ flex: 1, fontSize: 9, fontWeight: 400, letterSpacing: 0, color: 'rgba(255,255,255,0.3)' }}>
-                {gLoading ? 'loading…' : 'shared library — drag onto a track to claim it here'}
-              </span>
-            </div>
-            {globals && globals.length === 0 && !gLoading && (
-              <div style={{ gridColumn: '1 / -1', padding: '6px 0 12px', fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>
-                The shared asset library is empty.
-              </div>
-            )}
-            {globals?.map(g => (
-              <GlobalCard key={g.url} g={g} onClaim={() => claimGlobal(g)} />
-            ))}
-          </>
-        )}
+        {projectItems.map(a => {
+          const img = isImageAsset(a);
+          const k = img ? 'image' : a.kind;
+          return (
+            <Card
+              key={'p:' + a.id}
+              it={{
+                name: a.name, kind: k, src: a.src, duration: a.duration, hasAudio: img ? null : a.hasAudio,
+                byteFrom: 'store', origin: a.origin, usedBy: usedBy(a.src),
+                drag: img ? undefined : {
+                  'application/x-vid-asset': a.id,
+                  [ASSET_ITEM_TYPE]: JSON.stringify({ id: a.id, url: a.src, name: a.name, kind: k }),
+                },
+                actions: (
+                  <button
+                    title={'Remove「' + a.name + '」from this project (clips already on the timeline keep playing)'}
+                    onClick={() => vid.update(proj => removeAsset(proj, a.id))}
+                    style={rowBtn}
+                  >
+                    <CrossIcon />
+                  </button>
+                ),
+              }}
+            />
+          );
+        })}
+
+        {storeItems.map(s => {
+          const id = s.hash || s.name;
+          const payload = { id, url: s.url, name: s.name, kind: s.kind };
+          return (
+            <Card
+              key={'s:' + id}
+              it={{
+                name: s.name, kind: s.kind, src: s.url, duration: s.duration, hasAudio: s.hasAudio,
+                poster: s.kind === 'image' ? (s.thumb || s.url) : null,
+                byteFrom: 'store', origin: s.inLibrary === false ? 'session' : 'library',
+                usedBy: usedBy(s.url),
+                drag: {
+                  [ASSET_ITEM_TYPE]: JSON.stringify(payload),
+                  [GLOBAL_ITEM_TYPE]: JSON.stringify({ url: s.url, name: s.name, kind: s.kind }),
+                },
+                actions: (
+                  <span style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
+                    {s.kind !== 'image' && (
+                      <button title={'Claim「' + s.name + '」into this project'} onClick={() => claimStore(s)} style={rowBtn}>
+                        <PlusIcon />
+                      </button>
+                    )}
+                    {s.hash && (
+                      <>
+                        <button title="Rename this asset" onClick={() => void renameStore(s)} style={rowBtn}>
+                          <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                            <path d="M8 2l2 2-6 6H2V8z" />
+                          </svg>
+                        </button>
+                        <button title={'Delete「' + s.name + '」from the store'} onClick={() => void deleteStore(s)} style={rowBtn}>
+                          <CrossIcon />
+                        </button>
+                      </>
+                    )}
+                  </span>
+                ),
+              }}
+            />
+          );
+        })}
       </div>
 
-      {/* 底栏：Global Assets Include —— 一颗地球，开着就点亮。说明全在 tooltip 里（这里不写字）。 */}
+      {/* 底栏：一句实话 —— 现在这一档有多少件、库成员多少。 */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', flexShrink: 0,
         borderTop: '0.5px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.015)',
       }}>
-        <button
-          title={showGlobal
-            ? 'Global Assets Include — on. The shared asset library (data/assets) is listed below this project\'s assets. Click to hide it.'
-            : 'Global Assets Include — off. Click to also list the shared asset library (data/assets) below this project\'s assets.'}
-          onClick={() => setShowGlobal(v => !v)}
-          style={{
-            width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            border: '0.5px solid ' + (showGlobal ? 'rgba(10,132,255,0.55)' : 'rgba(255,255,255,0.12)'),
-            borderRadius: 5, padding: 0, cursor: 'pointer', flexShrink: 0,
-            background: showGlobal ? 'rgba(10,132,255,0.16)' : 'transparent',
-            color: showGlobal ? '#3b9dff' : 'rgba(255,255,255,0.42)',
-          }}
-        >
-          <GlobeIcon size={14} />
-        </button>
         <span style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.32)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {showGlobal ? (globals ? `${globals.length} global` : 'loading…') : 'project only'}
+          {busy ? 'loading…' : err ? err : `${total} ${total === 1 ? 'asset' : 'assets'} · ${scope}`}
         </span>
+        <span style={{ flex: 1 }} />
+        {store && (
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.26)', flexShrink: 0 }}>
+            {store.filter(s => s.inLibrary !== false).length} in library
+          </span>
+        )}
       </div>
     </div>
   );
