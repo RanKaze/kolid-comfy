@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
   type VidClip, type VidController, type VidTrack, type VidMergeProbe,
@@ -53,6 +53,18 @@ const MARK_TOP = RULER_H - MARK_H;   // 24：范围标记的顶边
 const TICK_TOP = PLAY_H;             // 10：刻度带的上沿
 const TICK_BOTTOM = MARK_H;          // 10：刻度带的下沿（给底部三角让位）
 const HEADER_W = 140;
+// 底部横向滚动条：条子（thumb）最窄 28px —— 两端各要放一颗圆把手，再窄就挤成一团。
+// 圆把手直径 11px，骑在 thumb 的左右边缘上（半颗在外），拖它 = 改 thumb 宽。
+const SB_THUMB_MIN = 28;
+const SB_KNOB = 11;
+const sbKnobStyle = (side: 'l' | 'r'): React.CSSProperties => ({
+  position: 'absolute', top: '50%', marginTop: -SB_KNOB / 2,
+  left: side === 'l' ? -SB_KNOB / 2 : undefined,
+  right: side === 'r' ? -SB_KNOB / 2 : undefined,
+  width: SB_KNOB, height: SB_KNOB, borderRadius: '50%',
+  background: '#b4b4bc', boxShadow: '0 0 0 0.5px rgba(0,0,0,0.65), 0 0 3px rgba(0,0,0,0.45)',
+  cursor: 'ew-resize',
+});
 // 四类轨同一高度：视频轨不再比音频 / Layer / process 高出一截，横向扫过去是一条齐线。
 const TRACK_H: Record<'video' | 'audio' | 'layer' | 'process', number> = { video: 46, audio: 46, layer: 46, process: 46 };
 const STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
@@ -762,31 +774,112 @@ export const VidTimeline: React.FC<{
   const laneContentW = Math.max(contentW - HEADER_W, 1);
   const laneViewW = Math.max(viewW - HEADER_W, 1);
   const maxScroll = Math.max(laneContentW - laneViewW, 0);
-  const sbThumbW = maxScroll > 0 ? Math.max(28, Math.min(trackW, laneViewW / laneContentW * trackW)) : trackW;
+  const sbThumbW = maxScroll > 0
+    ? Math.min(trackW, Math.max(SB_THUMB_MIN, laneViewW / laneContentW * trackW))
+    : trackW;
   const sbSpan = Math.max(trackW - sbThumbW, 1);
   // thumb 位置夹在行程内：scrollLeft 可能来自浏览器的滚动恢复，越过 maxScroll 时不能把
   // thumb 画到轨道外面去（那正是"刷新后范围指示不正确、点一下才回来"的那一瞬）。
   const sbThumbX = maxScroll > 0
     ? Math.min(Math.max(scrollX, 0), maxScroll) / maxScroll * Math.max(trackW - sbThumbW, 0)
     : 0;
-  const sbDrag = useRef<{ x0: number; s0: number } | null>(null);
+
+  // 拖拽三态：move = 整体平移（老行为）；l / r = 抓两端的圆把手**改宽**。
+  // 改宽就是改"视口占多少时长"—— thumb 变宽 = 一秒变窄 = 看得更多 = 缩小，反之放大。
+  // 所以它落到的其实是 pps（缩放），只不过入口换成了肉眼可见的条子宽度。
+  const sbDrag = useRef<{
+    mode: 'move' | 'l' | 'r';
+    x0: number;
+    /** 按下时的 scrollLeft。 */
+    s0: number;
+    /** 按下时的 thumb 宽（px）：把手的目标宽度一律从它算，不做增量累加 —— 不会漂。 */
+    w0: number;
+    /** 按下时视口左/右边缘对应的时刻。改宽时钉住对侧那个边缘，画面不游。 */
+    tL: number;
+    tR: number;
+    /** 按下时 lane 的可视宽。改宽时**用它**换算（别在 effect 里重新量）：改宽会让轨道变高，
+     *  纵向滚动条一出现 clientWidth 就少十几像素，重量的那一份会把钉住的边缘推歪。 */
+    laneV: number;
+  } | null>(null);
+  // 改宽后要落回去的 scrollLeft：按**对侧边缘的时刻**重算（等 pps 生效那一趟再写）。
+  const pendingSbRef = useRef<{ t: number; edge: 'l' | 'r'; laneV: number } | null>(null);
+
+  // 落 scrollLeft **必须在 paint 之前**（useLayoutEffect，不是 useEffect）：
+  // thumb 的宽来自 pps（这一帧就变了），位置来自 scrollX（要等滚动事件）。若滚动改在 paint 之后落，
+  // 就会多出一帧"新宽度 + 旧滚动位" —— 钉住的那一端每走一步先跳出去十几像素再弹回来，
+  // 也就是用户说的"拖一头、另一头抖"。layout effect 里落完顺手把 scrollX 同步给 React，
+  // 一次同步重渲，宽度和位置就是同一帧的同一个世界（浏览器还没画）。
+  useLayoutEffect(() => {
+    const a = pendingSbRef.current;
+    if (!a) return;
+    const sc = scrollRef.current;
+    if (!sc) return;
+    pendingSbRef.current = null;
+    const target = a.edge === 'l' ? a.t * vid.pps : a.t * vid.pps - a.laneV;
+    const maxS = Math.max(sc.scrollWidth - sc.clientWidth, 0);
+    sc.scrollLeft = Math.max(0, Math.min(maxS, target));
+    setScrollX(sc.scrollLeft);        // 别等 scroll 事件：它比 paint 晚
+  }, [pps, viewW]);
+
   const onSbDown = (e: React.PointerEvent) => {
     const sc = scrollRef.current, tr = trackRef.current;
-    if (!sc || !tr || maxScroll <= 0) return;
+    if (!sc || !tr) return;
+    const el = e.target as HTMLElement;
+    const handle = ((el?.dataset?.sbHandle || '') as '' | 'l' | 'r');
+    if (handle) {
+      // 把手：即便眼下没有可滚区间也接手势 —— 往里拖就是放大，先把区间造出来。
+      try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 指针已失活/合成事件：不挡手势 */ }
+      userZoomedRef.current = true;            // 手动改过视口占比 → 不再自动 Fit
+      const laneV = Math.max(sc.clientWidth - HEADER_W, 1);
+      const p = Math.max(vid.pps, 0.001);
+      sbDrag.current = {
+        mode: handle, x0: e.clientX, s0: sc.scrollLeft, w0: sbThumbW,
+        tL: sc.scrollLeft / p, tR: (sc.scrollLeft + laneV) / p, laneV,
+      };
+      return;
+    }
+    if (maxScroll <= 0) return;
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 指针已失活/合成事件：不挡手势 */ }
-    const onThumb = !!(e.target as HTMLElement)?.dataset?.sbThumb;
+    const onThumb = !!el?.dataset?.sbThumb;
     if (!onThumb) { // 点空白处：视窗跳过去（点中即居中），接着顺势进入拖动。
       const rect = tr.getBoundingClientRect();
       const frac = Math.max(0, Math.min(1, (e.clientX - rect.left - sbThumbW / 2) / sbSpan));
       sc.scrollLeft = frac * maxScroll;
     }
-    sbDrag.current = { x0: e.clientX, s0: sc.scrollLeft };
+    const laneV = Math.max(sc.clientWidth - HEADER_W, 1);
+    const p = Math.max(vid.pps, 0.001);
+    sbDrag.current = {
+      mode: 'move', x0: e.clientX, s0: sc.scrollLeft, w0: sbThumbW,
+      tL: sc.scrollLeft / p, tR: (sc.scrollLeft + laneV) / p, laneV,
+    };
   };
   const onSbMove = (e: React.PointerEvent) => {
     const d = sbDrag.current;
     const sc = scrollRef.current;
     if (!d || !sc) return;
-    sc.scrollLeft = Math.max(0, Math.min(maxScroll, d.s0 + (e.clientX - d.x0) * (maxScroll / sbSpan)));
+    const dx = e.clientX - d.x0;
+    if (d.mode === 'move') {
+      sc.scrollLeft = Math.max(0, Math.min(maxScroll, d.s0 + dx * (maxScroll / sbSpan)));
+      return;
+    }
+    if (trackW <= 0) return;
+    // 把手走过的像素 = thumb 宽的变化量。反解 pps：
+    //   thumbW = trackW · laneViewW / laneContentW  ⇒  laneContentW = trackW · laneViewW / thumbW
+    //   laneContentW = contentW − HEADER_W = (dur + 10)·pps − HEADER_W
+    const laneV = Math.max(sc.clientWidth - HEADER_W, 1);
+    const want = Math.max(SB_THUMB_MIN, Math.min(trackW, d.mode === 'r' ? d.w0 + dx : d.w0 - dx));
+    const laneWant = trackW * laneV / want;
+    const ppsWant = Math.max(6, Math.min(480, (laneWant + HEADER_W) / Math.max(dur + 10, 0.1)));
+    // 右把手动 ⇒ 左边缘的时刻钉住（往后看更多）；左把手动 ⇒ 右边缘钉住。
+    pendingSbRef.current = d.mode === 'r' ? { t: d.tL, edge: 'l', laneV: d.laneV } : { t: d.tR, edge: 'r', laneV: d.laneV };
+    if (Math.abs(ppsWant - vid.pps) > 1e-4) { vid.setPps(ppsWant); return; }
+    // pps 已经顶到 6 / 480：不会再触发上面那个 effect，这一趟就地落。
+    const a = pendingSbRef.current;
+    pendingSbRef.current = null;
+    const target = a.edge === 'l' ? a.t * vid.pps : a.t * vid.pps - a.laneV;
+    const maxS = Math.max(sc.scrollWidth - sc.clientWidth, 0);
+    sc.scrollLeft = Math.max(0, Math.min(maxS, target));
+    setScrollX(sc.scrollLeft);
   };
   const onSbUp = () => { sbDrag.current = null; };
 
@@ -1212,7 +1305,8 @@ export const VidTimeline: React.FC<{
       </div>
 
       {/* 自定义横向滚动条：常驻、对齐 lane 区域（左侧空出轨道头宽度）。
-          点空白 = 视窗跳过去并顺势拖动；拖 thumb = 精细滚动。 */}
+          点空白 = 视窗跳过去并顺势拖动；拖 thumb 中段 = 精细滚动；
+          拖两端的圆把手 = 改 thumb 宽（= 改视口占多少时长，即缩放），对侧边缘不动。 */}
       <div style={{ display: 'flex', height: 14, flexShrink: 0, background: '#141416', borderTop: '0.5px solid rgba(255,255,255,0.06)' }}>
         <div style={{ width: HEADER_W, flexShrink: 0, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)' }} />
         <div
@@ -1220,10 +1314,15 @@ export const VidTimeline: React.FC<{
           onPointerDown={onSbDown} onPointerMove={onSbMove} onPointerUp={onSbUp} onPointerCancel={onSbUp}
           style={{ flex: 1, position: 'relative', touchAction: 'none', userSelect: 'none' }}
         >
+          {/* 底槽：一条 2px 的暗线横贯整条 —— 两端圆把手之间的那段才是"当前视口"，有槽才看得出范围。 */}
+          <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', height: 2, marginTop: -1, borderRadius: 1, background: 'rgba(255,255,255,0.055)', pointerEvents: 'none' }} />
           <div
             data-sb-thumb="1"
-            style={{ position: 'absolute', top: 3, bottom: 3, left: sbThumbX, width: sbThumbW, borderRadius: 4, background: 'rgba(255,255,255,0.18)', cursor: maxScroll > 0 ? 'grab' : 'default' }}
-          />
+            style={{ position: 'absolute', top: 3, bottom: 3, left: sbThumbX, width: sbThumbW, borderRadius: 4, background: 'rgba(255,255,255,0.26)', cursor: maxScroll > 0 ? 'grab' : 'default' }}
+          >
+            <span data-sb-handle="l" style={sbKnobStyle('l')} />
+            <span data-sb-handle="r" style={sbKnobStyle('r')} />
+          </div>
         </div>
       </div>
 
