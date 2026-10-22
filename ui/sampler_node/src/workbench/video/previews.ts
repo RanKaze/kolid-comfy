@@ -171,7 +171,10 @@ export const ensureStrip = (src: string, srcDuration: number): Promise<string[] 
 async function buildStrip(src: string, d: number, n: number,
   onPartial: (urls: string[]) => void): Promise<string[] | null> {
   const dur = Math.max(0, d || 0);
-  const media = src.startsWith('/api/vid_media/') ? src.split('/').pop() : '';
+  // 两条伺服路都认：工程媒体库 `/api/vid_media/` 与**全局资产库** `/api/global_media/`
+  // （Assets 窗接在后面那一段共享库）。后者要带 `d=global`，后端才知道去哪个落点取文件。
+  const isGlobal = src.startsWith('/api/global_media/');
+  const media = (src.startsWith('/api/vid_media/') || isGlobal) ? (src.split('/').pop() || '') : '';
   // 后端在（有 ffmpeg）→ 请求整条落盘的缩略图。**但绝不空等**：后端一遍 ffmpeg 抽 96 帧
   // 1080p 要十几秒，这十几秒里用户已经在拖游标了 —— 所以客户端的 fastSeek 抽条**同时
   // 照跑**（谁先到先用，后端整条到了再整体替换）。渐进发布的意义就在这：任何时刻
@@ -180,7 +183,8 @@ async function buildStrip(src: string, d: number, n: number,
     const times = Array.from({ length: n }, (_, i) => dur * i / (n - 1));
     const client = grabFrames(src, times, onPartial).then(u => { if (u) onPartial(u); return u; });
     try {
-      const r = await fetch('/api/vid_strip?f=' + encodeURIComponent(media) + '&n=' + n);
+      const r = await fetch('/api/vid_strip?f=' + encodeURIComponent(media) + '&n=' + n
+        + (isGlobal ? '&d=global' : ''));
       if (r.ok) {
         const j = await r.json() as { urls?: string[] };
         if (Array.isArray(j.urls) && j.urls.length >= 2) { onPartial(j.urls); return j.urls; }

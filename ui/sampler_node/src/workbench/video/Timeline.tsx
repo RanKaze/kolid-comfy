@@ -8,6 +8,7 @@ import {
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
 import { probeMedia } from './audio';
 import { ingestFile } from './ingest';
+import { GLOBAL_ITEM_TYPE } from './Assets';
 import {
   ensureFrame, ensureStrip, ensureWaveform, frameBackend, peekStrip, stripComplete, stripFrame, subscribeStrip,
 } from './previews';
@@ -832,6 +833,16 @@ export const VidTimeline: React.FC<{
       const asset = p.assets.find(a => a.id === sid);
       if (asset) { vid.update(proj => placeAsset(proj, asset, trackId, at), 'Add clip'); return; }
     }
+    // 全局资产（Assets 窗接在后面的那一段共享库）：载荷是 URL 而不是资产 id —— 它此刻还不属于
+    // 这份工程。落定走 importSource：**先入本工程的资产库，再落一段引用它的片段**，与图池条目
+    // 同一条路（Assets 是项目所有数据的来源，不存在"直接进轨道"的路）。
+    const gRaw = e.dataTransfer.getData(GLOBAL_ITEM_TYPE);
+    if (gRaw) {
+      try {
+        const g = JSON.parse(gRaw) as { url?: string; name?: string };
+        if (g?.url) { void importSource(g.url, g.name || g.url, 'file', trackId, at); return; }
+      } catch { /* 载荷不是我们写的那份：当没发生过，继续看后面几种 */ }
+    }
     const stagingId = e.dataTransfer.getData(STAGING_ITEM_TYPE);
     if (stagingId) {
       const item = vid.staging.find(s => s.id === stagingId);
@@ -1067,7 +1078,7 @@ export const VidTimeline: React.FC<{
                 onDragOver={e => {
                   if (tr.kind === 'layer' || tr.kind === 'process') return;   // 合成轨 / process 轨不收素材
                   const ts = e.dataTransfer.types;
-                  if (ts.includes(ASSET_ITEM_TYPE) || ts.includes(STAGING_ITEM_TYPE) || Array.from(ts).includes('Files')) {
+                  if (ts.includes(ASSET_ITEM_TYPE) || ts.includes(GLOBAL_ITEM_TYPE) || ts.includes(STAGING_ITEM_TYPE) || Array.from(ts).includes('Files')) {
                     e.preventDefault();
                     setDropLane(tr.id);
                     // 拖着素材悬停时就亮指示：落点会吸到谁，先看见再松手。

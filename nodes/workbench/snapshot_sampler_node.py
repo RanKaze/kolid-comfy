@@ -11,7 +11,7 @@ import webbrowser
 from ...libs.client_host import open_ui, is_open_with_app, set_open_with_app
 import time
 import base64
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 import io
 import copy
 import shutil
@@ -545,6 +545,139 @@ _VID_CONT_OK = {'.mp4', '.m4v', '.webm', '.mov'}
 def _vid_media_dir():
     """资产媒体库的落点：data/sampler/media/vid/。"""
     return os.path.join(data_dir('sampler'), 'media', 'vid')
+
+
+# =============================================================================
+# 全局资产库（Assets 窗的 Global 开关读的就是这一份）
+#
+# 落点**就是节点那一份** —— `data_dir('assets')`，与 assets_node 的 `asset_cache_dir`
+# 同一个函数、同一个目录。它是跨文档共用的素材：不随任何 .cud 走，谁打开都能看见；
+# 而上面那个 `_vid_media_dir()` 是**某一份工程**自己入库的东西。
+# 别在别处再开一份"全局"目录 —— 只有一个落点，才对得起节点写进去的那些字节。
+_GA_IMG_EXT = frozenset(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif', '.tif', '.tiff'))
+_GA_VID_EXT = frozenset(('.mp4', '.webm', '.avi', '.mov', '.m4v', '.mkv'))
+_GA_AUD_EXT = frozenset(('.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'))
+
+
+def _global_assets_dir():
+    """全局资产库的落点 = 节点那一份：data/assets/。"""
+    return data_dir('assets')
+
+
+# ffprobe 的记性：`名字 → (字节数, 落盘时间, {hasAudio, duration})`。**按大小+时间认货** ——
+# 文件被换掉（同名不同内容）时 key 对不上，自然重探。一个文件近 0.3s，整库几十个视频
+# 串行要十来秒，所以只探一次、之后全走这张表。
+_GA_PROBE_CACHE: dict = {}
+_GA_PROBE_LOCK = threading.Lock()
+
+
+def _global_probe(name, path, size, mtime):
+    """一件货的"媒体事实"：有没有音轨（卡上的 AUD 角标）+ 时长（悬停扫片要按时刻取格）。
+    探不到（没 ffprobe / 咬不动）= `hasAudio: None` —— **"不知道"就别画角标**，
+    猜一个错的比不画更糟。"""
+    with _GA_PROBE_LOCK:
+        hit = _GA_PROBE_CACHE.get(name)
+        if hit and hit[0] == size and hit[1] == mtime:
+            return hit[2]
+    try:
+        probe = _vid_ffprobe(path) or {}
+    except Exception:
+        probe = {}
+    info = {'hasAudio': bool(probe.get('acodec')) if probe else None,
+            'duration': float(probe.get('duration') or 0)}
+    with _GA_PROBE_LOCK:
+        _GA_PROBE_CACHE[name] = (size, mtime, info)
+    return info
+
+
+def _global_assets_list():
+    """列一遍全局资产：名字 / 可播 URL / 类型 / 字节数 / 落盘时间（新的在前）。
+    上传写到一半的半成品（`_tmp_`）与隐藏文件不算货；认不出类型的也不列。
+    媒体（视频/音频）的 `hasAudio`（卡上那个 AUD 角标）与 `duration`（悬停扫片按时刻取格
+    要它）由 ffprobe 探 —— 整库并发跑一遍，只在第一次慢；图片不探。"""
+    d = _global_assets_dir()
+    items = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return items
+    for name in names:
+        if name.startswith('.') or name.startswith('_tmp_'):
+            continue
+        p = os.path.join(d, name)
+        if not os.path.isfile(p):
+            continue
+        ext = os.path.splitext(name)[1].lower()
+        if ext in _GA_IMG_EXT:
+            kind = 'image'
+        elif ext in _GA_VID_EXT:
+            kind = 'video'
+        elif ext in _GA_AUD_EXT:
+            kind = 'audio'
+        else:
+            continue
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        items.append({'name': name, 'url': '/api/global_media/' + quote(name),
+                      'kind': kind, 'size': st.st_size, 'mtime': st.st_mtime,
+                      'hasAudio': None, 'duration': 0})
+    items.sort(key=lambda x: (-x['mtime'], x['name']))
+    # 只有媒体（视频/音频）要探；并发 8 条 —— 一个 ffprobe 近 0.3s，串行会把第一次打开拖到十几秒。
+    media = [it for it in items if it['kind'] in ('video', 'audio')]
+    if media:
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                infos = list(pool.map(
+                    lambda it: _global_probe(it['name'], os.path.join(d, it['name']),
+                                             it['size'], it['mtime']), media))
+            for it, info in zip(media, infos):
+                it['hasAudio'] = info['hasAudio']
+                it['duration'] = info['duration']
+        except Exception:
+            pass          # 并发那套没起来：角标不画、扫片退回首帧，清单照给
+    return items
+
+
+def _send_media_file(h, path, cacheable=True):
+    """带 Range 的文件伺服 —— <video> 的 seek 靠它。返回 True = 响应已发出（404 交给调用方）。
+    全局资产与工程媒体库两条路共用这一份，免得两边各写一遍字节搬运。"""
+    if not os.path.isfile(path):
+        return False
+    size = os.path.getsize(path)
+    mime = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+    start, end, code = 0, size - 1, 200
+    rng = h.headers.get('Range') or ''
+    if rng.startswith('bytes='):
+        try:
+            a, b = rng.split('=', 1)[1].split('-', 1)
+            start = int(a) if a else 0
+            end = min(int(b), size - 1) if b else size - 1
+            code = 206
+        except (ValueError, IndexError):
+            start, end, code = 0, size - 1, 200
+    length = max(0, end - start + 1)
+    h.send_response(code)
+    h.send_header('Content-type', mime)
+    h.send_header('Accept-Ranges', 'bytes')
+    h.send_header('Cache-Control', 'max-age=31536000, immutable' if cacheable else 'no-store')
+    if code == 206:
+        h.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+    h.send_header('Content-Length', str(length))
+    h.end_headers()
+    if length:
+        with open(path, 'rb') as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(1 << 20, remaining))
+                if not chunk:
+                    break
+                h.wfile.write(chunk)
+                remaining -= len(chunk)
+    return True
 
 
 def _ff_bin(name):
@@ -3246,54 +3379,41 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'ok': True, 'docs': doc_io.restore_open_cuds()})
                 return
 
+            # 全局资产库：Assets 窗的 Global 开关问的就是这一份清单（落点 = 节点那一份
+            # data/assets/，见 _global_assets_list）。只读，不写 —— 往里加货是节点的事。
+            if self.path == '/api/global_assets':
+                try:
+                    items = _global_assets_list()
+                    self._send_json({'ok': True, 'dir': _global_assets_dir(), 'assets': items})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e), 'assets': []}, 500)
+                return
+
+            # 全局资产的文件伺服（带 Range —— <video> 的 seek 靠它）。
+            if self.path.startswith('/api/global_media/'):
+                # 同 vid_media：文件名里的空格/中文会被浏览器百分号编码，必须解码回来再拼路径。
+                fname = os.path.basename(unquote(urlparse(self.path).path[len('/api/global_media/'):]))
+                if not _send_media_file(self, os.path.join(_global_assets_dir(), fname)):
+                    self.send_error(404)
+                return
+
             # 资产媒体库：Video 工程 Assets 的文件伺服（带 Range —— <video> 的 seek 靠它）。
             if self.path.startswith('/api/vid_media/'):
                 # 文件名里的空格/中文等会被浏览器百分号编码（`Rabbit%20Dance_.mp4`）：这里必须解码
                 # 回来，否则拼出的路径永远对不上盘上的文件 → 404 → <video> 报
                 # MEDIA_ERR_SRC_NOT_SUPPORTED（videoWidth=0，播放头照走、画面全空）。
                 fname = os.path.basename(unquote(urlparse(self.path).path[len('/api/vid_media/'):]))
-                path = os.path.join(_vid_media_dir(), fname)
-                if not os.path.isfile(path):
+                if not _send_media_file(self, os.path.join(_vid_media_dir(), fname)):
                     self.send_error(404)
-                    return
-                size = os.path.getsize(path)
-                mime = mimetypes.guess_type(fname)[0] or 'application/octet-stream'
-                start, end, code = 0, size - 1, 200
-                rng = self.headers.get('Range') or ''
-                if rng.startswith('bytes='):
-                    try:
-                        a, b = rng.split('=', 1)[1].split('-', 1)
-                        start = int(a) if a else 0
-                        end = min(int(b), size - 1) if b else size - 1
-                        code = 206
-                    except (ValueError, IndexError):
-                        start, end, code = 0, size - 1, 200
-                length = max(0, end - start + 1)
-                self.send_response(code)
-                self.send_header('Content-type', mime)
-                self.send_header('Accept-Ranges', 'bytes')
-                self.send_header('Cache-Control', 'max-age=31536000, immutable')
-                if code == 206:
-                    self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
-                self.send_header('Content-Length', str(length))
-                self.end_headers()
-                if length:
-                    with open(path, 'rb') as f:
-                        f.seek(start)
-                        remaining = length
-                        while remaining > 0:
-                            chunk = f.read(min(1 << 20, remaining))
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
-                            remaining -= len(chunk)
                 return
 
             # 按需帧提取：片段的头/尾帧（t 跟着片段的 offset/duration 走，裁剪即新帧）。
             if self.path.startswith('/api/vid_frame'):
                 qs = parse_qs(urlparse(self.path).query)
                 fname = os.path.basename((qs.get('f') or [''])[0])
-                path = os.path.join(_vid_media_dir(), fname)
+                # 同上：`d=global` = 这件货在全局资产库里。
+                root = _global_assets_dir() if (qs.get('d') or [''])[0] == 'global' else _vid_media_dir()
+                path = os.path.join(root, fname)
                 try:
                     t = float((qs.get('t') or ['0'])[0])
                 except ValueError:
@@ -3319,7 +3439,10 @@ class SnapshotDetailerSamplerServer:
                     n = int((qs.get('n') or ['16'])[0])
                 except ValueError:
                     n = 16
-                urls = _vid_strip(os.path.join(_vid_media_dir(), fname), n)
+                # `d=global` = 这件货在**全局资产库**里（其余一律当工程媒体库）。
+                # 两条路同一个抽条函数，只是落点不同 —— 全局那批也能吃上后端落盘的缩略帧。
+                root = _global_assets_dir() if (qs.get('d') or [''])[0] == 'global' else _vid_media_dir()
+                urls = _vid_strip(os.path.join(root, fname), n)
                 self._send_json({'ok': bool(urls), 'urls': urls or []})
                 return
 
