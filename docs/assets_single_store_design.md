@@ -487,3 +487,39 @@ resolver —— **URL 面没变**（`/api/vid_media/<file>` 仍然有效、老 `
 | 回归 | 12/12 · 35/35 · 13/13 · 14/14 · 22/22 · 45/45 | vid 模型、A5 后端、仓库 UI、A1 两扇窗、仓库层 |
 
 **A5 至此完成**（存储层 + 模型层 + relink）。A6 才是"引用图 + 有引用就拒绝删除"。
+
+### A5c 落地记录（Processor 的 Staging 两档 → Assets）
+
+一句话：Processor 小窗里那两处叫 **Staging** 的（输入来源的"工作区条目"、输出去处的"停进工作区"）
+换成 **Assets** —— 输入从仓库挑图、按哈希由后端直读字节；产出写回仓库（session 作用域）。图池
+只剩"画布派生的在途输入"这一种用途，用户可见的两档不再经过它。
+
+| 位置 | 改法 |
+|---|---|
+| `PROCESSOR_SRC_IMAGE` | `['asset', 'Assets', …]`（原 `staging`）；`PROCESSOR_DST_IMAGE/MASK` 同 |
+| `procDefaultPick` | 老配置里的 `'staging'` 读成 `'asset'`（`output_targets` / `input_sources` 都归一），不静默退到第一项 |
+| 输入子行 | 描述符字段 `staging` → `asset`（`{options:[{id:hash,name}], cur}`），清单来自 `/api/global_assets` 的 `kind==='image'`（页面自己拉、5s 缓存；挑过的哈希不在库就落回最新一件） |
+| 动作 | `processor-staging {port,id}` → `processor-asset {port,hash}`；`BlendProcInRow.staging` → `.asset` |
+| 输入运输 | `blend-processor-run.inputs[]` 每项是 `{port, dataUrl}` 或 `{port, asset:hash}`；宿主把后者写成 `image_keys[port]='asset:<hash>'`，**不建图池条目** |
+| 后端 | `processor_input_tensor(key, server)`：`asset:<hash>` → `asset_store.path_of` 读正身 → `image_bytes_to_tensor`（与 dataURL 同一个解码方向，alpha 保留）；缺失/解不开 → `None`（跳过这一项，不炸整趟） |
+| 输出去处 | `finishProcessorRun` 的 `asset` 档 → `assetImportBytes(r.src, name, 'processor')`（`library:false`）+ `/api/asset_update` 补显示名（`member:false` 不变）；不再发 `blend-staging-upload` |
+| 刷新 | 落位成功后 `postMessage({type:'blend-assets-changed'})` → 宿主 `bumpAssets()` → 挂着的 Assets 窗重拉清单（`workbench/video/assetsTick.ts`） |
+| Interface tab | 默认源/落位的下拉同样换成 `Assets`（`asset`），老 `staging` 值按 `asset` 显示 |
+| 文案 | 状态条收尾 `Processor done — N result(s), M saved to Assets`（失败数一并报） |
+
+**为什么输入直读仓库而不是先转 dataURL**：同一张图在仓库里已经有一份正身，转 dataURL 再进图池
+等于复制第二份，还会让"这张图是谁"只剩图池编号可认。`asset:<hash>` 是内容地址，跑的时候现读现解，
+既不落盘也不占内存。
+
+**为什么产出进 session 而不是 library**：产出是"这次跑的中间物"，与视频那条路的 `Asset` 落位同义
+（产物是资产、工作区只是引用它的地方）。它出现在 Assets 窗的 Session 档，用户要留再"加入库"；
+A6 的回收也才有东西可收。
+
+**验收（全绿）**
+
+| 探针 | 结果 | 覆盖 |
+|---|---|---|
+| `temporary/_probe_proc_assets.cjs` | **25/25** ×2 | 真页面 + mock 宿主：枚举/兼容/选择回执、`image_keys='asset:<hash>'`、结果 `library:false` 导入 + 改名 + 状态条、画布来源仍走 hidden staging |
+| `temporary/_probe_proc_asset_input.py` | **7/7** | `processor_input_tensor`：真仓库图解码成 `[1,H,W,3\|4]`、mask 方向可用、未知哈希/垃圾字节返回 None 且不回落 staging、纯数字 id 仍走 staging |
+| `temporary/_probe_assets_ui.cjs` | **14/14** | Assets 窗回归（`assetsTick` 订阅没动渲染与清理） |
+

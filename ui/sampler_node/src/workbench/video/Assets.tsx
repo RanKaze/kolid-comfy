@@ -3,6 +3,7 @@ import {
   type VidAsset, type VidController, fmtTime, isAudioName, isVideoName, addAsset, newVidId, removeAsset,
 } from './model';
 import { probeMedia } from './audio';
+import { assetsTick, subscribeAssets } from './assetsTick';
 import { ingestFile } from './ingest';
 import { ensureFrame, ensureWaveform } from './previews';
 
@@ -391,6 +392,10 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
   const [listErr, setListErr] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const bump = useCallback(() => setTick(t => t + 1), []);
+  // 外面（Processor 的 Assets 落位、宿主导入、读档）写了仓库：跟着重拉。清单不是这一窗的
+  // 私有事实 —— 它只是仓库的一面镜子。
+  const [extTick, setExtTick] = useState(assetsTick());
+  useEffect(() => subscribeAssets(() => setExtTick(assetsTick())), []);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   // ── 缺失 / relink（A5）─────────────────────────────────────────────────────────────────────
@@ -431,7 +436,7 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
       .catch(e => { if (alive) { setStore([]); setListErr(String(e)); } })
       .finally(() => { if (alive) setBusy(false); });
     return () => { alive = false; };
-  }, [tick]);
+  }, [tick, extTick]);
 
   // 谁在用它：片段按 src 认资产（模型里片段只记 src，不记资产 id）。
   const clipsBySrc = useMemo(() => {

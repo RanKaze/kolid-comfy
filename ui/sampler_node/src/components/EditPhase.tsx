@@ -3718,24 +3718,26 @@ const InterfaceTab: React.FC<{
                       {modes.processor && (() => {
                         // 每枚 image/mask 出入口的默认源/落位：IMAGE 与 MASK 各自的候选与工作台
                         // Processor 小窗的表同一套词汇（PROCESSOR_SRC_* / PROCESSOR_DST_*）。
+                        // 老的 `staging` 落位按 `asset` 读：图池里的东西已经统一由仓库承载。
                         const mediaOut = (iface.end_ports ?? []).filter(p => p.type === 'IMAGE' || p.type === 'MASK');
                         const mediaIn = (iface.start_ports ?? []).filter(p => p.type === 'IMAGE' || p.type === 'MASK');
                         if (!mediaOut.length && !mediaIn.length) return null;
                         const targets = meta.output_targets || {};
                         const sources = meta.input_sources || {};
                         const dstTables: Record<string, [ProcessorDst, string][]> = {
-                          IMAGE: [['new_layer', 'New Layer'], ['staging', 'Staging']],
-                          MASK: [['selected_mask', 'Sel. Mask'], ['selected_layer', 'Sel. Layer'], ['staging', 'Staging']],
+                          IMAGE: [['new_layer', 'New Layer'], ['asset', 'Assets']],
+                          MASK: [['selected_mask', 'Sel. Mask'], ['selected_layer', 'Sel. Layer'], ['asset', 'Assets']],
                         };
                         const srcTables: Record<string, [ProcessorSrc, string][]> = {
-                          IMAGE: [['layers', 'Layers'], ['selected', 'Sel. Layer'], ['staging', 'Staging']],
+                          IMAGE: [['layers', 'Layers'], ['selected', 'Sel. Layer'], ['asset', 'Assets']],
                           MASK: [['main_mask', 'Main Mask'], ['selected_mask', 'Sel. Mask'], ['selected_alpha', 'Sel. Alpha'], ['mask_alpha', 'Mask&Alpha']],
                         };
+                        const legacyPick = (v: string | undefined): string | undefined => (v === 'staging' ? 'asset' : v);
                         const opt = { background: '#1c1c1e', color: '#fff' } as React.CSSProperties;
                         const portRow = (p: InterfacePort, side: 'end' | 'start', table: [string, string][], cur: string | undefined, onPick: (num: number, v: string) => void, title: string) => (
                           <div key={`${side}-${p.num}`} style={{ ...toggleRow, marginBottom: 0 }}>
                             <span style={{ ...toggleLabel, minWidth: 74 }}>{portDisplay(iface.name, side, p)}</span>
-                            <select style={{ ...styles.paramSelect, flex: 1 }} value={cur || table[0][0]}
+                            <select style={{ ...styles.paramSelect, flex: 1 }} value={legacyPick(cur) || table[0][0]}
                               onChange={e => onPick(p.num, e.target.value)} title={title}>
                               {table.map(([v, text]) => <option key={v} value={v} style={opt}>{text}</option>)}
                             </select>

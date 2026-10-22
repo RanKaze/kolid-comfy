@@ -6,6 +6,7 @@ import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_B
 import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendAttrOpen, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUi, setBlendUi } from './workbench/store';
 import { vidStagingOverlay } from './workbench/video/procRun';
+import { bumpAssets } from './workbench/video/assetsTick';
 import { ProbePanel } from './debug';
 
 const POLL_INTERVAL = 500;
@@ -159,8 +160,9 @@ const procUiOf = (v: unknown): BlendProcessorUi => {
     const num = typeof o.num === 'number' ? o.num : NaN;
     const options = procChoicesOf(o.options);
     if (!Number.isFinite(num) || !options.length) return [];
-    const st = o.staging && typeof o.staging === 'object' ? o.staging as Record<string, unknown> : null;
-    const staging = st ? {
+    const st = (o.asset || o.staging) && typeof (o.asset || o.staging) === 'object'
+      ? (o.asset || o.staging) as Record<string, unknown> : null;
+    const asset = st ? {
       options: (Array.isArray(st.options) ? st.options : []).flatMap((s: unknown) => {
         if (!s || typeof s !== 'object') return [];
         const q = s as Record<string, unknown>;
@@ -171,7 +173,7 @@ const procUiOf = (v: unknown): BlendProcessorUi => {
     return [{
       num, name: typeof o.name === 'string' ? o.name : '', hint: typeof o.hint === 'string' ? o.hint : '',
       type: o.type === 'MASK' ? 'MASK' : 'IMAGE',
-      options, cur: typeof o.cur === 'string' ? o.cur : '', staging,
+      options, cur: typeof o.cur === 'string' ? o.cur : '', asset,
     }];
   });
   const params: BlendProcParamRow[] = (Array.isArray(x.params) ? x.params : []).flatMap((r: unknown) => {
@@ -1036,8 +1038,10 @@ const App: React.FC = () => {
     else await handleBlendAction(body);
   }, [refRequest, handleBlendAction, handleLayerGenerate]);
 
-  // Processor run initiated by the workbench: upload the input images as hidden staging
-  // entries, then kick an offline interface execution. Results come back through the poller.
+  // Processor run initiated by the workbench: canvas-derived input images go up as hidden
+  // staging entries (in-flight transport), asset-store inputs go up as `asset:<hash>` and the
+  // backend reads those bytes itself, then we kick an offline interface execution. Results
+  // come back through the poller.
   // Must stay ABOVE the postMessage listener below — the listener's dep array reads this
   // const, and a declaration below it is a TDZ ReferenceError on the first render.
   const handleProcessorRun = useCallback(async (data: any) => {
@@ -1058,7 +1062,13 @@ const App: React.FC = () => {
     try {
       const image_keys: Record<string, string> = {};
       for (const inp of inputs) {
-        if (!inp || typeof inp.dataUrl !== 'string' || !inp.dataUrl) continue;
+        if (!inp || typeof inp.port !== 'number') continue;
+        // Assets 来源：后端按 `asset:<哈希>` 直接从仓库读字节，这里不落图池条目。
+        if (typeof inp.asset === 'string' && inp.asset) {
+          image_keys[String(inp.port)] = 'asset:' + inp.asset;
+          continue;
+        }
+        if (typeof inp.dataUrl !== 'string' || !inp.dataUrl) continue;
         const res = await fetch('/api/staging', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1192,6 +1202,10 @@ const App: React.FC = () => {
             blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-guidance-republish' }, '*');
           }
         }));
+      } else if (event.data?.type === 'blend-assets-changed') {
+        // 工作台自己往仓库里写了一件（Processor 的 Assets 落位）。Assets 窗的清单是拉的，
+        // 这里敲一下让每一扇挂着的窗重拉；写方自己不重复导入。
+        bumpAssets();
       } else if (event.data?.type === 'blend-guidance-card') {
         // Guidances 栈的那一张总卡（Layers 合成 + 整个 guidance 栈）。后端按保留 id
         // staging_guidance 原地换像素 —— 工作区永远只有这一张；image 为空 = 撤回它

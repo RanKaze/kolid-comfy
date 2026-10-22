@@ -517,13 +517,16 @@ export interface InterfaceInfo {
   allow_list?: boolean;
 }
 
-/** Processor 输出落位的四个去处（blend_node 的 PROCESSOR_DST_* 表同名）。 */
-export type ProcessorDst = 'new_layer' | 'selected_layer' | 'selected_mask' | 'staging';
+/** Processor 输出落位的四个去处（blend_node 的 PROCESSOR_DST_* 表同名）。
+ *  `asset` = 只进资产仓库（session 作用域），画布与图池都不动 —— 老配置里的 `staging`
+ *  在页面上按 `asset` 读（`procDefaultPick` 那一句兼容）。 */
+export type ProcessorDst = 'new_layer' | 'selected_layer' | 'selected_mask' | 'asset';
 
 /** Processor 输入来源的七个去处（blend_node 的 PROCESSOR_SRC_* 表同名）。
+ *  `asset` = 仓库里的一件图（下拉里挑）；字节由后端按哈希直接从仓库读，不经过图池。
  *  `video` 只出现在 Allow List 打开的接口上：这一行读的是游标底下那段视频，按帧拆成
  *  list 传进去（视频模式专用，见 EditPhase 的视频 list 跑法）。 */
-export type ProcessorSrc = 'layers' | 'selected' | 'staging' | 'main_mask' | 'selected_mask' | 'selected_alpha' | 'mask_alpha' | 'video';
+export type ProcessorSrc = 'layers' | 'selected' | 'asset' | 'main_mask' | 'selected_mask' | 'selected_alpha' | 'mask_alpha' | 'video';
 
 /** 一个 interface 的持久化配置（blocks_sets.json 的 interface_meta 键，按包名索引）。
  *  端口名只是展示 —— 执行全程按端口号走。names 的键是端口号字符串。 */
@@ -760,14 +763,14 @@ export type BlendDetectorUi = { available: boolean; prompt: string; threshold: n
 /** Processor 那一格的一枚候选（来源 / 落位共用一份形状）：值和它那张卡上的短名 + 说明。 */
 export type BlendProcChoice = { value: string; label: string; tip: string };
 
-/** 一行输入口（image / mask）：它叫什么、那句类型说明，和这一行此刻选中的来源 + 可选项。选了 Staging
- *  的 image 输入多带一份工作区条目表（`staging`），null = 这一行不是那种情况。
+/** 一行输入口（image / mask）：它叫什么、那句类型说明，和这一行此刻选中的来源 + 可选项。选了 Assets
+ *  的 image 输入多带一份仓库图清单（`asset`），null = 这一行不是那种情况。
  *  `type` 是端口类型本身（'IMAGE' / 'MASK'）—— 宿主靠它认出哪些行能挂 Video 候选
  *  （Allow List 的视频那条路只接 image 入口）。 */
 export type BlendProcInRow = {
   num: number; name: string; hint: string; options: BlendProcChoice[]; cur: string;
   type: 'IMAGE' | 'MASK';
-  staging: { options: { id: string; name: string }[]; cur: string } | null;
+  asset: { options: { id: string; name: string }[]; cur: string } | null;
 };
 
 /** 一行参数（这个接口带的 widget）。控件跟着类型走 —— `bool` / `number` / `text` / `choices`（≤3 枚
@@ -967,7 +970,7 @@ export type BlendUiAction =
   | 'pose-desc' | 'pose-commit' | 'pose-reset-pose' | 'pose-reset-all' | 'pose-from-image'
   | 'scene3d-open'
   | 'detector-prompt' | 'detector-threshold' | 'detector-invert' | 'detector-run'
-  | 'processor-interface' | 'processor-pick' | 'processor-staging' | 'processor-param'
+  | 'processor-interface' | 'processor-pick' | 'processor-asset' | 'processor-param'
   | 'processor-run' | 'processor-reset'
   | 'staging-prompt' | 'staging-blend' | 'staging-tag' | 'staging-cancel'
   | 'stage-layer' | 'layer-from-staging'
@@ -1146,12 +1149,12 @@ export type BlendUiPayloads = {
   'detector-threshold': number;
   'detector-invert': boolean;
   'detector-run': undefined;
-  /** Processor：换 interface、挑来源/落位（`side` + 端口号 + 选中的值）、挑工作区条目、
+  /** Processor：换 interface、挑来源/落位（`side` + 端口号 + 选中的值）、挑仓库图（哈希）、
    *  拧一口参数（值按那一口的类型归：布尔 / 数字 / 字符串）。换 interface 发的是身份（package 下标 +
    *  名字）；只有旧页面才只认位置，所以数字那一档留着。 */
   'processor-interface': number | { index: number; name: string };
   'processor-pick': { side: 'in' | 'out'; port: number; value: string };
-  'processor-staging': { port: number; id: string };
+  'processor-asset': { port: number; hash: string };
   'processor-param': { port: number; value: number | string | boolean };
   'processor-run': undefined;
   'processor-reset': undefined;

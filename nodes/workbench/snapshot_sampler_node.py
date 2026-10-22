@@ -242,14 +242,12 @@ def max_prompt_image_ref(text):
     return mx
 
 
-def dataurl_to_tensor(image_b64):
-    """dataURL → [1, H, W, 3|4] float tensor（工作区入库用的那一个方向）。
+def image_bytes_to_tensor(img_bytes):
+    """图片字节 → [1, H, W, 3|4] float tensor（dataURL 与仓库正身共用的解码方向）。
 
     带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB。
     解不出图就抛异常，让调用方按各自语义决定是跳过这张还是整单失败。
     """
-    b64_data = image_b64.split(',', 1)[1] if ',' in image_b64 else image_b64
-    img_bytes = base64.b64decode(b64_data)
     img = Image.open(io.BytesIO(img_bytes))
     if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
         img = img.convert('RGBA')
@@ -257,6 +255,12 @@ def dataurl_to_tensor(image_b64):
         img = img.convert('RGB')
     arr = np.array(img).astype(np.float32) / 255.0
     return torch.from_numpy(arr).unsqueeze(0)
+
+
+def dataurl_to_tensor(image_b64):
+    """dataURL → [1, H, W, 3|4] float tensor（工作区入库用的那一个方向）。"""
+    b64_data = image_b64.split(',', 1)[1] if ',' in image_b64 else image_b64
+    return image_bytes_to_tensor(base64.b64decode(b64_data))
 
 
 # ---- Pose 估计的把手（模型与推理都不在本包里）----
@@ -327,6 +331,28 @@ def staging_image_to_mask(img):
     if img.dim() == 2:
         return img.unsqueeze(0)
     return None
+
+
+def processor_input_tensor(key, server):
+    """Processor 的 image_keys 一项 → [1,H,W,C] tensor（取不到返回 None）。
+
+    `asset:<哈希>` 是 Assets 来源：仓库里那份字节就是正身，按内容地址直接读 —— 不经过
+    图池，也就不存在"同一张图再塞一份"和指错条目。其余（数字 staging id）仍走内存里的
+    tensor 引用：画布派生的输入是在途数据，不属于仓库。
+    """
+    s = str(key or '')
+    if s.startswith('asset:'):
+        path = asset_store.path_of(s[len('asset:'):])
+        if not path:
+            print(f'[InterfaceExec] asset input {s}: no bytes in the store')
+            return None
+        try:
+            with open(path, 'rb') as f:
+                return image_bytes_to_tensor(f.read())
+        except Exception as e:
+            print(f'[InterfaceExec] asset input {s}: {e}')
+            return None
+    return server.get_staging_image(s)
 
 
 def mask_as_image(mask):
@@ -2662,11 +2688,12 @@ class SnapshotDetailerSamplerServer:
                             'modes':   {'block': bool, 'processor': bool},
                             'block_ports': {'in': <start port num>, 'out': <end port num>},
                             'output_targets': {<port num>: 'new_layer'|'selected_layer'|
-                                               'selected_mask'|'staging'},
-                            'input_sources': {<port num>: 'layers'|'selected'|'staging'|
+                                               'selected_mask'|'asset'},
+                            'input_sources': {<port num>: 'layers'|'selected'|'asset'|
                                                'main_mask'|'selected_mask'|'selected_alpha'|'mask_alpha'},
                             'allow_list': bool}}
         端口号一律收成 str（JSON 键本就是字符串），label 去空白、空 label 视为没改。
+        `asset` = Processor 的仓库那一档；老的 `staging` 仍收（页面按 asset 读）。
         output_targets / input_sources = image/mask 出口的默认落位与入口的默认来源（Processor
         小窗的初值），取值出枚举就丢。
         allow_list = Allow List 开关：Processor 吃/吐整列图（视频逐帧那条路），执行时按节点
@@ -2675,8 +2702,8 @@ class SnapshotDetailerSamplerServer:
         out = {}
         if not isinstance(raw, dict):
             return out
-        dst_enum = {'new_layer', 'selected_layer', 'selected_mask', 'staging'}
-        src_enum = {'layers', 'selected', 'staging', 'main_mask', 'selected_mask',
+        dst_enum = {'new_layer', 'selected_layer', 'selected_mask', 'asset', 'staging'}
+        src_enum = {'layers', 'selected', 'asset', 'staging', 'main_mask', 'selected_mask',
                     'selected_alpha', 'mask_alpha', 'video'}
         for name, entry in raw.items():
             if not isinstance(name, str) or not name or not isinstance(entry, dict):
@@ -7976,9 +8003,10 @@ class SnapshotDetailerSamplerNode:
             dbg.record_image('上下文图（pipeline 当前图）', base_img)
             dbg.record_mask('上下文 mask', base_mask)
 
-        # 构建端口级图片覆盖。端口声明为 MASK 的走亮度转换 —— 覆盖值都是 staging 里
-        # 的 [1,H,W,C] 图，直接灌进 mask 端口形状不对。
-        # Allow List：image_keys 的值可以是**一列** staging id（list 模式的多图入口），
+        # 构建端口级图片覆盖。端口声明为 MASK 的走亮度转换 —— 覆盖值都是 [1,H,W,C] 图，
+        # 直接灌进 mask 端口形状不对。
+        # image_keys 的每项可以是 staging id（画布派生的在途图）或 `asset:<哈希>`（Processor
+        # 的 Assets 来源，后端直接从仓库读字节）；Allow List 下还可以是**一列**这样的键。
         # video_inputs 直接按 {file, f0, n, fps} 帧段抽帧成一列（旧快照的 {file, ss, t, …}
         # 仍照旧按秒走）—— 两条路都落成
         # port_overrides 里的 list，由 InterfaceExecutor 的 list_mode 分流。
@@ -7990,7 +8018,7 @@ class SnapshotDetailerSamplerNode:
         port_overrides = {}
         for port_num_str, key in image_keys.items():
             keys = key if isinstance(key, list) else [key]
-            imgs = [server.get_staging_image(k) for k in keys if k]
+            imgs = [processor_input_tensor(k, server) for k in keys if k]
             imgs = [x for x in imgs if x is not None]
             if not imgs:
                 continue
@@ -8002,7 +8030,8 @@ class SnapshotDetailerSamplerNode:
             port_overrides[int(port_num_str)] = vals if (list_mode or len(vals) > 1) else vals[0]
             if own_trace:
                 _pname = _start_names.get(str(port_num_str)) or f'value{port_num_str}'
-                _detail = f'staging {keys}' + (f'（{len(vals)} 张一列）' if len(vals) > 1 else '')
+                _what = ('asset ' if all(str(k).startswith('asset:') for k in keys if k) else 'staging ')
+                _detail = f'{_what}{keys}' + (f'（{len(vals)} 张一列）' if len(vals) > 1 else '')
                 _detail += '（亮度转 mask）' if declared == 'MASK' else ''
                 if declared == 'MASK':
                     dbg.record_mask(f'输入覆盖 · {_pname}', vals[0], detail=_detail)

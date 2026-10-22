@@ -11496,7 +11496,10 @@ async function dataURLToBytes(url) {
 }
 async function assetImportBytes(bytes, name, origin) {
     // 从读档回来的图层带的是原 Blob（cudAssetBytes），不是 ArrayBuffer —— 两种都收。
-    const dataUrl = bytes instanceof Blob ? await blobToDataURL(bytes) : bytesToDataURL(bytes);
+    // 已经是 dataURL 的直接用（Processor 的产出这一种，别再解一遍再编一遍）。
+    const dataUrl = typeof bytes === 'string'
+        ? bytes
+        : (bytes instanceof Blob ? await blobToDataURL(bytes) : bytesToDataURL(bytes));
     const body = JSON.stringify({
         data: dataUrl, name: name || 'cud.png',
         library: false, origin: origin || 'cud-save',
@@ -13453,8 +13456,8 @@ const UI_COMMANDS = {
     'detector-threshold': v => { const n = Number(v); if (Number.isFinite(n)) { detectThresholdValue = Math.max(0, Math.min(1, n)); syncDetectorUI(); } },
     'detector-invert': v => { detectInvertValue = !!v; syncDetectorUI(); },
     'detector-run': () => openDetectModal(),
-    // Processor：换 interface / 挑来源落位 / 挑工作区条目 / 拧一口参数。每一句都落回页面那三样真值源，
-    // 再重拼一次描述符播出去 —— 换源可能带出或收起 staging 子行，所以每一次都要重拼。
+    // Processor：换 interface / 挑来源落位 / 挑仓库图 / 拧一口参数。每一句都落回页面那三样真值源，
+    // 再重拼一次描述符播出去 —— 换源可能带出或收起 asset 子行，所以每一次都要重拼。
     'processor-interface': v => {
         // 宿主发的是这枚接口的身份：package 下标（processorList[].index，稳定）+ 名字。以前只发
         // "这份列表里的第几项"—— 列表成员随 Processor 开关增删，位置就漂了：宿主手里那份旧列表的
@@ -13490,12 +13493,12 @@ const UI_COMMANDS = {
         processorSel.set(procSelKey(p.index, side, port), String(o.value));
         syncProcessorUI();
     },
-    'processor-staging': v => {
+    'processor-asset': v => {
         const p = processorCurrent(); if (!p) return;
         const o = uiRow(v);
         const port = Number(o.port);
         if (!Number.isFinite(port)) return;
-        processorSel.set(procSelKey(p.index, 'in:staging', port), String(o.id));
+        processorSel.set(procSelKey(p.index, 'in:asset', port), String(o.hash));
         syncProcessorUI();
     },
     'processor-param': v => {
@@ -13686,11 +13689,36 @@ let processorChoiceIndex = -1;
 let processorSel = new Map();      // '<ifaceIndex>:in|out:<port>' -> 枚举值（跨重渲染记住）
 let processorBusy = false;         // 一次 run 在飞，blend-processor-result 收尾
 let processorRunIdx = -1;          // 在飞这次用的 interface（结果按它找目的枚举）
+// Assets 来源的下拉：仓库里的图片清单（/api/global_assets 的 image 那些）。这份清单不在快照里
+// —— 它和宿主 Assets 窗读的是同一份仓库、同一个路由，宿主不必每次 push 都带一遍。页面自己拉、
+// 自己缓存（5s），下拉里挑的哈希只住 processorSel。
+let processorAssets = [];          // [{hash, name}]，新的在前
+let processorAssetsAt = 0;         // 上次拉取（含失败）的时间
+let processorAssetsBusy = false;
+function kickProcessorAssets(force) {
+    if (processorAssetsBusy) return;
+    if (!force && Date.now() - processorAssetsAt < 5000) return;
+    processorAssetsBusy = true;
+    processorAssetsAt = Date.now();
+    fetch('/api/global_assets')
+        .then(r => r.json())
+        .then(d => {
+            const items = Array.isArray(d && d.assets) ? d.assets : [];
+            processorAssets = items
+                .filter(a => a && a.kind === 'image' && (a.hash || a.id))
+                .map(a => ({
+                    hash: String(a.hash || a.id),
+                    name: String(a.displayName || a.name || a.hash || a.id).slice(0, 80),
+                }));
+        })
+        .catch(() => { /* 拉不到就用上一份；空清单由选择行自己明说 */ })
+        .then(() => { processorAssetsBusy = false; syncProcessorUI(); });
+}
 
 const PROCESSOR_SRC_IMAGE = [
     ['layers', 'Layers', 'The Layers composite — the canvas as it stands right now'],
     ['selected', 'Sel. Layer', 'The selected layer\'s own pixels, at its native size'],
-    ['staging', 'Staging', 'A workspace entry picked below'],
+    ['asset', 'Assets', 'An image from the asset store picked below — its bytes are read straight from the store'],
 ];
 const PROCESSOR_SRC_MASK = [
     ['main_mask', 'Main Mask', 'The Mask layer\'s coverage — the same mask a run would use'],
@@ -13700,12 +13728,12 @@ const PROCESSOR_SRC_MASK = [
 ];
 const PROCESSOR_DST_IMAGE = [
     ['new_layer', 'New Layer', 'The result lands as a new layer on the canvas'],
-    ['staging', 'Staging', 'A copy of the result is parked in the workspace'],
+    ['asset', 'Assets', 'The result is saved to the asset store (session scope) — the canvas is untouched'],
 ];
 const PROCESSOR_DST_MASK = [
     ['selected_mask', 'Sel. Mask', 'The result writes back into the selected layer\'s mask'],
     ['selected_layer', 'Sel. Layer', 'The mask renders as a black/white image that replaces the selected layer\'s pixels'],
-    ['staging', 'Staging', 'A copy of the mask (as an image) is parked in the workspace'],
+    ['asset', 'Assets', 'The mask (as a black/white image) is saved to the asset store (session scope)'],
 ];
 const PROCESSOR_HINTS = {
     in: { IMAGE: 'Image input', MASK: 'Mask input' },
@@ -13728,14 +13756,16 @@ function procDstTable(type) { return type === 'MASK' ? PROCESSOR_DST_MASK : PROC
 // 端口的默认源/落位:Interface tab 里为这枚 interface 存的 input_sources / output_targets（键 =
 // 端口号字符串，随 interface_meta 持久化到 blocks_sets.json）。出入口行都用它当初值;取值是否
 // 合法不用这里管 —— procPick 的 fallback 本来就只认候选表里有的那几枚，类型对不上（老配置 /
-// 改过端口）自动退回表第一项。
+// 改过端口）自动退回表第一项。老的 `staging` 两档现在都叫 `asset`（图池的落位改由仓库承载）：
+// 读回来时按新名给，别让老配置静默退到第一项。
 function procDefaultPick(ifaceIdx, port) {
     const p = processorList.find(x => x.index === ifaceIdx);
     if (!p) return undefined;
+    const norm = v => (v === 'staging' ? 'asset' : v);
     const o = p.output_targets ? p.output_targets[String(port)] : null;
-    if (typeof o === 'string') return o;
+    if (typeof o === 'string') return norm(o);
     const i = p.input_sources ? p.input_sources[String(port)] : null;
-    return typeof i === 'string' ? i : undefined;
+    return typeof i === 'string' ? norm(i) : undefined;
 }
 
 // 参数值：只有"在这扇窗里拧过的"才存进 processorSel（键 <iface>:manual:<port>）；没拧过的每次
@@ -13809,23 +13839,25 @@ function syncProcessorUI() {
         const paramPorts = p.start_ports.filter(x => x.category === 'manual');
         const outPorts = p.end_ports.filter(x => x.type === 'IMAGE' || x.type === 'MASK' || x.type === 'PIPELINE_DATA');
 
-        // 输入行：每个 image/mask 起端口一行；选 Staging 的 image 输入多带一行工作区条目选择。
+        // 输入行：每个 image/mask 起端口一行；选 Assets 的 image 输入多带一行仓库图选择。
         for (const port of inPorts) {
             const table = port.type === 'MASK' ? PROCESSOR_SRC_MASK : PROCESSOR_SRC_IMAGE;
             const cur = pick('in', port, table);
-            let staging = null;
-            if (port.type === 'IMAGE' && cur === 'staging') {
-                // 页面这一侧没挑过就默认落在最后一枚（原来 `s === stagingItems[last]` 那一句）。
-                const stored = processorSel.get(procSelKey(p.index, 'in:staging', port.num));
-                const ids = stagingItems.map(s => String(s.id));
-                const curId = (stored !== undefined && ids.includes(String(stored)))
+            let asset = null;
+            if (port.type === 'IMAGE' && cur === 'asset') {
+                // 没挑过就默认落在最新的一件（清单新的在前）。挑过的哈希若已不在库里（删了 / 别的
+                // 会话清掉了）也退回最新那件 —— 下拉里亮着一件库里没有的货比换一件更糟。
+                const stored = processorSel.get(procSelKey(p.index, 'in:asset', port.num));
+                const hashes = processorAssets.map(a => a.hash);
+                const curHash = (stored !== undefined && hashes.includes(String(stored)))
                     ? String(stored)
-                    : (ids.length ? ids[ids.length - 1] : '');
-                staging = { options: stagingItems.map(s => ({ id: String(s.id), name: s.name })), cur: curId };
+                    : (hashes.length ? hashes[0] : '');
+                asset = { options: processorAssets.map(a => ({ id: a.hash, name: a.name })), cur: curHash };
+                kickProcessorAssets(false);
             }
             inputs.push({
                 num: port.num, name: port.name, hint: `${PROCESSOR_HINTS.in[port.type]} — ${port.name}`,
-                options: choices(table), cur, staging,
+                options: choices(table), cur, asset,
                 // 端口类型本身：宿主靠它认出哪些行能挂 Video 候选（Allow List 的视频路只接 image）。
                 type: port.type,
             });
@@ -13893,7 +13925,8 @@ function syncProcessorUI() {
     queueBlendUi();
 }
 
-// 输入收集：返回 dataURL，收集不了（没选图层、mask 没墨、工作区空）返回 null —— 状态已报。
+// 输入收集：返回 dataURL，或 Assets 来源的 `{asset: 哈希}`（字节由后端从仓库直读）；收集不了
+// （没选图层、mask 没墨、仓库空）返回 null —— 状态已报。
 function processorCollectInput(port, ifaceIdx) {
     const isMask = port.type === 'MASK';
     const table = isMask ? PROCESSOR_SRC_MASK : PROCESSOR_SRC_IMAGE;
@@ -13904,12 +13937,13 @@ function processorCollectInput(port, ifaceIdx) {
         setStatus('Video input runs in video mode — switch the mode segment to Video and Run again', 'error');
         return null;
     }
-    if (choice === 'staging') {
-        const id = processorSel.get(procSelKey(ifaceIdx, 'in:staging', port.num));
-        const it = stagingItems.find(s => s.id === id) || stagingItems[stagingItems.length - 1];
-        if (!it) { setStatus('The workspace is empty — drop an image into Staging first', 'error'); return null; }
-        processorSel.set(procSelKey(ifaceIdx, 'in:staging', port.num), it.id);
-        return it.src;
+    if (choice === 'asset') {
+        const stored = processorSel.get(procSelKey(ifaceIdx, 'in:asset', port.num));
+        const it = processorAssets.find(a => a.hash === stored) || processorAssets[0];
+        if (!it) { setStatus('The asset store has no images yet — import one in the Assets window', 'error'); return null; }
+        processorSel.set(procSelKey(ifaceIdx, 'in:asset', port.num), it.hash);
+        // 回哈希而不是 dataURL：字节留在仓库里，后端按内容地址直接取（同一张图不在这儿再塞一份）。
+        return { asset: it.hash };
     }
     if (isMask) {
         if (choice === 'main_mask') {
@@ -13954,9 +13988,9 @@ function runProcessor() {
     const inputs = [];
     for (const port of p.start_ports) {
         if (port.type !== 'IMAGE' && port.type !== 'MASK') continue;
-        const dataUrl = processorCollectInput(port, p.index);
-        if (dataUrl === null) return;
-        inputs.push({ port: port.num, dataUrl });
+        const got = processorCollectInput(port, p.index);
+        if (got === null) return;
+        inputs.push(typeof got === 'string' ? { port: port.num, dataUrl: got } : { port: port.num, asset: got.asset });
     }
     if (!inputs.length) { setStatus('That processor takes no image or mask inputs', 'error'); return; }
     // 参数只报"填过的"那些口：空着 = 这一口不报，后端拿它在图里派生出来的默认值跑。
@@ -13985,8 +14019,8 @@ function resetProcessorValues() {
     setStatus('Parameter values are back to what the graph carries', 'success');
 }
 
-// 结果落位。image 出口：新图层或工作区（隐藏条目复制一份可见的）；mask 出口：写回选中图层的
-// mask、把 mask 变成图替换选中图层像素、或进工作区。每档都要有选中图层兜底。
+// 结果落位。image 出口：新图层，或存进资产仓库（session 作用域，画布不动）；mask 出口：写回选中
+// 图层的 mask、把 mask 变成图替换选中图层像素、或存进资产仓库。图层那几档都要有选中图层兜底。
 function finishProcessorRun(d) {
     processorBusy = false;
     setActionBusy(false);
@@ -14000,14 +14034,14 @@ function finishProcessorRun(d) {
     processorRunIdx = -1;
     const results = Array.isArray(d.results) ? d.results : [];
     if (!results.length) { setStatus('Processor finished with no results', 'error'); return; }
-    const staged = [];
+    const parked = [];   // 落 Assets 的结果：等这一趟全摆完统一入库（异步，别卡住别的落位）
     let hitLayerTrouble = false;
     for (const r of results) {
         if (!r || typeof r.port !== 'number' || !r.src) continue;
         const isMask = r.type === 'MASK';
         const dst = procPick(ifaceIdx, 'out', r.port, procDstTable(isMask ? 'MASK' : 'IMAGE'),
             procDefaultPick(ifaceIdx, r.port));
-        if (dst === 'staging') { staged.push({ src: r.src, name: r.name || 'Processed' }); continue; }
+        if (dst === 'asset') { parked.push({ src: r.src, name: r.name || 'Processor' }); continue; }
         const l = getSelected();
         if (!l || l.isMaskLayer) { hitLayerTrouble = true; continue; }
         if (!isMask && dst === 'new_layer') {
@@ -14040,11 +14074,49 @@ function finishProcessorRun(d) {
             replaceLayerImage(l.id, { src: r.src, name: l.name });
         }
     }
-    if (staged.length) {
-        window.parent.postMessage({ type: 'blend-staging-upload', images: staged.map(s => s.src), names: staged.map(s => s.name) }, '*');
+    if (parked.length) {
+        // 入库是异步的：这一趟的状态由它收尾（存了几件 / 失败几件），别在这里先报一句"done"。
+        void parkProcessorResults(parked, results.length, hitLayerTrouble);
+        return;
     }
     if (hitLayerTrouble) setStatus('Processor done — select an image layer for the layer/mask outputs', 'error');
     else setStatus(`Processor done — ${results.length} result${results.length === 1 ? '' : 's'}`, 'success');
+}
+
+// "Assets" 落位：结果直接进仓库（session 作用域）—— 不进图池、也不上画布，与视频那条路
+// （New Track / Asset）同一个语义：产物是资产，工作区只是引用它的地方。名字原样带过去
+// （Assets 窗里那张卡就该叫这个），一件失败不吞掉其它几件。
+async function parkProcessorResults(items, total, layerTrouble) {
+    let saved = 0, failed = 0;
+    for (const it of items) {
+        const base = String(it.name || 'Processor').replace(/[\\/:*?"<>|]+/g, '_');
+        const name = /\.[a-z0-9]{2,5}$/i.test(base) ? base : base + '.png';
+        try {
+            const id = await assetImportBytes(it.src, name, 'processor');
+            // 入库那一口不收名字（library:false 不写表）；这里补一条只动元数据的改名 ——
+            // 卡片该叫结果端口那个名字，而不是一串哈希。member 仍是 false（session 作用域）。
+            try {
+                await fetch('/api/asset_update', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id, name }),
+                });
+            } catch (e) { /* 改名失败不影响字节已经进库 */ }
+            saved++;
+        } catch (e) {
+            failed++;
+            console.warn('processor result → asset store failed', e);
+        }
+    }
+    if (saved) {
+        kickProcessorAssets(true);
+        // 宿主那扇 Assets 窗攥着自己的清单，不知道这儿刚写了一件 —— 让它重拉一次。
+        window.parent.postMessage({ type: 'blend-assets-changed' }, '*');
+    }
+    const head = `Processor done — ${total} result${total === 1 ? '' : 's'}`;
+    const miss = failed ? `, ${failed} failed` : '';
+    const tail = layerTrouble ? ' · select an image layer for the layer/mask outputs' : '';
+    if (failed && !saved) setStatus(`${head} — could not save to Assets${tail}`, 'error');
+    else setStatus(`${head}, ${saved} saved to Assets${miss}${tail}`, layerTrouble ? 'error' : 'success');
 }
 
 // Interface 枚举与三段端口行的正文都在宿主（workbench/processor.tsx）—— 这里只把第一份描述符播出去。

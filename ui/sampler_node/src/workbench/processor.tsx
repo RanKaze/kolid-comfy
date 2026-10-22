@@ -94,7 +94,7 @@ const ProcessorBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
   const p = ui.processor;
   const none = p.names.length === 0;
   // Allow List + 视频模式：输入/输出的候选**整表**换成视频那一套 —— 图像模式那张源表
-  // （Layers / Sel. Layer / Staging）在视频模式下没有意义：画布被播放器盖着，图层也不是
+  // （Layers / Sel. Layer / Asset）在视频模式下没有意义：画布被播放器盖着，图层也不是
   // 用户眼里的东西。挑选值住在宿主 store（video/procPicks），不经 Blend 页。
   const videoMode = host.video.mode === 'video';
   const vidTables = videoMode && p.allowList;
@@ -183,16 +183,16 @@ const ProcessorBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
                 </select>
               </div>
             )}
-            {/* 图像模式的 Staging 条目选择（页面拼的描述符，视频模式下不出现）。 */}
-            {!vidTables && row.staging && (
+            {/* 图像模式的 Assets 条目选择（页面拼的描述符，视频模式下不出现）。 */}
+            {!vidTables && row.asset && (
               <div style={wbStyles.ctrl}>
                 <span style={{ ...wbStyles.ctrlLabel, width: 'auto' }} />
-                <select style={wbStyles.select} value={row.staging.cur} disabled={row.staging.options.length === 0}
-                  title="Which workspace entry feeds this input"
-                  onChange={e => send('processor-staging', { port: row.num, id: e.target.value })}>
-                  {row.staging.options.length === 0
-                    ? <option value="">— workspace is empty —</option>
-                    : row.staging.options.map(o => (
+                <select style={wbStyles.select} value={row.asset.cur} disabled={row.asset.options.length === 0}
+                  title="Which asset feeds this input — its bytes are read straight from the store by hash"
+                  onChange={e => send('processor-asset', { port: row.num, hash: e.target.value })}>
+                  {row.asset.options.length === 0
+                    ? <option value="">— asset store has no images —</option>
+                    : row.asset.options.map(o => (
                       <option key={o.id} value={o.id} style={{ background: '#1c1c1e', color: '#fff' }}>{o.name}</option>
                     ))}
                 </select>
@@ -268,10 +268,10 @@ export const processorUnit: WorkbenchUnit = {
   id: 'processor',
   title: 'Processor',
   hint: 'Processor — runs an interface that has Processor mode on as a fully offline pass: the pipeline’s current '
-    + 'image is never touched. Each image input reads the Layers composite, the selected layer or a staging entry; '
-    + 'each mask input reads the main Mask, the selected layer’s mask, its alpha, or mask AND alpha. Outputs land '
-    + 'as a new layer, back into the selected layer or its mask, or in the workspace. With Allow List on (Interface '
-    + 'tab), inputs go in as a column of images — in video mode from Tracks / Sel. Track / Asset, in segments — '
-    + 'and outputs come back as New Track / Asset.',
+    + 'image is never touched. Each image input reads the Layers composite, the selected layer or an asset from the '
+    + 'store; each mask input reads the main Mask, the selected layer’s mask, its alpha, or mask AND alpha. Outputs '
+    + 'land as a new layer, back into the selected layer or its mask, or in the asset store. With Allow List on '
+    + '(Interface tab), inputs go in as a column of images — in video mode from Tracks / Sel. Track / Asset, in '
+    + 'segments — and outputs come back as New Track / Asset.',
   Body: ProcessorBody,
 };
