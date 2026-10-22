@@ -305,8 +305,9 @@ function isNode(n: unknown): n is DockNode {
 // 剩下的树照旧认：少那一格，别的原地不动。
 // 退场的单元：曾经是一扇窗、现在没有了（或换了活法）。老布局里还留着它们的位置时按
 // "这一格没了"处理，不按"未知面板"报错。preprocess 搬进 Pipeline Graph 成了画布上的黑板，
-// 所以它从这一页的窗里退场 —— 老摆法里的那一格就地蒸发，剩下的窗照旧。
-const RETIRED_UNITS: UnitId[] = ['mask', 'preprocess'];
+// 所以它从这一页的窗里退场 —— 老摆法里的那一格就地蒸发，剩下的窗照旧。fxparams（Effect
+// Parameters）也走了同一条路：参数面现在贴在链里那枚 chip 旁边张开，不再占一扇 dock window。
+const RETIRED_UNITS: UnitId[] = ['mask', 'preprocess', 'fxparams'];
 
 // 一份存档"还能装"与"装得上"是两件事。树都没有（老页面写的 `u`/`g` 节点、手改坏的文件）才退回
 // 默认 —— 那时整棵树都在说这套模型不认的语言。除此之外交给 `fitLayout` 去救：剪掉不认识的单元、

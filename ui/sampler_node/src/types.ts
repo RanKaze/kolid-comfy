@@ -679,7 +679,7 @@ export type BlendFxOpenStep = {
 /** 参数面上每一句回发的坐标：哪一层、哪一枚 Effects 容器、链里的第几步。三样缺一就落不到那一步上。 */
 export type BlendFxCoord = { layerId: number; attrId: string; stepId: number };
 
-/** 笔尖此刻落在那一枚**面**（decal / mask）上时，Effect Parameters 那一格摆的就是它的参数：
+/** 笔尖此刻落在那一枚**面**（decal / mask）上时，点这枚 chip 张开的参数小窗摆的就是它的参数：
  *  Frame source 的绑定与可回发的坐标。`trackId` 是记录自己的 `frameTrack`（'' = 用画好的面）；
  *  轨道列表归宿主（它在管 Video 工程），不在这一份里。 */
 export type BlendAttrOpen = {
@@ -852,8 +852,8 @@ export type BlendUi = {
    *  `wand` 是这颗按钮的画法等值：它不能由 React 自己抄一份魔棒 SVG（那是第二份真相），所以由页面把
    *  `fxWandSvg()` 的原串放进快照 —— 条带上那枚链 chip 用的是同一个作者，一次赋值就不再变。 */
   fx: { bypass: boolean; wand: string; open: BlendFxOpenStep | null };
-  /** 笔尖落在那一枚面 attribute（decal / mask）上时的参数面。链没有展开时，Effect Parameters 那一格
-   *  摆的就是这一枚的 Frame source 下拉；链展开时 `fx.open` 占位（一次只摊一块参数面）。 */
+  /** 笔尖落在那一枚面 attribute（decal / mask）上时的参数面。链没有展开时，点这枚 chip 张开的小窗
+   *  摆的就是它的 Frame source 下拉；链展开时 `fx.open` 占位（一次只摊一块参数面）。 */
   attrOpen: BlendAttrOpen | null;
   /** Layers 那一格 Add 菜单里那条「往后的图是 raster 还是 smart object」的勾。它是页面那一份持久偏好
    *  （`blend.rasterDrop`）的镜像 —— 宿主只管摆这条目与亮这颗勾，翻开与否落在页面那一句里。 */

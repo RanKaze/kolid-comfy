@@ -3,6 +3,7 @@ import type { BlendAttrChip, BlendChainLane, BlendLayerRow, BlendStack, BlendUiS
 import type { WorkbenchHostCtx } from './registry';
 import { useBlendUi } from './store';
 import { useLayerEditBlocked } from './editGate';
+import { FxPopover, closeAttrPop, toggleAttrPop } from './fxPopover';
 
 // Layers / Guidances 两格的正文。两格用的是同一套行代码（页面那一句 renderStackList 也是），
 // 区别只有头部那几颗按钮和空态那句话，所以这里交出来的是一块 `LayerListView`，两格各摆一份。
@@ -285,8 +286,14 @@ const AttrChip = ({ row, chip, send }: { row: BlendLayerRow; chip: BlendAttrChip
       onClick={ev => {
         ev.stopPropagation();
         // ctrl+左键 = 启用/停用这一步（全体 attribute 同一套手势）；普通点击才是 spec.open 那一句。
+        // 面（decal / mask）那一下同时把它的 Frame source 小窗翻过来 —— 原来它是跟着 attrOpen 挂在
+        // Effect Parameters 那一格里的，那一格退休以后就近摆在这枚 chip 旁边（同一个动作，两个可见结果）。
         if (ev.ctrlKey || ev.metaKey) send('attr-toggle', { layerId: row.id, attrId: chip.guid });
-        else send('attr-open', { layerId: row.id, attrId: chip.guid });
+        else {
+          send('attr-open', { layerId: row.id, attrId: chip.guid });
+          if (chip.kind === 'surface') toggleAttrPop(row.id, chip.guid);
+          else closeAttrPop();
+        }
       }}
       onContextMenu={ev => {
         ev.preventDefault();
@@ -412,11 +419,11 @@ const ChainLane = ({ row, lane, send }: { row: BlendLayerRow; lane: BlendChainLa
                 setRowUi({ dragging: ck, over: null });
               }}
               onDragEnd={() => endDrag()}
-              // 点这一枚 = 展开/收起**这一步**的参数面（Effect Parameters 那一格）。页面那一侧还是只有
-              // `fxOpenId` 那一个变量说"哪一步摊着"，所以这里发的是坐标，toggle 语义留在它那里。
-              // 勾选框与行尾那枚 × 各自 stopPropagation，不会顺带把面板点开。
+              // 点这一枚 = 展开/收起**这一步**的参数小窗（fxPopover.tsx，紧挨着这枚 chip 摆）。页面那一侧
+              // 还是只有 `fxOpenId` 那一个变量说"哪一步摊着"，所以这里发的是坐标，toggle 语义留在它那里。
+              // 勾选框与行尾那枚 × 各自 stopPropagation，不会顺带把小窗点开。
               title={`${step.label} — click to ${step.id === openId ? 'close' : 'open'} its parameters`}
-              onClick={() => send('fx-step-open', { layerId: row.id, attrId: lane.guid, stepId: step.id })}>
+              onClick={() => { closeAttrPop(); send('fx-step-open', { layerId: row.id, attrId: lane.guid, stepId: step.id }); }}>
               <input type="checkbox" checked={step.enabled} aria-label="Enable this effect"
                 title={step.enabled ? 'Bypass this effect' : 'Enable this effect'}
                 onClick={ev => ev.stopPropagation()}
@@ -656,7 +663,7 @@ const RowMenus = ({ menu, row, send, video }:
   }
   if (menu.kind === 'attr-add') {
     // decal / mask（surface 那一类）在**视频模式的 Layer 摞**里要先问"绑哪条 video 轨"：轨清单
-    // 只住在宿主（Video 工程），所以这一问就在这口菜单里就地展开 —— 与 Effect Parameters 那行
+    // 只住在宿主（Video 工程），所以这一问就在这口菜单里就地展开 —— 与面 chip 小窗里那行
     // Frame source 是同一份清单、同一个绑定（面记录自己的 frameTrack）。Guidances 摞、Image 模式、
     // 以及工程里还没有视频轨时都不问，照旧直接加入（这就是没有轨道可绑时唯一说得通的做法）。
     const canBind = row.stack === 'layer' && video.mode === 'video' && !blocked && video.tracks.length > 0;
@@ -785,9 +792,10 @@ export const LayerListView = ({ stack, rows, send, video }:
   useHoverKeys();
   const listKey = 'list:' + stack;
   const over = st.over && st.over.key === listKey;
+  const listRef = useRef<HTMLDivElement | null>(null);
   useFaceChannel(send);
   return (
-    <div className={'layer-list' + (over ? ' drop-target' : '')}
+    <div ref={listRef} className={'layer-list' + (over ? ' drop-target' : '')}
       onDragOver={ev => {
         // 资产仓库的图卡 = 智能图层落点（画布之外的第二落点，guidance 栈同理）。dragover 阶段
         // 只看得见类型名，看不出 kind —— 音视频在这一落点是空操作，drop 那一步才判。
@@ -839,6 +847,8 @@ export const LayerListView = ({ stack, rows, send, video }:
       }}>
       {!rows.length && <div className="layer-empty">{EMPTY_TEXT[stack]}</div>}
       {rows.map(row => <LayerRow key={row.id} row={row} send={send} video={video} />)}
+      {/* 点开的链步骤 / 面 chip 的参数小窗。它按 chip 的实时矩形摆到旁边，所以锚点就在这一摞里找。 */}
+      <FxPopover list={listRef} rows={rows.map(row => row.id)} send={send} video={video} />
       <HoverPreview stack={stack} />
     </div>
   );

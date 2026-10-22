@@ -2465,12 +2465,24 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .fx-chain.bypassed .fx-read { color: rgba(255,159,10,0.75); }
         .fx-warn { font-size: 10px; font-weight: 700; color: #ff9f0a; padding: 1px 3px; }
-        /* 参数面那一格（Effect Parameters）。取值照页面 .fx-params / .fx-fold-head / .fx-map-btn /
-           .fx-curve-* 那几条，换的是宿主：这些类现在住在 dock 的正文里，页面那套 .control-row 骨架
-           已经不跟着过来了，所以名字宽度、读数右对齐这些由 wbStyles 说，这里只留形状与颜色。
-           .fx-chip.open 是新的一层：参数面从链里搬出来住进宿主以后，"哪一颗 chip 摊着"这件事必须仍然
-           看得见，点亮的是那一枚 chip 自己（与页面当年那条 .fx-chip.open 同一个读法）。 */
+        /* 参数小窗（原 Effect Parameters 那一格）。取值照页面 .fx-params / .fx-fold-head / .fx-map-btn /
+           .fx-curve-* 那几条，换的是宿主：这些类住在贴 chip 张开的小卡片里（fxPopover.tsx），页面那套
+           .control-row 骨架已经不跟着过来了，所以名字宽度、读数右对齐这些由 wbStyles 说，这里只留形状与颜色。
+           .fx-chip.open 是新的一层：参数面从链里搬出来以后，"哪一颗 chip 摊着"这件事必须仍然看得见，
+           点亮的是那一枚 chip 自己（与页面当年那条 .fx-chip.open 同一个读法）。 */
         .fx-chip.open { background: rgba(10,132,255,0.16); box-shadow: inset 0 0 0 1px rgba(10,132,255,0.6); }
+        .fx-pop { position: fixed; z-index: 320; display: flex; flex-direction: column;
+            width: min(320px, calc(100vw - 16px)); max-height: min(440px, calc(100vh - 16px));
+            border-radius: 10px; background: rgba(24,24,27,0.97); color-scheme: dark;
+            backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 0.5px solid rgba(255,255,255,0.16); box-shadow: 0 14px 40px rgba(0,0,0,0.55); overflow: hidden; }
+        .fx-pop-head { display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 9px; flex-shrink: 0;
+            border-bottom: 0.5px solid rgba(255,255,255,0.09); }
+        .fx-pop-title { font-size: 11.5px; font-weight: 700; color: rgba(255,255,255,0.88); white-space: nowrap; }
+        .fx-pop-read { flex: 1; min-width: 0; text-align: right; font-size: 10.5px; color: rgba(255,255,255,0.5);
+            font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .fx-pop-body { min-height: 0; overflow-y: auto; }
+        .fx-pop-body .fx-params { max-height: none; overflow: visible; }
         .fx-params { max-height: 340px; overflow-y: auto; overflow-x: hidden; }
         .fx-fold-head { display: flex; align-items: center; gap: 5px; width: 100%; background: none; border: none;
             color: rgba(255,255,255,0.55); font-size: 10.5px; font-weight: 700; cursor: pointer; padding: 2px 0; }

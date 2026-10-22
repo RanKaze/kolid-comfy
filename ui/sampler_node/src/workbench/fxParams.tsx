@@ -2,15 +2,16 @@ import React, { useRef, useState } from 'react';
 import { useBlendUi } from './store';
 import { wbStyles } from './skin';
 import type { BlendAttrOpen, BlendFxCoord, BlendFxOpenStep, BlendFxRow, BlendUiSend } from '../types';
-import type { WorkbenchHostCtx, WorkbenchUnit, WorkbenchUnitProps } from './registry';
+import type { WorkbenchHostCtx } from './registry';
 
-// 特效参数面这一格 = 页面注册表编好的那一串行（快照 `fx.open.rows`），一个 kind 一颗控件。
+// 特效参数面 = 页面注册表编好的那一串行（快照 `fx.open.rows`），一个 kind 一颗控件。它不是 dock window：
+// 点开链里某一步时，宿主把这块正文摆到那一枚 chip 旁边的小窗里（见 fxPopover.tsx）。
 // 判据全在页面那一侧：哪几行出现（声明序 + 每行自己的 when + 折叠组的开合）、贴图槽那一行叫什么
 // 名字、绑的那张图此刻还在不在、曲线的 x 夹在两个邻居之间、范围外不加控制点、首末点删不得 ——
 // 这一侧一条都不重述，画完控件把手势的坐标发回去（拍板 25「都改成组件」：不留 hole，也不留第二份真相）。
 //
-// 一趟只有一步摊着（`fxOpenId` 那一个变量说的就是它），所以头部不需要"是哪一步"的选择器：那颗 chip
-// 就是入口，再点一次收起来 —— 一个动作一个可见入口。
+// 一趟只有一步摊着（`fxOpenId` 那一个变量说的就是它），所以小窗头部不需要"是哪一步"的选择器：那颗
+// chip 就是入口，再点一次收起来 —— 一个动作一个可见入口。
 
 type Base = { step: BlendFxOpenStep; send: BlendUiSend };
 type Of<K extends BlendFxRow['kind']> = Base & { row: Extract<BlendFxRow, { kind: K }> };
@@ -352,42 +353,30 @@ const FrameSourceRow = ({ attr, video, send }: {
   );
 };
 
-const FxParamsBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
+/** 参数面的正文（不含小窗头部 —— 标题与那颗 × 由 fxPopover 摆）。读的仍是同一份快照：
+ *  `fx.open` 那一趟摊着的是链里某一步的参数；没有链步骤摊着时退到 `attr.open`，摆笔尖正落着的那枚
+ *  面（decal / mask）的 Frame source。两样都没有就是一句空态 —— 正常路径下小窗根本不会开。 */
+export const FxParamsPanel: React.FC<{ send: BlendUiSend; video: WorkbenchHostCtx['video'] }> = ({ send, video }) => {
   const ui = useBlendUi();
   const step = ui.fx.open;
   if (!step) {
     const attr = ui.attrOpen;
     if (!attr) {
       return (
-        <div style={{ padding: 4 }}>
+        <div style={{ padding: 6 }}>
           <div className="layer-empty">No effect step is open — click a step in a chain to edit its parameters</div>
         </div>
       );
     }
     return (
       <div className="fx-params dark-scroll" style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: 4, minWidth: 0 }}>
-        <div style={wbStyles.row} title="The attribute the brush is painting right now">
-          <span className="fx-name">{attr.label || attr.type}</span>
-        </div>
-        <FrameSourceRow attr={attr} video={host.video} send={send} />
+        <FrameSourceRow attr={attr} video={video} send={send} />
       </div>
     );
   }
   return (
     <div className="fx-params dark-scroll" style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: 4, minWidth: 0 }}>
-      <div style={wbStyles.row} title={`This step draws: ${step.readout || 'no readout'}`}>
-        <span className="fx-name">{step.label}</span>
-        <span style={{ ...wbStyles.readout, flex: 1, textAlign: 'right' }}>{step.readout}</span>
-      </div>
       {step.rows.map(row => <FxRow key={row.key} step={step} row={row} send={send} />)}
     </div>
   );
-};
-
-export const fxParamsUnit: WorkbenchUnit = {
-  id: 'fxparams',
-  title: 'Effect Parameters',
-  hint: 'The knobs of the one effect step you opened: click a step in a chain and its parameters land here. '
-    + 'Every row comes from the effect registry, so a mode row hides the knobs that no longer mean anything.',
-  Body: FxParamsBody,
 };

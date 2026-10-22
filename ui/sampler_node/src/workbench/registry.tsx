@@ -6,7 +6,6 @@ import { bucketUnit } from './bucket';
 import { canvasUnit } from './canvas';
 import { colorUnit } from './color';
 import { eraserUnit } from './eraser';
-import { fxParamsUnit } from './fxParams';
 import { guidancesUnit } from './guidances';
 import { historyUnit } from './history';
 import { layersUnit } from './layers';
@@ -71,7 +70,9 @@ export type WorkbenchUnit = {
 // 标题条和一圈空白 —— 这一列的高度是尺子量出来的，省一格是一格。
 // Guidances 与 Layers 是这一列的倒数第二对 —— 页面上就是这两格压在工具列尾巴上，且 Guidances 在上。
 // History 排在 Layers 之后（拍板 24.a：右栏、紧贴 Layers 下面）。
-// Effect Parameters 压在最末：它说的是链里被点开的那一步，读的是快照 `fx.open`，没点开就是一句空态。
+// Effect Parameters 曾经压在最末，现在**不在这一列里**：它不再是 dock window，而是点开链里某一步时
+// 贴在那枚 chip 旁边的一张参数小窗（见 fxPopover.tsx / fxParams.tsx）。少一扇窗，也就少一格标题条
+// 和一圈空白 —— 这一列的高度是尺子量出来的，省一格是一格（与 Mask 搬进 Guidances 同一条理由）。
 // 搬完一块就往后加一行，页面那一侧同时删掉它自己那一格。
 // Layout 是唯一一格**没有正文对象**的：它摆的是别的窗口，读的是 dock 树，所以它要的是宿主那把
 // 写口（`host.layout`），而不是页面播报过来的快照。
@@ -82,7 +83,7 @@ export const WORKBENCH_UNITS: WorkbenchUnit[] = [
   canvasUnit, transformUnit, colorUnit, brushUnit, bucketUnit, eraserUnit, selectionUnit, viewUnit,
   // 侧栏那六格工具小窗：Text、Geometry、3D、Pose、Detector、Processor（序 = 页面那一列的序）。
   textUnit, geometryUnit, scene3dUnit, poseUnit, detectorUnit, processorUnit,
-  guidancesUnit, layersUnit, historyUnit, fxParamsUnit,
+  guidancesUnit, layersUnit, historyUnit,
   // Layout 压在最末：它不画页面上的任何东西，只记别人怎么摆 —— 摆法用不上时它就该在最不碍事的地方。
   layoutUnit,
 ];
