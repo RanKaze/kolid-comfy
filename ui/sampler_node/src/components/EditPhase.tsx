@@ -19,9 +19,10 @@ import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModa
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
 import { setLayerEditBlocked } from '../workbench/editGate';
-import { getBlendUi, setBlendUi } from '../workbench/store';
+import { getBlendUi, setBlendUi, getActiveBlendUid } from '../workbench/store';
+import { resetRowInteraction } from '../workbench/layerRow';
 import { ingestFile } from '../workbench/video/ingest';
-import { clearProcFill, clearProcQueue, dequeueProcClip, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, vidStagingOverlay } from '../workbench/video/procRun';
+import { beginVidProcRun, clearProcFill, clearProcQueue, dequeueProcClip, endVidProcRun, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, setVidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets, Card, type StoreAsset } from '../workbench/video/Assets';
 import { VidPlayer } from '../workbench/video/Player';
@@ -1020,10 +1021,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const vidStopRef = useRef<string | null>(null);
   // 视频 list 跑的进度条与 Cancel 走**原本那一条**：写进 BlendUi 快照的 staging 段（与 detailer /
   // 图像模式 Processor 同一个真值源），RunStatusSeg 原样读、原样画 —— 不另起一套。跑动期间页面
-  // 推来的快照由 App 侧按 vidStagingOverlay 合流，不会被冲掉。
+  // 推来的快照由 App 侧按 vidStagingOverlay（getVidStagingOverlay(uid)）合流，不会被冲掉。
   const pushVidStaging = (patch: { busy?: boolean; cancelLive?: boolean; progress?: number }) => {
+    const uid = getActiveBlendUid();
+    if (uid === null) return;
     const ui = getBlendUi();
-    setBlendUi({ ...ui, staging: { ...ui.staging, ...patch } });
+    setBlendUi(uid, { ...ui, staging: { ...ui.staging, ...patch } });
   };
   // 原本那颗 Cancel 的去向：视频 list 跑在飞就打断它；否则照旧走页面的 staging-cancel。
   const cancelActiveRun = useCallback(() => {
@@ -1121,13 +1124,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   ): Promise<SegMeta[]> => {
     const setSegProgress = (segP: number) => {
       const p = segCount > 1 ? (segAt + segP) / segCount : segP;
-      vidStagingOverlay.progress = p;
+      setVidStagingOverlay({ progress: p });
       pushVidStaging({ progress: p });
       onSegProgress?.(segP);
     };
-    vidStagingOverlay.busy = true;
-    vidStagingOverlay.progress = segCount > 1 ? segAt / segCount : -1;
-    pushVidStaging({ busy: true, cancelLive: true, progress: vidStagingOverlay.progress });
+    const segOverlayProgress = segCount > 1 ? segAt / segCount : -1;
+    setVidStagingOverlay({ busy: true, progress: segOverlayProgress });
+    pushVidStaging({ busy: true, cancelLive: true, progress: segOverlayProgress });
     setVidProcRun({ state: 'running', msg: segMsg });
     await fetch('/api/execute_interface', {
       method: 'POST',
@@ -1249,6 +1252,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     }
 
     vidProcBusy.current = true;
+    beginVidProcRun(getActiveBlendUid());
     // 同一趟 Run 的所有占位共用一颗 runId —— 播报统计/续跑按它认亲。
     const runId = `proc-${Date.now()}`;
     // 输出口 → 各段占位的 clip id（下标 = 段号）：跑完一段按它找到坑来替换。
@@ -1356,11 +1360,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         : { state: 'error', msg: `Processor failed — ${e instanceof Error ? e.message : String(e)}${tail}` });
     } finally {
       // 撤掉原本那条 seg：快照 staging 段回 idle（页面之后的 push 也不再被覆盖）。
-      vidStagingOverlay.busy = false;
-      vidStagingOverlay.progress = -1;
+      setVidStagingOverlay({ busy: false, progress: -1 });
       pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
       vidCancelRef.current = false;
       vidProcBusy.current = false;
+      endVidProcRun();
     }
   }, [interfaces, vidTransport, vidUpdate, autoSaveCud]);
 
@@ -1527,6 +1531,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       }
     }
     vidProcBusy.current = true;
+    beginVidProcRun(getActiveBlendUid());
     vidCancelRef.current = false;
     let runningId = clipId;
     try {
@@ -1554,12 +1559,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           : { state: 'error', msg: `Generator failed — ${e instanceof Error ? e.message : String(e)}` });
     } finally {
       clearProcFill(clipId);
-      vidStagingOverlay.busy = false;
-      vidStagingOverlay.progress = -1;
+      setVidStagingOverlay({ busy: false, progress: -1 });
       pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
       vidCancelRef.current = false;
       if (before.some(s => s.id === vidStopRef.current) || vidStopRef.current === clipId) vidStopRef.current = null;
       vidProcBusy.current = false;
+      endVidProcRun();
     }
   }, [interfaces, execVgenClip]);
 
@@ -1656,13 +1661,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   ): Promise<SegMeta[]> => {
     const setSegProgress = (segP: number) => {
       const p = segCount > 1 ? (segAt + segP) / segCount : segP;
-      vidStagingOverlay.progress = p;
+      setVidStagingOverlay({ progress: p });
       pushVidStaging({ progress: p });
       onSegProgress?.(segP);
     };
-    vidStagingOverlay.busy = true;
-    vidStagingOverlay.progress = segCount > 1 ? segAt / segCount : -1;
-    pushVidStaging({ busy: true, cancelLive: true, progress: vidStagingOverlay.progress });
+    const segOverlayProgress = segCount > 1 ? segAt / segCount : -1;
+    setVidStagingOverlay({ busy: true, progress: segOverlayProgress });
+    pushVidStaging({ busy: true, cancelLive: true, progress: segOverlayProgress });
     setVidProcRun({ state: 'running', msg: segMsg });
     await fetch('/api/preset_video', {
       method: 'POST',
@@ -1740,6 +1745,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     }
 
     vidProcBusy.current = true;
+    beginVidProcRun(getActiveBlendUid());
     const runId = `preset-${Date.now()}`;
     const placeholderIds: string[] = [];
     try {
@@ -1811,11 +1817,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         ? { state: 'cancelled', msg: `Preset run cancelled${tail}` }
         : { state: 'error', msg: `Preset failed — ${e instanceof Error ? e.message : String(e)}${tail}` });
     } finally {
-      vidStagingOverlay.busy = false;
-      vidStagingOverlay.progress = -1;
+      setVidStagingOverlay({ busy: false, progress: -1 });
       pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
       vidCancelRef.current = false;
       vidProcBusy.current = false;
+      endVidProcRun();
     }
   }, [resolvePresetSrc, vidUpdate, autoSaveCud]);
 
@@ -1862,6 +1868,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       }
     }
     vidProcBusy.current = true;
+    beginVidProcRun(getActiveBlendUid());
     vidCancelRef.current = false;
     try {
       const segMsg = `Running 「${pd.iface}」 — segment ${pd.segIndex + 1}/${pd.segCount} (resumed)…`;
@@ -1895,12 +1902,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       return stopped ? 'stopped' : cancelled ? 'cancelled' : 'failed';
     } finally {
       clearProcFill(clipId);
-      vidStagingOverlay.busy = false;
-      vidStagingOverlay.progress = -1;
+      setVidStagingOverlay({ busy: false, progress: -1 });
       pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
       vidCancelRef.current = false;
       if (vidStopRef.current === clipId) vidStopRef.current = null;
       vidProcBusy.current = false;
+      endVidProcRun();
     }
   }, [interfaces, vidUpdate, blockSets, executePresetSeg, autoSaveCud]);
 
@@ -2235,6 +2242,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // 活跃文档换了人而文档集没变 → 拨选中项。只在 activeUid **真的跨了**这趟才拨：脏标记、
     // 存盘这些例行播报 activeUid 不变，不能把用户手动点开的那一格抢回来。
     const au = blendDocs.activeUid;
+    if (au !== prevActiveUid.current) resetRowInteraction();
     if (au != null && au !== prevActiveUid.current) {
       const u = docUnit(au);
       if (openDocUnits.includes(u) && !fresh.includes(u)) next = revealDoc(next, u);

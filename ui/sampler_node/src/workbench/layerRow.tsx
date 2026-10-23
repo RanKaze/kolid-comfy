@@ -138,6 +138,16 @@ const showHover = () => {
 };
 const hideHover = () => { hoverAskedId = null; setRowUi({ hover: null }); };
 
+/** 换活跃文档的那一刻把全部交互残留清空：拖拽载荷、接缝、右键菜单、Alt 悬浮预览都攥着
+ *  上一份文档的行 id / 记录 guid，留着就是对着新文档的行发旧文档的命令。面引用计数不用动 ——
+ *  行卸载时 useFaceVisible 的清账自己会跑。 */
+export const resetRowInteraction = () => {
+  endDrag();
+  closeMenu();
+  hoverRow = null;
+  hideHover();
+};
+
 /** 页面的那两句全局监听：Alt 在指针不动时按下/松开也要有反应（mousemove 这时根本不会来）。
  *  两格共用一对，所以按引用数装拆。 */
 let hoverWired = 0;

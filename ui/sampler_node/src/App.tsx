@@ -4,8 +4,9 @@ import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockPar
 import { blocksToGraph, graphToBlocks, sanitizeGraph, type PipelineGraph } from './workbench/pipeline-graph';
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, preprocessFlag } from './types';
 import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendAttrOpen, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
-import { getBlendUi, setBlendUi } from './workbench/store';
-import { vidStagingOverlay } from './workbench/video/procRun';
+import { getBlendUiOf, setBlendUi, setBlendActiveUid, dropBlendUi, getActiveBlendUid } from './workbench/store';
+import { getVidStagingOverlay, dropVidProcState } from './workbench/video/procRun';
+import { dropVidProcPicks } from './workbench/video/procPicks';
 import { bumpAssets } from './workbench/video/assetsTick';
 import { ProbePanel } from './debug';
 
@@ -415,7 +416,10 @@ const App: React.FC = () => {
   // 旋钮是一个数、档位是一个词、行上的一下是一枚坐标（哪一层、哪一枚 chip、落在谁的哪一侧）、可见区是
   // 一串键。页面对它做的和被删掉的那颗 <input> 做的是同一行调用。
   const sendBlendUiCommand: BlendUiSend = useCallback(<A extends BlendUiAction,>(action: A, value?: BlendUiPayloads[A]) => {
-    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-ui-command', action, value }, '*');
+    // 命令带着**此刻的活跃文档** uid 出门（拍板③）：页面按它校验 —— 攒在事件队列里的过期命令
+    // （用户按下之后、执行之前切了 tab）会被页面当垃圾丢掉，不再打进刚切走的文档。
+    blendIframeRef.current?.contentWindow?.postMessage(
+      { type: 'blend-ui-command', uid: getActiveBlendUid(), action, value }, '*');
   }, []);
   const stagingRef = useRef<StagingItem[]>([]);
   useEffect(() => { stagingRef.current = staging; }, [staging]);
@@ -1233,12 +1237,29 @@ const App: React.FC = () => {
         // The workbench's document list, its live one and its IO lock, in one announcement — the host
         // draws a dock window per document and greys File while a .cud is being read or written.
         const docs: BlendDoc[] = Array.isArray(event.data.docs) ? event.data.docs : [];
+        const au = typeof event.data.activeUid === 'number' ? event.data.activeUid : null;
         setBlendDocs({
-          activeUid: typeof event.data.activeUid === 'number' ? event.data.activeUid : null,
+          activeUid: au,
           busy: event.data.busy === true,
           docs,
           // 第一份播报（哪怕是空的）说明"未知"结束了：此后开文档集说什么就是什么，布局照此对账。
           announced: true,
+        });
+        // 投影跟着播报走：面板这一瞬就换成目标文档离开时的那份快照（桶里留影），不等页面重推。
+        setBlendActiveUid(au);
+        // 关掉的文档连快照桶一起收走 —— 留着就是一条永远没人读的旧面板状态。
+        setDocStills(prev => {
+          const open = new Set(docs.map(d => d.uid));
+          const stale = Object.keys(prev).map(Number).filter(uid => !open.has(uid));
+          for (const uid of stale) {
+            dropBlendUi(uid);
+            dropVidProcState(uid);
+            dropVidProcPicks(uid);
+          }
+          if (!stale.length) return prev;
+          const next = { ...prev };
+          for (const uid of stale) delete next[uid];
+          return next;
         });
         // 会话记录跟着播报走：这份活动集就是下一次刷新要整批重开的那批 .cud（打开序）。
         // 带路径的才记 —— 导入的 PNG 没有盘上文件，恢复不了，留给保留位当占位。
@@ -1250,16 +1271,6 @@ const App: React.FC = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ paths: docs.map(d => d.path).filter((p): p is string => !!p) }),
         }).catch(() => {});
-        // A closed document's kept frame goes with it: the workbench hands its uids out again from 1
-        // when its page reloads, and a fresh window must not open on some other project's last frame.
-        setDocStills(prev => {
-          const open = new Set(docs.map(d => d.uid));
-          const stale = Object.keys(prev).map(Number).filter(uid => !open.has(uid));
-          if (!stale.length) return prev;
-          const next = { ...prev };
-          for (const uid of stale) delete next[uid];
-          return next;
-        });
       } else if (event.data?.type === 'blend-doc-still') {
         const uid = typeof event.data.uid === 'number' ? event.data.uid : 0;
         const image = typeof event.data.image === 'string' ? event.data.image : '';
@@ -1269,6 +1280,9 @@ const App: React.FC = () => {
         // 工作台面板的状态快照。页面那边等值去过重才发，所以这里换掉就算数；画布和整页都不订阅它，
         // 只有读了这份快照的那几格正文会重绘 —— 拖动中每帧都在变的读数因此打扰不到采样器。
         // 这是一条跨 iframe 的边界，所以逐格取值：读不出来的当作没说过，回默认而不是回 0。
+        // 快照自带所属文档的 uid（页面盖章）：按它入桶，后台文档的桶就是它切走时的留影。
+        const uiUid = typeof event.data.uid === 'number' && Number.isFinite(event.data.uid) ? event.data.uid : null;
+        if (uiUid === null) return;
         const dec = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
         const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.round(v)) : 0);
         const str = (v: unknown) => (typeof v === 'string' ? v : '');
@@ -1279,7 +1293,7 @@ const App: React.FC = () => {
         });
         const ui = event.data;
         const base = EMPTY_BLEND_UI;
-        setBlendUi({
+        setBlendUi(uiUid, {
           mode: str(ui.mode) || 'none',
           canvas: { w: num(ui.canvas?.w), h: num(ui.canvas?.h) },
           transform: { readout: str(ui.transform?.readout) },
@@ -1373,13 +1387,15 @@ const App: React.FC = () => {
           // Processor 的三段行是描述符：逐行逐枚读回来，形状不对的丢掉（见 procUiOf）。
           processor: procUiOf(ui.processor),
           // 视频 list 跑（宿主那一趟）在飞时，staging 段的 run 状态归它 —— 页面在跑动期间推来的
-          // 快照不认识这趟跑，按页面那份合流会把 busy/进度冲掉。overlay 就是那趟跑留下的旗。
+          // 快照不认识这趟跑，按页面那份合流会把 busy/进度冲掉。overlay 就是那趟跑留下的旗，
+          // 按**来的快照的 uid** 取 —— 跑在 A 时，B 推来的快照不该被 A 的旗盖上。
           staging: (() => {
             const st = stagingUiOf(ui.staging);
-            if (!vidStagingOverlay.busy) return st;
-            return { ...st, busy: true, cancelLive: true, progress: vidStagingOverlay.progress };
+            const ov = getVidStagingOverlay(uiUid);
+            if (!ov.busy) return st;
+            return { ...st, busy: true, cancelLive: true, progress: ov.progress };
           })(),
-          faces: mergeFaces(getBlendUi().faces, faceDelta(ui.faces)),
+          faces: mergeFaces(getBlendUiOf(uiUid).faces, faceDelta(ui.faces)),
         });
       }
     };

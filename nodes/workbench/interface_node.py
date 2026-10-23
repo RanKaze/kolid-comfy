@@ -1690,9 +1690,35 @@ class InterfaceExecutor:
                 out[k] = v
         return out
 
+    @staticmethod
+    def _v3_class_clone(class_def, nid):
+        """V3 节点（IO.ComfyNode）执行前必须 clone 一份并注入 hidden。
+
+        core 里由 map_node_over_list → PREPARE_CLASS_CLONE 完成这件事；我们直接拿
+        注册表里的原类执行时，class 上的 hidden 恒为 None（_ComfyNodeBaseInternal
+        的类属性默认值），GetImageSize 这类读 hidden.unique_id 的节点会在 execute
+        里抛 AttributeError: 'NoneType' object has no attribute 'unique_id'。
+        """
+        try:
+            from comfy_api.internal import _ComfyNodeInternal
+            from comfy_api.latest._io import Hidden
+        except Exception:
+            return class_def
+        try:
+            if not (isinstance(class_def, type) and issubclass(class_def, _ComfyNodeInternal)):
+                return class_def
+            return class_def.PREPARE_CLASS_CLONE({"hidden_inputs": {Hidden.unique_id: nid}})
+        except Exception as e:
+            print(f"[InterfaceExecutor]   V3 clone failed {nid}: {e}")
+            return class_def
+
     def _call_node(self, class_def, func, inputs, nid, is_list_node):
         """跑一次节点：INPUT_IS_LIST 的约定包装 + 采样进度钩子 + 宿主返回约定解开。
         map 路径里每一帧都走这一句，所以钩子的安装/卸载必须在每次调用内自成一对。"""
+        v3_cls = self._v3_class_clone(class_def, nid)
+        if v3_cls is not class_def:
+            # 重新绑定到 clone 上，execute 里才能读到 clone.hidden
+            func = getattr(v3_cls, getattr(class_def, "FUNCTION", "execute"))
         if is_list_node:
             inputs = {k: [v] if not isinstance(v, list) else v for k, v in inputs.items()}
         orig_hook = None

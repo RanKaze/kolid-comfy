@@ -2250,6 +2250,9 @@ function setCanvasSize(w, h, scaleLayers) {
 // 读数与高亮都从这一份快照走：`mode` 喂六颗按钮的亮灭，两个 readout 是页面自己拼好的句子。
 // 一次 rAF 最多发一条，内容没变就一条都不发 —— 变换把手每帧都在动，不能每帧跨一次 iframe 边界。
 const blendUiState = {
+    // 这份快照属于哪份文档（activeDoc 的 uid）。宿主按它分桶留影 —— 切 tab 时面板立刻显示目标
+    // 文档离开时的那份，而不是等这里重推。没有文档时是 null，宿主对 null 的快照整条丢弃。
+    uid: null,
     mode: 'none', canvas: { w: 0, h: 0 }, transform: { readout: '' }, view: { readout: '' },
     // 画笔落在哪一面：三个谓词 + 这一支笔的名字 + 色环此刻的取值（页面算好的那条 rgba()，
     // 和光标环上那个字节不差），React 用它拼那句说明、点亮那一格、画那圈色环。
@@ -2321,6 +2324,8 @@ let blendUiQueued = false;      // 有没有一条快照在等 rAF —— 句柄
 let blendUiFallback = 0;
 let blendUiSent = '';
 function sendBlendUiNow() {
+    // 盖章：这份快照说的是活跃文档（盖完进等值闸，切换文档后 uid 变了自然算新的一条）。
+    blendUiState.uid = activeDoc ? activeDoc.uid : null;
     // 这两格是唯一需要像素的面：先把"要不要重编那几张"问过一遍，再去重。
     // 历史那几张要先编（它们只在进栈那一趟编一次，编法见 syncHistoryThumbs），再让面通道按
     // 可见区与预算决定这一帧发哪几张。
@@ -14346,6 +14351,9 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-ui-command') {
         // 四块薄面板（Canvas / Transform / Selection / View）的正文在宿主 dock 里，按钮发的是动作键。
         // 动作只作用于**当前活着的这一份文档** —— 面板永远跟着活动文档，与 10 号拍板一致。
+        // 每条命令都盖着宿主按下那一刻的活跃文档 uid：跟现在的对不上 = 用户按下之后切了 tab，
+        // 这条是攒过期的，丢掉 —— 不然它会打进刚切走的文档。
+        if (d.uid !== (activeDoc ? activeDoc.uid : null)) return;
         // 底片态（游标不在 Layer 段上）没有可编辑对象：Transform 的两条改动作直接拒绝，View 照常。
         if (vidBaseOn && (d.action === 'transform-adjust' || d.action === 'transform-fill')) {
             setStatus('Move the playhead onto a Layer segment to transform', 'error');
