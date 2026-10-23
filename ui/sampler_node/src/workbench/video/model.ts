@@ -381,8 +381,11 @@ export type VidController = {
   pauseProc?: (clipId: string) => void;
   /** 正在跑的那一段的 ■：只打断这一段的生成，队列里后面的段照常继续。 */
   stopProc?: (clipId: string) => void;
-  /** Layer 段合并用：向工作台页要这些图层集的内容签名（key → 签名）。页面不在/超时 = 空表。 */
+  /** Layer 段合并用：向工作台页要这些图层集的内容签名（key → 签名，两套一致才许合并）。页面不在/超时 = 空表。 */
   layerSigs?: (keys: string[]) => Promise<Record<string, string>>;
+  /** Layer 段粘贴：请页面把 `from` 那套图层**整套克隆**到新 key `to` 上（副本各改各的）。
+   *  返回 false = 页面不在 / 源 key 不存在 —— 调用方退回"共用同一套"（内容不丢，但两段联动）。 */
+  layerCopy?: (from: string, to: string) => Promise<boolean>;
   /** 仓库里已经找不到的哈希（工程引用了，但字节不在了）。打开工程与每次改动后刷新：
    *  时间线画红线、Assets 卡挂 MISSING、relink 按它挑目标。 */
   missing: ReadonlySet<string>;
@@ -549,6 +552,136 @@ export const splitClip = (p: VidProject, id: string, t: number, linked = true): 
 /** 解绑：联动组全体摘掉 groupId —— 此后各自拖各自裁（音画错开的正式手续）。 */
 export const unlinkGroup = (p: VidProject, groupId: string): VidProject =>
   ({ ...p, clips: p.clips.map(c => (c.groupId === groupId ? { ...c, groupId: undefined } : c)) });
+
+// ── 复制 / 粘贴 ────────────────────────────────────────────────────────────────────────────
+// 剪贴板里放的是**一份脱钩的快照**（不是原件引用）：原件之后被裁剪 / 改参数 / 删掉，都跟这次复制
+// 没关系。粘贴才发新 id —— 同一份快照可以反复粘，每粘一次都是独立的一段。
+//
+// 身份字段的规矩（照 mergeVidClips 的先例）：
+//  · groupId 重新发号，但**同一组内部的对应关系保留**（音画一对粘出来还是一对）；
+//  · procOwner 摘掉 —— 副本不是任何占位段的产物（重跑旧占位时它会报"槽位被占"，而不是被静默换掉）；
+//  · pending / vgen 的 runId 换新 —— 不能让副本被算进原件那一趟 Run 的"还剩几段"里；
+//  · vgen.chainPrev 只在链的上一段**也被复制**时改指副本，否则断开；
+//  · layerKey 见 pasteVidClips 的注释（图层集是页面那边的活数据，得请它克隆一份）。
+export type VidClipClipboard = {
+  /** 这批段最早的起点（s）：粘贴时把锚点放在播放头，其余段保持相对位置。 */
+  anchor: number;
+  /** 按 start 升序的快照（start 仍是复制时的时间线坐标，粘贴时统一平移）。 */
+  clips: VidClip[];
+};
+
+/** 执行快照的浅克隆（`params` / 帧窗口各存一份）：剪贴板里的那份不许跟原件共指，
+ *  否则之后原地改参数会连剪贴板一起改掉。 */
+const cloneProcPending = (pd: VidProcPending): VidProcPending => ({
+  ...pd,
+  params: { ...pd.params },
+  inputs: Object.fromEntries(Object.entries(pd.inputs).map(([k, w]) => [k, { ...w }])),
+  ...(pd.maskInputs
+    ? { maskInputs: Object.fromEntries(Object.entries(pd.maskInputs).map(([k, w]) => [k, { ...w }])) }
+    : {}),
+});
+
+const cloneVgenPending = (v: VidGenPending): VidGenPending => ({
+  ...v,
+  params: { ...v.params },
+  ports: { ...v.ports },
+  first_frame: v.first_frame ? { ...v.first_frame } : v.first_frame,
+  last_frame: v.last_frame ? { ...v.last_frame } : v.last_frame,
+});
+
+/** 复制：选中的段 + 它们的联动组同伴（组是一个逻辑单位，只抄一半粘出来就是残的）。 */
+export const copyVidClips = (p: VidProject, ids: readonly string[]): VidClipClipboard | null => {
+  const want = new Set<string>();
+  const groups = new Set<string>();
+  for (const c of p.clips) {
+    if (!ids.includes(c.id)) continue;
+    want.add(c.id);
+    if (c.groupId) groups.add(c.groupId);
+  }
+  if (!want.size) return null;
+  const clips = p.clips
+    .filter(c => want.has(c.id) || (c.groupId && groups.has(c.groupId)))
+    .map(c => ({
+      ...c,
+      ...(c.pending ? { pending: cloneProcPending(c.pending) } : {}),
+      ...(c.vgen ? { vgen: cloneVgenPending(c.vgen) } : {}),
+    }))
+    .sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
+  const anchor = clips[0].start;
+  return { anchor, clips };
+};
+
+export type VidPasteResult = {
+  project: VidProject;
+  /** 新段的 id（选择用）。 */
+  ids: string[];
+  /** Layer 段要请页面克隆的图层集：from = 源 key，to = 新 key（= 新段 id）。
+   *  调用方拿到回执前，那一段先共用源 key（内容一定对）；回执成功再把 layerKey 改成 `to`。 */
+  layerCopies: { from: string; to: string; clipId: string }[];
+  /** 原轨不在了、又没有同类的轨 ⇒ 这一段粘不了。 */
+  skipped: number;
+};
+
+/** 粘贴：`at` = 播放头。**这批段里最早的那一段从 `at` 开始**，其余按原来的相对位置排开。 */
+export const pasteVidClips = (p: VidProject, cb: VidClipClipboard, at: number): VidPasteResult => {
+  const t = Math.max(0, Number(at) || 0);
+  // 轨道：原轨还在就回原轨；不在了退到同类的第一条。一条同类的都没有 ⇒ 跳过（不顺手造轨 ——
+  // 粘一段视频却凭空长出一条轨，不是用户按 Ctrl+V 想要的事）。
+  const trackFor = (c: VidClip): string | null => {
+    const own = p.tracks.find(x => x.id === c.trackId);
+    if (own && own.kind === c.kind) return own.id;
+    const same = p.tracks.find(x => x.kind === c.kind);
+    return same ? same.id : null;
+  };
+  const idMap = new Map<string, string>();        // 旧 id → 新 id（组 / 链 / 图层认亲都用它）
+  for (const c of cb.clips) idMap.set(c.id, newVidId(c.kind === 'layer' ? 'lcl' : 'clip'));
+  const groupMap = new Map<string, string>();
+  const stamp = `copy-${Date.now()}`;
+  const clips: VidClip[] = [];
+  const layerCopies: VidPasteResult['layerCopies'] = [];
+  let skipped = 0;
+  for (const c of cb.clips) {
+    const trackId = trackFor(c);
+    if (!trackId) { skipped++; continue; }
+    const id = idMap.get(c.id)!;
+    let groupId: string | undefined;
+    if (c.groupId) {
+      groupId = groupMap.get(c.groupId);
+      if (!groupId) { groupId = newVidId('grp'); groupMap.set(c.groupId, groupId); }
+    }
+    // 图层集：先共用源那套（画面一定对得上），克隆回执到了再由调用方改成新 key。
+    const fromKey = c.layerKey || c.id;
+    if (c.kind === 'layer') layerCopies.push({ from: fromKey, to: id, clipId: id });
+    const next: VidClip = {
+      ...c,
+      id,
+      trackId,
+      groupId,
+      start: Math.max(0, t + (c.start - cb.anchor)),
+      procOwner: undefined,
+      ...(c.kind === 'layer' ? { layerKey: fromKey } : {}),
+      ...(c.pending
+        ? { pending: { ...cloneProcPending(c.pending), runId: `${stamp}-p-${id}` } }
+        : {}),
+      ...(c.vgen
+        ? {
+          vgen: {
+            ...cloneVgenPending(c.vgen),
+            runId: `${stamp}-g-${id}`,
+            chainPrev: c.vgen.chainPrev ? idMap.get(c.vgen.chainPrev) : undefined,
+          },
+        }
+        : {}),
+    };
+    clips.push(next);
+  }
+  return {
+    project: clips.length ? { ...p, clips: [...p.clips, ...clips] } : p,
+    ids: clips.map(c => c.id),
+    layerCopies,
+    skipped,
+  };
+};
 
 // ── 资产库 ────────────────────────────────────────────────────────────────────────────────
 /** 收一件资产：同一个 src 只留一份（重复拖进来 = 认领已有的那件）。 */

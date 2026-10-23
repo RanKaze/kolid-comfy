@@ -142,6 +142,13 @@ _PULL_TOKEN = os.urandom(16).hex()
 # 还开着页签的节点补发 /window_closed 用,见 _notify_tabs_window_closed。
 _tabs = {'urls': []}
 
+# 节点页签意图(见 _open_tab)。桌面刚被拉起时 HTTP 服务已经在线(发现文件已写好)
+# 但壳页还没加载 —— 那几秒里投出去的 addTab 没有页面接得住,只能静默丢掉。
+# 所以 /open 一律先登记意图:/tabs 每次都把它带回去,壳页一加载就自己建出来,
+# 建出来后由 Api.tabs_changed 回报摘掉(与 .cud 文档意图同一套自愈机制)。
+_pending_opens = []
+_opens_lock = threading.Condition()
+
 
 # =============================================================================
 # 桌面文档会话(.cud 双击)—— 壳进程自任 blend 页面与它的 5 个接口
@@ -386,7 +393,7 @@ class DesktopDocs:
         """只在壳页稳定时投递;否则留给它下次加载时按 /tabs 自愈。
         loaded 为假=页面还没起;ncr_set 为假=装 NCR 的那次 Reload 还没发生,
         此刻投的脚本会被垂死的页面消费掉。两个都不是问题 —— 意图表在。"""
-        if _state['loaded'] and _state.get('ncr_set'):
+        if _shell_ready():
             _post_js(script)
             _bring_to_front()
 
@@ -1125,6 +1132,7 @@ class Api:
             _tabs['urls'] = [str(u) for u in (urls or []) if isinstance(u, str)]
         except Exception:
             _tabs['urls'] = []
+        _ack_tab_opens(list(_tabs['urls']))
 
     def tab_closed(self, url):
         """用户点页签 ×:等价浏览器里关掉页签 —— iframe 摘除不会触发
@@ -2266,7 +2274,17 @@ class HandshakeHandler(BaseHTTPRequestHandler):
         if path == '/tabs':
             # 壳页每次加载都来同步:把还该开着的文档页签按意图重建(Reload 掐断
             # 长轮询,在途投递可能被垂死页面消费 —— 意图表让投递不再需要"不丢")
-            return self._json({'tabs': docs.intents()})
+            # 节点页签意图同批带回:这是"壳页起来之前收到的 /open"唯一的落地通道。
+            return self._json({'tabs': docs.intents() + _pending_tab_opens()})
+        if path == '/status':
+            # 节点侧的探活兼就绪查询:ready 为假时别投 /open(投了也没页面接)。
+            # tabs 是壳页自己报上来的当前页签 —— 节点据此确认"页签真的在",
+            # 而不是把 HTTP 200 当成成功。
+            return self._json({'ok': True, 'client': 'kolidui', 'ready': _shell_ready(),
+                               'loaded': bool(_state.get('loaded')),
+                               'ncr': bool(_state.get('ncr_set')), 'pid': os.getpid(),
+                               'tabs': list(_tabs.get('urls') or []),
+                               'pending': [x['url'] for x in _pending_tab_opens()]})
         if path == '/blend_node.html':
             f = WEB_ROOT / 'blend_node.html'
             if not f.is_file():
@@ -2406,8 +2424,11 @@ class HandshakeHandler(BaseHTTPRequestHandler):
                 return self._json({'error': 'bad url'}, 400)
             if not _is_localhost(url):
                 return self._json({'error': 'only localhost urls are accepted'}, 400)
-            _open_tab(url, title)
-            return self._json({'ok': True})
+            delivered = _open_tab(url, title)
+            # delivered 为假 = 壳页还没起来,这一发只登记成意图。调用方(节点侧
+            # open_ui)据此继续重试,而不是把"受理了"当成"注入成功"。
+            return self._json({'ok': True, 'delivered': bool(delivered),
+                               'ready': _shell_ready()})
         if path == '/api/pose_estimate':
             # 图层的像素只活在浏览器里, 所以这边是 PNG 进、关键点出 (节点那条还认工作区 id)。
             if body.get('source') != 'layer':
@@ -2427,12 +2448,57 @@ class HandshakeHandler(BaseHTTPRequestHandler):
         return self._json({'error': 'not found'}, 404)
 
 
-def _open_tab(url, title):
-    if not _state['loaded']:
+def _shell_ready():
+    """壳页能不能接住 JS:loaded(页面起了)且 ncr_set(装 app-region 的那次
+    Reload 已经发生)。两者之间投的脚本会被垂死的页面消费掉 —— 所以除了投递,
+    还要留一条意图让页面重新加载时自己建回来。"""
+    return bool(_state.get('loaded')) and bool(_state.get('ncr_set'))
+
+
+def _pending_tab_opens():
+    with _opens_lock:
+        return [{'url': it['url'], 'title': it['title']} for it in _pending_opens]
+
+
+def _ack_tab_opens(urls):
+    """壳页报回来的页签里有它 ⇒ 意图已经落地,摘掉。否则下次加载会把它又建回来
+    (用户关掉的页签不该复活)。"""
+    if not urls:
         return
+    with _opens_lock:
+        for u in urls:
+            it = next((x for x in _pending_opens if x['url'] == u), None)
+            if it is not None:
+                _pending_opens.remove(it)
+
+
+def _title_from_url(url):
+    """--url= 没带 --title= 时的兜底:用页面名当标签名。"""
+    page = str(url).rsplit('/', 1)[-1].split('?')[0]
+    return page or str(url)
+
+
+def _open_tab(url, title):
+    """把一枚节点页签交给壳页。返回是否已投递(壳页当时真的接得住)。
+    不论返回什么都先登记意图 —— 意图是兜底,投递只是让它早一点出现。"""
+    # 只收 localhost 页面(与 /open 路由同款校验):命令行来的地址同样不放行外网
+    if not _is_localhost(url):
+        print(f'[KolidUI] refused non-localhost tab: {url}', file=sys.stderr)
+        return False
+    with _opens_lock:
+        it = next((x for x in _pending_opens if x['url'] == url), None)
+        if it is not None:
+            it['title'] = title
+        else:
+            _pending_opens.append({'url': url, 'title': title})
+    if not _shell_ready():
+        print(f'[KolidUI] shell not ready yet — queued tab intent: {title}')
+        _bring_to_front()
+        return False
     _post_js('addTab(%s, %s)' % (json.dumps(url, ensure_ascii=False),
                                  json.dumps(title, ensure_ascii=False)))
     _bring_to_front()
+    return True
 
 
 def _post_window_closed(origin, timeout=1.5):
@@ -2558,22 +2624,43 @@ def _on_loaded():
         _user32.PostMessageW(wt.HWND(hwnd), WM_APP_SETUP, 0, 0)
 
 
-def _focus_existing(open_path=None, timeout_s=3.0):
+def _pid_alive(pid):
+    """进程还在返回 True,死了返回 False,查不出来返回 None(按"在"处理)。"""
+    if not pid or os.name != 'nt':
+        return None
+    try:
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    except Exception:
+        return None
+
+
+def _focus_existing(open_path=None, open_url=None, open_title=None, timeout_s=3.0):
     """发现文件指向活着的实例就聚焦它并返回 True;文件缺失/陈旧返回 False。
-    带 open_path(双击 .cud 的二次启动)时把路径交给已开实例处理 —— 那边铸
-    token、开/聚焦页签,本进程只管退出。"""
+    带 open_path(双击 .cud)或 open_url(节点用 --url= 起本进程)时把东西交给
+    已开实例处理 —— 那边铸 token、开/聚焦页签,本进程只管退出。"""
     if not DISCOVERY_FILE.exists():
         return False
     try:
         info = json.loads(DISCOVERY_FILE.read_text(encoding='utf-8'))
         port = int(info['port'])
+        pid = int(info.get('pid') or 0)
     except Exception:
+        return False
+    # 发现文件可能是上个进程留下的:进程已经死了就别为它等满 3s(冷启动很贵)
+    if pid and _pid_alive(pid) is False:
         return False
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if open_path:
             route = '/open_file'
             payload = json.dumps({'path': open_path}).encode('utf-8')
+        elif open_url:
+            route = '/open'
+            payload = json.dumps({'url': open_url, 'title': open_title or ''}).encode('utf-8')
         else:
             route = '/focus'
             payload = b'{}'
@@ -2584,7 +2671,8 @@ def _focus_existing(open_path=None, timeout_s=3.0):
             with urllib.request.urlopen(req, timeout=1):
                 pass
             print('[KolidUI] already running — ' + (
-                'handed over %s' % open_path if open_path else 'focused existing window'))
+                'handed over %s' % open_path if open_path else
+                'handed over %s' % open_url if open_url else 'focused existing window'))
             return True
         except urllib.error.HTTPError as e:
             # 旧实例没有 /open_file 路由:退成只聚焦 —— 也比再开一个窗口强
@@ -2597,14 +2685,39 @@ def _focus_existing(open_path=None, timeout_s=3.0):
     return False
 
 
+def _parse_argv(argv):
+    """命令行 → 要开的东西。两条路,都可能同时出现:
+      .cud 双击/拖放  —— 位置参数(是个文件)
+      节点页面        —— --url=<页面地址> [--title=<标签名>]
+    返回 (文档路径 or None, [(url, title), ...])。title 缺失时为 None(由页面名兜底)。"""
+    doc_path = None
+    tabs = []
+    for a in argv:
+        if a.startswith('--url='):
+            tabs.append((a[len('--url='):], None))
+        elif a.startswith('--title='):
+            if tabs:
+                tabs[-1] = (tabs[-1][0], a[len('--title='):])
+        elif a.startswith(('http://', 'https://')):
+            tabs.append((a, None))
+        elif not a.startswith('-') and doc_path is None and os.path.isfile(a):
+            doc_path = a
+    return doc_path, tabs
+
+
 def main():
     # 双击 .cud 启动时,资源管理器把路径放在 argv(打包后 exe 亦然);
     # 拖到 exe 图标上、命令行直跑也走同一条。旗标不是路径,忽略。
-    args = [a for a in sys.argv[1:] if not a.startswith('-')]
-    open_path = args[0] if args and os.path.isfile(args[0]) else None
+    # 节点侧(Open With Application)不再"先起进程再 HTTP 注入":它直接把页面
+    # 地址放在 --url= 里,本进程登记意图,壳页一加载就自己把页签建出来 ——
+    # 抢跑(HTTP 服务先上线、壳页后加载)与"垂死页面吃掉脚本"两种丢单都不存在了。
+    doc_path, tab_urls = _parse_argv(sys.argv[1:])
+    open_path = doc_path
 
     # 二次启动:已有实例在跑就聚焦它(双击时把路径交给它),然后退出
-    if _focus_existing(open_path):
+    if _focus_existing(open_path,
+                       open_url=tab_urls[0][0] if tab_urls else None,
+                       open_title=tab_urls[0][1] if tab_urls else None):
         return
 
     _load_ui_state()
@@ -2614,10 +2727,15 @@ def main():
     threading.Thread(target=_sweep_old_profiles, daemon=True).start()
     atexit.register(_clear_discovery)
 
-    # 文件先登记再起窗:意图表在,壳页首次加载 fetch /tabs 就会把页签建出来,
-    # 不需要往还没有的页面投递任何东西。双击失败(文件消失)窗口照常开。
+    # 文件/页面都先登记再起窗:意图表在,壳页首次加载 fetch /tabs 就会把页签建
+    # 出来,不需要往还没有的页面投递任何东西。双击失败(文件消失)窗口照常开。
     if open_path:
         docs.open_path(open_path)
+    for u, t in tab_urls:
+        if _open_tab(u, t or _title_from_url(u)):
+            print(f'[KolidUI] tab from command line: {u}')
+        else:
+            print(f'[KolidUI] tab queued until the shell loads: {u}')
 
     win = webview.create_window(
         WINDOW_TITLE,

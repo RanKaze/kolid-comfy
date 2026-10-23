@@ -4894,6 +4894,40 @@ function replyVidLayerSigs(reqId, keys) {
     window.parent.postMessage({ type: 'blend-vid-layer-sig', reqId, sigs }, '*');
 }
 
+// ── Layer 段粘贴：整套克隆 ──────────────────────────────────────────────────────────────────
+// 宿主粘一段 Layer 段时，副本要有**自己的一套图层** —— 共用一套就是"改副本把原件也改了"，
+// 那不是"复制"在用户眼里的意思。源可以是活跃那套（内容就在全局 layers 上）或 layerSets 里
+// 存着的某一套（非活跃的）。逐层深拷贝（像素/属性/变换各立一份，见 cloneLayerFields），
+// 图层 id 重新发号；历史从空开始 —— 切到这一套时 switchLayerSet 会补一条基线，
+// 撤销不会空转到别人身上（同"这一套还没人建过"那一支）。
+function copyLayerSetTo(from, to) {
+    const src = String(from || ''), dst = String(to || '');
+    if (!src || !dst || src === dst) return false;
+    const set = src === activeLayerSet ? captureLayerSet() : layerSets.get(src);
+    if (!set) return false;
+    const ls = (Array.isArray(set.layers) ? set.layers : []).map(l => {
+        const c = cloneLayerFields(l, l.name);
+        c.id = ++layerSeq;
+        return c;
+    });
+    layerSets.set(dst, {
+        layers: ls,
+        selectedId: null,
+        decal: set.decal ? cloneCanvasSurface(set.decal) : null,
+        decalCtx: null,          // 切到这一套时由 switchLayerSet 现取（见那儿那两行）
+        undoStack: [], redoStack: [], lastActionKey: null,
+    });
+    return true;
+}
+// 回执只有一句 ok：宿主只关心"副本那套建起来了没有"，建不起来它就退回共用源那一套（内容不丢）。
+// **回执的 type 必须与请求不同**（`-copied`）：这一页的 message 监听没有来源守卫，
+// 请求与回执同名时，页面直接打开（parent === self）会在自己身上来回弹成死循环。
+function replyVidLayerCopy(reqId, from, to) {
+    let ok = false;
+    try { ok = copyLayerSetTo(from, to); } catch (e) { ok = false; }
+    window.parent.postMessage({ type: 'blend-vid-layer-copied', reqId, ok }, '*');
+}
+
 function switchLayerSet(key) {
     const k = String(key || '');
     if (k === activeLayerSet) return;
@@ -14176,6 +14210,7 @@ window.addEventListener('message', event => {
     }
     if (d.type === 'blend-vid-frame') { handleVidFrameMessage(d); return; }
     if (d.type === 'blend-vid-layer-sig') { replyVidLayerSigs(d.reqId, d.keys); return; }
+    if (d.type === 'blend-vid-layer-copy') { replyVidLayerCopy(d.reqId, d.from, d.to); return; }
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
     if (d.type === 'blend-vid-base') { handleVidBaseMessage(d); return; }
     if (d.type === 'blend-vid-base-off') { vidBaseOff(); return; }

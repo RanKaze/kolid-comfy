@@ -836,24 +836,29 @@ def _send_media_file(h, path, cacheable=True):
         except (ValueError, IndexError):
             start, end, code = 0, size - 1, 200
     length = max(0, end - start + 1)
-    h.send_response(code)
-    h.send_header('Content-type', mime)
-    h.send_header('Accept-Ranges', 'bytes')
-    h.send_header('Cache-Control', 'max-age=31536000, immutable' if cacheable else 'no-store')
-    if code == 206:
-        h.send_header('Content-Range', f'bytes {start}-{end}/{size}')
-    h.send_header('Content-Length', str(length))
-    h.end_headers()
-    if length:
-        with open(path, 'rb') as f:
-            f.seek(start)
-            remaining = length
-            while remaining > 0:
-                chunk = f.read(min(1 << 20, remaining))
-                if not chunk:
-                    break
-                h.wfile.write(chunk)
-                remaining -= len(chunk)
+    try:
+        h.send_response(code)
+        h.send_header('Content-type', mime)
+        h.send_header('Accept-Ranges', 'bytes')
+        h.send_header('Cache-Control', 'max-age=31536000, immutable' if cacheable else 'no-store')
+        if code == 206:
+            h.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+        h.send_header('Content-Length', str(length))
+        h.end_headers()
+        if length:
+            with open(path, 'rb') as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    h.wfile.write(chunk)
+                    remaining -= len(chunk)
+    except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+        # <video> 拖完进度条就断开是常态（seek 会重新发 Range 请求），浏览器自己会重连；
+        # 这里静默收摊，别在每个断流上抛一整段 traceback。
+        return True
     return True
 
 

@@ -659,6 +659,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   })());
   const [vidProject, setVidProject] = useState<VidProject>(() => vidSeedRef.current!.p);
   const vidProjectRef = useRef(vidProject); vidProjectRef.current = vidProject;
+  // 屏幕上这份工程**属于哪份文档**。`vidProjectRef` 是 state 的镜像，切 tab 的那一帧会短暂
+  // 停在上一份上（setVidProject 之后 React 才重渲）—— 存盘时向宿主要工程（blend-request-vid）、
+  // 以及每一笔改动写进哪个桶，都要按归属判，不能拿"屏幕上正摆着的那份"当答案。
+  const vidProjectOwner = useRef<number | null>(null);
   const [vidTransport] = useState(createVidTransport);
   // seek 走合流器：标尺拖动每发指针事件都进这里，合到 rAF 一帧一落（见 createSeekCoalescer）。
   // interactive 也在这一并带上 —— 上一版在这里丢了标记，拖标尺完全不走缩略条路径。
@@ -765,6 +769,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const prev = vidProjectRef.current;
     vidByDoc.current.set(uid, proj);
     vidProjectRef.current = proj;
+    vidProjectOwner.current = uid;
     if (uid === activeUidRef.current) setVidProject(proj);
     markVidDirty(uid);
     vidEditAt.current = Date.now();
@@ -819,12 +824,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 也能链得上（每次立刻把 ref 换掉），渲染仍然只由 setVidProject 驱动。
   const vidUpdate = useCallback((fn: (p: VidProject) => VidProject, label?: string) => {
     const uid = activeUidRef.current;
-    const prev = vidProjectRef.current;
+    // 底稿：**这个 uid 桶里的那份**。屏幕上那份可能还是上一份（切 tab 的那一帧、restore 还没到），
+    // 拿它当底改出来的结果写进这一桶，就是把别人的轨道搬过来。
+    const prev = (uid != null ? vidByDoc.current.get(uid) : undefined) ?? vidProjectRef.current;
     // 每一次工程变更都顺手收掉不再成立的生成器链接（拖开/裁开/删段/改轨）——
     // 自动断开只在这一处发生，读链的函数因此可以信任存档里的 chainPrev。
     const next = pruneVgenChains(fn(prev));
     if (next === prev) return;                 // 没变：不进历史、不置脏
     vidProjectRef.current = next;
+    vidProjectOwner.current = uid;
     setVidProject(next);
     if (uid != null) {
       vidByDoc.current.set(uid, next);
@@ -844,12 +852,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const uid = blendDocs.activeUid;
     if (uid == null) return;
     const map = vidByDoc.current;
-    if (!map.has(uid)) {
-      const seed = vidSeedRef.current;
-      map.set(uid, seed ? seed.p : defaultVidProject());
+    // 页面存档只属于**开机见到的第一份文档**，喂完就摘 —— 不管那一份此刻桶里有没有工程。
+    // 老写法是"第一份**桶里还没有**的文档"才摘：开机那份要是先收到了文件里的工程
+    // （blend-vid-restore 比文档播报先到，刷新恢复文档时就是这样），seed 就一直挂在手上，
+    // 之后**跳到任何一份自己没有工程的 tab**（.cud 里没带 video 段的那种）都会被它灌上一份
+    // 别人的时间线 —— 用户报的"切 cud tab 时 Tracks 的内容跟着搬过去"就是这个。
+    const seed = vidSeedRef.current;
+    if (seed) {
       vidSeedRef.current = null;
+      if (!map.has(uid)) map.set(uid, seed.p);
     }
+    if (!map.has(uid)) map.set(uid, defaultVidProject());
     const proj = map.get(uid)!;
+    // 屏幕换了人：归属与 ref 当场钉住，别等 React 重渲那一帧（见 vidProjectOwner 的注释）。
+    vidProjectOwner.current = uid;
+    vidProjectRef.current = proj;
     setVidProject(proj);
     // 模式跟着工程走：打开哪份文档就落回它自己的 Image / Video 设置。
     syncVidMode(proj.mode === 'video' ? 'video' : 'image');
@@ -879,6 +896,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       vidHist.current.clear();
       const empty = defaultVidProject();
       vidProjectRef.current = empty;
+      vidProjectOwner.current = null;
       setVidProject(empty);
       vidEditAt.current = 0;
       layerEditAt.current = 0;
@@ -889,11 +907,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 回包按 reqId 认领；页面不在 / 1.5s 没回 = 空表（调用方按"比较失败"处理，不合并）。
   const layerSigSeq = useRef(1);
   const layerSigWaiters = useRef(new Map<number, (sigs: Record<string, string>) => void>());
+  // Layer 段粘贴：请页面把源段那套图层**整套克隆**到新 key（见页面 copyLayerSetTo）。
+  // 回包按 reqId 认领；页面不在 / 1.5s 没回 = false（调用方退回"共用同一套"，内容不丢）。
+  const layerCopySeq = useRef(1);
+  const layerCopyWaiters = useRef(new Map<number, (ok: boolean) => void>());
   // iframe 的两条 Video 消息：保存时按 uid 来要快照；读档/重开时把文件里那份送回桶里。
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
       const d = e.data as { type?: string; uid?: number; project?: unknown; files?: unknown; at?: number;
-        reqId?: number; sigs?: Record<string, string> } | null;
+        reqId?: number; sigs?: Record<string, string>; ok?: boolean } | null;
       if (!d || typeof d.type !== 'string') return;
       if (d.type === 'blend-vid-layer-sig') {
         if (e.source !== blendIframeRef.current?.contentWindow) return;
@@ -905,6 +927,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         }
         return;
       }
+      if (d.type === 'blend-vid-layer-copied') {
+        if (e.source !== blendIframeRef.current?.contentWindow) return;
+        const rid = Math.round(Number(d.reqId) || 0);
+        const finish = layerCopyWaiters.current.get(rid);
+        if (finish) {
+          layerCopyWaiters.current.delete(rid);
+          finish(d.ok === true);
+        }
+        return;
+      }
       if (d.type === 'blend-edited') {
         // 页面刚提交了一步图层动作（或刚撤销/重做了一步）：Ctrl+Z 从此归它，直到视频又被改动。
         layerEditAt.current = Number(d.at) || Date.now();
@@ -912,9 +944,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       }
       if (d.type === 'blend-request-vid') {
         const uid = Math.round(Number(d.uid) || 0);
-        const project = vidByDoc.current.get(uid)
-          ?? (uid === (activeUidRef.current ?? -1) ? vidProjectRef.current : null);
-        (e.source as Window | null)?.postMessage({ type: 'blend-vid', uid, project }, '*');
+        // 桶里那份是权威。桶里没有（刚切过来、播报还没到）才看屏幕 —— 而且只在这个 uid
+        // **确实是屏幕上这份的归属**时给：否则会把上一份的轨道写进新文件的 header.video。
+        const own = vidByDoc.current.get(uid);
+        const screen = vidProjectOwner.current === uid ? vidProjectRef.current : null;
+        (e.source as Window | null)?.postMessage({ type: 'blend-vid', uid, project: own ?? screen }, '*');
       } else if (d.type === 'blend-vid-restore') {
         const uid = Math.round(Number(d.uid) || 0);
         const proj = normalizeVidProject(d.project);
@@ -926,6 +960,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         vidEditAt.current = 0;
         bumpVidHist();
         if (uid === activeUidRef.current) {
+          vidProjectOwner.current = uid;
+          vidProjectRef.current = proj;
           setVidProject(proj);
           // 文件里带的模式跟着落地：打开这份 .cud 就显示它自己的设置。
           syncVidMode(proj.mode === 'video' ? 'video' : 'image');
@@ -2036,6 +2072,27 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     win.postMessage(msg, '*', transfer);
     return true;
   }, [blendIframeRef]);
+  // Layer 段粘贴：把源段那套图层整套克隆到新 key（见页面 copyLayerSetTo）。**成套克隆**是必须的：
+  // 共用一套的话，改副本的图层会把原件一起改掉（"复制"在用户眼里不是"链接"）。
+  const layerCopy = useCallback((from: string, to: string): Promise<boolean> => {
+    const win = blendIframeRef.current?.contentWindow;
+    if (!win || !from || !to || from === to) return Promise.resolve(false);
+    return new Promise(resolve => {
+      const reqId = layerCopySeq.current++;
+      let done = false;
+      let timer = 0;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        layerCopyWaiters.current.delete(reqId);
+        resolve(ok);
+      };
+      timer = window.setTimeout(() => finish(false), 1500);
+      layerCopyWaiters.current.set(reqId, finish);
+      win.postMessage({ type: 'blend-vid-layer-copy', reqId, from, to }, '*');
+    });
+  }, [blendIframeRef]);
   // Layer 段合并的"内容是否同一套"：向页面要素材签名（见页面 replyVidLayerSigs）。
   const layerSigs = useCallback((keys: string[]): Promise<Record<string, string>> => {
     const win = blendIframeRef.current?.contentWindow;
@@ -2145,7 +2202,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     stopProc: stopPendingClip,
     // Layer 段合并：向页面要图层集签名，两段一致才允许并。
     layerSigs,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs, vidMissing, vidRelink, recheckMissing]);
+    layerCopy,
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs, layerCopy, vidMissing, vidRelink, recheckMissing]);
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。
@@ -2744,7 +2802,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     <div style={styles.container}>
       {/* Three things an inline style prop cannot express: the panel's dark scrollbar (a
           ::-webkit-scrollbar rule), the resize handle's hover/focus tint, and the Settings page's
-          iOS value field (a :focus underline plus the number spinners it must not show). All scoped
+          iOS value field (grey while resting, white + a blue underline while editing). All scoped
           by class here — the scrollbar matches the workbench's own (faint pill, transparent track,
           no arrow buttons). */}
       <style>{`
@@ -2755,9 +2813,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .dark-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
         .dark-scroll::-webkit-scrollbar-corner { background: transparent; }
         .dark-scroll::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-        .ios-val::-webkit-outer-spin-button, .ios-val::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-        .ios-val { -moz-appearance: textfield; appearance: textfield; }
-        .ios-val:focus { border-bottom-color: #0a84ff; }
+        .ios-val { color: rgba(235,235,245,0.6); }
+        .ios-val:focus { border-bottom-color: #0a84ff; color: #fff; }
+        /* 正则框空着的时候，占位符就是它唯一的可辨识形状 —— 没有它，一张新规则卡上
+           只有一个 15px 高的透明输入区，看上去就是"这一条没有正则参数"。 */
+        .ios-val::placeholder { color: rgba(142,142,147,0.72); }
         /* ---- Layers / Guidances 两格 ----
            这一族规则是从 blend_node.html 那一页搬过来的，选择器名与声明块都照原文（门禁比这两段）。
            必要的不一样只有三处，每一处都写在这里，门禁也照这三处放行：
@@ -4004,13 +4064,15 @@ const VideoGenFrameModal: React.FC<{
 };
 
 // ── SettingsTab ──
-// Two screens behind one iOS segmented control. DEFAULT SETTING is the nine numeric knobs every run
-// starts from (they used to sit at the bottom of the Draw column); ARCHITECTURE is a list of rules —
-// each one a regex matched against the architecture of the pipeline that actually runs — replacing
-// some of those nine for the runs it catches. The numbers stay the host's either way: this page only
-// edits what the Draw panel edited, so a value can never exist twice.
-// The look is the iOS inset-grouped list — system greys, cards that fill the column, hairline
-// separators inset from the label. Only this page wears it for now.
+// Two screens behind one iOS segmented control, dressed as iOS Settings' inset-grouped lists: a
+// centered column with a large title, uppercase section headers, #1c1c1e cards with 44px rows and
+// hairline separators inset to the text, and a grey footer under each card stating what the group
+// does (the tooltips keep the longer form — footer is the glanceable sentence). DEFAULT SETTING is
+// the nine numeric knobs every run starts from (they used to sit at the bottom of the Draw column);
+// ARCHITECTURE is a list of rules — each one a regex matched against the architecture of the
+// pipeline that actually runs — replacing some of those nine for the runs it catches. The numbers
+// stay the host's either way: this page only edits what the Draw panel edited, so a value can
+// never exist twice.
 type SettingsScreen = 'default' | 'arch';
 // Which screen is showing and which rule cards are open belong to the user, not to the program, so
 // they are remembered per browser — same policy as the section folds and the panel width, and ONE
@@ -4031,11 +4093,15 @@ const saveSettingsUI = (next: SettingsUI) => {
 };
 
 // The nine knobs split into three cards, so the target semantics (a working resolution to reach) and
-// the input ceilings (a memory cap, 0 = off) never read as one undifferentiated list.
-const SETTINGS_GROUPS: { title: string; hint?: string; keys: OverrideKey[] }[] = [
-  { title: 'Output Preprocessing', keys: ['mask_grow', 'mask_blur', 'crop_reserve'] },
-  { title: 'Working Resolution', keys: ['pixels', 'align'] },
-  { title: 'Input Ceilings', hint: '0 = no limit', keys: ['ref_pixels', 'ref_align', 'tgen_pixels', 'tgen_align'] },
+// the input ceilings (a memory cap, 0 = off) never read as one undifferentiated list. The footer
+// under each card is the one-sentence version of what the row tooltips say — visible without hover.
+const SETTINGS_GROUPS: { title: string; hint?: string; keys: OverrideKey[]; footer: string }[] = [
+  { title: 'Output Preprocessing', keys: ['mask_grow', 'mask_blur', 'crop_reserve'],
+    footer: 'The mask is grown outwards and feathered before the working area is cropped.' },
+  { title: 'Working Resolution', keys: ['pixels', 'align'],
+    footer: 'The cropped area is resized to fit the pixel budget — a small crop is enlarged to reach it.' },
+  { title: 'Input Ceilings', hint: '0 = no limit', keys: ['ref_pixels', 'ref_align', 'tgen_pixels', 'tgen_align'],
+    footer: 'Shrink-only caps on images going in — images already inside the budget are left alone.' },
 ];
 {
   const lost = OVERRIDE_KEYS.filter(k => !SETTINGS_GROUPS.some(g => g.keys.includes(k)));
@@ -4043,9 +4109,9 @@ const SETTINGS_GROUPS: { title: string; hint?: string; keys: OverrideKey[] }[] =
 }
 
 const segBtnStyle = (on: boolean): React.CSSProperties => ({
-  flex: 1, padding: '5px 0', borderRadius: 6.5, border: 'none', outline: 'none', cursor: 'pointer',
-  fontSize: 12.5, fontWeight: 500, background: on ? '#39393d' : 'transparent',
-  color: on ? '#fff' : 'rgba(255,255,255,0.62)', boxShadow: on ? '0 1px 3px rgba(0,0,0,0.4)' : 'none',
+  flex: 1, padding: '6px 0', borderRadius: 7, border: 'none', outline: 'none', cursor: 'pointer',
+  fontSize: 13, fontWeight: 600, background: on ? '#636366' : 'transparent',
+  color: on ? '#fff' : 'rgba(255,255,255,0.62)', boxShadow: on ? '0 3px 8px rgba(0,0,0,0.35)' : 'none',
 });
 
 const DragHandleIcon: React.FC = () => (
@@ -4055,6 +4121,48 @@ const DragHandleIcon: React.FC = () => (
     <circle cx="2.5" cy="13" r="1.3" /><circle cx="7.5" cy="13" r="1.3" />
   </svg>
 );
+
+// 数值框，iOS 的 value 形态：平时按千分位右对齐（次级灰），点进去选全、按纯数字编辑，松手
+// 回到格式化的读数；↑/↓ 按 step 增减并夹在 [min, max]（原生 number input 的键盘行为，格式化
+// 显示是它给不了的）。中间输入不回显 clamp —— 显示走 draft（编辑器里的原始文本），比如把
+// 65536 逐位打成 1048576 的途中不会被 min 当场弹回 65536，落焦点才见格式化的终值。
+const NumField: React.FC<{
+  value: number; min: number; max: number; step: number;
+  disabled?: boolean; onChange: (n: number) => void; style?: React.CSSProperties;
+}> = ({ value, min, max, step, disabled, onChange, style }) => {
+  const [draft, setDraft] = useState<string | null>(null);
+  const clamp = (n: number) => Math.max(min, Math.min(max, n));
+  const emit = (text: string) => {
+    const n = parseInt(text.replace(/[^\d]/g, ''), 10);
+    onChange(Number.isFinite(n) ? clamp(n) : 0);
+  };
+  return (
+    <input className="ios-val" type="text" inputMode="numeric" disabled={disabled}
+      style={{ ...styles.iosNum, ...(style || {}) }}
+      value={draft ?? value.toLocaleString('en-US')}
+      onFocus={e => {
+        const el = e.currentTarget;
+        setDraft(String(value));
+        // 选全要等 React 把 draft 落进 DOM 之后 —— 同步选会被紧跟的重渲清掉。
+        // setTimeout 而不是 rAF：后者在节流的后台标签里一次都不跑。
+        setTimeout(() => el.select(), 0);
+      }}
+      onChange={e => {
+        // 草稿只留数字：粘贴 "1,048,576" 这类带分隔符的文本时显示保持纯数字,
+        // 也防着"焦点事件丢了、编辑落在格式化文本上"的残局(异常环境下不会越滚越脏)。
+        const text = e.target.value.replace(/[^\d]/g, '');
+        setDraft(text); emit(text);
+      }}
+      onBlur={() => setDraft(null)}
+      onKeyDown={e => {
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+        e.preventDefault();
+        const next = clamp(value + (e.key === 'ArrowUp' ? step : -step));
+        setDraft(String(next)); onChange(next);
+      }}
+    />
+  );
+};
 
 const SettingsTab: React.FC<{
   values: Record<OverrideKey, number>;
@@ -4080,6 +4188,24 @@ const SettingsTab: React.FC<{
     const openRules = ui.openRules.includes(id) ? ui.openRules.filter(x => x !== id) : [...ui.openRules, id];
     const next = { ...ui, openRules }; setUi(next); saveSettingsUI(next);
   };
+  // 新出现的一条规则（Add / Duplicate）自己展开、并把光标放进它的正则框 —— 一条还没有正则的
+  // 规则在屏幕上是张空卡，不给这两下的话用户得先猜到那个框在哪儿。首次渲染（从后端读回来的
+  // 那批）不算"新出现"，否则一进这一屏焦点就被抢走。
+  const seenRuleIds = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const ids = archSettings.rules.map(r => r.id);
+    if (seenRuleIds.current === null) { seenRuleIds.current = new Set(ids); return; }
+    const fresh = ids.find(id => !seenRuleIds.current!.has(id));
+    ids.forEach(id => seenRuleIds.current!.add(id));
+    if (!fresh) return;
+    if (!ui.openRules.includes(fresh)) {
+      const next = { ...ui, openRules: [...ui.openRules, fresh] };
+      setUi(next); saveSettingsUI(next);
+    }
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLInputElement>(`input[data-arch-pattern="${fresh}"]`)?.focus();
+    });
+  }, [archSettings.rules, ui]);
 
   // A rule edits itself back into the whole list — the list, order included, IS the state.
   const patchRule = (id: string, patch: Partial<ArchRule>) => {
@@ -4107,6 +4233,8 @@ const SettingsTab: React.FC<{
   return (
     <div className="dark-scroll" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
       <div style={styles.iosScreen}>
+        <div style={styles.iosPageTitle}>Settings</div>
+
         {/* 子 tab：iOS 分段控件。选哪屏是视图状态，落 sampler.settingsUI（用户的选择，不自动跳）。 */}
         <div style={styles.iosSeg}>
           <button style={segBtnStyle(ui.screen === 'default')} onClick={() => pickScreen('default')}
@@ -4115,8 +4243,8 @@ const SettingsTab: React.FC<{
             title="Regex rules that replace some of those values for the runs they catch">Architecture</button>
         </div>
 
-        {/* DEFAULT SETTING — 三张卡：输出前处理 / 工作分辨率 / 输入封顶。范围与说明仍出自
-            DEFAULT_PARAM_META 那一张表（规则卡读同一张），这里只换外观。 */}
+        {/* DEFAULT SETTING — 三张卡：输出前处理 / 工作分辨率 / 输入封顶，每张卡下面跟一句 footer
+            （组语义的一目了然版）。范围与说明仍出自 DEFAULT_PARAM_META 那一张表（规则卡读同一张）。 */}
         {ui.screen === 'default' && SETTINGS_GROUPS.map(group => (
           <React.Fragment key={group.title}>
             <div style={styles.iosGroupTitle}>{group.title}{group.hint && <em style={styles.iosGroupHint}>{group.hint}</em>}</div>
@@ -4124,16 +4252,18 @@ const SettingsTab: React.FC<{
               {group.keys.map((key, i) => {
                 const m = DEFAULT_PARAM_META[key];
                 return (
-                  <div key={key} style={i === group.keys.length - 1 ? styles.iosRow : { ...styles.iosRow, ...styles.iosRowLine }}
-                    title={m.title}>
-                    <span style={styles.iosLabel}>{m.label}</span>
-                    <input className="ios-val" style={styles.iosNum} type="number" min={m.min} max={m.max} step={m.step}
-                      value={values[key]}
-                      onChange={e => onDefaultParamChange(key, parseInt(e.target.value) || 0)} />
-                  </div>
+                  <React.Fragment key={key}>
+                    {i > 0 && <div style={styles.iosSep} />}
+                    <div style={styles.iosRow} title={m.title}>
+                      <span style={styles.iosLabel}>{m.label}</span>
+                      <NumField value={values[key]} min={m.min} max={m.max} step={m.step}
+                        onChange={n => onDefaultParamChange(key, n)} />
+                    </div>
+                  </React.Fragment>
                 );
               })}
             </div>
+            <div style={styles.iosFooter}>{group.footer}</div>
           </React.Fragment>
         ))}
 
@@ -4152,10 +4282,13 @@ const SettingsTab: React.FC<{
                 <IOSToggle checked={openWithApp} onChange={onOpenWithAppChange} />
               </div>
             </div>
+            <div style={styles.iosFooter}>What happens when a node opens its UI while a run is going.</div>
           </>
         )}
 
-        {/* ARCHITECTURE — 一张卡一条规则：卡头是把手 + 正则 + 徽章 + 折叠箭头，九排在收起时不画。 */}
+        {/* ARCHITECTURE — 一张卡一条规则：卡头是把手 + 正则框 + 徽章 + 折叠箭头（"architecture"
+            那个前缀标签撤了 —— 框里的正则本身和占位符已经把"这是什么"说全，宽度还给输入框），
+            九排在收起时不画。 */}
         {ui.screen === 'arch' && (<>
           <div style={styles.iosGroupTitle}>Rules<em style={styles.iosGroupHint}>first match wins</em></div>
           {archSettings.rules.map((rule, idx) => {
@@ -4163,7 +4296,7 @@ const SettingsTab: React.FC<{
             const open = ui.openRules.includes(rule.id);
             const onCount = OVERRIDE_KEYS.filter(k => !!rule.overrides[k]?.enabled).length;
             return (
-              <div key={rule.id} style={{ ...styles.iosCard, ...(problem ? styles.iosCardBad : {}) }}
+              <div key={rule.id} style={{ ...styles.iosCard, marginBottom: 10, ...(problem ? styles.iosCardBad : {}) }}
                 draggable
                 onDragStart={e => {
                   // The card is the drag source, but its fields are where the pointer lands when
@@ -4176,13 +4309,15 @@ const SettingsTab: React.FC<{
                 onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('application/x-archrule')); if (!isNaN(from)) onReorderArchRules(from, idx); }}
                 onContextMenu={e => { e.preventDefault(); setRuleMenu({ x: e.clientX, y: e.clientY, id: rule.id }); }}
               >
-                <div style={{ ...styles.iosRow, ...styles.iosRowLine, minHeight: 44 }}
+                <div style={{ ...styles.iosRow, minHeight: 46 }}
                   onClick={e => { if ((e.target as HTMLElement).closest('input')) return; toggleRule(rule.id); }}
                   title={'Regex matched against the loaded pipeline\'s architecture (case-insensitive search). '
                     + 'Rules go top to bottom and the first one that matches wins, whole.'
                     + (problem ? '\n' + problemNote(problem) : '')}>
                   <span style={styles.iosHandle}><DragHandleIcon /></span>
-                  <input className="ios-val" style={styles.iosPattern} value={rule.architecture}
+                  <input className="ios-val" style={styles.iosPattern} data-arch-pattern={rule.id}
+                    placeholder="pattern — e.g. qwen|flux"
+                    value={rule.architecture}
                     onChange={e => patchRule(rule.id, { architecture: e.target.value })} />
                   <span style={problem ? { ...styles.iosBadge, ...styles.iosBadgeWarn } : styles.iosBadge}>
                     {problem || `${onCount} / ${OVERRIDE_KEYS.length}`}
@@ -4193,34 +4328,50 @@ const SettingsTab: React.FC<{
                   </span>
                 </div>
                 {/* iOS 三段式：名字在左、值在右、开关在最右。开关关 = 这项不覆盖，
-                    右半边摆的就是 Default Setting 那一屏的现值（整行压暗）。 */}
-                {open && OVERRIDE_KEYS.map((key, i) => {
+                    右半边摆的就是 Default Setting 那一屏的现值（整行压暗）。分隔线跟着
+                    文本起点内缩（把手那一格的宽度不算在内）。 */}
+                {open && OVERRIDE_KEYS.map(key => {
                   const m = DEFAULT_PARAM_META[key];
                   const entry = rule.overrides[key];
                   const on = !!entry?.enabled;
-                  const last = i === OVERRIDE_KEYS.length - 1;
                   return (
-                    <div key={key} style={last ? { ...styles.iosRow, paddingLeft: 26 } : { ...styles.iosRow, ...styles.iosRowLine, paddingLeft: 26 }}
-                      title={`${m.label} — off = runs matched by this rule use the Default Setting (${values[key]}). `
-                        + 'On = the number on the right replaces it.'}>
-                      <span style={{ ...styles.iosLabel, opacity: on ? 1 : 0.4 }}>{m.label}</span>
-                      <input className="ios-val" style={{ ...styles.iosNum, opacity: on ? 1 : 0.4 }}
-                        type="number" min={m.min} max={m.max} step={m.step} disabled={!on}
-                        value={entry?.value ?? values[key]}
-                        onChange={e => setRuleParam(rule.id, key, { value: parseInt(e.target.value) || 0 })} />
-                      <div onClick={e => e.stopPropagation()}>
-                        <IOSToggle checked={on}
-                          onChange={v => setRuleParam(rule.id, key, { enabled: v, value: entry?.value ?? values[key] })} />
+                    <React.Fragment key={key}>
+                      <div style={{ ...styles.iosSep, marginLeft: 42 }} />
+                      <div style={{ ...styles.iosRow, paddingLeft: 42 }}
+                        title={`${m.label} — off = runs matched by this rule use the Default Setting (${values[key]}). `
+                          + 'On = the number on the right replaces it.'}>
+                        <span style={{ ...styles.iosLabel, opacity: on ? 1 : 0.4 }}>{m.label}</span>
+                        <NumField value={entry?.value ?? values[key]} min={m.min} max={m.max} step={m.step}
+                          disabled={!on} style={{ opacity: on ? 1 : 0.4 }}
+                          onChange={n => setRuleParam(rule.id, key, { value: n })} />
+                        <div onClick={e => e.stopPropagation()}>
+                          <IOSToggle checked={on}
+                            onChange={v => setRuleParam(rule.id, key, { enabled: v, value: entry?.value ?? values[key] })} />
+                        </div>
                       </div>
-                    </div>
+                    </React.Fragment>
                   );
                 })}
               </div>
             );
           })}
-          <div style={styles.iosCard}>
-            <button style={styles.iosAddRow} onClick={onAddArchRule}
-              title="A new rule matches nothing until you type its pattern">Add Rule</button>
+          {archSettings.rules.length > 0 ? (
+            <div style={styles.iosCard}>
+              <button style={styles.iosAddRow} onClick={onAddArchRule}
+                title="A new rule matches nothing until you type its pattern">Add Rule</button>
+            </div>
+          ) : (
+            // 空态也是一张卡：一句话 + Add Rule 行，页面不留光板。
+            <div style={styles.iosCard}>
+              <div style={styles.iosEmpty}>No rules — every run uses the Default Setting as-is.</div>
+              <div style={{ ...styles.iosSep, marginLeft: 0 }} />
+              <button style={styles.iosAddRow} onClick={onAddArchRule}
+                title="A new rule matches nothing until you type its pattern">Add Rule</button>
+            </div>
+          )}
+          <div style={styles.iosFooter}>
+            Top to bottom — the first rule whose pattern matches the pipeline&apos;s architecture replaces
+            those values whole; everything it leaves off falls back to Default Setting.
           </div>
           {ruleMenu && (() => {
             const target = archSettings.rules.find(r => r.id === ruleMenu.id);
@@ -4801,26 +4952,33 @@ const styles: Record<string, React.CSSProperties> = {
   // 几何块也用它补一句语义（cover vs contain、要不要 mask）。
   blockNote: { fontSize: 11, lineHeight: 1.45, color: 'rgba(255,255,255,0.42)', paddingTop: 2 },
 
-  // ── Settings 页的 iOS inset-grouped 词汇（系统色，不再手调白叠加）：卡片 #1c1c1e、分节标题
-  // #8e8e93 大写、内缩分隔线 rgba(84,84,88,.55)、强调 #0a84ff、告警 #ff9f0a。Draw 页那套
-  // paramRow/paramInput 原样留着 —— 这页先换装，质感定了再谈推广。
-  iosScreen: { display: 'flex', flexDirection: 'column', paddingBottom: 8 },
-  iosSeg: { margin: '12px 12px 0', display: 'flex', padding: 2.5, borderRadius: 9, background: 'rgba(255,255,255,0.08)', flexShrink: 0 },
-  iosGroupTitle: { margin: '14px 14px 6px', display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 11, fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase', color: '#8e8e93' },
-  iosGroupHint: { fontStyle: 'normal', textTransform: 'none', letterSpacing: 0, fontWeight: 400, fontSize: 11, color: 'rgba(142,142,147,0.75)' },
-  iosCard: { margin: '0 12px 10px', background: '#1c1c1e', borderRadius: 10, overflow: 'hidden' },
+  // ── Settings 页的 iOS inset-grouped 词汇（系统色，不再手调白叠加）：黑底、卡片 #1c1c1e、
+  // 分节标题 #8e8e93 大写、分隔线 rgba(84,84,88,.65) 内缩到文本起点、强调 #0a84ff、告警 #ff9f0a。
+  // 内容是一根居中的定宽列（iPad Settings 的摆法），面板再宽行也不跟着拉长。
+  iosScreen: { display: 'flex', flexDirection: 'column', width: '100%', maxWidth: 620, margin: '0 auto', padding: '0 16px 28px' },
+  iosPageTitle: { fontSize: 26, fontWeight: 700, letterSpacing: '-0.4px', color: '#fff', margin: '16px 0 14px' },
+  iosSeg: { display: 'flex', padding: 2, borderRadius: 9, background: 'rgba(118,118,128,0.24)', flexShrink: 0 },
+  iosGroupTitle: { margin: '18px 0 7px', display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 13, fontWeight: 400, letterSpacing: '0.6px', textTransform: 'uppercase', color: '#8e8e93' },
+  iosGroupHint: { fontStyle: 'normal', textTransform: 'none', letterSpacing: 0, fontWeight: 400, fontSize: 12, color: 'rgba(142,142,147,0.75)' },
+  // 卡片下方的一句说明（组语义的一目了然版）：iOS 的 section footer，自带组间距。
+  iosFooter: { margin: '7px 0 16px', fontSize: 12.5, lineHeight: '17px', color: '#8e8e93' },
+  iosCard: { background: '#1c1c1e', borderRadius: 11, overflow: 'hidden' },
   iosCardBad: { boxShadow: 'inset 0 0 0 1px rgba(255,159,10,0.7)' },
-  iosRow: { display: 'flex', alignItems: 'center', gap: 8, padding: '0 14px', minHeight: 40, minWidth: 0 },
-  iosRowLine: { borderBottom: '0.5px solid rgba(84,84,88,0.55)' },
-  iosLabel: { flex: 1, minWidth: 0, fontSize: 13.5, color: 'rgba(255,255,255,0.92)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  // 值贴右、无边框，聚焦才现出下划线（:focus 在 <style> 里的 .ios-val）
-  iosNum: { flexShrink: 0, width: 92, textAlign: 'right', background: 'transparent', border: 'none', borderBottom: '0.5px solid transparent', outline: 'none', color: 'rgba(255,255,255,0.92)', fontSize: 13.5, fontVariantNumeric: 'tabular-nums' },
-  iosPattern: { flex: 1, minWidth: 0, background: 'transparent', border: 'none', borderBottom: '0.5px solid transparent', outline: 'none', color: 'rgba(255,255,255,0.92)', fontSize: 12.5, fontFamily: 'ui-monospace, Consolas, monospace' },
-  iosBadge: { flexShrink: 0, padding: '1.5px 6px', borderRadius: 8, background: 'rgba(255,255,255,0.07)', color: '#8e8e93', fontSize: 10.5, fontVariantNumeric: 'tabular-nums' },
-  iosBadgeWarn: { background: 'rgba(255,159,10,0.13)', color: '#ff9f0a' },
+  iosRow: { display: 'flex', alignItems: 'center', gap: 10, padding: '0 16px', minHeight: 44, minWidth: 0 },
+  // 内缩分隔线：独立的一根，画在行与行之间，起点对齐文本 —— 不再压在整行边框上。
+  iosSep: { height: 0.5, background: 'rgba(84,84,88,0.65)', marginLeft: 16 },
+  iosLabel: { flex: 1, minWidth: 0, fontSize: 14, color: 'rgba(255,255,255,0.92)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  // 值贴右、无边框；颜色归 .ios-val（静默次级灰、聚焦变白现蓝下划线，见 <style> 块）
+  iosNum: { flexShrink: 0, width: 96, textAlign: 'right', background: 'transparent', border: 'none', borderBottom: '0.5px solid transparent', outline: 'none', fontSize: 14, fontVariantNumeric: 'tabular-nums' },
+  // 正则框是"这一条是谁"，所以它不能像纯数字那样只留一行空白：空着也要有框的形状
+  // （淡底 + hairline + 占位符），否则新加的规则卡看上去就是一整行空的。
+  iosPattern: { flex: 1, minWidth: 60, padding: '5px 9px', borderRadius: 7, background: 'rgba(255,255,255,0.055)', border: '0.5px solid rgba(84,84,88,0.55)', outline: 'none', color: 'rgba(255,255,255,0.92)', fontSize: 13, fontFamily: 'ui-monospace, Consolas, monospace' },
+  iosBadge: { flexShrink: 0, padding: '2px 7px', borderRadius: 9, background: 'rgba(255,255,255,0.08)', color: '#8e8e93', fontSize: 11, fontVariantNumeric: 'tabular-nums' },
+  iosBadgeWarn: { background: 'rgba(255,159,10,0.15)', color: '#ff9f0a' },
   iosHandle: { flexShrink: 0, display: 'flex', color: 'rgba(142,142,147,0.55)', cursor: 'grab' },
   iosChev: { flexShrink: 0, display: 'flex', color: 'rgba(142,142,147,0.45)', transition: 'transform 0.12s ease' },
-  iosAddRow: { display: 'block', width: '100%', textAlign: 'left', padding: '11px 14px', background: 'transparent', border: 'none', outline: 'none', color: '#0a84ff', fontSize: 13.5, cursor: 'pointer' },
+  iosAddRow: { display: 'block', width: '100%', textAlign: 'left', padding: '12px 16px', background: 'transparent', border: 'none', outline: 'none', color: '#0a84ff', fontSize: 14, cursor: 'pointer' },
+  iosEmpty: { padding: '18px 16px', fontSize: 13.5, lineHeight: '18px', color: '#8e8e93' },
 
   // The dock's own frame (its boxes, bars, handles and windows) is styled in src/dock/DockView.tsx —
   // this is what a unit's BODY uses: interior cards and rows, same skin as the Settings page.

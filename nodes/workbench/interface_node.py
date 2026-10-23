@@ -11,24 +11,120 @@ any_type = AlwaysEqualProxy("*")
 _UNRESOLVED = object()  # sentinel for unresolved link values
 
 
-def _sg_boundary_widget_value(sg_node, sg_data, slot):
-    """Resolve a subgraph boundary input from the subgraph node's own widgets_values.
+def _alias_target(entry):
+    """展开 `_subgraph_output_aliases` 的值：(internal_node_id, output_slot)。
 
-    Promoted widget inputs (input entry has a 'widget' key, link is None) store
-    their value on the subgraph node instance's widgets_values array, not in any
-    link. The node's inputs[] index aligns with sg_data.inputs[] index, and
-    widgets_values aligns with the widget-bearing inputs in array order (inputs
-    that carry a link AND a widget still consume a widgets_values slot).
+    新格式是 [id, slot]；旧存档/旧代码写的是裸 id，那时一律按输出槽 0 读 ——
+    子图某个输出若不是从内部节点第 0 个口连出来的（很常见），按 0 读会静默
+    拿到另一个值，也就是"接错线"。
+    """
+    if isinstance(entry, (list, tuple)) and len(entry) == 2:
+        return str(entry[0]), int(entry[1])
+    return str(entry), 0
 
-    Returns _UNRESOLVED when the slot is not a promoted widget input or the
-    value is missing.
+
+def _widget_names_of(node):
+    """存档里这条节点各 widget 的 `(名字, 是否已转成连线输入)`，按槽序。
+
+    新前端在每个 input 条目上带 `widget: {name}`，所以"哪一格是什么"是可查的。
+    节点包后来增删了 widget 时，`widgets_values` 的格数和当前 INPUT_TYPES 对不上，
+    按位置读就会整体错位（提示词串跑进 motion_amplitude 这类）；有名字表就能按
+    名字把值对上，存档里多出来的名字直接跳过。
+
+    第二个元素很关键：把某个 widget 转成输入口之后，前端有的版本**仍把它的值留
+    在 widgets_values 里**，有的版本会删掉 —— 对齐时两种约定都要试。
+    """
+    names = []
+    for inp in (node.get("inputs") or []) if isinstance(node, dict) else []:
+        if not isinstance(inp, dict) or inp.get("widget") is None:
+            continue
+        cand = _widget_entry_names(inp)
+        names.append((cand[0] if cand else None, inp.get("link") is not None))
+    return names
+
+
+def _widgets_by_stored_names(widget_params, widgets_names, values):
+    """按存档里的 widget 名字对齐 widgets_values；对不齐返回 None。
+
+    节点包后来增/删了 widget 时，存档里的格子数和当前 INPUT_TYPES 对不上，按位置
+    读会整体错位（提示词串跑进 motion_amplitude、'euler' 跑进 scheduler 这类）。
+    名字表能直接规避：多余的旧名字连同它的值一起跳过。
+
+    已转成输入的 widget 有两种存档约定（值留着 / 值删掉），这里两种都走一遍，
+    取"正好把值用完"的那种；都对不齐返回 None，交调用方退回按位置的老办法。
+    """
+    if not isinstance(widgets_names, list) or not widgets_names:
+        return None
+    if not isinstance(values, list) or not values:
+        return None
+    opts_of = {n: (o or {}) for n, _t, o in widget_params}
+    pairs = []
+    for nm in widgets_names:
+        if isinstance(nm, (tuple, list)) and len(nm) == 2:
+            pairs.append((nm[0], bool(nm[1])))
+        else:
+            pairs.append((nm, False))
+
+    def _walk(skip_linked):
+        out = {}
+        i = 0
+        for nm, linked in pairs:
+            if skip_linked and linked:
+                continue  # 转成输入口的 widget：存档里没留值，也不占格
+            if i >= len(values):
+                return None
+            if nm in opts_of:
+                out[nm] = values[i]
+                i += 1
+                if opts_of[nm].get("control_after_generate"):
+                    if i >= len(values):
+                        return None
+                    i += 1
+            elif isinstance(nm, str) and "." in nm:
+                out[nm] = values[i]
+                i += 1
+            else:
+                i += 1
+        return out if i == len(values) else None
+
+    for skip in (False, True):
+        got = _walk(skip)
+        if got is not None:
+            return got
+    return None
+
+
+def _node_passthrough(cls):
+    """一口进一口出（AnyPass / ByPass 这类直通节点）→ True。
+
+    这种节点不做运算，只是把值搬过去；因此"想要哪个上游输出"这个名字可以穿过
+    它继续往上找，也可以在日志里把它展开成 `7748:0 ← 7745:8`。
+    """
+    if cls is None or len(getattr(cls, "RETURN_TYPES", ()) or ()) != 1:
+        return False
+    try:
+        it = cls.INPUT_TYPES()
+    except Exception:
+        return False
+    if not isinstance(it, dict):
+        return False
+    names = [n for cat in ("required", "optional") for n in (it.get(cat) or {})]
+    return len(names) == 1
+
+
+def _sg_boundary_widget_entry(sg_node, sg_data, slot):
+    """Return the subgraph node's input entry for a boundary slot, or None.
+
+    Promoted widget inputs carry a 'widget' key on the subgraph node instance.
+    Used by the callers to tell "this port is a widget" (a missing value should
+    fall back to the internal node's own default) from "this port is a plain
+    link" (a missing value is a real unresolved boundary).
     """
     if not isinstance(sg_node, dict):
-        return _UNRESOLVED
+        return None
     node_inputs = sg_node.get("inputs") or []
-    wv = sg_node.get("widgets_values")
-    if not isinstance(wv, list) or not wv or not isinstance(node_inputs, list):
-        return _UNRESOLVED
+    if not isinstance(node_inputs, list):
+        return None
     defs = (sg_data or {}).get("inputs") or []
 
     # Find the node's input entry for this boundary slot (index match, verified by name)
@@ -43,37 +139,128 @@ def _sg_boundary_widget_value(sg_node, sg_data, slot):
         def_name = defs[slot].get("name")
         entry = next((i for i in node_inputs if isinstance(i, dict) and i.get("name") == def_name), None)
     if not isinstance(entry, dict) or not entry.get("widget"):
-        return _UNRESOLVED
+        return None
+    return entry
 
-    # widgets_values index = number of widget-bearing inputs preceding this entry
-    widx = 0
-    found = False
-    for i in node_inputs:
-        if not isinstance(i, dict) or not i.get("widget"):
-            continue
-        if i is entry:
-            found = True
-            break
-        widx += 1
-    if not found or widx >= len(wv):
-        return _UNRESOLVED
 
-    val = wv[widx]
-    # Light type conversion based on the boundary definition type
-    def_type = defs[slot].get("type", "") if slot < len(defs) and isinstance(defs[slot], dict) else ""
-    if def_type == "INT" and isinstance(val, str):
-        try:
-            val = int(float(val))
-        except (ValueError, TypeError):
-            pass
-    elif def_type == "FLOAT" and isinstance(val, str):
-        try:
-            val = float(val)
-        except (ValueError, TypeError):
-            pass
-    elif def_type == "BOOLEAN" and isinstance(val, str):
-        val = val.lower() in ("true", "1", "yes")
+def _widget_entry_names(entry):
+    """Candidate names for a widget-bearing input entry, most specific first."""
+    names = []
+    widget = entry.get("widget")
+    if isinstance(widget, dict) and isinstance(widget.get("name"), str):
+        names.append(widget["name"])
+    if isinstance(entry.get("name"), str):
+        names.append(entry["name"])
+    return names
+
+
+def _coerce_boundary_widget_value(val, def_type):
+    """按边界声明的标量类型收敛一个 widget 值；收不拢就当作没有值。
+
+    收不拢说明这个格子里装的不是这个口该有的东西（前端少写/多写一格时，
+    位置表会整体错位），继续往下传只会让内部节点在 `str > float` 这种地方
+    才炸；这里直接返回 _UNRESOLVED，让调用方退回节点自己的默认值。
+    """
+    if val is None:
+        return _UNRESOLVED
+    try:
+        if def_type == "FLOAT":
+            return float(val)
+        if def_type == "INT":
+            return int(float(val))
+    except (TypeError, ValueError):
+        return _UNRESOLVED
+    if def_type == "BOOLEAN":
+        if isinstance(val, str):
+            return val.lower() in ("true", "1", "yes")
+        return bool(val)
     return val
+
+
+def _find_subgraph(subgraph_by_type, node_type):
+    """按 type 找子图定义：原样 → 去连字符/小写 → None。
+
+    前端两种写法都出现过：节点 type 是子图 uuid，个别存档里连字符/大小写对不上
+    （nested 子图尤其常见），所以命中不了再归一化比一次。
+    """
+    if not isinstance(node_type, str) or not node_type:
+        return None
+    if not isinstance(subgraph_by_type, dict):
+        return None
+    sg = subgraph_by_type.get(node_type)
+    if sg is None:
+        sg = subgraph_by_type.get(node_type.replace("-", "").lower())
+    return sg
+
+
+def _instance_input_index(sg_node, def_name):
+    """子图定义里的输入名 → 这颗实例的 `inputs` 数组下标（没这一格就 None）。
+
+    子图定义可以声明 15 个输入，而实例上可能只有 14 格 —— 某个输入既没连线、也
+    没在实例上生成槽（现场：`motion_amplitude`）。这时**后面所有下标都相差 1**，
+    拿"定义下标"去比父图连线的 `target_slot` 就会把 sampler_name 接到 scheduler
+    的线上。所以一律先按名字换成实例下标。
+    """
+    for i, entry in enumerate((sg_node or {}).get("inputs") or []):
+        if isinstance(entry, dict) and entry.get("name") == def_name:
+            return i
+    return None
+
+
+def _sg_boundary_widget_value(sg_node, sg_data, slot):
+    """Resolve a subgraph boundary input from the subgraph node's own widget values.
+
+    Promoted widget inputs store their value on the subgraph node instance, not in
+    any link. 三级来源：
+
+    1. ``widgets_values_named`` 按**定义里的输入名**取 —— 最稳，实例上连槽都没有
+       也照样能取到（现场：motion_amplitude 就是"没连线、走 subgraph 上的 widget"）；
+    2. 实例上那个输入条目存在时的命名表（按条目名，兼容 widget.name 与 input.name 不同）；
+    3. ``widgets_values`` 位置表 —— 只有"带 widget 的输入槽数 == 值个数"时才可信。
+
+    Returns _UNRESOLVED when there is no trustworthy value.
+    """
+    defs = (sg_data or {}).get("inputs") or []
+    def_name = defs[slot].get("name", "") if 0 <= slot < len(defs) and isinstance(defs[slot], dict) else ""
+    def_type = defs[slot].get("type", "") if 0 <= slot < len(defs) and isinstance(defs[slot], dict) else ""
+
+    named = sg_node.get("widgets_values_named")
+    if isinstance(named, dict) and def_name and def_name in named:
+        val = _coerce_boundary_widget_value(named[def_name], def_type)
+        if val is not _UNRESOLVED:
+            return val
+
+    entry = _sg_boundary_widget_entry(sg_node, sg_data, slot)
+    if entry is None:
+        return _UNRESOLVED
+
+    # 2) 命名表：键就是 promoted widget 的名字，逐个对，不做位置猜测。
+    if isinstance(named, dict):
+        for nm in _widget_entry_names(entry):
+            if nm in named:
+                return _coerce_boundary_widget_value(named[nm], def_type)
+
+    # 2) 位置表：槽位数与值个数对不上时说明这份存档的格子不准，不猜。
+    wv = sg_node.get("widgets_values")
+    if not isinstance(wv, list) or not wv:
+        return _UNRESOLVED
+    node_inputs = [i for i in (sg_node.get("inputs") or []) if isinstance(i, dict)]
+    widget_entries = [i for i in node_inputs if i.get("widget")]
+    if len(widget_entries) != len(wv):
+        return _UNRESOLVED
+    pos = None
+    for i, e in enumerate(widget_entries):
+        if e is entry:
+            pos = i
+            break
+    if pos is None:
+        for i, e in enumerate(widget_entries):
+            if e.get("name") == entry.get("name"):
+                pos = i
+                break
+    if pos is None or pos >= len(wv):
+        return _UNRESOLVED
+    return _coerce_boundary_widget_value(wv[pos], def_type)
 
 # Global injection dict: {start_node_id: {port_num: value}}
 _interface_injections = {}
@@ -271,7 +458,18 @@ class InterfacePackageNode:
         if not subgraphs:
             subgraphs = workflow.get("subgraphs", [])
         subgraph_by_type = {str(sg.get("id")): sg for sg in subgraphs if isinstance(sg, dict) and "id" in sg}
+        # 前端两种写法都出现过：节点 type 是子图 uuid，但个别存档的 uuid 带/不带连字符
+        # 对不上（nested 子图尤其常见）。补一份归一化索引，命中不了再按名字兜一次。
+        for sg in subgraphs:
+            if not isinstance(sg, dict):
+                continue
+            for key in (sg.get("id"), sg.get("name")):
+                if isinstance(key, str) and key:
+                    subgraph_by_type.setdefault(key.replace("-", "").lower(), sg)
         return node_by_id, links, subgraph_by_type
+
+    _subgraph_of = staticmethod(lambda subgraph_by_type, node_type:
+                               _find_subgraph(subgraph_by_type, node_type))
 
     @staticmethod
     def _get_node_inputs(node, links):
@@ -307,10 +505,15 @@ class InterfacePackageNode:
         return result
 
     @classmethod
-    def _expand_subgraph(cls, sg_node_id, sg_node, subgraph_by_type, links, sub_prompt, parent_node_id=None):
-        """Expand a ComfyUI subgraph node into its internal nodes."""
+    def _expand_subgraph(cls, sg_node_id, sg_node, subgraph_by_type, links, sub_prompt,
+                         parent_node_id=None, prefix=None):
+        """Expand a ComfyUI subgraph node into its internal nodes.
+
+        `prefix` 只在"子图里再套子图"的递归里给：成品里的节点 id 是
+        `父实例.本实例.内部节点`，而父图连线的 target 仍然只写**本层**的裸 id。
+        """
         sg_type = sg_node.get("type", "")
-        sg_data = subgraph_by_type.get(sg_type)
+        sg_data = cls._subgraph_of(subgraph_by_type, sg_type)
         if not sg_data:
             return {}
 
@@ -361,7 +564,9 @@ class InterfacePackageNode:
             elif st in ("graph/output", "SubgraphNodeOutput"):
                 sg_out_node = sn
 
-        prefix = f"{sg_node_id}."
+        prefix = f"{sg_node_id}." if prefix is None else prefix
+        # 成品里这颗子图节点的 id（顶层就是 "7743"，嵌套则是 "7744.6280"）
+        self_id = prefix[:-1] if prefix.endswith(".") else prefix
         sg_in_id = str(sg_in_node.get("id")) if sg_in_node else ""
         sg_out_id = str(sg_out_node.get("id")) if sg_out_node else ""
 
@@ -402,6 +607,15 @@ class InterfacePackageNode:
             if sn_type in ("graph/input", "graph/output", "SubgraphNodeInput", "SubgraphNodeOutput"):
                 continue
 
+            # 子图里还套着子图（现场：7744 里的 [Config] Architecture）——
+            # 不展开的话，执行时 class_type 是个 uuid，直接 SKIP，它的输出永远
+            # 没有值，下游只能吃默认值（"很多 fallback"的来源之一）。
+            # 递归用**本层**的 links 解边界，节点 id 再往前缀一层。
+            if cls._subgraph_of(subgraph_by_type, sn_type):
+                cls._expand_subgraph(sn_id, sn, subgraph_by_type, sg_links, sub_prompt,
+                                     prefix=f"{prefix}{sn_id}.")
+                continue
+
             sn_inputs = {}
             for inp in sn.get("inputs", []):
                 if isinstance(inp, dict):
@@ -439,6 +653,9 @@ class InterfacePackageNode:
                 "class_type": sn_type,
                 "inputs": sn_inputs,
                 "_widgets_values": sn.get("widgets_values", []),
+                "_widgets_names": _widget_names_of(sn),
+                "_outputs_names": [o.get("name") for o in (sn.get("outputs") or [])],
+                "_widgets_values_named": sn.get("widgets_values_named") or {},
                 "mode": sn.get("mode", 0),
             }
 
@@ -469,6 +686,9 @@ class InterfacePackageNode:
             input_def = virtual_input_map.get(origin_slot, {})
             input_name = input_def.get("name", "")
             input_type = input_def.get("type", "")
+            # 内部连线用的是**定义**里的槽号，父图连线用的是**实例**里的槽号；
+            # 实例少一格（motion_amplitude）时两者不再相等，必须按名字换算。
+            inst_slot = _instance_input_index(sg_node, input_name)
 
             # Resolve the value: check sg_node's input links in parent graph
             resolved = False
@@ -487,7 +707,8 @@ class InterfacePackageNode:
                     pl_origin_slot = pl.get("origin_slot", -1)
                 else:
                     continue
-                if pl_target_id == sg_node_id and pl_target_slot == origin_slot:
+                if pl_target_id == sg_node_id and inst_slot is not None \
+                        and pl_target_slot == inst_slot:
                     if internal_target in sub_prompt:
                         for inp_name, inp_val in sub_prompt[internal_target].get("inputs", {}).items():
                             if isinstance(inp_val, dict) and inp_val.get("_sg_input_slot") == origin_slot:
@@ -504,6 +725,13 @@ class InterfacePackageNode:
                     for inp_name, inp_val in sub_prompt[internal_target].get("inputs", {}).items():
                         if isinstance(inp_val, dict) and inp_val.get("_sg_input_slot") == origin_slot:
                             sub_prompt[internal_target]["inputs"][inp_name] = wval
+                elif _sg_boundary_widget_entry(sg_node, sg_data, origin_slot) is not None:
+                    # 这是个 promoted widget 口，但存档里没有可信的值（比如前端把
+                    # widgets_values 写多/写少了一格）。保留 _sg_input_slot 占位，
+                    # 执行时直接跳过这个输入，让内部节点自己的默认值生效 ——
+                    # 猜一格相邻的值（提示词串）比用默认值更糟。
+                    print("[InterfacePorts] promoted widget slot %s/%s: 存档值不可信, "
+                          "改用内部节点默认值" % (sg_node.get("id", "?"), origin_slot))
                 else:
                     for inp_name, inp_val in sub_prompt[internal_target].get("inputs", {}).items():
                         if isinstance(inp_val, dict) and inp_val.get("_sg_input_slot") == origin_slot:
@@ -525,7 +753,9 @@ class InterfacePackageNode:
 
             origin, origin_slot = get_link_origin(sl)
             internal_origin = f"{prefix}{origin}"
-            output_aliases[f"{sg_node_id}:{target_slot}"] = internal_origin
+            # 记住内部节点用的是**哪个输出槽**：子图输出 N ← 内部节点 X 的第 K 个口，
+            # 丢掉 K 就变成"永远读 X 的第 0 个口"。
+            output_aliases[f"{self_id}:{target_slot}"] = [internal_origin, origin_slot]
 
         return sub_prompt
 
@@ -635,7 +865,7 @@ class InterfacePackageNode:
                 continue  # Don't add GetNode to sub_prompt
 
             # Check if this is a subgraph node
-            if node_type in subgraph_by_type:
+            if _find_subgraph(subgraph_by_type, node_type):
                 self._expand_subgraph(nid, n, subgraph_by_type, links, sub_prompt)
                 continue
 
@@ -662,6 +892,9 @@ class InterfacePackageNode:
                 "class_type": node_type,
                 "inputs": inputs,
                 "_widgets_values": wv,
+                "_widgets_names": _widget_names_of(n),
+                "_outputs_names": [o.get("name") for o in (n.get("outputs") or [])],
+                "_widgets_values_named": n.get("widgets_values_named") or {},
                 "mode": n.get("mode", 0),
             }
 
@@ -718,6 +951,9 @@ class InterfacePackageNode:
                                         "class_type": rn.get("type", ""),
                                         "inputs": r_inputs,
                                         "_widgets_values": rn.get("widgets_values", []),
+                                        "_widgets_names": _widget_names_of(rn),
+                                        "_outputs_names": [o.get("name") for o in (rn.get("outputs") or [])],
+                                        "_widgets_values_named": rn.get("widgets_values_named") or {},
                                         "mode": rn.get("mode", 0),
                                     }
                             resolved = True
@@ -853,12 +1089,18 @@ class InterfacePackageNode:
             # 三种失败各有各的说法, 面板上"框里只有 placeholder"时打的就是这几行。
             who = "%s#%s value-input[%s]" % (node_obj.get('type', '?'), node_obj.get('id', '?'), entry_idx)
             ins = node_obj.get("inputs") or []
-            wv = node_obj.get("widgets_values")
             entry = ins[entry_idx] if 0 <= entry_idx < len(ins) else None
             if not isinstance(entry, dict) or "widget" not in entry:
                 print("[InterfacePorts] 默认值缺席 %s: 这条输入在存档里没有 widget (%s), "
                       "它是个连线口" % (who, 'no entry' if not isinstance(entry, dict) else 'widget key missing'))
                 return _no_widget_value
+            # 新前端的命名表按名字给值, 不受数组长度错位影响, 优先用。
+            named = node_obj.get("widgets_values_named")
+            if isinstance(named, dict):
+                for nm in _widget_entry_names(entry):
+                    if nm in named and named[nm] is not None:
+                        return named[nm]
+            wv = node_obj.get("widgets_values")
             if not isinstance(wv, list):
                 print("[InterfacePorts] 默认值缺席 %s: 存档里没有 widgets_values 数组 (是 %s)"
                       % (who, type(wv).__name__))
@@ -963,8 +1205,8 @@ class InterfacePackageNode:
             if not n:
                 continue
             node_type = n.get("type", "")
-            if node_type in subgraph_by_type:
-                sg = subgraph_by_type[node_type]
+            if _find_subgraph(subgraph_by_type, node_type):
+                sg = _find_subgraph(subgraph_by_type, node_type)
                 sg_widget_values[nid] = n.get("widgets_values", [])
                 for si in sg.get("inputs", []):
                     sg_input_defs.append({"name": si.get("name", ""), "type": si.get("type", ""), "sg_node_id": nid})
@@ -1110,8 +1352,8 @@ class PipelinePackageNode:
             return title
         node_type = node_obj.get("type", "Unknown")
         # If type is a subgraph UUID, look up the subgraph's name
-        if subgraph_by_type and node_type in subgraph_by_type:
-            sg = subgraph_by_type[node_type]
+        sg = InterfacePackageNode._subgraph_of(subgraph_by_type or {}, node_type)
+        if sg is not None:
             sg_name = sg.get("name", "")
             if sg_name:
                 return sg_name
@@ -1205,6 +1447,10 @@ class InterfaceExecutor:
         self.on_sampler_progress = on_sampler_progress
         self._sg_widget_values = {}  # Set during execute from pkg
         self._sg_input_defs = []
+        # nid → {输入名: "来源节点:输出槽"}；只用来把"类型不对/回退"的日志指回那根线。
+        self._link_src = {}
+        self._guard_nodes = set()   # 已经打印过连线表的节点（每个节点只打一次）
+        self._sub_prompt = {}       # 当前这次执行的 sub_prompt（日志追溯用）
         # Allow List：这一次 execute 是不是按"一列图"跑（见 execute 的 list_mode）。
         self.list_mode = False
         # 与最近一次 execute() 的 results 逐条对齐的端口号 —— 离线 processor 按
@@ -1238,6 +1484,7 @@ class InterfaceExecutor:
         sub_prompt = pkg.get('sub_prompt', {})
         if not sub_prompt:
             raise RuntimeError("Package has no sub_prompt")
+        self._sub_prompt = sub_prompt   # 日志里追"值到底来自哪根线"要用
 
         print(f"[InterfaceExecutor] === Starting '{interface_name}' ===")
         print(f"[InterfaceExecutor] start={start_id} end={end_id} start_types={pkg.get('start_types', {})} nodes={list(sub_prompt.keys())}")
@@ -1260,6 +1507,8 @@ class InterfaceExecutor:
             output_values = {}
             self._eval_cache = output_values
             self._eval_stack = set()  # 循环检测
+            self._link_src = {}       # nid → {输入名: "来源节点:输出槽"}，只用于日志定位
+            self._guard_nodes = set()
             self._eval_count = 0
             self._eval_total = len([n for n in sub_prompt if not n.startswith("_")])
 
@@ -1340,13 +1589,15 @@ class InterfaceExecutor:
             if nid.startswith("_"):
                 continue
             widgets_values = node.pop("_widgets_values", [])
-            if not widgets_values:
+            widgets_named = node.pop("_widgets_values_named", None)
+            widgets_names = node.pop("_widgets_names", None)
+            if not widgets_values and not widgets_named:
                 continue
             class_type = node.get("class_type", "")
             class_def = comfy_nodes.NODE_CLASS_MAPPINGS.get(class_type)
             if not class_def:
                 continue
-            widget_dict = self._build_widget_dict(class_def, widgets_values)
+            widget_dict = self._build_widget_dict(class_def, widgets_values, widgets_named, widgets_names)
             for name, val in widget_dict.items():
                 existing = node.get("inputs", {}).get(name)
                 if isinstance(existing, dict) and existing.get("_virtual_input"):
@@ -1356,10 +1607,21 @@ class InterfaceExecutor:
                     node["inputs"][name] = val
 
     @staticmethod
-    def _build_widget_dict(class_def, widgets_values):
-        """从 widgets_values 数组构建 {name: typed_value} 字典"""
+    def _build_widget_dict(class_def, widgets_values, widgets_values_named=None, widgets_names=None):
+        """从 widgets_values 数组（或前端的命名表）构建 {name: typed_value} 字典。
+
+        新前端会把值按名字写进 ``widgets_values_named``：DynamicCombo 的子输入在
+        那里就是 ``resize_type.width`` 这种点号名，而位置表 ``widgets_values`` 里
+        它们是展开后的若干槽位，单靠 INPUT_TYPES 的顶层声明序对不出来。所以优先
+        用命名表；其次是存档自带的 widget 名字表（``inputs[].widget.name``，能扛住
+        节点包增删 widget 造成的格子数不一致）；两者都没有才按声明序消费。
+        """
         import inspect as _inspect
-        if not widgets_values:
+        if not widgets_values and not widgets_values_named:
+            return {}
+        try:
+            input_types = class_def.INPUT_TYPES()
+        except Exception:
             return {}
         func_name = getattr(class_def, "FUNCTION", "execute")
         func = getattr(class_def, func_name, None)
@@ -1380,77 +1642,126 @@ class InterfaceExecutor:
             if v.kind in (_inspect.Parameter.POSITIONAL_OR_KEYWORD, _inspect.Parameter.KEYWORD_ONLY, _inspect.Parameter.POSITIONAL_ONLY)
             and p != 'self'
         ]
-        try:
-            input_types = class_def.INPUT_TYPES()
-        except Exception:
-            return {}
-        link_names = set()
-        widget_types = {}
-        declared_order = []  # INPUT_TYPES 声明序里的 widget 参数名
-        for cat in ("required", "optional", "hidden"):
+        declared = []  # [(name, type, opts)] in INPUT_TYPES order
+        for cat in ("required", "optional"):
             ci = input_types.get(cat, {})
-            if isinstance(ci, dict):
-                for name, val in ci.items():
-                    if not isinstance(val, tuple) or len(val) < 1:
-                        continue
-                    t = val[0]
-                    opts = val[1] if len(val) >= 2 and isinstance(val[1], dict) else {}
-                    # All hidden inputs are system-provided, never mapped from widgets_values
-                    if cat == "hidden" or opts.get("forceInput", False):
-                        link_names.add(name)
-                        continue
-                    if isinstance(t, str) and t in ("STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"):
-                        # New ComfyUI API nodes use string type tags like "COMBO";
-                        # old API nodes use a raw list for combo boxes.
-                        widget_types[name] = t
-                    elif isinstance(t, list):
-                        widget_types[name] = "COMBO"
+            if not isinstance(ci, dict):
+                continue
+            for name, val in ci.items():
+                if not isinstance(val, tuple) or len(val) < 1:
+                    continue
+                t = val[0]
+                opts = val[1] if len(val) >= 2 and isinstance(val[1], dict) else {}
+                declared.append((name, t, opts))
+        declared_names = {n for n, _t, _o in declared}
+
+        # 无论有没有位置表，都先按 INPUT_TYPES 建一张 name → 标量类型表：
+        # 命名表的值也要过一遍类型收敛（前端命名表里可能留着字符串形式）。
+        link_names = set(input_types.get("hidden") or {})
+        widget_types = {}
+        widget_params = []  # [(name, type, opts)]
+        for name, t, opts in declared:
+            # All hidden inputs are system-provided, never mapped from widgets_values
+            if opts.get("forceInput", False):
+                link_names.add(name)
+                continue
+            if isinstance(t, str) and t in ("STRING", "INT", "FLOAT", "BOOLEAN", "COMBO", "COMFY_DYNAMICCOMBO_V3"):
+                # New ComfyUI API nodes use string type tags like "COMBO";
+                # old API nodes use a raw list for combo boxes.
+                widget_types[name] = t
+                widget_params.append((name, t, opts))
+            elif isinstance(t, list):
+                widget_types[name] = "COMBO"
+                widget_params.append((name, t, opts))
+            elif isinstance(opts.get("options"), list):
+                # io_type 不是字符串的 DynamicCombo 变体
+                widget_types[name] = "COMFY_DYNAMICCOMBO_V3"
+                widget_params.append((name, t, opts))
+            else:
+                link_names.add(name)
+
+        def _coerce_values(d):
+            for name, val in list(d.items()):
+                if val is None:
+                    continue
+                wt = widget_types.get(name, "")
+                if wt == "INT":
+                    try: d[name] = int(val)
+                    except (ValueError, TypeError): pass
+                elif wt == "FLOAT":
+                    try: d[name] = float(val)
+                    except (ValueError, TypeError): pass
+                elif wt == "BOOLEAN":
+                    if isinstance(val, str):
+                        d[name] = val.lower() in ("true", "1", "yes")
                     else:
-                        link_names.add(name)
-                        continue
-                    declared_order.append(name)
+                        d[name] = bool(val)
+            return d
+
+        # 1. 新前端：按名字给值。点号子输入原样保留；丢掉 control_after_generate
+        #    这类只属于前端的伪字段（execute 的签名里没有，传进去会 TypeError）。
+        named_result = {}
+        if isinstance(widgets_values_named, dict):
+            for name, val in widgets_values_named.items():
+                if val is None:
+                    continue
+                if name in declared_names or name in param_names or "." in str(name):
+                    named_result[name] = val
+        if not widgets_values:
+            return _coerce_values(named_result)
+
+        # 2. 存档自带 widget 名字表：按名字对齐（能扛住节点包增删 widget）
+        by_name = _widgets_by_stored_names(widget_params, widgets_names, widgets_values)
+        if by_name is not None:
+            by_name.update(named_result)
+            return _coerce_values(by_name)
+
+        # 3. 旧工作流：按位置消费。
         # 存档里 widgets_values 是前端按 INPUT_TYPES 声明序摆的, 消费也必须按这个序 ——
         # 有些第三方节点 (如 essentials 的 ImageResize) execute 签名把两个参数写反了,
         # 按签名序对位会把 method 的值喂给 interpolation。签名里有但 INPUT_TYPES 没声明的
         # 参数 (前端画不出 widget, 不占槽) 只在还有剩余槽位时才消费。
-        widget_params = list(declared_order)
-        seen = set(widget_params)
-        widget_params += [p for p in param_names if p not in link_names and p not in seen]
-        cag_flags = set()
-        for i, name in enumerate(widget_params):
-            for cat in ("required", "optional"):
-                ci = input_types.get(cat, {})
-                if isinstance(ci, dict) and name in ci:
-                    val = ci[name]
-                    if isinstance(val, tuple) and len(val) >= 2 and isinstance(val[1], dict):
-                        if val[1].get("control_after_generate", False):
-                            cag_flags.add(i)
-                    break
+        seen = {n for n, _t, _o in widget_params}
+        widget_params += [(p, None, {}) for p in param_names
+                          if p not in link_names and p not in seen]
+
+        def _dynamic_slots(name, opts, selected):
+            """DynamicCombo 选中 option 后，它的子输入各占一个后续槽位。"""
+            slots = []
+            for opt in (opts.get("options") or []):
+                if opt.get("key") != selected:
+                    continue
+                for cat in ("required", "optional"):
+                    for sub_name, sub_val in ((opt.get("inputs") or {}).get(cat) or {}).items():
+                        sub_t = sub_val[0] if isinstance(sub_val, (tuple, list)) and sub_val else None
+                        key = f"{name}.{sub_name}"
+                        if isinstance(sub_t, str) and sub_t in ("STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"):
+                            widget_types[key] = sub_t
+                        slots.append((key, sub_t, {}))
+                break
+            return slots
+
         result = {}
         val_idx = 0
-        for i, name in enumerate(widget_params):
-            if val_idx >= len(widgets_values):
-                break
+        queue = list(widget_params)
+        qi = 0
+        while qi < len(queue) and val_idx < len(widgets_values):
+            name, t, opts = queue[qi]
+            qi += 1
+            if isinstance(t, str) and t == "COMFY_DYNAMICCOMBO_V3":
+                selected = widgets_values[val_idx]
+                val_idx += 1
+                result[name] = selected
+                queue[qi:qi] = _dynamic_slots(name, opts, selected)
+                continue
             result[name] = widgets_values[val_idx]
             val_idx += 1
-            if i in cag_flags and val_idx < len(widgets_values):
+            if opts.get("control_after_generate") and val_idx < len(widgets_values):
                 val_idx += 1
-        for name, val in list(result.items()):
-            if val is None:
-                continue
-            wt = widget_types.get(name, "")
-            if wt == "INT":
-                try: result[name] = int(val)
-                except (ValueError, TypeError): pass
-            elif wt == "FLOAT":
-                try: result[name] = float(val)
-                except (ValueError, TypeError): pass
-            elif wt == "BOOLEAN":
-                if isinstance(val, str):
-                    result[name] = val.lower() in ("true", "1", "yes")
-                else:
-                    result[name] = bool(val)
-        return result
+        _coerce_values(result)
+        # 命名表是前端当前状态，优先于按位置猜出来的值
+        result.update(named_result)
+        return _coerce_values(result)
 
     def _evaluate_node(self, nid, sub_prompt, start_id, end_id, pkg, output_values):
         """从 End 节点开始递归求值（懒求值）。
@@ -1517,6 +1828,7 @@ class InterfaceExecutor:
                 inputs["port_types"] = _json.dumps({str(k): v for k, v in pkg.get('start_types', {}).items()})
                 inputs["unique_id"] = start_id
 
+            src_map = self._link_src.setdefault(nid, {})
             for name, val in node_inputs.items():
                 if is_link(val):
                     origin_id = str(val[0])
@@ -1524,8 +1836,8 @@ class InterfaceExecutor:
                     aliases = sub_prompt.get("_subgraph_output_aliases", {})
                     alias_key = f"{origin_id}:{output_slot}"
                     if alias_key in aliases:
-                        origin_id = aliases[alias_key]
-                        output_slot = 0
+                        origin_id, output_slot = _alias_target(aliases[alias_key])
+                    src_map[name] = f"{origin_id}:{output_slot}"
                     # 检查是否已缓存
                     resolved = self._resolve_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid, name)
                     if resolved is not _UNRESOLVED:
@@ -1617,6 +1929,11 @@ class InterfaceExecutor:
             #     第三方节点按 ComfyUI 的 [B,H,W,3] 契约做 normalize，拿到 4 通道
             #     会在广播 mean/std 时直接崩（DepthAnything 等 preprocessor 典型）。
             self._coerce_image_inputs(class_type, class_def, inputs)
+
+            # 3.6 标量类型对齐：存档/连线偶尔把 FLOAT/INT 口喂成字符串（widget
+            #     格子错位、或口接错线）。第三方节点直接拿去做 `str > float` 会在
+            #     很深的地方才炸，这里先按 INPUT_TYPES 收敛；收不拢就用类默认值并留一行日志。
+            self._coerce_scalar_inputs(nid, class_def, inputs)
 
             # 4. 执行节点
             _dbg = []
@@ -1712,6 +2029,43 @@ class InterfaceExecutor:
             print(f"[InterfaceExecutor]   V3 clone failed {nid}: {e}")
             return class_def
 
+    @staticmethod
+    def _nest_v3_dynamic_inputs(class_def, inputs, nid):
+        """V3 Schema 的 DynamicCombo / DynamicSlot 输入在 prompt 里是点号路径
+        （resize_type.width、resize_type.height），而 execute 收到的是嵌套 dict
+        （resize_type={"resize_type": "scale dimensions", "width": ...}）。
+
+        core 在 execution.py 的 map_node_over_list 里用 build_nested_inputs 做这一步；
+        这里直接照搬，否则 kwargs 里会多出 'resize_type.width' 这种参数，节点报
+        TypeError: execute() got an unexpected keyword argument。同时把未激活的
+        动态选项（例如换成按倍率缩放后残留的 resize_type.width）过滤掉。
+        """
+        if not any("." in str(k) for k in inputs):
+            return inputs
+        try:
+            from comfy_api.internal import _ComfyNodeInternal
+            from comfy_api.latest import _io as _io_v3
+        except Exception:
+            return inputs
+        try:
+            if not (isinstance(class_def, type) and issubclass(class_def, _ComfyNodeInternal)):
+                return inputs
+        except Exception:
+            return inputs
+        try:
+            valid_inputs, _hidden, v3_data = _io_v3.get_finalized_class_inputs(
+                class_def.INPUT_TYPES(), inputs)
+            if not v3_data.get("dynamic_paths"):
+                return inputs
+            if not getattr(class_def, "ACCEPT_ALL_INPUTS", False):
+                known = (set(valid_inputs.get("required") or {}) |
+                         set(valid_inputs.get("optional") or {}))
+                inputs = {k: v for k, v in inputs.items() if k in known}
+            return _io_v3.build_nested_inputs(inputs, v3_data)
+        except Exception as e:
+            print(f"[InterfaceExecutor]   V3 nested inputs failed {nid}: {e}")
+            return inputs
+
     def _call_node(self, class_def, func, inputs, nid, is_list_node):
         """跑一次节点：INPUT_IS_LIST 的约定包装 + 采样进度钩子 + 宿主返回约定解开。
         map 路径里每一帧都走这一句，所以钩子的安装/卸载必须在每次调用内自成一对。"""
@@ -1719,6 +2073,9 @@ class InterfaceExecutor:
         if v3_cls is not class_def:
             # 重新绑定到 clone 上，execute 里才能读到 clone.hidden
             func = getattr(v3_cls, getattr(class_def, "FUNCTION", "execute"))
+        if not is_list_node:
+            # DynamicCombo 的点号路径必须先收成嵌套 dict 再进 execute
+            inputs = self._nest_v3_dynamic_inputs(class_def, inputs, nid)
         if is_list_node:
             inputs = {k: [v] if not isinstance(v, list) else v for k, v in inputs.items()}
         orig_hook = None
@@ -1815,7 +2172,7 @@ class InterfaceExecutor:
             origin_id, output_slot = str(_link[0]), int(_link[1])
             _alias_key = f"{origin_id}:{output_slot}"
             if _alias_key in aliases:
-                origin_id, output_slot = aliases[_alias_key], 0
+                origin_id, output_slot = _alias_target(aliases[_alias_key])
             self._eval_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid)
             _v = self._get_output(origin_id, output_slot, output_values)
             result.append(None if _v is _UNRESOLVED else _v)
@@ -1911,10 +2268,10 @@ class InterfaceExecutor:
         aliases = sub_prompt.get("_subgraph_output_aliases", {})
         alias_key = f"{origin_id}:{output_slot}"
         if alias_key in aliases:
-            mapped = aliases[alias_key]
+            mapped, mapped_slot = _alias_target(aliases[alias_key])
             # mapped 是一个 boundary 节点 id，其输出被 alias 到 Start 的某个端口
             mapped_outputs = output_values.get(mapped, ())
-            if mapped_outputs and len(mapped_outputs) > 0:
+            if mapped_outputs and len(mapped_outputs) > mapped_slot:
                 return True
 
         # 2) 直接按 (origin_id, output_slot) 在 Start 注入输出里查找
@@ -1951,7 +2308,7 @@ class InterfaceExecutor:
     def _expand_nested_subgraph(self, sn_id, sn, subgraph_by_type, parent_links, sub_prompt, parent_prefix, parent_sg_node_id, parent_sg_data, output_values):
         """递归展开嵌套 subgraph 节点的内部节点到 sub_prompt 中。"""
         sg_type = sn.get("type", "")
-        sg_data = subgraph_by_type.get(sg_type)
+        sg_data = _find_subgraph(subgraph_by_type, sg_type)
         if not sg_data:
             print(f"[InterfaceExecutor] Nested subgraph {sn_id}: type '{sg_type}' not found in subgraph definitions")
             return
@@ -2000,7 +2357,7 @@ class InterfaceExecutor:
             if n_type in ("graph/input", "graph/output", "SubgraphNodeInput", "SubgraphNodeOutput"):
                 continue
             # Double-nested subgraph
-            if n_type in subgraph_by_type:
+            if _find_subgraph(subgraph_by_type, n_type):
                 self._expand_nested_subgraph(nested_prefix + n_id, n, subgraph_by_type, nested_sg_links, sub_prompt, nested_prefix, sn_id, sg_data, output_values)
                 continue
 
@@ -2018,9 +2375,15 @@ class InterfaceExecutor:
                     if (origin_node_obj and origin_node_obj.get("type") in ("graph/input", "SubgraphNodeInput")) or is_virtual:
                         # Boundary input — resolve from parent subgraph's links or parent graph
                         resolved = False
+                        # 定义槽号 → 实例下标（实例可能少一格，见 _instance_input_index）
+                        ndefs = sg_data.get("inputs") or []
+                        _def_name = (ndefs[origin_slot].get("name", "")
+                                     if 0 <= origin_slot < len(ndefs) and isinstance(ndefs[origin_slot], dict) else "")
+                        inst_slot = _instance_input_index(sn, _def_name)
                         # Check parent subgraph links (the subgraph containing sn)
                         for pl in parent_links:
-                            if isinstance(pl, list) and len(pl) >= 5 and str(pl[3]) == sn_id and pl[4] == origin_slot:
+                            if isinstance(pl, list) and len(pl) >= 5 and str(pl[3]) == sn_id \
+                                    and inst_slot is not None and pl[4] == inst_slot:
                                 p_origin = str(pl[1])
                                 p_slot = pl[2]
                                 # Resolve from parent sub_prompt or parent graph
@@ -2061,6 +2424,9 @@ class InterfaceExecutor:
                 "class_type": n_type,
                 "inputs": n_inputs,
                 "_widgets_values": n.get("widgets_values", []),
+                "_widgets_names": _widget_names_of(n),
+                "_outputs_names": [o.get("name") for o in (n.get("outputs") or [])],
+                "_widgets_values_named": n.get("widgets_values_named") or {},
                 "mode": n.get("mode", 0),
             }
 
@@ -2073,7 +2439,7 @@ class InterfaceExecutor:
                     origin, origin_slot = get_origin(sl)
                     internal_origin = nested_prefix + origin
                     aliases = sub_prompt.setdefault("_subgraph_output_aliases", {})
-                    aliases[parent_prefix + sn_id + ":" + str(target_slot)] = internal_origin
+                    aliases[parent_prefix + sn_id + ":" + str(target_slot)] = [internal_origin, origin_slot]
         else:
             # No explicit output proxy — check virtual negative IDs
             for sl in nested_sg_links:
@@ -2082,12 +2448,12 @@ class InterfaceExecutor:
                     origin, origin_slot = get_origin(sl)
                     internal_origin = nested_prefix + origin
                     aliases = sub_prompt.setdefault("_subgraph_output_aliases", {})
-                    aliases[parent_prefix + sn_id + ":" + str(target_slot)] = internal_origin
+                    aliases[parent_prefix + sn_id + ":" + str(target_slot)] = [internal_origin, origin_slot]
 
     def _try_execute_subgraph(self, sg_node_id, sg_node, subgraph_by_type, links, output_values):
         """展开并执行一个 ComfyUI subgraph 节点，返回其输出 tuple。"""
         sg_type = sg_node.get("type", "")
-        sg_data = subgraph_by_type.get(sg_type)
+        sg_data = _find_subgraph(subgraph_by_type, sg_type)
         if not sg_data:
             raise RuntimeError(f"Subgraph {sg_node_id}: type '{sg_type}' not found in subgraph definitions")
 
@@ -2143,7 +2509,7 @@ class InterfaceExecutor:
             if sn_type in ("graph/input", "graph/output", "SubgraphNodeInput", "SubgraphNodeOutput"):
                 continue
             # Check if this is a nested subgraph node — recursively expand
-            if sn_type in subgraph_by_type:
+            if _find_subgraph(subgraph_by_type, sn_type):
                 self._expand_nested_subgraph(sn_id, sn, subgraph_by_type, links, sub_prompt, prefix, sg_node_id, sg_data, output_values)
                 continue
             sn_inputs = {}
@@ -2161,11 +2527,15 @@ class InterfaceExecutor:
                         is_virtual_input = origin and origin.startswith("-") and origin not in sg_node_id_set
                         if (origin_node_obj and origin_node_obj.get("type") in ("graph/input", "SubgraphNodeInput")) or is_virtual_input:
                             # This input comes from subgraph boundary (proxy node or virtual negative ID)
-                            # origin_slot = subgraph input slot = parent node input slot
+                            # origin_slot 是**定义**槽号；父图连线用的是**实例**下标，按名字换算
                             resolved = False
+                            _defs = sg_data.get("inputs") or []
+                            _dname = (_defs[origin_slot].get("name", "")
+                                      if 0 <= origin_slot < len(_defs) and isinstance(_defs[origin_slot], dict) else "")
+                            inst_slot = _instance_input_index(sg_node, _dname)
                             for pl in links:
                                 if isinstance(pl, list) and len(pl) >= 5:
-                                    if str(pl[3]) == sg_node_id and pl[4] == origin_slot:
+                                    if str(pl[3]) == sg_node_id and inst_slot is not None and pl[4] == inst_slot:
                                         parent_origin = str(pl[1])
                                         parent_origin_slot = pl[2]
                                         if parent_origin in output_values and parent_origin_slot < len(output_values[parent_origin]):
@@ -2204,6 +2574,9 @@ class InterfaceExecutor:
                 "class_type": sn_type,
                 "inputs": sn_inputs,
                 "_widgets_values": sn.get("widgets_values", []),
+                "_widgets_names": _widget_names_of(sn),
+                "_outputs_names": [o.get("name") for o in (sn.get("outputs") or [])],
+                "_widgets_values_named": sn.get("widgets_values_named") or {},
                 "mode": sn.get("mode", 0),
             }
 
@@ -2216,14 +2589,14 @@ class InterfaceExecutor:
                 target, target_slot = get_link_target(sl)
                 if target and target.startswith("-") and target not in sg_node_id_set:
                     origin, origin_slot = get_link_origin(sl)
-                    output_aliases[f"{sg_node_id}:{target_slot}"] = prefix + origin
+                    output_aliases[f"{sg_node_id}:{target_slot}"] = [prefix + origin, origin_slot]
             # Execute all internal nodes, then find outputs via aliases
             self._map_all_widgets(sub_prompt)
             self._eval_cache = output_values
             self._eval_stack = set()
             self._eval_count = 0
             self._eval_total = len([n for n in sub_prompt if not n.startswith("_")])
-            for alias_key, internal_origin in output_aliases.items():
+            for alias_key, (internal_origin, _slot) in output_aliases.items():
                 if internal_origin in sub_prompt and internal_origin not in output_values:
                     self._evaluate_node(internal_origin, sub_prompt, "", "", {"start_types": {}, "types": {}}, output_values)
             # Map subgraph output slots to internal node outputs
@@ -2231,9 +2604,11 @@ class InterfaceExecutor:
             result = []
             for i, out_def in enumerate(sg_outputs):
                 alias_key = f"{sg_node_id}:{i}"
-                internal_origin = output_aliases.get(alias_key)
-                if internal_origin and internal_origin in output_values:
-                    result.append(output_values[internal_origin][0] if output_values[internal_origin] else None)
+                target = output_aliases.get(alias_key)
+                internal_origin, internal_slot = _alias_target(target) if target else (None, 0)
+                ot = output_values.get(internal_origin) if internal_origin else None
+                if ot and internal_slot < len(ot):
+                    result.append(ot[internal_slot])
                 else:
                     result.append(None)
             result = tuple(result)
@@ -2242,12 +2617,12 @@ class InterfaceExecutor:
 
         # Has explicit graph/output proxy — find which internal nodes feed into it
         sg_out_id = str(sg_out_node.get("id"))
-        output_targets = {}  # slot → internal_node_id
+        output_targets = {}  # slot → [internal_node_id, output_slot]
         for sl in sg_links:
             origin, origin_slot = get_link_origin(sl)
             target, target_slot = get_link_target(sl)
             if target == sg_out_id:
-                output_targets[target_slot] = prefix + origin
+                output_targets[target_slot] = [prefix + origin, origin_slot]
 
         # Widget mapping
         self._map_all_widgets(sub_prompt)
@@ -2260,20 +2635,19 @@ class InterfaceExecutor:
         self._eval_stack = set()
         self._eval_count = 0
         self._eval_total = len([n for n in sub_prompt if not n.startswith("_")])
-        for slot, internal_origin in output_targets.items():
+        for slot, target in output_targets.items():
+            internal_origin, _slot = _alias_target(target)
             if internal_origin in sub_prompt and internal_origin not in output_values:
                 self._evaluate_node(internal_origin, sub_prompt, "", "", {"start_types": {}, "types": {}}, output_values)
 
-        # Build result tuple: slot N → output_values[internal_origin][0]
+        # Build result tuple: slot N → 内部节点的第 K 个输出口（K 来自连线，不能假定 0）
         max_slot = max(output_targets.keys()) if output_targets else -1
         result = []
         for i in range(max_slot + 1):
-            internal_origin = output_targets.get(i)
-            if internal_origin and internal_origin in output_values:
-                ot = output_values[internal_origin]
-                result.append(ot[0] if ot else None)
-            else:
-                result.append(None)
+            target = output_targets.get(i)
+            internal_origin, internal_slot = _alias_target(target) if target else (None, 0)
+            ot = output_values.get(internal_origin) if internal_origin else None
+            result.append(ot[internal_slot] if ot and internal_slot < len(ot) else None)
         result = tuple(result)
         output_values[sg_node_id] = result
         print(f"[InterfaceExecutor] Subgraph {sg_node_id} executed: {len(result)} outputs")
@@ -2304,7 +2678,7 @@ class InterfaceExecutor:
         if not class_def:
             # Check if this is a subgraph node (type is a UUID in subgraph_by_type)
             node_by_id, links, subgraph_by_type = InterfacePackageNode._build_node_lookup(workflow)
-            if node_type in subgraph_by_type:
+            if InterfacePackageNode._subgraph_of(subgraph_by_type, node_type):
                 return self._try_execute_subgraph(node_id, target, subgraph_by_type, links, output_values)
             raise RuntimeError(f"External node {node_id}: type '{node_type}' not in NODE_CLASS_MAPPINGS and not a known subgraph")
         inputs = {}
@@ -2333,7 +2707,8 @@ class InterfaceExecutor:
                     inputs[nm] = self.get_pipeline()
                     print(f"[InterfaceExecutor]   Injected pipeline for {node_id}.{nm} (unconnected)")
         wv = target.get("widgets_values", [])
-        wd = self._build_widget_dict(class_def, wv)
+        wd = self._build_widget_dict(class_def, wv, target.get("widgets_values_named"),
+                                     _widget_names_of(target))
         for nm, v in wd.items():
             if nm not in inputs:
                 inputs[nm] = v
@@ -2452,6 +2827,167 @@ class InterfaceExecutor:
         print(f"[InterfaceExecutor]   IMAGE input RGBA → RGB (alpha flattened on white): "
               f"{label or 'image'} {tuple(shape)} → {tuple(new.shape)}")
         return new
+
+    def _coerce_scalar_inputs(self, nid, class_def, inputs):
+        """按 INPUT_TYPES 把标量输入收敛成声明类型（数字 / 布尔 / 候选项）。
+
+        Interface 这条执行路径不经过 ComfyUI 的 validate_inputs，所以错位的 widget
+        值或接错类型的线会一路带到节点函数里，最后在很深的地方报
+        `'>' not supported between instances of 'str' and 'float'` 或
+        `'float' object cannot be interpreted as an integer`，看不出是哪个口哪条线。
+        这里在调用前统一收一次：
+
+        * FLOAT ⇄ INT 互转：`range(steps)` 这类口拿到 20.0 必崩（链上的
+          CM_IntBinaryOperation / ScriptNode 算出来天然是 float），而 KSampler
+          之类只做 `if x not in 候选: 退回第一项`，错了也不吭声；
+        * 字符串数字（"1.0" → 1.0）；
+        * 布尔："true"/1 → True；
+        * 候选项（COMBO）：类型不对（例如 scheduler 收到一个 int）时退回默认值 /
+          第一项 —— 与 core 的 `if x not in SCHEDULERS: x = SCHEDULERS[0]` 同义，
+          区别只是这里会打日志，并把值来自哪根线一起写出来（core 是静默的）。
+
+        收不拢就打一行能定位到节点/输入/值的日志。INPUT_IS_LIST 的节点、以及值
+        本身是 list/tuple 的（Allow List 逐帧输入）不在这里处理。
+        """
+        import numbers
+
+        if class_def is None:
+            return
+        if getattr(class_def, "INPUT_IS_LIST", False):
+            return
+        try:
+            input_types = class_def.INPUT_TYPES()
+        except Exception:
+            return
+        if not isinstance(input_types, dict):
+            return
+
+        def _guard(name, declared, val, extra):
+            _dump_wiring_once()
+            shown = repr(val)
+            if len(shown) > 60:
+                shown = shown[:57] + "..."
+            print(f"[InterfaceExecutor]   TYPE guard {nid}.{name}: 声明为 {declared} "
+                  f"但收到 {type(val).__name__}({shown}){_src_of(name)}, {extra}")
+
+        def _src_of(name):
+            """这个输入的值从哪根线来；穿过直通节点一路展开成 `7748:0 ← 7745:8`。"""
+            src = (self._link_src.get(nid) or {}).get(name)
+            if not src:
+                return " [来自存档格子]"
+            chain = [src]
+            cur = src
+            for _ in range(3):
+                if ":" not in cur:
+                    break
+                origin_id, slot = cur.rsplit(":", 1)
+                origin = (getattr(self, "_sub_prompt", None) or {}).get(origin_id)
+                if not isinstance(origin, dict):
+                    break
+                try:
+                    import nodes as _cn
+                    cls = _cn.NODE_CLASS_MAPPINGS.get(origin.get("class_type", ""))
+                except Exception:
+                    cls = None
+                if not _node_passthrough(cls):
+                    break
+                inner = [v for v in (origin.get("inputs") or {}).values() if is_link(v)]
+                if len(inner) != 1:
+                    break
+                cur = f"{inner[0][0]}:{inner[0][1]}"
+                chain.append(cur)
+            return " [来自 " + " ← ".join(chain) + "]"
+
+        def _dump_wiring_once():
+            """第一次在这个节点上拦到类型问题时，把它所有连线打一遍 —— 错位时
+            邻居的名字一眼就能对上（sampler_name 收到的是 scheduler 的值…）。"""
+            if nid in self._guard_nodes:
+                return
+            self._guard_nodes.add(nid)
+            m = self._link_src.get(nid) or {}
+            if m:
+                print(f"[InterfaceExecutor]   连线 {nid}: "
+                      + ", ".join(f"{k}<-{v}" for k, v in m.items()))
+
+        for cat in ("required", "optional"):
+            ci = input_types.get(cat)
+            if not isinstance(ci, dict):
+                continue
+            for name, spec in ci.items():
+                if name not in inputs:
+                    continue
+                if not isinstance(spec, (tuple, list)) or not spec:
+                    continue
+                t = spec[0]
+                opts = spec[1] if len(spec) >= 2 and isinstance(spec[1], dict) else {}
+                val = inputs[name]
+                if val is None or isinstance(val, (list, tuple, dict)):
+                    continue
+
+                # ---- 数字 / 布尔 ----
+                if t in ("FLOAT", "INT", "BOOLEAN"):
+                    try:
+                        if t == "FLOAT":
+                            inputs[name] = float(val)          # int / bool / 数字串都吃
+                        elif t == "INT":
+                            raw = val if isinstance(val, numbers.Real) else float(str(val))
+                            nv = int(round(float(raw)))
+                            if not isinstance(raw, numbers.Integral) and float(raw) != nv:
+                                _guard(name, t, val, f"四舍五入成 {nv}")
+                            inputs[name] = nv
+                        elif isinstance(val, str):
+                            inputs[name] = val.lower() in ("true", "1", "yes")
+                        else:
+                            inputs[name] = bool(val)
+                        continue
+                    except (TypeError, ValueError):
+                        default = opts.get("default")
+                        _guard(name, t, val,
+                               f"改用默认值 {default!r}" if default is not None
+                               else "该类没有默认值, 原样传下去")
+                        if default is not None:
+                            inputs[name] = default
+                    continue
+
+                # ---- 候选项 ----
+                if not isinstance(val, (numbers.Number, str)):
+                    continue  # tensor / 对象之类：不是 combo 值，别拿 == 去比
+                if t == "COMBO":
+                    options = opts.get("options")
+                elif isinstance(t, list):
+                    options = t
+                else:
+                    continue
+                if not isinstance(options, list) or not options:
+                    continue
+                if any(isinstance(o, (dict, list)) for o in options):
+                    continue
+                if val in options:
+                    continue
+                # 类型对得上、只是这个值不在表里：不动它，只留一行提示。
+                # 前端把某个口接错线时，值往往是另一个 widget 的合法值（例如提示词
+                # 接到 sampler_name），节点那边会静默退回默认，日志是唯一线索；
+                # 而"文件被删/改名"这种正常失配也走这里，让节点自己报错更准。
+                numeric_opts = any(isinstance(o, numbers.Number) and not isinstance(o, bool)
+                                   for o in options)
+                val_numeric = isinstance(val, numbers.Number) and not isinstance(val, bool)
+                if val_numeric == numeric_opts:
+                    if isinstance(val, str) and len(options) > 1:
+                        _dump_wiring_once()
+                        print(f"[InterfaceExecutor]   TYPE hint {nid}.{name}: {val!r}{_src_of(name)} "
+                              f"不在这 {len(options)} 个候选项里, 节点可能自己退回默认")
+                    continue
+                # 类型不对（例如 scheduler 收到一个 int）：跟 core 一致，退默认/第一项。
+                # 曾经想把整数当"老工作流的 combo 下标"解释，但那等于把接错线的
+                # 值翻译成另一个合法值，比直接退默认更难查 —— 只把这层可能性写进日志。
+                default = opts.get("default")
+                pick = default if default in options else options[0]
+                as_index = (f"（若按老下标解释会是 {options[int(val)]!r}）"
+                            if isinstance(val, numbers.Integral) and not isinstance(val, bool)
+                            and 0 <= int(val) < len(options) else "")
+                _guard(name, f"COMBO[{len(options)}]", val,
+                       f"回退到 {pick!r}{as_index}")
+                inputs[name] = pick
 
     def _coerce_image_inputs(self, class_type, class_def, inputs):
         """把声明为 IMAGE 的输入里的 RGBA 压成 RGB。

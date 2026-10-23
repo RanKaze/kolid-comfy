@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  type VidClip, type VidController, type VidTrack, type VidMergeProbe,
-  addLayerClip, addTrack, clipAtSolo, fmtTime, importToTrack, isAudioName, isVideoName, mergeVidClips, moveClip, moveTrack, outputClipOf, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack,
+  type VidClip, type VidClipClipboard, type VidController, type VidPasteResult, type VidTrack, type VidMergeProbe,
+  addLayerClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, mergeVidClips, moveClip, moveTrack, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack,
   replaceVidClipsWithMerged, setMaskTrack, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
   vgenChainPrevOf, vgenSeamsOf, vgenWithDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
+import { getActiveBlendUid } from '../store';
 import { probeMedia } from './audio';
 import { ingestFile } from './ingest';
 import { GLOBAL_ITEM_TYPE } from './Assets';
@@ -31,7 +32,7 @@ function useStrip(src: string, srcDuration: number): string[] | undefined {
 // ── Tracks 窗（时间线）───────────────────────────────────────────────────────────────────────
 // 一根标尺 + 若干轨道。视频轨在上、音频轨在下（tracks 数组序）；标尺上是播放头（红色，当前
 // 播放位置）与一对入/出点（I/O，播放范围）。交互：
-//  * 标尺按下/拖动 = scrub（改播放头）；
+//  * 标尺按下/拖动 = scrub（改播放头），路上吸到 0 / 入出点 / 各段头尾（Ctrl/⌘ 临时关掉）；
 //  * I/O 两个小把手各自拖动，圈出播放范围（Player 在范围内循环）；
 //  * 片段：拖身体 = 移动（联动组整组走；**按住 Alt 只动自己** —— 音视频错开的口子），
 //    左右边 = 裁剪（Alt 同理只裁自己），点 ⧉ 徹底解绑，✕ = 删除，Delete 键删选中的；
@@ -69,6 +70,12 @@ const sbKnobStyle = (side: 'l' | 'r'): React.CSSProperties => ({
 // 四类轨同一高度：视频轨不再比音频 / Layer / process 高出一截，横向扫过去是一条齐线。
 const TRACK_H: Record<'video' | 'audio' | 'layer' | 'process', number> = { video: 46, audio: 46, layer: 46, process: 46 };
 const STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+// 吸附排除集里的"空集"：播放头 scrub / 入出点拖动每帧都要一个，共用一个常量，不每帧 new。
+const EMPTY_IDS: ReadonlySet<string> = new Set<string>();
+// 复制 / 粘贴的剪贴板，**按文档分桶**：Video 工程是每份文档一份 —— 粘进别的文档的段既没有
+// 那套图层（layerKey 是页面那边的活数据），也不在它的资产表里。同一份文档里反复粘 = 同一份
+// 快照再抄一遍（每次都是新 id 的独立段）。
+const clipboards = new Map<number | null, VidClipClipboard>();
 
 // 最近一次**裁剪**拖动的时间戳。Clip 用它决定"静态预览能不能拿半成品条顶位"：只有正在裁
 // 的那一小段时间才认半成品；平时只认抽完的条 —— 抽条是渐进发布的，半成品的数组长度每次
@@ -248,6 +255,77 @@ export const VidTimeline: React.FC<{
     selAnchorRef.current = null;
     setSelIds(new Set<string>());
   }, []);
+  // ── 复制 / 粘贴 ── Ctrl/⌘+C 抄选中的段（联动组整组带上），Ctrl/⌘+V 粘在**播放头**：
+  // 被抄的那批里最早的一段从播放头开始，其余按原来的相对位置排开（见 model 的 pasteVidClips）。
+  // 快捷键只挂在宿主 window 上：焦点在工作台画布（iframe）里时这些键根本不到这儿 ——
+  // 画布自己的 Ctrl+C 是复制图层，两边不会互相抢。
+  const [actNote, setActNote] = useState('');
+  const noteTimer = useRef(0);
+  const flash = useCallback((msg: string) => {
+    setActNote(msg);
+    if (noteTimer.current) window.clearTimeout(noteTimer.current);
+    noteTimer.current = window.setTimeout(() => setActNote(''), 2600);
+  }, []);
+  useEffect(() => () => { if (noteTimer.current) window.clearTimeout(noteTimer.current); }, []);
+  const doCopy = useCallback(() => {
+    if (!selIds.size) { flash('Copy: nothing selected — click a segment first'); return; }
+    const cb = copyVidClips(p, [...selIds]);
+    if (!cb) return;
+    clipboards.set(getActiveBlendUid(), cb);
+    flash(`Copied ${cb.clips.length} segment${cb.clips.length > 1 ? 's' : ''} — Ctrl+V pastes at the playhead`);
+  }, [p, selIds, flash]);
+  const doPaste = useCallback(() => {
+    const cb = clipboards.get(getActiveBlendUid());
+    if (!cb || !cb.clips.length) { flash('Paste: nothing copied yet (Ctrl+C a segment first)'); return; }
+    const at = transport.get();
+    const out: { r?: VidPasteResult } = {};
+    vid.update(proj => {
+      const r = pasteVidClips(proj, cb, at);
+      out.r = r;
+      return r.project;
+    }, 'Paste clip');
+    const r = out.r;
+    if (!r || !r.ids.length) { flash('Paste: the original track is gone — nothing landed'); return; }
+    setSelIds(new Set(r.ids));
+    selAnchorRef.current = r.ids[0];
+    // Layer 段：请页面把那一套图层**整套克隆**到新 key，成功了才把 layerKey 换过去
+    // （克隆不成就继续共用源那套 —— 画面一定对，只是两段联动）。同一个 label ⇒ 与上面那笔并成一步撤销。
+    const copies = r.layerCopies;
+    const layerCopy = vid.layerCopy;
+    if (copies.length && layerCopy) {
+      void Promise.all(copies.map(cp => layerCopy(cp.from, cp.to).then(ok => (ok ? cp : null))))
+        .then(done => {
+          const ok = done.filter((x): x is typeof copies[number] => !!x);
+          if (!ok.length) return;
+          vid.update(proj => ({
+            ...proj,
+            clips: proj.clips.map(c => {
+              const hit = ok.find(x => x.clipId === c.id);
+              return hit ? { ...c, layerKey: hit.to } : c;
+            }),
+          }), 'Paste clip');
+        });
+    }
+    const skipped = r.skipped ? ` · ${r.skipped} skipped (no track of that kind)` : '';
+    flash(`Pasted ${r.ids.length} segment${r.ids.length > 1 ? 's' : ''} at ${fmtTime(at)}${skipped}`);
+  }, [vid, transport, flash]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      if (!keyIs(e, 'c') && !keyIs(e, 'v')) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return;
+      // 页面上正选着一段文字（比如读数、段名）⇒ 让浏览器照常复制，别抢。
+      const sel = document.getSelection();
+      if (keyIs(e, 'c') && sel && !sel.isCollapsed && String(sel).trim()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (keyIs(e, 'c')) doCopy(); else doPaste();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [doCopy, doPaste]);
   // ── Shift + 拖空白 = 框选（可以跨轨）：矩形碰到的片段全选。片段自己会 stopPropagation，
   //    所以"在片段上按住 Shift 拖"仍是原来的同轨连选，不和这里抢手势。 ──
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -341,11 +419,12 @@ export const VidTimeline: React.FC<{
   // 靶子带标签：吸住时在靶子上拉一条琥珀竖线并写明"吸的是谁"（见 showSnap）。
   type SnapHit = { t: number; label: string };
   const SNAP_PX = 6;
-  const snapTargets = useCallback((exclude: ReadonlySet<string>, skipIo: boolean): SnapHit[] => {
+  /** 靶子表。skipHead = 别把播放头自己列进去（正在拖播放头时，否则它一按下就吸在自己身上）。 */
+  const snapTargets = useCallback((exclude: ReadonlySet<string>, skipIo: boolean, skipHead = false): SnapHit[] => {
     const ts: SnapHit[] = [
       { t: 0, label: 'Timeline start' },
-      { t: transport.get(), label: 'Playhead' },
     ];
+    if (!skipHead) ts.push({ t: transport.get(), label: 'Playhead' });
     if (!skipIo && p.outPoint > p.inPoint) {
       ts.push({ t: p.inPoint, label: 'In point' }, { t: p.outPoint, label: 'Out point' });
     }
@@ -377,11 +456,12 @@ export const VidTimeline: React.FC<{
     const el = snapGuideRef.current;
     if (el) el.style.display = 'none';
   }, []);
-  /** 单边吸附（裁剪 / 入出点）：把时刻 t 吸到最近的靶子上。 */
-  const snapEdge = useCallback((t: number, exclude: ReadonlySet<string>, skipIo = false): SnapHit | null => {
+  /** 单边吸附（裁剪 / 入出点 / 播放头 scrub）：把时刻 t 吸到最近的靶子上。
+   *  skipHead：拖播放头时它自己不能当靶子（否则一按下就吸在原地不动）。 */
+  const snapEdge = useCallback((t: number, exclude: ReadonlySet<string>, skipIo = false, skipHead = false): SnapHit | null => {
     const tol = SNAP_PX / vid.pps;
     let best: SnapHit | null = null, bestD = tol;
-    for (const s of snapTargets(exclude, skipIo)) {
+    for (const s of snapTargets(exclude, skipIo, skipHead)) {
       const d = Math.abs(s.t - t);
       if (d < bestD) { bestD = d; best = s; }
     }
@@ -578,15 +658,27 @@ export const VidTimeline: React.FC<{
     }
   };
 
-  // ── 标尺 scrub ──
+  // ── 标尺 scrub ── 播放头拖动也吃同一套吸附：靶子 = 时间线 0 / 入出点 / 各段头尾
+  // （**不含播放头自己**，否则按下就吸在原地）。Ctrl/⌘ 临时关掉。
+  // 吸住时琥珀竖线正好压在播放头线上（它 zIndex 更高）—— 线由红变琥珀就是"此刻吸住了"，
+  // 标签写明吸的是谁（与拖片段/入出点同一个指示器，不另造一套）。
   const scrubRef = useRef(false);
+  /** 指针 → 播放头时刻（含吸附）。按下与拖动共用一口，点标尺也能精准落在片段边界上。 */
+  const scrubTo = (clientX: number, noSnap: boolean) => {
+    const raw = timeAt(clientX);
+    const hit = noSnap ? null : snapEdge(raw, EMPTY_IDS, false, true);
+    showSnap(hit);
+    vid.seek(hit ? hit.t : raw);
+  };
   const onRulerDown = (e: React.PointerEvent) => {
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 指针已失活/合成事件：不挡手势 */ }
     scrubRef.current = true;
-    vid.seek(timeAt(e.clientX));
+    scrubTo(e.clientX, e.ctrlKey || e.metaKey);
   };
-  const onRulerMove = (e: React.PointerEvent) => { if (scrubRef.current) vid.seek(timeAt(e.clientX)); };
-  const onRulerUp = () => { scrubRef.current = false; };
+  const onRulerMove = (e: React.PointerEvent) => {
+    if (scrubRef.current) scrubTo(e.clientX, e.ctrlKey || e.metaKey);
+  };
+  const onRulerUp = () => { scrubRef.current = false; clearSnap(); };
 
   // ── 入 / 出点 ──
   const startBound = (e: React.PointerEvent, which: 'in' | 'out') => {
@@ -599,7 +691,7 @@ export const VidTimeline: React.FC<{
     if (!d || (d.mode !== 'in' && d.mode !== 'out')) return;
     const raw = timeAt(e.clientX);
     // 入/出点也吃吸附（吸到片段头尾、播放头、0）；两个 I/O 点自己不当靶子 —— 吸到自己身上就拖不动了。
-    const hit = (e.ctrlKey || e.metaKey) ? null : snapEdge(raw, new Set<string>(), true);
+    const hit = (e.ctrlKey || e.metaKey) ? null : snapEdge(raw, EMPTY_IDS, true);
     showSnap(hit);
     const t = hit ? hit.t : raw;
     vid.update(proj => d.mode === 'in'
@@ -1020,7 +1112,7 @@ export const VidTimeline: React.FC<{
     setDropLane(null);
     // 落点也吃吸附（对齐到片段头尾、I/O、播放头、0）；按住 Ctrl/⌘ 临时关掉。
     const raw = timeAt(e.clientX);
-    const hit = (e.ctrlKey || e.metaKey) ? null : snapEdge(raw, new Set<string>());
+    const hit = (e.ctrlKey || e.metaKey) ? null : snapEdge(raw, EMPTY_IDS);
     const at = hit ? hit.t : raw;
     clearSnap();
     const sid = e.dataTransfer.getData(ASSET_ITEM_TYPE);
@@ -1091,6 +1183,16 @@ export const VidTimeline: React.FC<{
           </select>
         </label>
         <div style={{ flex: 1 }} />
+        {actNote && (
+          <span data-vid-act-note="" title={actNote} style={{
+            fontSize: 10.5, fontWeight: 600, color: '#ffb04a', whiteSpace: 'nowrap',
+            maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis',
+          }}>{actNote}</span>
+        )}
+        <button style={btn} title="Copy the selected segments, linked partners included (Ctrl+C)"
+          onClick={doCopy}>Copy</button>
+        <button style={btn} title="Paste at the playhead — the leftmost copied segment starts there, the rest keep their spacing (Ctrl+V)"
+          onClick={doPaste}>Paste</button>
         {blade && (
           <span title="Blade: left-click a clip to cut it in two. Hold Alt to cut only the one you clicked (its linked audio/video stays whole)."
             style={{ fontSize: 10.5, fontWeight: 600, color: '#ff9f0a', whiteSpace: 'nowrap' }}>✂ Blade — click a clip to cut</span>
@@ -1108,7 +1210,7 @@ export const VidTimeline: React.FC<{
       <div ref={scrollRef} data-vid-scroll="" style={{ flex: 1, minHeight: 0, overflow: 'auto', position: 'relative', scrollbarWidth: 'none' }}>
         {/* `minWidth: '100%'`：内容层至少铺满滚动容器的可视宽 —— 轨道是无限延伸的画布，
             不能因为工程短就在右边留一条空带（首帧 viewW 还没测出来时也靠它兜住）。 */}
-        <div ref={contentRef} style={{ width: contentW, minWidth: '100%', position: 'relative', minHeight: '100%' }}>
+        <div ref={contentRef} data-vid-pps={Math.round(pps * 1000) / 1000} style={{ width: contentW, minWidth: '100%', position: 'relative', minHeight: '100%' }}>
 
           {/* 标尺：整条只认游标（点哪拖哪）。范围的上下界是**顶上那两个三角块**（PR 那种），
               它们只占标尺顶部 10px，其余高度全是游标的地盘 —— 调范围抓三角、移游标点标尺，
@@ -1155,7 +1257,7 @@ export const VidTimeline: React.FC<{
                 <div style={{ position: 'absolute', left: 0, top: 0, width: 8, height: MARK_H, background: inSet ? '#0a84ff' : 'rgba(255,255,255,0.30)', clipPath: 'polygon(100% 0, 100% 100%, 0 50%)', pointerEvents: 'none', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))' }} />
               </div>
               {/* 播放头三角（left 只钉基准，逐帧位移交给 transport 订阅者直改 transform）。 */}
-              <div ref={triRef} style={{ position: 'absolute', left: HEADER_W - 5, top: 0, width: 10, height: PLAY_H, background: '#ff453a', clipPath: 'polygon(0 0, 100% 0, 50% 100%)', pointerEvents: 'none', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.6))', zIndex: 7 }} />
+              <div ref={triRef} data-vid-ph="" style={{ position: 'absolute', left: HEADER_W - 5, top: 0, width: 10, height: PLAY_H, background: '#ff453a', clipPath: 'polygon(0 0, 100% 0, 50% 100%)', pointerEvents: 'none', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.6))', zIndex: 7 }} />
             </div>
           </div>
 
@@ -1314,7 +1416,7 @@ export const VidTimeline: React.FC<{
                     e.preventDefault();
                     setDropLane(tr.id);
                     // 拖着素材悬停时就亮指示：落点会吸到谁，先看见再松手。
-                    const hit = (e.ctrlKey || e.metaKey) ? null : snapEdge(timeAt(e.clientX), new Set<string>());
+                    const hit = (e.ctrlKey || e.metaKey) ? null : snapEdge(timeAt(e.clientX), EMPTY_IDS);
                     showSnap(hit);
                   }
                 }}
