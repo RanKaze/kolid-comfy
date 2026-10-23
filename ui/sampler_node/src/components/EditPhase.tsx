@@ -2202,6 +2202,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const settledDocs = useRef(false);
   // 上一轮播报的文档集：这一轮多出来的就是"新开的工程"（Load / New / 重开）—— 它们要当场露脸。
   const prevDocs = useRef<readonly UnitId[]>([]);
+  // 上一轮播报的活跃文档：**已开着的文档被工作台自己切成活跃**（vgen 帧卡的跳转 →
+  // requestImportCud 的 already-open 分支 → switchDocument）只重新播报一次，文档集不变 ——
+  // fresh 那一支抓不到它，选中项得自己跟上，不然工作台已经在画 B，tab 条还停在 A。
+  const prevActiveUid = useRef<number | null>(null);
   useEffect(() => {
     // 播报前（它自己也刚加载），开文档集是"未知"而不是"空"。此刻按空集会先把存档里画布窗口的位置
     // 剪掉，等播报到来只能按新文档安放 —— 画布每次刷新都跳回默认位置，而其它面板本来就留得住（加载
@@ -2228,8 +2232,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         if (uid !== null) onDocCommand('activate', Number(uid));
       }
     }
+    // 活跃文档换了人而文档集没变 → 拨选中项。只在 activeUid **真的跨了**这趟才拨：脏标记、
+    // 存盘这些例行播报 activeUid 不变，不能把用户手动点开的那一格抢回来。
+    const au = blendDocs.activeUid;
+    if (au != null && au !== prevActiveUid.current) {
+      const u = docUnit(au);
+      if (openDocUnits.includes(u) && !fresh.includes(u)) next = revealDoc(next, u);
+    }
+    prevActiveUid.current = au;
     if (next !== dock) applyDock(next);
-  }, [dock, openDocUnits, applyDock, blendDocs.announced]);
+  }, [dock, openDocUnits, applyDock, blendDocs.announced, blendDocs.activeUid]);
   // 默认布局：Layout 那一格标了 ★ 的那一份，是页面**每次打开**的起手式。它住在盘上（`/api/layouts`），
   // 不在浏览器里 —— 宿主端口是 8700..8799 里试出来的，换个端口就是换个 origin，localStorage 里那份
   // 当场看不见（这正是"我存的布局下次打开就没了"的由来）。

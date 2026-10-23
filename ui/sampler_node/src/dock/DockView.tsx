@@ -215,7 +215,10 @@ const carried = (ctx: DockCtx, e: React.DragEvent): readonly UnitId[] | null => 
     } catch { /* not ours — fall through to the plain id */ }
   }
   const one = e.dataTransfer.getData('text/plain');
-  return one ? [one] : null;
+  // 自家载荷里也有用 text/plain 的（图层行塞的是行 id）：只有它真是本页认得的单元 id 才认领 ——
+  // 否则块级 onDropCapture 会在 capture 阶段 stopPropagation，把行自己的 onDrop 拦死
+  // （reorder 与跨 Layers/Guidances 拖动整个失灵，就是被这一句吞的）。
+  return one && ctx.rules.known(one) ? [one] : null;
 };
 // The drag sources a window wears. `grab(ctx, window.ids)` is the window HANDLE; `grab(ctx, [u])` is an
 // item's TITLE. Nothing else differs between the two drags — same payload shape, same cleanup — which is
