@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useSyncExternalStore } from 'react';
 import type { PipelineBlock, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi, VideoGenConfig, VideoGenSlot } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, preprocessFlag, VIDEO_GEN_SLOTS, videoGenMissing } from '../types';
 import { DebugPanel } from './DebugModal';
@@ -16,7 +16,7 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidGenFrameRef, type VidGenTrackCfg, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidGenFrameRef, type VidGenTrackCfg, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
@@ -24,6 +24,9 @@ import { setLayerEditBlocked } from '../workbench/editGate';
 import { getBlendUi, setBlendUi, getActiveBlendUid } from '../workbench/store';
 import { resetRowInteraction } from '../workbench/layerRow';
 import { ingestFile } from '../workbench/video/ingest';
+import { grabFrameFull } from '../workbench/video/previews';
+import { getVidSelection, subscribeVidSelection } from '../workbench/video/selection';
+import { bumpAssets } from '../workbench/video/assetsTick';
 import { beginVidProcRun, clearProcFill, clearProcQueue, dequeueProcClip, endVidProcRun, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, setVidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets, Card, type StoreAsset } from '../workbench/video/Assets';
@@ -1499,8 +1502,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, []);
 
   /** 往生成器轨上摆一段（播放头处）。参数用端口默认值打底，之后在段上改。 */
-  const addVideoGenSegment = useCallback((ifaceIndex: number) => {
-    const itf = interfaces[ifaceIndex];
+  const addVideoGenSegment = useCallback((ifaceIndex: number) => {    const itf = interfaces[ifaceIndex];
     if (!itf) return;
     const cfg = vgenCfgOf(itf);
     const ports = cfg.ports || {};
@@ -1523,6 +1525,68 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     }), 'Add video generator');
     setVidProcRun({ state: 'idle', msg: '' });
   }, [interfaces, vgenCfgOf, vgenDefaults, vidUpdate, vidTransport]);
+
+  // ── Add continue segment ── 时间线上恰好选中一枚**视频段**时可用:把那段视频的尾帧
+  // 抓下来(全分辨率、精确 seek)、入资产仓库拿哈希,作为一台生成器新段的首帧,新段就摆
+  // 在这段正后方 —— 生成器接着这段的画面往下画。选中态来自跨窗 store(Timeline 抄进来)。
+  const addContinueVgenSegment = useCallback(async (ifaceIndex: number) => {
+    const itf = interfaces[ifaceIndex];
+    if (!itf) return;
+    const cfg = vgenCfgOf(itf);
+    const ports = cfg.ports || {};
+    if (!ports.first_frame) {
+      setVidProcRun({ state: 'error', msg: `「${itf.name}」 has no First frame port bound — bind it in the Interface tab first.` });
+      return;
+    }
+    const missing = videoGenMissing(cfg);
+    if (missing.length) {
+      setVidProcRun({ state: 'error', msg: `「${itf.name}」 still needs ${missing.join(', ')} bound in the Interface tab.` });
+      return;
+    }
+    const sel = getVidSelection();
+    const clip = sel.size === 1 ? vidProjectRef.current.clips.find(c => sel.has(c.id)) : undefined;
+    if (!clip || clip.kind !== 'video') {
+      setVidProcRun({ state: 'error', msg: 'Select one video segment on the timeline first (exactly one, a real video clip).' });
+      return;
+    }
+    setVidProcRun({ state: 'running', msg: `Grabbing the last frame of 「${clip.name}」…` });
+    // 尾帧 = 源内 offset+duration 的前一刻(0.04s ≈ 一帧内,精确 seek 不是关键帧级)。
+    const dataurl = await grabFrameFull(clip.src, Math.max(0, clip.offset + clip.duration - 0.04));
+    if (!dataurl) {
+      setVidProcRun({ state: 'error', msg: `Could not grab the last frame of 「${clip.name}」 — the source may be missing (relink it in Assets).` });
+      return;
+    }
+    setVidProcRun({ state: 'running', msg: 'Importing the frame into the asset store…' });
+    const frameName = `${clip.name} · last frame`;
+    let hash = '';
+    try {
+      const res = await fetch('/api/asset_import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ images: [dataurl], names: [frameName], library: true, origin: 'run' }),
+      });
+      const j = await res.json();
+      hash = j?.ok && j?.added?.[0]?.id ? String(j.added[0].id) : '';
+    } catch { hash = ''; }
+    if (!hash) {
+      setVidProcRun({ state: 'error', msg: 'The asset store refused the frame — check the backend log.' });
+      return;
+    }
+    bumpAssets();
+    const { params, duration } = vgenDefaults(itf, ports, vidProjectRef.current.fps);
+    const start = clip.start + clip.duration;
+    if (procSlotBusy(vidProjectRef.current, ports.video ?? 0, start, duration)) {
+      setVidProcRun({ state: 'error', msg: `The output track already has a clip at ${start.toFixed(1)}s — move it before adding the continue segment.` });
+      return;
+    }
+    vidUpdate(proj => placeVideoGenSegment(proj, {
+      name: itf.name, runId: `vgen-${Date.now()}`, port: ports.video ?? 0,
+      iface: itf.name, ifaceNum: ifaceIndex, ports, fixed_fps: !!cfg.fixed_fps,
+      fixed_fps_value: cfg.fixed_fps ? (Number(cfg.fixed_fps_value) || 16) : undefined,
+      params, start, duration,
+      first_frame: { kind: 'asset', hash, name: frameName },
+    }), 'Add continue segment');
+    setVidProcRun({ state: 'done', msg: `Continue segment placed at ${start.toFixed(1)}s — it starts from 「${clip.name}」's last frame.` });
+  }, [interfaces, vgenCfgOf, vgenDefaults, vidUpdate]);
 
   /** 跑一段生成器（只这一段）：段上那套参数原样进 interface，首末帧（含从链上前段共享来的）
    *  喂进它们那一口，产物落到输出轨的对应位置。调用方负责忙碌闸门与进度条收尾。 */
@@ -2290,17 +2354,32 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     () => vidProject.assets.filter(a => a.kind === 'video').map(a => ({ id: a.id, name: a.name })),
     [vidProject.assets],
   );
+  // 时间线选中态(跨窗 store 的宿主侧读数):恰好选中一枚**视频段**时,Video Generator 窗的
+  // Add continue segment 才有原料 —— 那段的尾帧就是新段的首帧。
+  const vidSel = useSyncExternalStore(subscribeVidSelection, getVidSelection);
+  const continueSel = useMemo(() => {
+    if (vidSel.size !== 1) return null;
+    const c = vidProject.clips.find(c => vidSel.has(c.id));
+    return c && c.kind === 'video' ? { name: c.name } : null;
+  }, [vidSel, vidProject.clips]);
   const wbHost = useMemo(() => ({
     staging, blendPreview, guidanceCard, stageUpload, stageRemove,
     layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock },
     video: {
       mode: vidMode, fps: vidProject.fps, setFps: setVidFps, tracks: vidTrackList, assets: vidAssetList,
       // Video Generator：Processor 那一格要能列出"哪些接口是生成器"并发起添加（段的位置/时长
-      // 只有宿主知道，所以添加这个动作也住在宿主 —— 窗口只挑哪一台）。
-      videoGen: { list: videoGenList, add: addVideoGenSegment },
+      // 只有宿主知道，所以添加这个动作也住在宿主 —— 窗口只挑哪一台）。`cont` 是时间线上
+      // 恰好选中的那枚视频段（Add continue segment 的原料）；没有 = null。
+      videoGen: { list: videoGenList, add: addVideoGenSegment, cont: continueSel, addContinue: addContinueVgenSegment },
+      // Video 模式的 Mask 轨绑定(Tracks 窗顶栏撤掉后的去处):Guidances 的 MaskRow 画 Bind。
+      maskTrack: {
+        id: vidProject.maskTrackId || '',
+        tracks: vidTrackList,
+        set: (id: string | null) => vidUpdate(proj => setMaskTrack(proj, id || null), 'Mask track'),
+      },
     },
   }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock,
-    vidMode, vidProject.fps, setVidFps, vidTrackList, vidAssetList, videoGenList, addVideoGenSegment]);
+    vidMode, vidProject.fps, vidProject.maskTrackId, setVidFps, vidTrackList, vidAssetList, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment, vidUpdate]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
   // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
   // 所以：**空列表在启动期是歧义的**，要等它至少说过一次"我有文档"，此后再说空才算关闭。

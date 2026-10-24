@@ -53,7 +53,14 @@ export type WorkbenchHostCtx = {
       list: { name: string; index: number; ports: Record<string, number>;
               fixed_fps: boolean; fixed_fps_value?: number; missing: string[]; ready: boolean }[];
       add: (ifaceIndex: number) => void;
+      /** Add continue segment:时间线上恰好选中一枚视频段时可用 —— 它的尾帧入库存成图,
+       *  作为新段的首帧,新段落在这段正后方。`cont` = 那枚段的名字(没选中 = null)。 */
+      cont: { name: string } | null;
+      addContinue: (ifaceIndex: number) => void;
     };
+    /** Video 模式的 Mask = 一条轨的绑定(Tracks 窗顶栏撤掉后的去处):当前绑的轨 id
+     *  ('' = 没绑)、视频轨清单、写口。Guidances 的 MaskRow 用它画 Bind。 */
+    maskTrack: { id: string; tracks: { id: string; name: string }[]; set: (id: string | null) => void };
   };
 };
 

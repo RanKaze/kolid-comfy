@@ -325,6 +325,51 @@ async function grabFrame(src: string, t: number): Promise<string | null> {
   }
 }
 
+/** 全分辨率精确抓帧(续接段的首帧用):grabFrame 是缩略管线(160px JPEG),这里的画面要
+ *  喂给生成器当第一帧,尺寸与精度都得是正身 —— 原生宽高、精确 currentTime(不走 fastSeek)、
+ *  JPEG 0.92。同样排进串行队,不跟 scrub 抢解码器。返回 dataURL(/api/asset_import 直接收)。 */
+export const grabFrameFull = (src: string, t: number): Promise<string | null> =>
+  enqueueFrame(async () => {
+    const v = document.createElement('video');
+    v.muted = true;
+    v.preload = 'auto';
+    v.playsInline = true;
+    v.src = src;
+    try {
+      const ready = await new Promise<boolean>(resolve => {
+        const ok = () => resolve(true);
+        const bad = () => resolve(false);
+        v.addEventListener('loadeddata', ok, { once: true });
+        v.addEventListener('error', bad, { once: true });
+        setTimeout(bad, 15000);
+      });
+      if (!await ready) return null;
+      await yieldToScrub();                      // 拖动中不跟主 <video> 抢解码器。
+      await new Promise<void>(resolve => {
+        const done = () => resolve();
+        v.addEventListener('seeked', done, { once: true });
+        setTimeout(done, 8000);
+        try {
+          const lim = Number.isFinite(v.duration) && v.duration > 0 ? Math.max(0, v.duration - 0.04) : t;
+          v.currentTime = Math.max(0, Math.min(t, lim));
+        } catch { done(); }
+      });
+      if (!v.videoWidth || !v.videoHeight) return null;
+      const cv = document.createElement('canvas');
+      cv.width = v.videoWidth;
+      cv.height = v.videoHeight;
+      const g = cv.getContext('2d');
+      if (!g) return null;
+      g.drawImage(v, 0, 0);
+      return cv.toDataURL('image/jpeg', 0.92);
+    } catch {
+      return null;
+    } finally {
+      v.removeAttribute('src');
+      v.load();
+    }
+  });
+
 // ── 后端 /api/vid_frame 在不在 ── 只探一次。在 → 优先走后端（有磁盘缓存，开机就有图）；
 // 不在（旧服务没重启）→ 全走客户端抓帧。
 let backendProbe: Promise<boolean> | null = null;

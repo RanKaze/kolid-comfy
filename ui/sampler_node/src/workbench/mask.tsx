@@ -2,6 +2,7 @@ import React from 'react';
 import { wbStyles } from './skin';
 import { useBlendUi } from './store';
 import type { BlendUiSend } from '../types';
+import type { WorkbenchHostCtx } from './registry';
 
 // Mask 这一格就是页面原来的 #maskDock 合成的那一格（拍板 6.a）：那张覆盖面自己。
 // 曾经上面还有一行"笔落在哪一面"（键帽徽章 + 目标名 + 笔尖那枚 Invert）。用户拍板全撤：键帽是
@@ -36,8 +37,12 @@ const LAYER_ACTIONS: { action: 'mask-layer-invert' | 'mask-layer-full' | 'mask-l
 // 这一行住在 Guidances 的列表顶上（见 guidances.tsx），不是一扇窗，所以它的外框得自己钉住：
 // `position: sticky` 让它在列表滚动时留在原地（一摞行往下滚，这条覆盖面不该跟着跑掉），底下一道
 // 发丝线把它和 guidance 那些行分开。背景必须写实：不写的话滚动的内容会从它下面透出来。
-export const MaskRow: React.FC<{ send: BlendUiSend }> = ({ send }) => {
+//
+// Video 模式下多一条 **轨绑定条**:Video 的 Mask 是"哪条轨当 mask 源"(亮度逐帧),与画布墨迹
+// 是两回事 —— 曾经那颗下拉住在 Tracks 窗顶栏,顶栏撤掉后搬到这里,Bind 点开一个轨选单。
+export const MaskRow: React.FC<{ send: BlendUiSend; host?: WorkbenchHostCtx }> = ({ send, host }) => {
   const ui = useBlendUi();
+  const [bindOpen, setBindOpen] = React.useState(false);
   const armed = ui.mode === 'mask';
   return (
     <div data-mask-row="" style={{ display: 'flex', flexDirection: 'column', gap: 4,
@@ -68,6 +73,61 @@ export const MaskRow: React.FC<{ send: BlendUiSend }> = ({ send }) => {
           <Eye visible={ui.mask.visible} />
         </button>
       </div>
+
+      {/* Video 模式的轨绑定条:绑哪条视频轨当 mask 源。Bind 点开一个小选单(None + 各视频轨),
+          选完即写工程(一次 vidUpdate = 一步撤销、随 .cud 走)。绑了的那条轨,时间线头上戴 MASK 章。 */}
+      {host?.video.mode === 'video' && (
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 5, padding: '0 5px 5px' }}>
+          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.45)', flexShrink: 0 }}
+            title={'Video-mode Mask is a TRACK binding — the picked track\'s frames (luminance, white = covered) become the mask for every frame of a run. None = no mask, the whole frame is the workspace. Only Pipeline Preset runs read this.'}>
+            Track mask
+          </span>
+          <button
+            style={{ ...wbStyles.btn, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              ...(host.video.maskTrack.id ? { color: '#79c0ff', borderColor: 'rgba(10,132,255,0.55)' } : null) }}
+            title={host.video.maskTrack.id
+              ? 'Bound: the track\'s frames are the mask. Click to change or unbind.'
+              : 'Bind a video track as the video-mode mask source — click to pick one.'}
+            onClick={e => { e.stopPropagation(); setBindOpen(o => !o); }}
+          >
+            {host.video.maskTrack.id
+              ? (host.video.maskTrack.tracks.find(t => t.id === host.video.maskTrack.id)?.name ?? 'Bound track')
+              : 'Bind'}
+          </button>
+          {bindOpen && (
+            <div
+              data-vid-mask-bind="1"
+              onContextMenu={e => e.preventDefault()}
+              style={{
+                position: 'absolute', top: 'calc(100% - 2px)', left: 5, right: 5, zIndex: 40,
+                display: 'flex', flexDirection: 'column', gap: 1, padding: 4, borderRadius: 8,
+                background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
+                boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
+              }}
+            >
+              {[['', 'None — no mask'], ...host.video.maskTrack.tracks.map(t => [t.id, t.name] as [string, string])].map(([id, label]) => (
+                <button
+                  key={id || 'none'}
+                  onClick={e => { e.stopPropagation(); host.video.maskTrack.set(id || null); setBindOpen(false); }}
+                  style={{
+                    display: 'block', width: '100%', textAlign: 'left', padding: '5px 9px', borderRadius: 5,
+                    border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    background: (host.video.maskTrack.id || '') === id ? 'rgba(10,132,255,0.22)' : 'transparent',
+                    color: (host.video.maskTrack.id || '') === id ? '#79c0ff' : 'rgba(255,255,255,0.88)',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = (host.video.maskTrack.id || '') === id ? 'rgba(10,132,255,0.22)' : 'transparent'; }}
+                >{label}</button>
+              ))}
+              {host.video.maskTrack.tracks.length === 0 && (
+                <div style={{ padding: '4px 9px 5px', fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>
+                  No video tracks yet — add one in Tracks (right-click a track header).
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

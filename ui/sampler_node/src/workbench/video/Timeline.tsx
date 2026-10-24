@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   type VidClip, type VidClipClipboard, type VidController, type VidPasteResult, type VidTrack, type VidMergeProbe,
   addLayerClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, mergeVidClips, moveClip, moveTrack, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack,
-  replaceVidClipsWithMerged, setMaskTrack, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
+  replaceVidClipsWithMerged, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
   vgenChainPrevOf, vgenSeamsOf, vgenWithDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
@@ -11,11 +11,11 @@ import { getActiveBlendUid } from '../store';
 import { probeMedia } from './audio';
 import { ingestFile } from './ingest';
 import { GLOBAL_ITEM_TYPE } from './Assets';
+import { setVidSelection } from './selection';
 import {
   ensureFrame, ensureStrip, ensureWaveform, frameBackend, peekStrip, stripComplete, stripFrame, subscribeStrip,
 } from './previews';
 import { getProcFill, getProcQueue, subscribeProcFill, subscribeProcQueue } from './procRun';
-
 /** 缩略条的订阅：抽好的那一刻敲一下组件重渲；挂载即开始在后台抽条。
  *  `src` 为空 = 这条片段不需要缩略条（音频段：波形另有 Cache，不该给纯音频源抽视频帧）。 */
 function useStrip(src: string, srcDuration: number): string[] | undefined {
@@ -170,6 +170,21 @@ const IconMerge: React.FC = () => (
     <path d="M7.2 8h1.6" />
   </svg>
 );
+const IconCopy: React.FC = () => (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="6" y="6" width="7.4" height="7.4" rx="1.6" />
+    <path d="M10 3.4H4.4A1.4 1.4 0 0 0 3 4.8V10.4" />
+  </svg>
+);
+const IconPaste: React.FC = () => (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="4.2" y="3.6" width="7.6" height="9.8" rx="1.4" />
+    <path d="M6.2 3.6V2.6h3.6v1" />
+    <path d="M6.4 8h3.2M6.4 10.4h3.2" />
+  </svg>
+);
 
 
 // 剃刀光标：按住 C 时整条时间线换成剪刀。内联 SVG 数据 URI（`#` 等已被 encodeURIComponent 编码），
@@ -212,12 +227,6 @@ type DragState =
   | { mode: 'in' }
   | { mode: 'out' };
 
-const btn: React.CSSProperties = {
-  fontSize: 10.5, fontWeight: 600, padding: '3px 10px', borderRadius: 999, cursor: 'pointer',
-  background: 'rgba(255,255,255,0.07)', border: '0.5px solid rgba(255,255,255,0.16)',
-  color: 'rgba(255,255,255,0.82)', lineHeight: 1.5, flexShrink: 0,
-};
-
 export const VidTimeline: React.FC<{
   vid: VidController;
   /** 占位段的齿轮（设置入口）：参数 = 这一批要一起改的占位段 id。
@@ -252,6 +261,9 @@ export const VidTimeline: React.FC<{
   const dragRef = useRef<DragState | null>(null);
   // 多选：Ctrl/⌘ 点选切换单颗、Shift 在同轨上连选。锚点是上一次单击的那颗。
   const [selIds, setSelIds] = useState<ReadonlySet<string>>(() => new Set<string>());
+  // 选中态抄一份给跨窗的 store:Video Generator 窗的 Add continue segment 读它来判断
+  // "时间线上选中了哪段"(Timeline 自己的 state 别人看不见)。
+  useEffect(() => { setVidSelection(selIds); }, [selIds]);
   const selAnchorRef = useRef<string | null>(null);
   const selectOnly = useCallback((id: string) => {
     selAnchorRef.current = id;
@@ -723,16 +735,45 @@ export const VidTimeline: React.FC<{
   // ── 右键合并（多选 + 头尾相接）────────────────────────────────────────────────────────────
   // 菜单只在"多选、同轨同类、首尾严格相接"时露头（结构由 vidMergeStructure 判，见 model）。
   // 参数/帧窗口不满足、占位段正在跑、Layer 两套内容不一致时按钮置灰，原因写在下面。
+  // 菜单如今是**段的通用右键菜单**:Copy / Paste 常驻;Merge 只在多选且首尾相接时出现
+  // (`canMerge`,probe 只在那时有效)。
   type MergeMenuState = {
     x: number;
     y: number;
     ids: string[];
-    probe: VidMergeProbe;
+    canMerge: boolean;
+    probe: VidMergeProbe | null;
     layerCheck: 'idle' | 'checking' | 'equal' | 'differ';
     busy: boolean;
     note: string;
   };
   const [mergeMenu, setMergeMenu] = useState<MergeMenuState | null>(null);
+  // 轨头右键菜单:加轨的三个入口(Video / Layer / Audio)都从这弹 —— 顶栏撤掉后的去处。
+  const [trackMenu, setTrackMenu] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!trackMenu) return;
+    const inMenu = (t: EventTarget | null): boolean => {
+      const el = t as HTMLElement | null;
+      return !!el && typeof el.closest === 'function' && !!el.closest('[data-vid-track-menu]');
+    };
+    const onDown = (e: PointerEvent) => { if (!inMenu(e.target)) setTrackMenu(null); };
+    const onCtx = (e: MouseEvent) => { if (!inMenu(e.target)) setTrackMenu(null); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      setTrackMenu(null);
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    document.addEventListener('contextmenu', onCtx, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('blur', () => setTrackMenu(null));
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true);
+      document.removeEventListener('contextmenu', onCtx, true);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [trackMenu !== null]);
   // 异步回包认领号：关菜单 / 再开一次都会 ++，晚到的旧回包不会改到新菜单。
   const mergeSeq = useRef(0);
   const closeMergeMenu = useCallback(() => {
@@ -742,18 +783,18 @@ export const VidTimeline: React.FC<{
   const openMergeMenu = useCallback((e: React.MouseEvent, clip: VidClip) => {
     e.preventDefault();
     e.stopPropagation();
-    // 右击未选中的段 = 只选它（多选之外的右键不合并）。
-    if (!selIds.has(clip.id)) { selectOnly(clip.id); return; }
-    const ids = [...selIds];
-    if (!vidMergeStructure(p, ids).ok) return;      // 头尾不相连：不弹菜单
-    const probe = probeVidMerge(p, ids);
+    // 右击未选中的段 = 先把它选上(菜单里的 Copy 说的就是这份选区)。
+    if (!selIds.has(clip.id)) selectOnly(clip.id);
+    const ids = selIds.has(clip.id) ? [...selIds] : [clip.id];
+    const canMerge = vidMergeStructure(p, ids).ok;
+    const probe = canMerge ? probeVidMerge(p, ids) : null;
     const token = ++mergeSeq.current;
     const base: MergeMenuState = {
-      x: e.clientX, y: e.clientY, ids, probe,
+      x: e.clientX, y: e.clientY, ids, canMerge, probe,
       layerCheck: 'idle', busy: false, note: '',
     };
-    if (probe.ok && probe.plan.kind === 'layer') {
-      const keys = [...new Set(probe.plan.clips.map(c => c.layerKey || c.id))];
+    if (canMerge && probe!.ok && probe!.plan.kind === 'layer') {
+      const keys = [...new Set(probe!.plan.clips.map(c => c.layerKey || c.id))];
       if (vid.layerSigs && keys.length) {
         base.layerCheck = 'checking';
         void vid.layerSigs(keys).then(sigs => {
@@ -804,7 +845,7 @@ export const VidTimeline: React.FC<{
   }, [mergeMenu !== null, closeMergeMenu]);
   const runMerge = async () => {
     const m = mergeMenu;
-    if (!m || m.busy || !m.probe.ok) return;
+    if (!m || !m.canMerge || m.busy || !m.probe || !m.probe.ok) return;
     const plan = m.probe.plan;
     if (plan.kind === 'layer' && m.layerCheck !== 'equal') return;
     if (plan.clips.some(c => c.pending && getProcFill(c.id) >= 0)) {
@@ -930,7 +971,6 @@ export const VidTimeline: React.FC<{
 
   // ── Fit ── 整段时间线正好铺满可视 lane（左右留一点余量）。
   const userZoomedRef = useRef(false);                       // 用户手动缩放过 → 停止自动 Fit
-  const pendingAnchorRef = useRef<{ t: number; off: number } | null>(null);
   // pps 下限不是固定的 6：50 分钟的工程按 6px/s 铺开近三万像素，视口永远装不下，滚动手柄
   // 拖到最宽也看不到 range 两头。下限 = min(6, 把全长铺进 lane 的 pps)：短工程维持老下限 6
   // 不变，长工程随"铺满"一起下调 —— lane 再窄，也总允许缩到整条时间线（含 range）正好进视野；
@@ -961,28 +1001,7 @@ export const VidTimeline: React.FC<{
     fitZoom();
   }, [dur, span, fitZoom, hasView]);
 
-  // ── 缩放 ── 播放头在视野里就以它为锚（缩放围着"正在播的时刻"转，线不从画面上溜走）；
-  // 不在视野里退回老行为：锚可视区中心，缩放前后画面中心不动。
-  const zoomBy = (f: number) => {
-    const sc = scrollRef.current;
-    if (!sc) return;
-    const laneV = Math.max(sc.clientWidth - HEADER_W, 1);
-    const tH = transport.get();
-    const offH = tH * vid.pps - sc.scrollLeft;   // 播放头在 lane 视口里的偏移（0..laneV = 看得见）
-    pendingAnchorRef.current = offH >= 0 && offH <= laneV
-      ? { t: tH, off: offH }
-      : { t: (sc.scrollLeft + laneV / 2) / vid.pps, off: laneV / 2 };
-    userZoomedRef.current = true;
-    vid.setPps(Math.max(ppsFloor(laneV, span), Math.min(480, vid.pps * f)));
-  };
-  useEffect(() => {
-    const a = pendingAnchorRef.current;
-    if (!a) return;
-    pendingAnchorRef.current = null;
-    const sc = scrollRef.current;
-    if (sc) sc.scrollLeft = Math.max(0, a.t * vid.pps - a.off);
-  }, [pps, vid.pps]);
-
+  // ── 缩放 ── ±/Fit 按钮撤了:缩放走滚动条两端的圆把手(拖宽),Fit 走滚动条**双击**。
   // ── 自定义横向滚动条 ── 几何：thumb 宽 = 视口占比，位置 = scrollLeft 比例。
   const laneContentW = Math.max(contentW - HEADER_W, 1);
   const laneViewW = Math.max(viewW - HEADER_W, 1);
@@ -1187,54 +1206,28 @@ export const VidTimeline: React.FC<{
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#141416', minWidth: 0, overflow: 'hidden' }}>
-      {/* 头一条：增删轨道、缩放、时间读数。 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '0.5px solid rgba(255,255,255,0.08)', flexShrink: 0, flexWrap: 'wrap' }}>
-        <button style={btn} title="Add a video track on top" onClick={() => vid.update(p2 => addTrack(p2, 'video'), 'Add track')}>+ Video Track</button>
-        <button style={{ ...btn, color: '#d7a6ff' }}
-          title="Add a Layer track on top — it holds Layer segments, each with its own set of layers, composited over the video below. Only a Layer track that sits above every video track takes effect."
-          onClick={() => vid.update(p2 => addTrack(p2, 'layer'), 'Add track')}>+ Layer Track</button>
-        <button style={btn} title="Add an audio track at the bottom" onClick={() => vid.update(p2 => addTrack(p2, 'audio'), 'Add track')}>+ Audio Track</button>
-        {/* Video 模式的 Mask = **一条轨的绑定**（不是画布上的一张墨迹）：绑了就把那条轨的画面
-            亮度逐帧当 mask（白 = 覆盖）；None = 没绑 = 整幅都是工作区。preset 链没有输入口，
-            它的 mask 就来自这里；Processor 的 mask 口有自己的端口来源，不看这里。 */}
-        <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4, fontSize: 10.5, color: 'rgba(255,255,255,0.5)' }}
-          title="Video-mode Mask is a TRACK binding — the picked track's frames (luminance, white = covered) become the mask for every frame of a run. None = no mask, the whole frame is the workspace. Only Pipeline Preset runs read this; a Processor's mask input has its own source picker.">
-          Mask
-          <select
-            data-vid-mask-track=""
-            value={p.maskTrackId || ''}
-            onChange={e => vid.update(proj => setMaskTrack(proj, e.target.value || null), 'Mask track')}
-            style={{ fontSize: 10.5, padding: '2px 4px', borderRadius: 4, background: '#2a2a2e', color: 'rgba(255,255,255,0.8)', border: '0.5px solid rgba(255,255,255,0.14)', maxWidth: 130 }}
-          >
-            <option value="">None</option>
-            {p.tracks.filter(t => t.kind === 'video').map(t => (
-              <option key={t.id} value={t.id}>{t.name}</option>
-            ))}
-          </select>
-        </label>
-        <div style={{ flex: 1 }} />
-        {actNote && (
-          <span data-vid-act-note="" title={actNote} style={{
-            fontSize: 10.5, fontWeight: 600, color: '#ffb04a', whiteSpace: 'nowrap',
-            maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis',
-          }}>{actNote}</span>
-        )}
-        <button style={btn} title="Copy the selected segments, linked partners included (Ctrl+C)"
-          onClick={doCopy}>Copy</button>
-        <button style={btn} title="Paste at the playhead — the leftmost copied segment starts there, the rest keep their spacing (Ctrl+V)"
-          onClick={doPaste}>Paste</button>
-        {blade && (
-          <span title="Blade: left-click a clip to cut it in two. Hold Alt to cut only the one you clicked (its linked audio/video stays whole)."
-            style={{ fontSize: 10.5, fontWeight: 600, color: '#ff9f0a', whiteSpace: 'nowrap' }}>✂ Blade — click a clip to cut</span>
-        )}
-        <span ref={readRef} style={{ fontSize: 11, color: 'rgba(255,255,255,0.55)', fontVariantNumeric: 'tabular-nums' }}>
-          {fmtTime(transport.get())} / {fmtTime(dur)}
-        </span>
-        <button style={{ ...btn, width: 26, padding: '3px 0', textAlign: 'center' }} title="Zoom out" onClick={() => zoomBy(1 / 1.3)}>−</button>
-        <button style={{ ...btn, width: 26, padding: '3px 0', textAlign: 'center' }} title="Zoom in" onClick={() => zoomBy(1.3)}>+</button>
-        <button style={btn} title="Zoom to fit the whole timeline in view" onClick={fitZoom}>Fit</button>
-      </div>
+    <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#141416', minWidth: 0, overflow: 'hidden' }}>
+      {/* 顶栏撤掉了:加轨走**轨头右键菜单**,Copy/Paste 走**段右键菜单**,Fit 走**滚动条双击**,
+          Mask 绑定搬去了 Guidances 窗(Video 模式的 MaskRow)。只留两样无处可去的反馈:
+          动作播报(actNote)与 Blade 提示 —— 覆盖在滚动区左下角,不吃指针。 */}
+      {(actNote || blade) && (
+        <div style={{ position: 'absolute', left: 8, bottom: 22, zIndex: 30, pointerEvents: 'none', display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-start' }}>
+          {actNote && (
+            <span data-vid-act-note="" title={actNote} style={{
+              fontSize: 10.5, fontWeight: 600, color: '#ffb04a', whiteSpace: 'nowrap',
+              maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis',
+              background: 'rgba(20,20,22,0.88)', border: '0.5px solid rgba(255,176,74,0.35)', borderRadius: 5, padding: '2px 7px',
+            }}>{actNote}</span>
+          )}
+          {blade && (
+            <span title="Blade: left-click a clip to cut it in two. Hold Alt to cut only the one you clicked (its linked audio/video stays whole)."
+              style={{ fontSize: 10.5, fontWeight: 600, color: '#ff9f0a', whiteSpace: 'nowrap',
+                background: 'rgba(20,20,22,0.88)', border: '0.5px solid rgba(255,159,10,0.35)', borderRadius: 5, padding: '2px 7px' }}>
+              ✂ Blade — click a clip to cut
+            </span>
+          )}
+        </div>
+      )}
 
       {/* 滚动区：标尺 sticky 在顶、轨道头 sticky 在左；原生滚动条整体隐藏（Chromium 155+ 已不认
           ::-webkit-scrollbar，用标准 scrollbar-width:none），横向导航交给下面的自定义条。 */}
@@ -1327,6 +1320,7 @@ export const VidTimeline: React.FC<{
                   setRenaming(tr.id);
                 }}
                 title={`Drag to reorder — order is stacking: video tracks composite top to bottom, a Layer track only composites while it sits above every video track. Double-click to rename.`}
+                onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setTrackMenu({ x: e.clientX, y: e.clientY }); }}
                 style={{ position: 'sticky', left: 0, width: HEADER_W, flexShrink: 0, zIndex: 4, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px', cursor: trkDrag ? 'grabbing' : 'grab', userSelect: 'none' }}
               >
                 <span style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: KIND_UI[tr.kind].chipBg, color: KIND_UI[tr.kind].fg }}>
@@ -1627,6 +1621,8 @@ export const VidTimeline: React.FC<{
         <div
           ref={trackRef}
           onPointerDown={onSbDown} onPointerMove={onSbMove} onPointerUp={onSbUp} onPointerCancel={onSbUp}
+          onDoubleClick={fitZoom}
+          title="Drag to scroll · drag the round handles to zoom · double-click to fit the whole timeline"
           style={{ flex: 1, position: 'relative', touchAction: 'none', userSelect: 'none' }}
         >
           {/* 底槽：一条 2px 的暗线横贯整条 —— 两端圆把手之间的那段才是"当前视口"，有槽才看得出范围。 */}
@@ -1645,16 +1641,54 @@ export const VidTimeline: React.FC<{
       <div ref={noteRef} style={{ padding: '4px 10px', fontSize: 10.5, color: 'rgba(255,255,255,0.4)', borderTop: '0.5px solid rgba(255,255,255,0.06)', flexShrink: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} />
 
       {/* 右键合并菜单：挂到 body（不受轨道区的滚动/裁剪影响），fixed 定位。 */}
+      {/* 轨头右键菜单:加轨三兄弟。任何一条轨的头上右键都弹这一份。 */}
+      {trackMenu && createPortal(
+        <div
+          data-vid-track-menu="1"
+          onContextMenu={e => e.preventDefault()}
+          style={{
+            position: 'fixed', zIndex: 9999,
+            left: Math.max(8, Math.min(trackMenu.x, window.innerWidth - 230)),
+            top: Math.max(8, Math.min(trackMenu.y, window.innerHeight - 130)),
+            minWidth: 190, padding: 4, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 1,
+            background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
+            boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
+          }}
+        >
+          {([
+            ['video', 'Add Video Track', 'Add a video track on top'],
+            ['layer', 'Add Layer Track', 'Add a Layer track on top — it holds Layer segments, each with its own set of layers, composited over the video below. Only a Layer track that sits above every video track takes effect.'],
+            ['audio', 'Add Audio Track', 'Add an audio track at the bottom'],
+          ] as ['video' | 'layer' | 'audio', string, string][]).map(([kind, label, tip]) => (
+            <button
+              key={kind}
+              onClick={() => { vid.update(p2 => addTrack(p2, kind), 'Add track'); setTrackMenu(null); }}
+              title={tip}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left',
+                padding: '6px 9px', borderRadius: 5, border: 'none',
+                background: 'transparent', color: 'rgba(255,255,255,0.92)',
+                fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+            >{label}</button>
+          ))}
+        </div>,
+        document.body,
+      )}
+
       {mergeMenu && createPortal((() => {
         const m = mergeMenu;
-        const plan = m.probe.ok ? m.probe.plan : null;
-        const running = !!plan && plan.clips.some(c => c.pending && getProcFill(c.id) >= 0);
-        const blocked = !m.probe.ok ? m.probe.reason
-          : !plan ? ''
-            : running ? 'A selected segment is running — wait for it to finish.'
-              : plan.kind === 'layer' && m.layerCheck === 'checking' ? 'Comparing the layer contents…'
-                : plan.kind === 'layer' && m.layerCheck !== 'equal' ? (m.note || 'The layer sets are not identical.')
-                  : m.note;
+        const plan = m.canMerge && m.probe?.ok ? m.probe.plan : null;
+        const running = !!plan && plan.clips.some((c: VidClip) => c.pending && getProcFill(c.id) >= 0);
+        const blocked = !m.canMerge ? ''
+          : !m.probe?.ok ? m.probe!.reason
+            : !plan ? ''
+              : running ? 'A selected segment is running — wait for it to finish.'
+                : plan.kind === 'layer' && m.layerCheck === 'checking' ? 'Comparing the layer contents…'
+                  : plan.kind === 'layer' && m.layerCheck !== 'equal' ? (m.note || 'The layer sets are not identical.')
+                    : m.note;
         const disabled = !plan || running || m.busy || (plan.kind === 'layer' && m.layerCheck !== 'equal');
         const label = !plan ? 'Merge segments'
           : plan.kind === 'process' ? `Merge ${plan.clips.length} process segments`
@@ -1662,6 +1696,20 @@ export const VidTimeline: React.FC<{
               : plan.videoMode === 'concat'
                 ? `Merge ${plan.clips.length} video segments (stitch into a new file)`
                 : `Merge ${plan.clips.length} video segments`;
+        const item = (labelText: string, icon: React.ReactNode, onClick: () => void, title: string): React.ReactNode => (
+          <button
+            onClick={onClick}
+            title={title}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left',
+              padding: '6px 9px', borderRadius: 5, border: 'none',
+              background: 'transparent', color: 'rgba(255,255,255,0.92)',
+              fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+          >{icon}{labelText}</button>
+        );
         return (
           <div
             data-vid-merge-menu="1"
@@ -1669,30 +1717,39 @@ export const VidTimeline: React.FC<{
             style={{
               position: 'fixed', zIndex: 9999,
               left: Math.max(8, Math.min(m.x, window.innerWidth - 342)),
-              top: Math.max(8, Math.min(m.y, window.innerHeight - 104)),
+              top: Math.max(8, Math.min(m.y, window.innerHeight - 140)),
               minWidth: 230, maxWidth: 330, padding: 4, borderRadius: 8,
               background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
-              boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
+              boxShadow: '0 12px 36px rgba(0,0,0,0.6)', display: 'flex', flexDirection: 'column', gap: 1,
             }}
           >
-            <button
-              disabled={disabled}
-              onClick={() => { void runMerge(); }}
-              title={blocked || 'Merge the selected adjacent segments into one.'}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left',
-                padding: '6px 9px', borderRadius: 5, border: 'none',
-                background: disabled ? 'transparent' : 'rgba(10,132,255,0.18)',
-                color: disabled ? 'rgba(255,255,255,0.38)' : 'rgba(255,255,255,0.92)',
-                fontSize: 11.5, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer',
-              }}
-            >
-              <IconMerge />{m.busy ? 'Merging…' : label}
-            </button>
-            {blocked && (
-              <div style={{ padding: '4px 9px 5px', fontSize: 10, lineHeight: 1.45, color: 'rgba(255,255,255,0.5)' }}>
-                {blocked}
-              </div>
+            {item('Copy', <IconCopy />, () => { doCopy(); closeMergeMenu(); },
+              'Copy the selected segments, linked partners included (Ctrl+C)')}
+            {item('Paste at the playhead', <IconPaste />, () => { doPaste(); closeMergeMenu(); },
+              'Paste at the playhead — the leftmost copied segment starts there, the rest keep their spacing (Ctrl+V)')}
+            {m.canMerge && (
+              <>
+                <div style={{ height: 1, margin: '3px 6px', background: 'rgba(255,255,255,0.10)' }} />
+                <button
+                  disabled={disabled}
+                  onClick={() => { void runMerge(); }}
+                  title={blocked || 'Merge the selected adjacent segments into one.'}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left',
+                    padding: '6px 9px', borderRadius: 5, border: 'none',
+                    background: disabled ? 'transparent' : 'rgba(10,132,255,0.18)',
+                    color: disabled ? 'rgba(255,255,255,0.38)' : 'rgba(255,255,255,0.92)',
+                    fontSize: 11.5, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  <IconMerge />{m.busy ? 'Merging…' : label}
+                </button>
+                {blocked && (
+                  <div style={{ padding: '4px 9px 5px', fontSize: 10, lineHeight: 1.45, color: 'rgba(255,255,255,0.5)' }}>
+                    {blocked}
+                  </div>
+                )}
+              </>
             )}
           </div>
         );

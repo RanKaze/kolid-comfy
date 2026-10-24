@@ -963,6 +963,8 @@ export const placeVideoGenSegment = (
     ports: VideoGenPorts; fixed_fps: boolean; fixed_fps_value?: number;
     params: Record<string, unknown>;
     start: number; duration: number;
+    /** 开跑前就绑好的首帧(Add continue segment:所选视频段的尾帧)。缺省 = 不绑。 */
+    first_frame?: VidGenFrameRef | null;
   },
 ): VidProject => {
   const { p: withTrack, track } = ensureVideoGenTrack(p, item.port);
@@ -976,6 +978,7 @@ export const placeVideoGenSegment = (
       iface: item.iface, ifaceNum: item.ifaceNum,
       ports: item.ports, fixed_fps: item.fixed_fps, fixed_fps_value: item.fixed_fps_value,
       params: item.params,
+      first_frame: item.first_frame ?? null,
     },
   };
   return { ...withTrack, clips: [...withTrack.clips, clip] };

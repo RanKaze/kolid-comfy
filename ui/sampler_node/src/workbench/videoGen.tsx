@@ -22,6 +22,10 @@ const VideoGenBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
   // 摆段那一步的成败由宿主写进这条播报（播放头处被占、必绑槽没绑齐都从这里说出来）。
   const run = useVidProcRun();
   const cur = list[pick] || list[0];
+  // Add continue segment 的原料:时间线上恰好选中的那枚视频段(没有 = null)。
+  const cont = host.video.videoGen.cont;
+  const firstBound = (cur?.ports.first_frame ?? 0) > 0;
+  const contReady = !!cur?.ready && videoMode && firstBound && !!cont;
 
   return (
     <div style={{ ...wbStyles.stack, padding: 4 }}>
@@ -55,6 +59,19 @@ const VideoGenBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
                   ? 'Place a video generator segment at the playhead — its length starts from the duration port’s value, and the finished clip lands on the output track at that position.'
                   : `This generator still has unbound ports (${cur.missing.join(', ')}) — bind them in the Interface tab first.`}
               onClick={() => host.video.videoGen.add(cur.index)}>Add segment</button>
+            {/* Add continue segment:接着时间线上选中的那段视频往下画 —— 它的尾帧入库存成图,
+                作为新段的首帧,新段摆在这段正后方。没选中视频段 / 首帧口没绑 / 有必绑槽缺失时禁用。 */}
+            <button type="button"
+              style={{ ...wbStyles.btn, ...(contReady ? null : wbStyles.btnOff) }}
+              disabled={!contReady}
+              title={!videoMode
+                ? 'Segments live on the video timeline — switch the Workbench window to Video mode first.'
+                : !firstBound
+                  ? 'This generator has no First frame port bound — bind it in the Interface tab first.'
+                  : !cont
+                    ? 'Select one video segment on the timeline first (exactly one, a real video clip) — its last frame becomes this segment’s first frame.'
+                    : `Continue 「${cont.name}」: its last frame becomes this segment’s first frame, and the segment is placed right after it.`}
+              onClick={() => host.video.videoGen.addContinue(cur.index)}>Add continue segment</button>
           </div>
 
           {/* 这一台现在绑成什么样：八个槽一行一枚，没绑的写 — 。必绑而没绑的那几枚标橙。 */}

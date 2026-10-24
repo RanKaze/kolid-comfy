@@ -34,7 +34,7 @@ const GuidancesBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
   // 的一员（不参与拖拽/排序，也不进那个 stack），只是借这一格的位置站着。
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minHeight: 0 }}>
-      <MaskRow send={send} />
+      <MaskRow send={send} host={host} />
       <LayerListView stack="guidance" rows={ui.stacks.guidances} send={send} video={host.video} />
     </div>
   );
