@@ -4990,7 +4990,6 @@ class SnapshotDetailerSamplerNode:
                     guid = pf.get('guid') if isinstance(pf, dict) else None
                     if guid:
                         guid_to_prefab[guid] = pf
-        valid_paths = getattr(prompt_server, '_valid_lora_paths', None) or set()
 
         def expand(node, visited):
             if not isinstance(node, dict) or not node.get('active', True):
@@ -5068,8 +5067,7 @@ class SnapshotDetailerSamplerNode:
                 file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
                 if not file_path:
                     continue
-                normalized_path = file_path.replace('\\', '/')
-                if valid_paths and normalized_path not in valid_paths and file_path not in valid_paths:
+                if not prompt_server.lora_allowed_by_regex(file_path):
                     continue
                 if not lora_states.get(file_path, True):
                     continue
@@ -5117,9 +5115,8 @@ class SnapshotDetailerSamplerNode:
                 slider_cfgs = prompt_server._get_lora_slider_configs_by_filepath() or {}
             except Exception:
                 slider_cfgs = {}
-            # 同款过滤（prompt_node.py:220-226 / 3881-3886）：架构 regex 没命中的 lora
-            # 不加载，也不出标记词。
-            valid_paths = getattr(prompt_server, '_valid_lora_paths', None) or set()
+            # 同款过滤（prompt_node 的 get_active_loras_string / lora_allowed_by_regex）：
+            # 架构 regex 没命中的 lora 不加载，也不出标记词 —— 命中集为空同样是真状态，全拒。
             for lora_item in loras:
                 if isinstance(lora_item, dict):
                     if not lora_item.get('active', True):
@@ -5129,8 +5126,7 @@ class SnapshotDetailerSamplerNode:
                         file_path = prompt_server._resolve_lora_file_path(file_path)
                     if not file_path:
                         continue
-                    normalized_path = file_path.replace('\\', '/')
-                    if valid_paths and normalized_path not in valid_paths and file_path not in valid_paths:
+                    if not prompt_server.lora_allowed_by_regex(file_path):
                         print(f"[QueryLora] SKIP (prompt tab): 不在当前架构 lora_regex 命中集 — {file_path}")
                         continue
                     strength = lora_item.get('strength', 1.0)
@@ -5292,9 +5288,9 @@ class SnapshotDetailerSamplerNode:
             slider_cfgs = ps._get_lora_slider_configs_by_filepath() or {}
         except Exception:
             slider_cfgs = {}
-        # 与 prompt 节点自己的输出同一条规矩（prompt_node.py:220-226 / 3881-3886）：
-        # 没被当前架构 lora_regex 命中的 lora 既不加载，也不出标记词。
-        valid_paths = getattr(ps, '_valid_lora_paths', None) or set()
+        # 与 prompt 节点自己的输出同一条规矩（lora_allowed_by_regex）：没被当前架构
+        # lora_regex 命中的 lora 既不加载，也不出标记词 —— 命中集为空（该架构在库里
+        # 没有 lora）同样是真状态，此时全拒，而不是把过滤整个关掉。
         for lora_item in loras:
             if isinstance(lora_item, dict):
                 if not lora_item.get('active', True):
@@ -5304,8 +5300,7 @@ class SnapshotDetailerSamplerNode:
                     file_path = ps._resolve_lora_file_path(file_path)
                 if not file_path:
                     continue
-                normalized_path = file_path.replace('\\', '/')
-                if valid_paths and normalized_path not in valid_paths and file_path not in valid_paths:
+                if not ps.lora_allowed_by_regex(file_path):
                     print(f"[QueryLora] SKIP: 不在当前架构 lora_regex 命中集 — {file_path}")
                     continue
                 strength = lora_item.get('strength', 1.0)

@@ -690,6 +690,22 @@ class SnapshotPromptServer:
                 return file_path
         return fp_or_fingerprint
 
+    def lora_allowed_by_regex(self, file_path):
+        """lora_regex 命中判定 —— lora 加载闸门的唯一真源。
+
+        regex 为空 = 这道过滤没开，全放行；regex 非空 = 必须落在 `_valid_lora_paths`
+        命中集里。**命中集为空是真状态**（当前架构在库里一个 lora 都没有，比如 'Moss'），
+        此时应当全部拒绝 —— 各调用点以前自写 `if valid_paths and ...`，空集会把过滤
+        静默关掉，异架构 lora 就这样混进了运行中的管线（2026-10-24 日志：Moss 管线
+        经 Query 块加载了两条 Krea2 lora）。
+        """
+        if not file_path:
+            return False
+        if not self.lora_regex:
+            return True
+        normalized = file_path.replace('\\', '/')
+        return normalized in self._valid_lora_paths or file_path in self._valid_lora_paths
+
     def _resolve_selected_loras_by_fingerprint(self, loras):
         """Resolve saved lora selections by fingerprint.
         Saved loras have file_path that may be stale (lora renamed/moved).
