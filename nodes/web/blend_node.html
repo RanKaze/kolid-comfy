@@ -4894,6 +4894,29 @@ function replyVidLayerSigs(reqId, keys) {
     window.parent.postMessage({ type: 'blend-vid-layer-sig', reqId, sigs }, '*');
 }
 
+// ── 关键帧录制的参数快照 ────────────────────────────────────────────────────────────────────
+// 宿主录关键帧时问这里："当前图层集里,每一层的 transform 与特效链参数现在是什么?"(blend-vid-kf-get)
+// 只报数据不报 DOM;通道键由宿主编(数值参数进关键帧,颜色/曲线这些复杂值宿主自己先不收)。
+// 录哪个集:宿主按播放头切集(vid-layer-set),所以这里照实报**当前活跃**的 layers —— 播放头在
+// 哪个 Layer 段里,活跃的就是哪段的那套。
+function vidKfSnapshot() {
+    return (layers || []).filter(l => !l.isMaskLayer).map(l => ({
+        id: String(l.id),
+        name: l.name || '',
+        visible: l.visible !== false,
+        transform: l.transform ? Object.assign({}, l.transform) : null,
+        effects: (l.effects || []).map(e => ({
+            id: e.id, type: e.type, enabled: e.enabled !== false,
+            params: e.params ? JSON.parse(JSON.stringify(e.params)) : {},
+        })),
+    }));
+}
+function replyVidKf(reqId) {
+    let layers = [];
+    try { layers = vidKfSnapshot(); } catch (e) { layers = []; }
+    window.parent.postMessage({ type: 'blend-vid-kf', reqId, layers }, '*');
+}
+
 // ── Layer 段粘贴：整套克隆 ──────────────────────────────────────────────────────────────────
 // 宿主粘一段 Layer 段时，副本要有**自己的一套图层** —— 共用一套就是"改副本把原件也改了"，
 // 那不是"复制"在用户眼里的意思。源可以是活跃那套（内容就在全局 layers 上）或 layerSets 里
@@ -14210,6 +14233,7 @@ window.addEventListener('message', event => {
     }
     if (d.type === 'blend-vid-frame') { handleVidFrameMessage(d); return; }
     if (d.type === 'blend-vid-layer-sig') { replyVidLayerSigs(d.reqId, d.keys); return; }
+    if (d.type === 'blend-vid-kf-get') { replyVidKf(d.reqId); return; }
     if (d.type === 'blend-vid-layer-copy') { replyVidLayerCopy(d.reqId, d.from, d.to); return; }
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
     if (d.type === 'blend-vid-base') { handleVidBaseMessage(d); return; }

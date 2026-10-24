@@ -100,6 +100,72 @@ export type VidClip = {
   /** 输出轨上的产物由哪个占位段生成（= 占位段的 clip id）。重跑同一个占位段时按它认亲，
    *  自己的旧产物不算"占位"，会被原地换掉；别的东西占着才是真占。 */
   procOwner?: string;
+  /** 关键帧系统（见 VidKeyframes）：持久化在段上，随 .cud 走。眼下只有 Layer 段用 ——
+   *  通道里记的是它图层集的 fx 参数与 transform。结构对参数源开放，之后扩啥都只是新键。 */
+  keyframes?: VidKeyframes;
+};
+
+// ── 关键帧系统 ───────────────────────────────────────────────────────────────────────────────
+// 段上的关键帧:通道键 → 一串 (时刻, 值)。通道键是**开放的地址串** —— 设计上不封顶,眼下只有
+// 两层前缀:
+//   `layer:<layerId>:transform:<cx|cy|w|h|rotation>`
+//   `layer:<layerId>:fx:<fxId>:<paramKey>`
+// 之后的参数源(新的属性系统、音频、 Whatever)只是新的键前缀,模型、录制与回放都不用改。
+// 值眼下只有数值(fx 的 range 参数、transform 各维都是数);string/boolean 留给之后的参数源。
+
+export type VidKfValue = number;
+/** 一枚关键帧:t = **段内秒**(相对段头 —— 段挪动,关键帧跟着走),v = 该通道此刻的值。 */
+export type VidKeyframe = { t: number; v: VidKfValue };
+export type VidKeyframes = { channels: Record<string, VidKeyframe[]> };
+
+/** 工作台回的参数快照(blend-vid-kf):当前图层集里每层的 transform 与特效链参数。
+ *  值保持 JSON 原样 —— 宿主只挑数值的进关键帧,复杂值(颜色/曲线)之后再说。 */
+export type VidKfSnapshot = {
+  layers: {
+    id: string;
+    name: string;
+    visible: boolean;
+    transform: Record<string, unknown> | null;
+    effects: { id: number; type: string; enabled: boolean; params: Record<string, unknown> }[];
+  }[];
+};
+
+/** 同刻判定:两枚关键帧的时刻差小于它算同一枚(覆盖,不并存)。 */
+export const KF_EPS = 0.005;
+
+/** 录制:往一枚段的关键帧系统里 upsert 一批通道值(播放头每停一次,把当下的参数写进去)。
+ *  每个通道各自:摘掉同刻旧帧 → 按时间序插回。channels 惰性建,别的段原样不动。 */
+export const kfRecord = (p: VidProject, clipId: string, t: number, values: Record<string, VidKfValue>): VidProject => ({
+  ...p,
+  clips: p.clips.map(c => {
+    if (c.id !== clipId) return c;
+    const channels = { ...(c.keyframes?.channels ?? {}) };
+    for (const [key, v] of Object.entries(values)) {
+      const list = (channels[key] ?? []).filter(k => Math.abs(k.t - t) >= KF_EPS);
+      const next = [...list, { t, v }].sort((a, b) => a.t - b.t);
+      channels[key] = next;
+    }
+    return { ...c, keyframes: { channels } };
+  }),
+});
+
+/** 采样:一个通道在某时刻的值(线性插值;头尾夹取;空通道 = null)。
+ *  这是回放引擎要用的那一半 —— 录制先落数据,回放接上来就用同一口。 */
+export const kfSample = (kf: VidKeyframes | undefined, key: string, t: number): VidKfValue | null => {
+  const list = kf?.channels[key];
+  if (!list || !list.length) return null;
+  if (t <= list[0].t) return list[0].v;
+  const last = list[list.length - 1];
+  if (t >= last.t) return last.v;
+  for (let i = 1; i < list.length; i++) {
+    if (t <= list[i].t) {
+      const a = list[i - 1];
+      const b = list[i];
+      const k = (t - a.t) / Math.max(b.t - a.t, 1e-6);
+      return typeof a.v === 'number' && typeof b.v === 'number' ? a.v + (b.v - a.v) * k : b.v;
+    }
+  }
+  return last.v;
 };
 
 /** Processor 占位段里的**执行快照**：Run 确认的当下就在轨上摆好的坑（每段一个、预分配

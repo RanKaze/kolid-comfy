@@ -16,7 +16,7 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidGenFrameRef, type VidGenTrackCfg, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfRecord, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
@@ -26,6 +26,7 @@ import { resetRowInteraction } from '../workbench/layerRow';
 import { ingestFile } from '../workbench/video/ingest';
 import { grabFrameFull } from '../workbench/video/previews';
 import { getVidSelection, subscribeVidSelection } from '../workbench/video/selection';
+import { getKfArmed, subscribeKfArmed } from '../workbench/video/kfArmed';
 import { bumpAssets } from '../workbench/video/assetsTick';
 import { beginVidProcRun, clearProcFill, clearProcQueue, dequeueProcClip, endVidProcRun, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, setVidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
@@ -706,6 +707,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // interactive 也在这一并带上 —— 上一版在这里丢了标记，拖标尺完全不走缩略条路径。
   const [vidSeek] = useState(() => createSeekCoalescer(vidTransport));
   const [vidPlaying, setVidPlaying] = useState(false);
+  // 播放态的 ref:关键帧录制的触发回路(transport 订阅闭包)要在回调里读到"此刻在不在播",
+  // 读 state 会拿 stale —— 走 ref。
+  const vidPlayingRef = useRef(false);
+  vidPlayingRef.current = vidPlaying;
   const [vidPps, setVidPps] = useState(60);
   // ── Inspector 的选中 ── Assets 窗点卡片产生,Inspector 窗照它放大看(图/音/视频都收,
   // 视频与音频用自己那条独立播放头,与主 transport 互不相识)。切换/关闭文档时清空:
@@ -950,6 +955,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 回包按 reqId 认领；页面不在 / 1.5s 没回 = 空表（调用方按"比较失败"处理，不合并）。
   const layerSigSeq = useRef(1);
   const layerSigWaiters = useRef(new Map<number, (sigs: Record<string, string>) => void>());
+  // 关键帧录制的回包认领(与上面同一套 reqId/waiter 模式,见 blend-vid-kf-get)。
+  const kfSeq = useRef(1);
+  const kfWaiters = useRef(new Map<number, (snap: VidKfSnapshot | null) => void>());
+  const kfTimers = useRef(new Map<number, number>());
   // Layer 段粘贴：请页面把源段那套图层**整套克隆**到新 key（见页面 copyLayerSetTo）。
   // 回包按 reqId 认领；页面不在 / 1.5s 没回 = false（调用方退回"共用同一套"，内容不丢）。
   const layerCopySeq = useRef(1);
@@ -967,6 +976,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         if (finish) {
           layerSigWaiters.current.delete(rid);
           finish(d.sigs && typeof d.sigs === 'object' ? d.sigs : {});
+        }
+        return;
+      }
+      if (d.type === 'blend-vid-kf') {
+        if (e.source !== blendIframeRef.current?.contentWindow) return;
+        const rid = Math.round(Number(d.reqId) || 0);
+        const finish = kfWaiters.current.get(rid);
+        if (finish) {
+          kfWaiters.current.delete(rid);
+          const layers = (d as { layers?: VidKfSnapshot['layers'] }).layers;
+          finish(Array.isArray(layers) ? { layers } : null);
         }
         return;
       }
@@ -1726,6 +1746,74 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         ? { ...c, vgen: { ...c.vgen, [which]: ref } } : c),
     }), 'Bind frame');
   }, [vidUpdate]);
+
+  /** 关键帧录制的参数快照:向工作台页要"当前图层集"的 transform + fx 参数(见 blend_node 的
+   *  blend-vid-kf-get)。与 layerSigs 同一条 reqId/waiter 模式,1.5s 超时兜底。 */
+  const layerKfParams = useCallback((): Promise<VidKfSnapshot | null> => {
+    const win = blendIframeRef.current?.contentWindow;
+    if (!win) return Promise.resolve(null);
+    return new Promise(resolve => {
+      const reqId = ++kfSeq.current;
+      let done = false;
+      const finish = (snap: VidKfSnapshot | null) => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(kfTimers.current.get(reqId));
+        kfWaiters.current.delete(reqId);
+        resolve(snap);
+      };
+      kfTimers.current.set(reqId, window.setTimeout(() => finish(null), 1500));
+      kfWaiters.current.set(reqId, finish);
+      win.postMessage({ type: 'blend-vid-kf-get', reqId }, '*');
+    });
+  }, [blendIframeRef]);
+
+  // ── 关键帧录制 ── Record 钮(kfArmed store,Tracks 左上角)亮着时:播放头每停一个位置
+  // (暂停态的 scrub、播放头拖动),就把该刻所在 **Layer 段**的图层参数快照写成关键帧
+  // (段内秒,持久化在段上)。播放中不记(逐帧太密);拉快照异步,去抖 150ms —— 停稳了才落。
+  // 开录那一刻也先记一笔。臂的开关经 kfArmed 外部 store,这里订阅它,不碰控制器。
+  const vidKfArmRef = useRef(false);
+  useEffect(() => subscribeKfArmed(() => { vidKfArmRef.current = getKfArmed(); }), []);
+  vidKfArmRef.current = getKfArmed();
+  const recordKfAtPlayhead = useCallback(async () => {
+    if (!getKfArmed() || vidPlayingRef.current) return;
+    const proj = vidProjectRef.current;
+    const t = vidTransport.get();
+    const clip = proj.clips.find(c => c.kind === 'layer' && !c.pending && t >= c.start && t < c.start + c.duration);
+    if (!clip) return;
+    const local = Math.round((t - clip.start) * 1000) / 1000;
+    const snap = await layerKfParams();
+    if (!snap || !getKfArmed()) return;
+    const values: Record<string, number> = {};
+    for (const l of snap.layers) {
+      const pfx = `layer:${l.id}`;
+      if (l.transform) {
+        for (const [k, v] of Object.entries(l.transform)) {
+          if (typeof v === 'number' && Number.isFinite(v)) values[`${pfx}:transform:${k}`] = v;
+        }
+      }
+      for (const e of l.effects) {
+        if (!e.enabled) continue;                 // 旁路的特效不记(它不影响画面)
+        for (const [pk, pv] of Object.entries(e.params || {})) {
+          if (typeof pv === 'number' && Number.isFinite(pv)) values[`${pfx}:fx:${e.id}:${pk}`] = pv;
+        }
+      }
+    }
+    if (!Object.keys(values).length) return;
+    vidUpdate(proj2 => kfRecord(proj2, clip.id, local, values), 'Record keyframes');
+  }, [layerKfParams, vidUpdate, vidTransport]);
+  const kfTimer = useRef(0);
+  useEffect(() => {
+    const schedule = () => {
+      if (vidPlayingRef.current || !getKfArmed()) return;
+      if (kfTimer.current) window.clearTimeout(kfTimer.current);
+      kfTimer.current = window.setTimeout(() => { kfTimer.current = 0; void recordKfAtPlayhead(); }, 150);
+    };
+    const unArm = subscribeKfArmed(() => { if (getKfArmed()) schedule(); });
+    const unT = vidTransport.subscribe(schedule);
+    if (getKfArmed()) schedule();                 // 挂载/依赖变化时:已在录制中就先记一笔
+    return () => { unArm(); unT(); if (kfTimer.current) window.clearTimeout(kfTimer.current); };
+  }, [recordKfAtPlayhead, vidTransport]);
 
   // ── Pipeline Preset 的视频路（骨架与 Processor 视频路同一套）────────────────────────────
   // 差别只在"预设没有输入口"：喂哪段视频由**每次运行**的 modal 定（Tracks / Sel. Track /

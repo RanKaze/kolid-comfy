@@ -12,6 +12,7 @@ import { probeMedia } from './audio';
 import { ingestFile } from './ingest';
 import { GLOBAL_ITEM_TYPE } from './Assets';
 import { setVidSelection } from './selection';
+import { getKfArmed, setKfArmed, subscribeKfArmed } from './kfArmed';
 import {
   ensureFrame, ensureStrip, ensureWaveform, frameBackend, peekStrip, stripComplete, stripFrame, subscribeStrip,
 } from './previews';
@@ -226,6 +227,32 @@ type DragState =
   | { mode: 'scrub' }
   | { mode: 'in' }
   | { mode: 'out' };
+
+// ── 关键帧录制钮 ── 亮红 = 录制中,暗红 = 关。开关走 kfArmed 外部 store(按钮自己订阅,
+// 状态与重渲都只发生在这一颗按钮上,不牵动整条时间线)。
+const KfRecordButton: React.FC = () => {
+  const armed = useSyncExternalStore(subscribeKfArmed, getKfArmed);
+  return (
+    <button
+      data-vid-kf-rec=""
+      onClick={() => setKfArmed(!armed)}
+      title={armed
+        ? 'Keyframe record is ON — every playhead stop inside a Layer segment records the layers\' transform and fx parameters at that time (stored on the segment). Click to stop recording.'
+        : 'Keyframe record is OFF — click to arm it: every playhead stop inside a Layer segment then records the layers\' transform and fx parameters at that time (stored on the segment).'}
+      style={{
+        position: 'absolute', left: 6, top: 5, zIndex: 40,
+        width: 20, height: 20, borderRadius: '50%', cursor: 'pointer', padding: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: armed ? '#ff3b30' : 'rgba(96,26,22,0.92)',
+        border: armed ? '1px solid rgba(255,140,130,0.95)' : '1px solid rgba(255,255,255,0.22)',
+        boxShadow: armed ? '0 0 9px rgba(255,59,48,0.8)' : 'none',
+        transition: 'box-shadow 120ms, background 120ms',
+      }}
+    >
+      <span style={{ width: 8, height: 8, borderRadius: '50%', background: armed ? '#fff' : 'rgba(255,255,255,0.32)' }} />
+    </button>
+  );
+};
 
 export const VidTimeline: React.FC<{
   vid: VidController;
@@ -1207,6 +1234,10 @@ export const VidTimeline: React.FC<{
 
   return (
     <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#141416', minWidth: 0, overflow: 'hidden' }}>
+      {/* 关键帧录制钮(左上角):亮红 = 录制中 —— 播放头每停一次,把该刻 Layer 段的图层参数
+          (fx 参数 + transform)写成关键帧(持久化在段上);暗红 = 关,什么都不记。
+          开关是外部 store(kfArmed):按钮自己订阅,重渲只发生在它身上。 */}
+      <KfRecordButton />
       {/* 顶栏撤掉了:加轨走**轨头右键菜单**,Copy/Paste 走**段右键菜单**,Fit 走**滚动条双击**,
           Mask 绑定搬去了 Guidances 窗(Video 模式的 MaskRow)。只留两样无处可去的反馈:
           动作播报(actNote)与 Blade 提示 —— 覆盖在滚动区左下角,不吃指针。 */}
