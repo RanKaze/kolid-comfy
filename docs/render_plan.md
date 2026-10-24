@@ -409,7 +409,8 @@ python tests/golden/compare.py tests/golden/vid temporary/_golden_gl --edge --ma
 | P3.1 余下：笔刷落笔写纹理（decal 直写，base 预折，橡皮同路径） | **完成**（见 §10.3.2），`temporary/_probe_paint_tex.cjs` 全绿 |
 | P3.2 唯一画布：webgl2 `#stageCanvas` 直出，三块旧面退成离屏 | **完成**（见 §10.3.3），`temporary/_probe_stage.cjs` 全绿 |
 | P3.3 删旧显示机：底片 `<video>` 直传纹理，`#vidBaseCanvas` 整块消失 | **完成**（见 §10.3.4），`_probe_stage.cjs` 的 `natural.baseStamp` 是 `<media>@<时刻>`、`baseCoverage=1` |
-| P3.4 删 playing 分支：编辑与播放同一条路径 | **完成**（见 §10.3.4），`_probe_vid_playedit.cjs` 播放中 `stageMode='live'`、改图层 13ms 落地 |
+| P3.4 删 playing 分支：编辑与播放同一条路径 | **完成**（见 §10.3.4），`_probe_vid_playedit.cjs` 播放中 `stageMode='live'`、改图层 7ms 落地 |
+| P3.5 播放卡顿归因：底片按**帧号**上台（rVFC）、视频纹理走零拷贝、播放中不再每帧重发 UI 快照 | **完成**（见 §10.3.4 末段 + §10.4 第 13/15/16 条），`_probe_vid_cadence.cjs --gpu` 底片上传 166 次/秒 → 32 次/秒且间隔稳定 36ms |
 | `tests/guards.py` | **40**（I1 = 0；其余是 P4/P5 的目标） |
 
 ### 10.2 自检（改动后必跑）
@@ -423,6 +424,8 @@ node temporary/_probe_compositor.cjs --direct   # 直出 → temporary/_cmp_dire
 node temporary/_probe_paint_tex.cjs             # 笔刷落点 → temporary/_cmp_paint
 node temporary/_probe_stage.cjs                 # 唯一显示面 → temporary/_cmp_stage
 node temporary/_probe_vid_playedit.cjs          # 播放中编辑（P3.4）→ 控制台 JSON
+node temporary/_probe_vid_cadence.cjs --gpu     # 播放节奏/每段耗时（P3.5）→ 控制台
+node temporary/_probe_vid_rate.cjs --gpu        # 包率 vs 回图率（P3.5）→ 控制台
 $PY tests/test_render_plan.py                                  # 编译器
 $PY tests/golden/compare.py tests/golden/vid temporary/_cmp_plan --maxdiff=0
 $PY tests/golden/compare.py tests/golden/vid temporary/_cmp_direct --edge --maxdiff=1
@@ -523,9 +526,9 @@ $PY tests/guards.py                                            # 不变量记账
 | 位置 | 变成了什么 |
 |---|---|
 | `#vidBaseCanvas` | 整块删掉（CSS / markup / `vidBaseCtx` / `sizeCanvasElement` 的尺寸循环）。全页只剩两块离屏缓冲：`#blendCanvas`（context image）与 `#guidanceCanvas`。 |
-| `stageShowBase(force)` | 不再 `vidBasePaintNow()` + 上传暂存面，而是**直接把 `#vidBaseVideo` 当纹理**交给 `stagePresent`。去重戳只留一份：`stageBaseStamp = 源@currentTime(3位)`（`vidBaseStamp` 没了）。`readyState < 2` / `seeking` / 没有 `videoWidth` 时直接返回 ⇒ 屏幕上保留上一帧，不会黑。 |
+| `stageShowBase(force)` | 不再 `vidBasePaintNow()` + 上传暂存面，而是**直接把 `#vidBaseVideo` 当纹理**交给 `stagePresent`。去重戳只留一份：`stageBaseStamp = 源@#帧号`（rVFC 计数；暂停/拖动退回 `源@currentTime(3位)`，见 §10.4 第 13 条）。`readyState < 2` / `seeking` / 没有 `videoWidth` 时直接返回 ⇒ 屏幕上保留上一帧，不会黑。 |
 | `paintVidBase` / `handleVidBaseMessage` / `vidBaseFrame` | 删。宿主早就不再发 `blend-vid-base`（位图老路），那条分支只剩死代码。`blend-vid-base-src` 的 `hidden` 字段也一并删了 —— "被合成压着"由"有没有合成包"自己表达（`stageWanted`）。 |
-| 出帧循环 | `vidBasePaintTick` → `vidBaseTick`：每帧只比一次字符串，`stageWanted() === 'base'` 才动手。**没用 `requestVideoFrameCallback`**（见 §10.4 第 13 条）。 |
+| 出帧循环 | `vidBasePaintTick` → `vidBaseTick`：每帧只比一次字符串，`stageWanted() === 'base'` 才动手。**新帧由 `requestVideoFrameCallback` 计数**（`vidBaseWatchFrames`，见 §10.4 第 13 条）—— P3.3 当时判反了，改成按 `currentTime` 去重，结果一秒白传三十多次整幅纹理（P3.5 更正）。 |
 | `vidFrameFlush` 的 `active` | `!p.playing && layerKey === activeLayerSet` → `layerKey === activeLayerSet`。播放中这一包也折在活画布上、也上台 —— 编辑与播放同一条路径。 |
 | `vidCompState` | `isActive` 同样去掉播放位；`contentSig` 从 `(hasFrame && playing) ? '' : …` 收敛成 `hasFrame ? '' : …`（随帧变的段本来就靠 `t` 比较）。 |
 | `vidFrameOff` / `switchLayerSet` | 不再有"播放中不重画"的分支：两处都直接 `render()`。`switchLayerSet(key)` 只剩一个参数，`layer-set` 只剩 `{key}`。 |
@@ -538,8 +541,32 @@ $PY tests/guards.py                                            # 不变量记账
 
 **验收**：`node temporary/_probe_stage.cjs` —— `natural.mode='base'`、`baseStamp` 是 `<media>@<时刻>`、
 `baseCoverage=1`（底片真的上了台），`shown` 只剩两块离屏缓冲；`node temporary/_probe_vid_playedit.cjs`
-—— 播放中 `stageMode='live'`（不再是 `composite`），在面板上点眼睛 13ms 落到当前段，停下后仍是 `live`。
+—— 播放中 `stageMode='live'`（不再是 `composite`），在面板上点眼睛 7ms 落到当前段，停下后仍是 `live`。
 四例 `--edge --maxdiff=1` 与 2D `--maxdiff=0` 不变；`tests/guards.py` 仍是 40（I1 = 0）。
+
+#### P3.5 播放卡顿归因（承接 P3.4，已落地）
+
+P3.4 之后用户仍报"播放有卡顿"。实测（`_probe_vid_cadence.cjs --gpu`，RTX 4070 / ANGLE D3D11）三处，
+全部与"显示路径每帧干了不该干的事"有关，与合成质量无关：
+
+| 症状（实测） | 根因 | 改法 |
+|---|---|---|
+| 底片态 stage 每秒被**重铺 166 次**（每个 rAF tick 一次），间隔杂乱（p50 6ms、夹着 26ms） | 去重戳用 `currentTime` —— 媒体时钟几乎每 tick 都动（2 秒 309 个值），而片源 2 秒只有 49 帧 | 改由 `requestVideoFrameCallback` 计数（`vidBaseWatchFrames`）⇒ **32 次/秒、间隔稳定 36ms** |
+| 每次上传都是一次整幅 832×1216 的纹理上传 | `compositeGL` 默认开 `UNPACK_PREMULTIPLY_ALPHA_WEBGL` ⇒ 借不到解码器纹理，走 CPU 读回 + YUV→RGBA | 视频项传 `premul: true`（不透明源，逐像素等价）。**实测只省 0.03ms/帧**（4070），属微优化；软解/弱 GPU 上才明显 |
+| Layer 段播放时主线程每帧 **5ms（峰值 25ms）** 在 `sendBlendUiNow` | `render()` → `updateTransformReadout()` **无条件** `queueBlendUi()`，播放时读数一个字都没变，却把整页 UI 快照 stringify 一遍 | 读数变了才发；像素驱动的缩略图另走 `queueBlendUiPixels()`（120ms 节流）。播放期快照次数 37 → 13 |
+
+改后 `render` 1.0ms、`stagePresent` 0.2ms、rAF p50 6.5ms；Layer 段包率与监视器回图率都是 **30~32/s**
+（`_probe_vid_rate.cjs --gpu`：包间隔 p50 34ms、回图 p50 31ms，rtt 23ms）。
+
+**没解决的两处**（都量过，先记在这儿，别再当"卡顿"去翻显示路径）：
+
+- **换段那一下**：`_probe_vid_boundary.cjs --gpu` 跨 base→live→composite→base 播 4 秒，只有 1 处
+  >100ms 的空档（stage 重铺 107ms、监视器回图 137ms），落在进出 Layer 段的边界上。其余间隔都在 35ms 上下。
+  要治它得让"进段首帧"不再等镜像 seek（预热已经提前 4 秒，但换套 + 首帧合成仍在这一帧里）。
+- **片源帧率 ≠ 采样格**：这条工程是 30fps，片源只有 24.5fps（`totalVideoFrames` 2 秒 49 帧）。合成按
+  `q = floor(t*30)/30` 取样，24.5fps 的内容落在 30Hz 的格子上，每帧被显示 1 或 2 格且不均匀 —— 看起来
+  像轻微抖动，但这是采样节拍，不是丢帧。宿主 rAF 与主线程都干净（`_probe_host_jank.cjs --gpu`：
+  0 条 longtask、p95 16.7ms、>33ms 的帧 1/307）。
 
 ### 10.4 踩过的坑（照抄，别再踩）
 
@@ -568,8 +595,24 @@ $PY tests/guards.py                                            # 不变量记账
    2D 兜底之所以还能用，是因为兜底分支只在 webgl2 **返回 null** 时才走（那时 canvas 还没被绑）。
    另外 `preserveDrawingBuffer` 必须开 —— `stageReadbackToBlend` 靠 `drawImage(stageCanvas)` 抄
    context image，关掉就是一张黑图（或者上一帧）。
-13. **`display:none` 的 `<video>` 不能指望 `requestVideoFrameCallback`**（P3.3）：rVFC 的语义是"新帧
-   呈现给合成器时"，不在渲染树里的元素不保证有呈现。`drawImage` / `texImage2D` 照常能取到已解码的
-   帧，但"什么时候取"只能自己轮询（`vidBaseTick` 的 rAF + 一次 `currentTime` 比较）。
+13. **`display:none` 的 `<video>` 上 `requestVideoFrameCallback` 照常回调**（P3.3 判反，P3.5 实测更正）：
+    在 `#vidBaseVideo` 上挂链，2 秒回调 **49 次**、间隔 42ms，与 `getVideoPlaybackQuality().totalVideoFrames`
+    的增量**完全一致**（同一段 24.5fps 的片源）。所以"什么时候有新帧"不用轮询猜，rVFC 就是准信号。
+    两个附带条件：①rVFC 是**一次性**的，回调里要自己续；②`setAttribute('src') + load()` 会**清空**
+    pending 回调 ⇒ 换源后必须重挂（本页挂在 `emptied` 上）。反过来，`currentTime` **不是**帧信号 ——
+    它是媒体时钟，实测 2 秒里有 309 个不同值（每个 rAF tick 都变），拿它去重等于一秒白传三十多次整幅
+    纹理。退路仍留着：500ms 没来帧就按 `currentTime` 比（老浏览器 / 解码器不给回调），宁可多传不能冻住。
 14. **P3.4 之后 `isActive` 在播放中恒为真**：任何"命中就补画一次 / 强制重铺一次"的代码都会变成每秒
-   30 次。命中路径只在 `stageMode !== 'live'` 时补画，`stageSync` 不要带 `force`。
+    30 次。命中路径只在 `stageMode !== 'live'` 时补画，`stageSync` 不要带 `force`。
+15. **视频纹理传 `premul: true` 走零拷贝那条路**（P3.5）：`compositeGL` 对普通 `src` 会开
+    `UNPACK_PREMULTIPLY_ALPHA_WEBGL`；WebGL 见到这个（或 `UNPACK_FLIP_Y_WEBGL`）为真就借不到解码器
+    那帧纹理，只能读回 CPU 再做 YUV→RGBA。视频没有 alpha（不透明），预乘与直通逐像素相同，所以这是
+    个纯性能开关。**实测（4070 / ANGLE D3D11，带 `gl.finish()`）只差 0.17ms vs 0.20ms 一帧** ——
+    是微优化，不是卡顿主因；软件解码 / 弱 GPU 上差距会大得多，所以留着。（带 alpha 的视频源会差，
+    目前没有这种输入。）
+16. **播放时别每帧重发整页 UI 快照**（P3.5）：`render()` 末尾的 `updateTransformReadout()` 原本**无条件**
+    `queueBlendUi()`，而 `sendBlendUiNow` 要 `syncHistoryThumbs/syncMaskStill/syncStackFaces` +
+    `JSON.stringify(blendUiState)` —— 实测 **5ms、峰值 25ms**。播放时读数一个字都不变，等于每秒白烧
+    150ms 主线程（还挤在同一帧的合成回图前面）。现在读数**变了才发**，像素驱动的缩略图另走
+    `queueBlendUiPixels()`（120ms 节流、带尾沿）；显式动作仍走不节流的 `queueBlendUi()`，回执照旧当帧到
+    （实测点眼睛 7ms 落到当前段）。

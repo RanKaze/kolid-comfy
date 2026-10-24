@@ -2431,7 +2431,26 @@ function flushBlendUi() {
     if (window.parent === window) return;
     if (blendUiQueued) { cancelAnimationFrame(blendUiFrame); blendUiQueued = false; blendUiFrame = 0; }
     if (blendUiFallback) { clearTimeout(blendUiFallback); blendUiFallback = 0; }
+    if (blendUiPixelTimer) { clearTimeout(blendUiPixelTimer); blendUiPixelTimer = 0; }
     sendBlendUiNow();
+}
+
+// render() 每帧都要报一次快照吗？不用。播放时它一秒 30 趟，每趟都要把整份 UI 状态
+// stringify 一遍（实测 5ms，峰值 25ms），而那份快照在播放时**一个字都没变** —— 纯粹白烧，
+// 还会把同一帧里的合成回图往后挤。跟着像素走的只有缩略图那几格（历史、蒙版、层栈），
+// 120ms 一次肉眼分辨不出来；真正的动作（换图层、撤销、切工具…）走的仍是不节流的
+// queueBlendUi()，回执照旧当帧到。
+const BLEND_UI_PIXEL_MS = 120;
+let blendUiPixelAt = 0;
+let blendUiPixelTimer = 0;
+function queueBlendUiPixels() {
+    if (blendUiPixelTimer) return;                  // 这一趟已经排上了，等它
+    const wait = Math.max(0, BLEND_UI_PIXEL_MS - (performance.now() - blendUiPixelAt));
+    blendUiPixelTimer = setTimeout(() => {
+        blendUiPixelTimer = 0;
+        blendUiPixelAt = performance.now();
+        queueBlendUi();
+    }, wait);
 }
 
 // A readout only takes up sidebar space while it has something to say — 现在这句判断交给 React。
@@ -4164,7 +4183,7 @@ function render() {
     }
     stageSync();                        // 模式不是 live 时（底片 / 合成图副本）把它换回来
     updateTransformReadout();
-    queueBlendUi();
+    queueBlendUiPixels();               // 像素变了：缩略图那几格节流后再报（见上）
     drawOverlay();
     schedulePreview();
     scheduleGuidanceCard();
@@ -5115,24 +5134,24 @@ function publishGuidanceCard() {
 
 function updateTransformReadout() {
     const held = dragGroupMembers();
+    let next = '';
     if (held) {
         // A group has no single rotation, so the readout reports the union box it scales and moves
         // by — the members' own angles are what they are.
         const box = groupBox(held);
         const tr = box && box.transform;
-        blendUiState.transform.readout = tr
-            ? `${held.length} layers  X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%`
-            : '';
-        queueBlendUi();
-        return;
-    }
-    const l = getSelected();
-    if (!l || !canvasW) {
-        blendUiState.transform.readout = '';
+        if (tr) next = `${held.length} layers  X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%`;
     } else {
-        const tr = effectiveTransform(l);
-        blendUiState.transform.readout = `X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%  R ${(tr.rotation * 180 / Math.PI).toFixed(1)}°`;
+        const l = getSelected();
+        if (l && canvasW) {
+            const tr = effectiveTransform(l);
+            next = `X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%  R ${(tr.rotation * 180 / Math.PI).toFixed(1)}°`;
+        }
     }
+    // 读数没变就一个字都不发。播放时 render() 一秒三十趟，这里原本每趟都往宿主送一份整页
+    // UI 快照（stringify 实测 5ms、峰值 25ms）—— 而读数在播放时根本不动，全是白烧。
+    if (next === blendUiState.transform.readout) return;
+    blendUiState.transform.readout = next;
     queueBlendUi();
 }
 
