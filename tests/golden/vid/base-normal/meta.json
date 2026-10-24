@@ -1,0 +1,28 @@
+{
+  "case": "base-normal",
+  "note": "视频轨：无 Layer 段，底片路径",
+  "requestedT": 2,
+  "t": 2,
+  "kind": "base",
+  "layerKey": "",
+  "grid": [
+    832,
+    1216
+  ],
+  "fps": 30,
+  "layersN": 0,
+  "sha256": "0885e744050e1727bdd0c376086c202313b8e97c22cd9a9bd39ba51fe3e0cda5",
+  "bytes": 955970,
+  "stable": true,
+  "format": "png-rgba-straight",
+  "tolerance": {
+    "sameDevice": 0,
+    "crossDevice": 1
+  },
+  "env": {
+    "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36",
+    "gl": "swiftshader",
+    "headless": true
+  },
+  "capturedAt": "2026-10-24T18:34:47.828Z"
+}

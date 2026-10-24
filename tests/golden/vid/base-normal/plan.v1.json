@@ -1,0 +1,76 @@
+{
+  "v": 1,
+  "doc": "视频测试.cud",
+  "t": 2.0,
+  "frame": {
+    "mode": "source",
+    "source": {
+      "trackId": "trkmvmi0bn02k",
+      "fit": "stretch",
+      "at": 2.0
+    }
+  },
+  "grid": {
+    "w": 832,
+    "h": 1216
+  },
+  "fps": 30.0,
+  "color": {
+    "in": "srgb",
+    "out": "srgb",
+    "premultiplied": false
+  },
+  "mask": null,
+  "tracks": [
+    {
+      "id": "trkmvmi206h100",
+      "kind": "video",
+      "name": "Video 2",
+      "resource": "res:d54755bf0682b994e2f5f996b3d9ce2c",
+      "clips": [
+        {
+          "start": 3.815829206924238,
+          "duration": 4.52,
+          "offset": 0,
+          "srcDuration": 4.52
+        }
+      ]
+    },
+    {
+      "id": "trkmvmi0bn02k",
+      "kind": "video",
+      "name": "Video 1",
+      "resource": "res:1716963e1821016705bc7389bf816fbe",
+      "clips": [
+        {
+          "start": 0,
+          "duration": 4.84,
+          "offset": 0,
+          "srcDuration": 4.84
+        }
+      ]
+    }
+  ],
+  "layers": [],
+  "resources": [
+    {
+      "id": "res:1716963e1821016705bc7389bf816fbe",
+      "kind": "video",
+      "uri": "media://1716963e1821016705bc7389bf816fbe.mp4",
+      "w": null,
+      "h": null
+    },
+    {
+      "id": "res:d54755bf0682b994e2f5f996b3d9ce2c",
+      "kind": "video",
+      "uri": "media://d54755bf0682b994e2f5f996b3d9ce2c.mp4",
+      "w": null,
+      "h": null
+    }
+  ],
+  "source": {
+    "kind": "cud",
+    "path": "F:/Pathes/Pictures/RanKaze/AI修改/视频测试.cud",
+    "layerSet": ""
+  }
+}

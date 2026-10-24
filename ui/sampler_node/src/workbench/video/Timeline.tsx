@@ -434,6 +434,12 @@ export const VidTimeline: React.FC<{
     const paint = () => {
       const t = transport.get();
       const px = t * ppsRef.current;
+      // **先读后写**：这一支每帧都跑，播放时按 60Hz。中间那些 textContent 赋值会让这一片
+      // DOM 失效，之后再读 scrollLeft/clientWidth 就是一次强制重排（时间线上几百个片段）。
+      // 把要读的全提到写之前，重排只在浏览器自己的帧节奏里发生。
+      const sc = scrollRef.current;
+      const sl = sc ? sc.scrollLeft : 0;
+      const cw = sc ? sc.clientWidth : 0;
       if (lineRef.current) lineRef.current.style.transform = `translateX(${px}px)`;
       if (triRef.current) triRef.current.style.transform = `translateX(${px}px)`;
       if (readRef.current) readRef.current.textContent = `${fmtTime(t)} / ${fmtTime(durRef.current)}`;
@@ -445,8 +451,7 @@ export const VidTimeline: React.FC<{
           : 'Preview: no video showing under the playhead — muted, not soloed, or nothing there';
       }
       // 跟随：播放头走出视野就滚过去（scrub 往回也跟 —— 与原口径一致）。
-      const sc = scrollRef.current;
-      if (sc && (px < sc.scrollLeft || px > sc.scrollLeft + sc.clientWidth - 48)) {
+      if (sc && (px < sl || px > sl + cw - 48)) {
         sc.scrollLeft = Math.max(0, px - 80);
       }
     };

@@ -1047,8 +1047,10 @@ export type BlendUiPayloads = {
   /** 直接设画布尺寸（宿主侧那两颗输入框用）：Video 模式下活画布的弹窗看不见窗口外，
    *  所以给一条带值的路，落地仍是页面同一个 setCanvasSize。 */
   'canvas-resize': { w: number; h: number };
-  /** 切到某套图层（Video 的 Layer 段）。`key: ''` = 回到文档主图层。 */
-  'layer-set': { key: string };
+  /** 切到某套图层（Video 的 Layer 段）。`key: ''` = 回到文档主图层。
+   *  `playing` = 宿主此刻在不在播 —— 页面据此决定切完要不要重画活画布（播放中不重画：
+   *  整画布 render 在冷缓存下几百毫秒，正好落在换段那一刻）。 */
+  'layer-set': { key: string; playing?: boolean };
   'transform-adjust': undefined;
   'transform-fill': undefined;
   'select-rect': undefined;

@@ -519,13 +519,20 @@ export const snapPlace = (p: VidProject, trackId: string, at: number): number =>
  *  solo/mute 集合里的轨可能已被删掉（删轨后到清理 effect 跑之前）：那些 id 不在 tracks 里，
  *  自然被跳过 —— 不会因此把画面整个挡掉。 */
 /** 段按轨分桶(一次 O(n)):播放循环里 clipAtSolo / compositePlanAt / 音频对表每帧都要
- *  "每条轨找 t 处的段",各扫一遍全表是 O(轨×段) —— 桶化后每轨只在自家桶里找。 */
+ *  "每条轨找 t 处的段",各扫一遍全表是 O(轨×段) —— 桶化后每轨只在自家桶里找。
+ *  **每帧调 4~6 次、而工程对象是只读的**（写口全是"旧 project 进、新 project 出"）：按
+ *  `p.clips` 的数组身份缓存一份，同一帧里后面几次直接拿现成的。工程一改就是新数组 ⇒ 自动失效。 */
+let bucketOf: VidClip[] | null = null;
+let bucketVal: Map<string, VidClip[]> | null = null;
 export const clipsByTrack = (p: VidProject): Map<string, VidClip[]> => {
+  if (bucketVal && bucketOf === p.clips) return bucketVal;
   const m = new Map<string, VidClip[]>();
   for (const c of p.clips) {
     const b = m.get(c.trackId);
     if (b) b.push(c); else m.set(c.trackId, [c]);
   }
+  bucketOf = p.clips;
+  bucketVal = m;
   return m;
 };
 

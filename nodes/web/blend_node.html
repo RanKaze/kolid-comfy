@@ -27,6 +27,13 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* Video 底片：游标不在 Layer 段上时，画布的内容就是当前视频帧 —— 文档尺寸、原样铺满，
    不套任何图层 transform。它压在最底下；底片态里把 blend / guidance 藏起来就能看见它。 */
 #vidBaseCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: none; transform-origin: 0 0; will-change: transform; border-radius: 4px; pointer-events: none; }
+/* 底片自己播：这一页挂一只同源的 <video> 播放同一个文件，宿主只报时刻 —— 抓帧/传帧那条路
+   （每 1/6 秒一次整幅 readback + 跨窗 transfer）整个不见了。尺寸与视图变换跟 #vidBaseCanvas 同源
+   （sizeCanvasElement / applyView 一并写），所以两者可以互换而画面不动一下。 */
+#vidBaseVideo { position: absolute; left: 0; top: 0; width: 0; height: 0; display: none; transform-origin: 0 0; will-change: transform; border-radius: 4px; pointer-events: none; object-fit: fill; background: transparent; }
+/* 逐帧合成的源帧镜像：不进画面（1px、透明），只为了让 <video> 保持"在视口里"而不被浏览器
+   当成后台标签降频。它们同时最多几条，见 vidSrcVideoFor。 */
+#vidSrcStage { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden; opacity: 0.01; pointer-events: none; }
 /* The Guidances stack is a DISPLAY layer, not part of the picture: #blendCanvas stays exactly the
    context image (working layers only) so every consumer of it — the run input, the Tag regions,
    Layer Context, Export PNG, the host preview — is guidance-free without a single special case.
@@ -357,6 +364,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="canvasArea">
         <div id="viewport">
             <canvas id="vidBaseCanvas"></canvas>
+            <video id="vidBaseVideo" muted playsinline preload="auto" aria-hidden="true"></video>
+            <div id="vidSrcStage" aria-hidden="true"></div>
             <canvas id="blendCanvas"></canvas>
             <canvas id="guidanceCanvas"></canvas>
             <canvas id="overlayCanvas"></canvas>
@@ -698,6 +707,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="fx/data_bend.js"></script>
 <script src="fx/rgb_split.js"></script>
 <script src="fx/ui.js"></script>
+<!-- RenderPlan 合成器（P2）：吃 RenderPlan 出 Frame(plan,t)。现在还是 2D 采样（与旧路径同一条，
+     所以与 golden 必须逐像素相同）；第二步换成 GL 预乘混合。它不认识编辑器/播放器 —— 见 docs/render_plan.md。 -->
+<script src="js/frame-source.js"></script>
+<script src="js/compositor.js"></script>
 
 <!-- 3D 图层的引擎: three.js + FBX/glTF/OBJ 加载器 + TransformControls 打成的一个离线包,
      挂成 window.K3D。页面不碰 CDN, 静态文件走 /js/ 路由 (snapshot_sampler_node.py)。 -->
@@ -735,6 +748,8 @@ const canvasArea = document.getElementById('canvasArea');
 const viewport = document.getElementById('viewport');
 const vidBaseCanvas = document.getElementById('vidBaseCanvas');
 const vidBaseCtx = vidBaseCanvas.getContext('2d');
+const vidBaseVideo = document.getElementById('vidBaseVideo');
+const vidSrcStage = document.getElementById('vidSrcStage');
 const blendCanvas = document.getElementById('blendCanvas');
 const guidanceCanvas = document.getElementById('guidanceCanvas');
 const overlayCanvas = document.getElementById('overlayCanvas');
@@ -922,10 +937,15 @@ let layerSeq = 0;
 const MIN_ZOOM = 0.02, MAX_ZOOM = 64;
 const MIN_ROTATE_RADIUS = 12;  // px from the view centre where the pointer angle is still meaningful
 const view = { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true };
-// Video 底片态：游标不在 Layer 段上时，画布内容 = 当前视频帧（宿主逐帧送来）。它只是显示用的
-// 一层底图，**不进 blendCanvas** —— context image 仍然是那套工作图层。
+// Video 底片态：游标不在 Layer 段上时，画布内容 = 当前视频帧 —— 这一页自己挂的 #vidBaseVideo
+// 播放那段源（老路是宿主逐帧送 ImageBitmap，仍接得住）。它只是显示用的一层底图，
+// **不进 blendCanvas** —— context image 仍然是那套工作图层。
 let vidBaseOn = false;
-let vidBaseFrame = null;       // ImageBitmap：最近一帧视频（换新帧时关掉旧的）
+let vidBaseFrame = null;       // ImageBitmap：最近一帧视频（老路；换新帧时关掉旧的）
+let vidBaseSrc = '';           // #vidBaseVideo 上挂的源（哈希值，不是解析后的绝对 URL）
+let vidBaseWant = 0;           // 这一包要的源内时刻（秒）
+let vidBasePlaying = false;    // 宿主在不在播
+let vidBaseHidden = false;     // 宿主说"这一段被 Layer 合成压着"：不上台，但继续跟着播
 let overlayDpr = 1;
 let viewDrag = null;           // {kind:'zoom'|'rotate'|'pan', sign, startX, startY, startView, anchorDoc, centerDoc, moved}
 let keySpace = false, keyAlt = false, keyCtrl = false, keyShift = false;
@@ -1175,7 +1195,11 @@ function sizeCanvasElement() {
         c.style.width = canvasW + 'px';
         c.style.height = canvasH + 'px';
     }
-    // 重设位图尺寸会清空内容：底片态下按新尺寸再铺一次。
+    // 底片那只 <video> 只是显示：文档尺寸铺满（object-fit: fill），位图尺寸由文件自己定。
+    vidBaseVideo.style.width = canvasW + 'px';
+    vidBaseVideo.style.height = canvasH + 'px';
+    // 重设位图尺寸会清空内容：清 stamp，作画循环下一帧会按新尺寸重铺。
+    vidBaseStamp = '';
     if (vidBaseOn) paintVidBase();
 }
 
@@ -2420,6 +2444,7 @@ function applyView() {
     guidanceCanvas.style.transform = viewTransform;
     // 底片跟着同一套视图变换：缩放/平移/旋转/翻转都照常，只是它自己不带图层 transform。
     vidBaseCanvas.style.transform = viewTransform;
+    vidBaseVideo.style.transform = viewTransform;
     // Keep the transparency checkerboard at a constant size on screen.
     const cb = 16 / view.zoom;
     if (blendCanvas._cb !== cb) {
@@ -4068,17 +4093,246 @@ function vidFrameWorkLayers(key) {
 }
 
 function vidFrameSource(sources, trackId) {
-    return trackId ? (sources.get(trackId) || null) : null;
+    const src = trackId ? (sources.get(trackId) || null) : null;
+    if (!src) return null;
+    // 镜像 <video> 还没解出画面（刚换源 / 还在 seek）：这一帧这一轨当"没有帧"处理。
+    // **不能**把没就绪的 <video> 交给 drawImage —— 它会抛 InvalidStateError，而这里的调用
+    // 在 render() 的清屏之后、try 之前，一抛就把整趟合成剪断（画布只剩空白）。
+    // `seeking` 也要挡：seek 在途时 drawImage 拿到的还是**上一帧**，折出来是一张"位置对不上"
+    // 的图（暂停态下拖游标最常见）。等它落定，缺帧重试会补上。
+    if (src instanceof HTMLVideoElement && (src.readyState < 2 || src.seeking || !src.videoWidth)) return null;
+    return src;
+}
+
+// 一帧的像素尺寸：ImageBitmap 读 width/height，<video> 读 videoWidth/videoHeight
+// （元素的 width/height 是 HTML 属性，默认 300×150，与画面毫无关系）。
+function vidFrameSizeOf(src) {
+    if (!src) return { w: 0, h: 0 };
+    return {
+        w: Math.round(src.videoWidth || src.naturalWidth || src.width || 0),
+        h: Math.round(src.videoHeight || src.naturalHeight || src.height || 0),
+    };
 }
 
 // 一帧铺进目标画布：contain（短边贴满，多出来的两边透明）—— 与监视器上 object-fit:contain
 // 同一读法，也与"底图就是这一帧"的直觉一致。
 function drawVidFrameContain(ctx, src, w, h) {
-    const sw = src.width || 0, sh = src.height || 0;
+    const s0 = vidFrameSizeOf(src);
+    const sw = s0.w, sh = s0.h;
     if (!sw || !sh) return;
     const s = Math.min(w / sw, h / sh);
     const dw = Math.max(1, sw * s), dh = Math.max(1, sh * s);
-    ctx.drawImage(src, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    // 兜一层：镜像视频在"读尺寸"与"drawImage"之间也可能刚好被换源/复位。
+    try { ctx.drawImage(src, (w - dw) / 2, (h - dh) / 2, dw, dh); } catch (e) { /* 这一帧这轨先空着 */ }
+}
+
+// ── 源帧镜像 ────────────────────────────────────────────────────────────────────────────────
+// 逐帧合成的源帧**在本页里播**：一条轨一只 <video>（同源、静音、和宿主的时间线同步）。
+// 宿主不再抓帧传帧 —— 那条路上每帧都要 drawImage(正在播的 <video>) + 整幅 createImageBitmap +
+// 跨窗 transfer，非主轨还是"精确 seek"（100ms 级，一条轨一次）。现在合成那一刻直接
+// drawImage(镜像视频) 就够了：解码是浏览器的事，帧一步都不离开这个进程。
+// 只有**被面 attribute 指名**的轨才解码（见 vidFrameNeedTracks）；没人吃帧的段一条都不开。
+const vidSrcVideos = new Map();     // trackId -> { v, src, ok, usedAt }
+const VID_SRC_POOL_MAX = 4;
+
+function vidSrcVideoFor(trackId, src) {
+    let e = vidSrcVideos.get(trackId);
+    if (e && e.src === src) { e.usedAt = performance.now(); return e; }
+    if (e) { try { e.v.pause(); e.v.removeAttribute('src'); e.v.load(); } catch (err) { /* gone */ } }
+    const v = document.createElement('video');
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = 'auto';
+    v.setAttribute('aria-hidden', 'true');
+    e = { v, src, ok: false, usedAt: performance.now(), want: -1 };
+    v.addEventListener('loadeddata', () => {
+        e.ok = true;
+        if (v.videoWidth && v.videoHeight) noteVidGrid(v.videoWidth, v.videoHeight);
+        // 加载期间收到的那一包只能算"还没帧"：解出来了立刻按记住的时刻对一次，再重画一趟。
+        const wt = (e.warmWant != null && e.want < 0) ? e.warmWant : e.want;
+        if (wt >= 0) {
+            try { v.currentTime = wt; } catch (err) { /* 还不能 seek */ }
+            if (vidFramePacket && vidFramePacket.playing && v.paused) void v.play().catch(() => { /* 自动播放政策 */ });
+        }
+        vidSrcAskRedraw();
+    }, { once: true });
+    v.addEventListener('error', () => { e.ok = false; }, { once: true });
+    v.setAttribute('src', src);
+    vidSrcStage.appendChild(v);
+    try { v.load(); } catch (err) { /* noop */ }
+    vidSrcVideos.set(trackId, e);
+    if (vidSrcVideos.size > VID_SRC_POOL_MAX) {
+        // 池子有界：最久没被用到的那条让位（解码器不白占着）。
+        let oldest = null, oldestAt = Infinity;
+        for (const [k, x] of vidSrcVideos) if (k !== trackId && x.usedAt < oldestAt) { oldest = k; oldestAt = x.usedAt; }
+        if (oldest) vidSrcDrop(oldest);
+    }
+    return e;
+}
+
+function vidSrcDrop(trackId) {
+    const e = vidSrcVideos.get(trackId);
+    if (!e) return;
+    try { e.v.pause(); e.v.removeAttribute('src'); e.v.load(); e.v.remove(); } catch (err) { /* gone */ }
+    vidSrcVideos.delete(trackId);
+}
+
+/** 这一套图层集里，哪些轨的帧真的会被吃掉（= 可见图层上、启用的 surface attribute 的 frameTrack）。
+ *  同一份判据 vidFrameInject 与 vidCompState 都用 —— 三处分离过一次，别再分。 */
+function vidFrameNeedTracks(key) {
+    const need = new Set();
+    for (const l of vidFrameWorkLayers(key)) {
+        if (!l || !l.visible || !l.img) continue;
+        for (const r of attrRecordsOf(l)) {
+            if (!r || r.chain || !r.frameTrack || !attrEnabled(r)) continue;
+            const spec = ATTR_TYPES[r.type];
+            if (!spec || spec.kind !== 'surface') continue;
+            need.add(String(r.frameTrack));
+        }
+    }
+    return need;
+}
+
+/** 把镜像视频对到宿主报的时刻。宿主每包只送 {trackId, src, want} —— 时刻的算法（片段偏移 +
+ *  播放头 - 起点）留在宿主那一侧，这里只执行。
+ *  一个已知的异步缝：`currentTime = want` 之后画面上还是**上一帧**（seek 要几十毫秒才落），
+ *  所以这一包的合成可能用旧帧。停了就等不到下一包了 ⇒ seek 落定后自己再合一次（vidSrcAskRedraw）。 */
+function vidSrcSync(d) {
+    const out = new Map();
+    const list = Array.isArray(d.tracks) ? d.tracks : null;
+    if (!list) return out;
+    const need = vidFrameNeedTracks(d.layerKey || '');
+    const playing = !!d.playing;
+    const now = performance.now();
+    for (const t of list) {
+        if (!t || !t.trackId || !t.src) continue;
+        const trackId = String(t.trackId);
+        if (!need.has(trackId)) continue;                 // 没人吃这轨的帧：不解码
+        const want = Math.max(0, +t.want || 0);
+        // **借底片那只**：同一个源、又正好对在同一处（本工程里 decal 指的就是底轨）——
+        // 直接拿它当这一轨的源帧：省一次加载、一个解码器，进段第一帧也不用等。
+        if (vidBaseOn && String(t.src) === vidBaseSrc && vidBaseVideo.readyState >= 2
+            && !vidBaseVideo.seeking && Math.abs(want - vidBaseWant) < 0.2) {
+            out.set(trackId, vidBaseVideo);
+            continue;
+        }
+        const e = vidSrcVideoFor(trackId, String(t.src));
+        const v = e.v;
+        e.want = want;
+        if (v.readyState >= 2) {
+            if (playing) {
+                if (Math.abs(v.currentTime - want) > 0.12) { try { v.currentTime = want; } catch (err) { /* 还不能 seek */ } }
+                if (v.paused) void v.play().catch(() => { /* autoplay 政策 */ });
+            } else {
+                if (!v.paused) v.pause();
+                if (Math.abs(v.currentTime - want) > 1 / 240) {
+                    try { v.currentTime = want; vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
+                }
+            }
+            out.set(trackId, v);
+        } else if (playing) {
+            if (v.paused) void v.play().catch(() => { /* autoplay 政策 */ });
+            out.set(trackId, v);                          // 还没解出来：这一帧这轨先空着
+        } else {
+            out.set(trackId, v);
+        }
+        e.usedAt = now;
+    }
+    // 这一包不再需要的镜像：停掉（别让它们在后台继续解码）。
+    for (const [k, e] of vidSrcVideos) {
+        if (out.has(k)) continue;
+        if (!e.v.paused) { try { e.v.pause(); } catch (err) { /* gone */ } }
+    }
+    return out;
+}
+
+// 预热：宿主提前 ~1.5 秒报"下一段 Layer 段要哪几条轨、那一刻的源在哪" —— 这里先把镜像 <video>
+// 挂上、加载好、对到那一刻（暂停着）。进段时它就只差"折一张图"，边界不再是主线程上的一坨活。
+// 预热：宿主提前几秒报"下一段 Layer 段要哪几条轨、那一刻的源在哪" ——
+//   1) 先把镜像 <video> 挂上、加载好、对到那一刻（暂停着）；
+//   2) 源帧齐了就**先试着折一张丢掉**：特效链第一次跑要编译/分配，那一趟是最贵的，
+//      挪到进段之前付；换段那一刻就只剩一张热的。
+const vidWarmDone = new Set();
+let vidWarmPending = null;      // { key, tracks, until }
+let vidWarmTimer = 0;
+function handleVidWarm(d) {
+    const key = String(d.layerKey || '');
+    const need = vidFrameNeedTracks(key);
+    if (!need.size || vidWarmDone.has(key)) return;      // 这一段不吃帧 / 已经预热过
+    const list = (Array.isArray(d.tracks) ? d.tracks : [])
+        .filter(t => t && t.trackId && t.src && need.has(String(t.trackId)));
+    if (!list.length) return;
+    for (const t of list) {
+        const e = vidSrcVideoFor(String(t.trackId), String(t.src));
+        e.warmWant = Math.max(0, +t.want || 0);
+        if (e.v.readyState >= 2 && !e.v.seeking && Math.abs(e.v.currentTime - e.warmWant) > 0.1) {
+            try { e.v.currentTime = e.warmWant; } catch (err) { /* 还不能 seek */ }
+        }
+    }
+    vidWarmPending = { key, tracks: list, until: performance.now() + 6000 };
+    vidWarmKick();
+}
+
+// 源帧一齐就**先折一张丢掉**：特效链第一次跑要编译/分配，那一趟最贵，挪到进段之前付。
+function vidWarmKick() {
+    if (vidWarmTimer) return;
+    const p = vidWarmPending;
+    if (!p) return;
+    if (vidWarmDone.has(p.key) || performance.now() > p.until) { vidWarmPending = null; return; }
+    const srcs = new Map();
+    for (const t of p.tracks) {
+        const trackId = String(t.trackId);
+        // 底片那只就够（同一个源、又对在同一处）——与 vidSrcSync 的借用规则一致
+        if (vidBaseOn && String(t.src) === vidBaseSrc && vidBaseVideo.readyState >= 2 && !vidBaseVideo.seeking) {
+            srcs.set(trackId, vidBaseVideo);
+            continue;
+        }
+        const e = vidSrcVideos.get(trackId);
+        if (!e || e.src !== String(t.src) || e.v.readyState < 2 || e.v.seeking) { srcs.clear(); break; }
+        srcs.set(trackId, e.v);
+    }
+    if (srcs.size === p.tracks.length) {
+        vidWarmDone.add(p.key);
+        vidWarmPending = null;
+        try {
+            composeVidFrameCanvas({ reqId: 0, t: 0, layerKey: p.key, baseTrackId: null, sources: srcs, bitmaps: [] });
+        } catch (e) { /* 折不出来就算了，进段时会再试 */ }
+        return;
+    }
+    vidWarmTimer = setTimeout(() => { vidWarmTimer = 0; vidWarmKick(); }, 50);
+}
+
+function vidSrcPauseAll() {
+    for (const [, e] of vidSrcVideos) { try { if (!e.v.paused) e.v.pause(); } catch (err) { /* gone */ } }
+}
+
+// seek 落定（或刚解出画面）后重画一趟：那一包到的时候画面还是上一帧/还没有帧。
+// 一帧只排一次 —— 同一个 rAF 里几条轨各自 ready 也只算一次。
+let vidRedrawRaf = 0;
+function vidSrcAskRedraw() {
+    if (!vidFramePacket || vidRedrawRaf) return;
+    vidRedrawRaf = requestAnimationFrame(() => {
+        vidRedrawRaf = 0;
+        vidFrameRedraw();
+    });
+}
+function vidSrcAwaitSeek(e) {
+    if (e.awaitSeek) return;
+    e.awaitSeek = true;
+    e.v.addEventListener('seeked', () => { e.awaitSeek = false; vidSrcAskRedraw(); }, { once: true });
+    setTimeout(() => { e.awaitSeek = false; }, 1500);     // 卡住的 seek 不把标记焊死
+}
+
+/** 丢掉缓存里那一版、按此刻的状态重画一趟。缓存记的是"还没帧/旧帧"的结论，不能拿它挡重画。 */
+function vidFrameRedraw() {
+    const p = vidFramePacket;
+    if (!p) return;
+    vidCompCache = null;
+    p.rendered = false;          // 缓存里是"还没帧/旧帧"那一版，逼它重画
+    // 这一趟是**编辑**触发的（显隐/参数/拖动/画笔）：缺源帧也照画 —— 临时面上留的还是上一帧，
+    // 画出来顶多"慢半帧"，而"整趟不发不动"在暂停态就等于"编辑没反应"。
+    p.editing = true;
+    scheduleVidFrameReply();
 }
 
 // 视频模式没有 Canvas 窗，也没有"第一张图层撑开画布"这一步：输出栅格就是下面那条视频轨的
@@ -4154,8 +4408,16 @@ function ensureVidCanvas() {
 
 // ==================== Video 底片（游标不在 Layer 段上）====================
 // 视频模式下画布常驻。游标不在任何 Layer 段上时，画布的内容就是**当前视频帧**：按文档尺寸原样
-// 铺满，不套任何图层 transform（那时也没有可动的对象）。帧由宿主逐帧送来 —— 只有它拿得到 <video>。
+// 铺满，不套任何图层 transform（那时也没有可动的对象）。
+//
+// **帧不过界。** 早先是宿主每 1/6 秒抓一帧送过来（drawImage(正在播的 <video>) → createImageBitmap
+// 整幅 → 跨窗 transfer → 这边再 drawImage）。那条路每一趟都要把一整幅画面从合成器读回来，还要在
+// 主线程上排队 —— 画面越顺的地方它越贵，播放时的规律性顿感就是它。现在这一页自己挂一只同源的
+// <video> 播同一个文件（#vidBaseVideo）：宿主只报"哪一段、播到哪、在不在播"（5~6Hz 的小消息），
+// 解码与出画全交给浏览器，一个像素都不过界。
 // 这张底图只负责显示：blendCanvas 仍是 context image（工作图层），底片态里只是把它藏起来。
+// 状态（vidBaseSrc / vidBaseWant / vidBasePlaying）声明在画布变量区，见文件上方。
+
 function paintVidBase() {
     const cw = vidBaseCanvas.width, ch = vidBaseCanvas.height;
     vidBaseCtx.setTransform(1, 0, 0, 1, 0, 0);
@@ -4168,14 +4430,136 @@ function paintVidBase() {
     }
 }
 
+// ── 台上露哪一块 ────────────────────────────────────────────────────────────────────────────
+// 视频模式下只有两块面：
+//   `live`  = 活画布 blendCanvas（用户手上正在编辑的那一套，笔刷/变换都在它上面）；
+//   `stage` = 台下这块 vidBaseCanvas。它装两样东西之一：
+//             · 正常段 = 底片帧（作画循环每帧画进去）；
+//             · Layer 段但活画布不是这套（**播放中就是这样，我们不再切套**）= 合成图的副本。
+// 为什么这么分：切活画布那套 = 整画布重渲染（含特效链），主线程上几百毫秒 —— 而它原本正好
+// 落在换段那一刻，屏幕上的"闪/跳"就是它。播放时合成走临时画布，把结果 blit 到 stage 上，
+// 一套显示面，内容自己变，永远不需要"换面"。
+function vidStageIsLive() {
+    const p = vidFramePacket;
+    if (!p) return !vidBaseOn;      // 没有合成包（正常段）：有底片就靠 stage 显示底片帧
+    // 播放中**永不上台活画布**：它不重画（见 vidFrameFlush 的 active），露出来就是上一套的
+    // 旧画面。画面一律由 stage 上那份（底片帧 / 合成图副本）负责。
+    if (p.playing) return false;
+    // 停下：这一包说的正是活画布上这套（用户手上就是在编辑它）⇒ 露活画布
+    return (p.layerKey || '') === (activeLayerSet || '');
+}
+
 function applyVidBaseMode() {
-    vidBaseCanvas.style.display = vidBaseOn ? 'block' : 'none';
-    // 工作层与 guidance 让位（它们仍是 context image 的来源，只是不摆出来）。
-    blendCanvas.style.visibility = vidBaseOn ? 'hidden' : '';
-    guidanceCanvas.style.visibility = vidBaseOn ? 'hidden' : '';
-    // applyView 会把同一套变换给三张画布，并顺手重画 overlay（底片态下它会清空）。
+    const live = vidStageIsLive();
+    vidBaseCanvas.style.display = live ? 'none' : 'block';
+    vidBaseVideo.style.display = 'none';        // <video> 只解码，从不上台（换源即黑，不能露）
+    blendCanvas.style.visibility = live ? '' : 'hidden';
+    guidanceCanvas.style.visibility = live ? '' : 'hidden';
     applyView();
-    if (vidBaseOn) paintVidBase();
+    // 正常段（没有合成包）才立刻铺底片帧；Layer 段里台下这块装的是合成图副本（blit 来的），别盖掉。
+    if (!live && !vidBaseHidden && !vidFramePacket) vidStageRepaint();
+}
+
+/** 显示跟模式对账：只在真的不一致时才动（每帧都会调，别白干）。 */
+function vidStageSync() {
+    const live = vidStageIsLive();
+    const showingLive = blendCanvas.style.visibility !== 'hidden';
+    if (live !== showingLive) applyVidBaseMode();
+}
+
+/** 台下这块该显示底片帧了：立刻同步画一次（不留下"上一手的合成图"露在人眼前的那一帧）。 */
+function vidStageRepaint() {
+    vidBaseStamp = '';
+    vidBasePaintNow();
+}
+
+/** 把底片帧画进 stage。只在"正常段 + 镜像有画面"时动手：换源/seek 期间不画 ⇒ 保留上一帧，
+ *  永远不会出现黑屏（<video> 时代正是在这里黑的）。 */
+function vidBasePaintNow() {
+    const v = vidBaseVideo;
+    if (!vidBaseOn || vidBaseHidden || !v || !vidBaseSrc) return;
+    const cw = vidBaseCanvas.width, ch = vidBaseCanvas.height;
+    if (!cw || !ch || v.readyState < 2 || v.seeking) return;
+    const stamp = vidBaseSrc + '@' + v.currentTime.toFixed(3);
+    if (stamp === vidBaseStamp) return;
+    vidBaseStamp = stamp;
+    vidBaseCtx.setTransform(1, 0, 0, 1, 0, 0);
+    vidBaseCtx.globalAlpha = 1;
+    vidBaseCtx.globalCompositeOperation = 'source-over';
+    try { vidBaseCtx.drawImage(v, 0, 0, cw, ch); } catch (e) { /* 这一帧跳过 */ }
+}
+
+/** 合成图副本上台下这块（播放中不切活画布，画面就靠它显示）。 */
+function vidStageBlit(src) {
+    if (!src || !src.width || !src.height) return;
+    const cw = vidBaseCanvas.width, ch = vidBaseCanvas.height;
+    if (!cw || !ch) return;
+    vidBaseCtx.setTransform(1, 0, 0, 1, 0, 0);
+    vidBaseCtx.globalAlpha = 1;
+    vidBaseCtx.globalCompositeOperation = 'source-over';
+    vidBaseCtx.clearRect(0, 0, cw, ch);
+    try { vidBaseCtx.drawImage(src, 0, 0, cw, ch); } catch (e) { /* 这一帧跳过 */ }
+    vidBaseStamp = '';                 // 这块现在装的是合成图，不是底片帧
+}
+
+// 作画循环：正常段里跟着镜像视频出帧（一帧一次 drawImage，帧没变就不画）。
+let vidBaseRaf = 0;
+function vidBasePaintTick() {
+    vidBaseRaf = 0;
+    vidBasePaintNow();
+    vidBaseRaf = requestAnimationFrame(vidBasePaintTick);
+}
+requestAnimationFrame(vidBasePaintTick);
+
+function vidBasePause() {
+    try { if (!vidBaseVideo.paused) vidBaseVideo.pause(); } catch (e) { /* 还没源 */ }
+}
+
+// 把 <video> 对到这一包说的时刻。播放中只在大偏差时动手（纠偏＝一次 seek＝一次卡顿，
+// 起播/回绕那种"该重来"的时候才值得）；暂停时每次都对（拖动要跟手）。
+function vidBaseSeek() {
+    const v = vidBaseVideo;
+    if (!v || !vidBaseSrc) return;
+    const ready = v.readyState >= 2;
+    if (!vidBasePlaying) {
+        if (!v.paused) v.pause();
+        if (ready && Math.abs(v.currentTime - vidBaseWant) > 0.02) {
+            try { v.currentTime = vidBaseWant; } catch (e) { /* 还不能 seek */ }
+        }
+        return;
+    }
+    if (ready && Math.abs(v.currentTime - vidBaseWant) > 0.25) {
+        try { v.currentTime = vidBaseWant; } catch (e) { /* 还不能 seek */ }
+    }
+    if (v.paused) void v.play().catch(() => { /* autoplay 政策 */ });
+}
+
+// 宿主的底片包：{src,start,offset,t,playing,hidden}。只做三件事：换源、对时、播/停。
+// `hidden` = 这一段被 Layer 合成压着（画面上不露底片），但**照样跟着播/对时** —— 出段即用。
+function handleVidBaseSrcMessage(d) {
+    const src = String(d.src || '');
+    if (!src) { vidBaseOff(); return; }
+    vidBaseWant = Math.max(0, (+d.offset || 0) + (+d.t || 0) - (+d.start || 0));
+    vidBasePlaying = !!d.playing;
+    vidBaseHidden = !!d.hidden;
+    vidBaseOn = true;
+    if (src !== vidBaseSrc) {
+        vidBaseSrc = src;
+        vidBaseFrame = null;                     // 老路的位图作废
+        const v = vidBaseVideo;
+        v.setAttribute('src', src);
+        try { v.load(); } catch (e) { /* noop */ }
+        // 元数据到了才能对时，也才知道栅格（画布还是 0 的时候靠这一下立起来）。
+        const onMeta = () => {
+            if (vidBaseSrc !== src) return;      // 已经换走了
+            if (v.videoWidth && v.videoHeight) noteVidGrid(v.videoWidth, v.videoHeight);
+            vidBaseSeek();
+        };
+        v.addEventListener('loadedmetadata', onMeta, { once: true });
+        v.addEventListener('loadeddata', onMeta, { once: true });
+    }
+    applyVidBaseMode();
+    vidBaseSeek();
 }
 
 function handleVidBaseMessage(d) {
@@ -4194,6 +4578,9 @@ function vidBaseOff() {
     const prev = vidBaseFrame;
     vidBaseFrame = null;
     if (prev) { try { prev.close(); } catch (e) { /* gone */ } }
+    vidBasePause();
+    vidBaseHidden = false;
+    vidBaseStamp = '';             // 再回来时第一帧要重画
     if (!vidBaseOn) return;
     vidBaseOn = false;
     applyVidBaseMode();
@@ -4218,6 +4605,7 @@ function vidFrameSurfaceFor(rec, w, h) {
 function vidFrameInject(packet, stack) {
     const touched = [];
     const used = new Set();
+    packet.frameMissing = false;           // 每趟重算：这一趟到底还缺不缺帧
     const usedTracks = new Set();          // 这一包**实际消费**了哪些轨的源帧(报给宿主:
                                            // 没被任何面 attribute 引用的轨不必抓不必传 ——
                                            // 精确 seek 一条轨是 100ms 级的买卖)
@@ -4237,6 +4625,9 @@ function vidFrameInject(packet, stack) {
             resetCtx(g);
             g.clearRect(0, 0, cv.width, cv.height);
             const src = vidFrameSource(packet.sources, r.frameTrack);
+            // 这一轨**还没有能画的帧**（镜像刚换源 / 还在 seek）：记一笔，合成完立刻安排重试。
+            // 不记的话，暂停态下这一帧就永远停在"没有帧"的版本上（播放时下一包会自愈，暂停不会）。
+            if (!src) packet.frameMissing = true;
             if (src) {
                 if (r.type === 'mask') g.filter = VID_FRAME_LUMA_FILTER;
                 drawVidFrameContain(g, src, cv.width, cv.height);
@@ -4307,13 +4698,16 @@ function replyVidFrameCached(reqId, frameless) {
     window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, cached: true, frameless: !!frameless, usedTracks: [...vidLastUsedTracks] }, '*');
 }
 
+
 // 一帧回一张图给监视器。两半：
-//   · 这一包说的那一段就是活画布上这套（最常见：正选中它）+ 画布正显示着 ⇒ 直接抄 blendCanvas，
-//     那句话在 render() 里已经折好了，这里一个像素都不重画；
+//   · 这一包说的那一段就是活画布上这套（最常见：正选中它）+ 画布正显示着 ⇒ 直接抄 blendCanvas；
 //   · 否则（没选中 Layer 段、或选中的是别段）⇒ 单独把游标底下那段折进临时画布，监视器仍是旧口径。
-// 合并到 rAF 一口：播放时包按 fps 来，重绘（画笔/参数）又会在同一帧里喊一次 —— 都并到这一口。
+// **一帧只做一次**：合成（render / 折临时画布）+ 回图都并到这一口 rAF 里。宿主可以按 30Hz
+// 发包，落地节拍由这里决定 —— 同一帧来几包就只合成最后一包。这一层是"发得比画得快"不反噬的
+// 全部依靠：没有它，每一包都会同步 render 一次整画布（含特效链）。
+let vidInFlush = false;
 function scheduleVidFrameReply() {
-    if (!vidFramePacket || vidFrameRaf) return;
+    if (!vidFramePacket || vidFrameRaf || vidInFlush) return;
     vidFrameRaf = requestAnimationFrame(vidFrameFlush);
 }
 
@@ -4323,21 +4717,86 @@ function vidFrameFlush() {
     vidFrameRaf = 0;
     const p = vidFramePacket;
     if (!p) return;
-    // 回图这一刻的真实状态记进缓存:下一包状态没变(图层没编辑、源帧帧号没动)就回
-    // cached 标记,零像素工作 —— 播放扫过一段"与时间无关"的图层集时,监视器那一趟
-    // 从"每帧全量重画 + 编码回传"变成"每帧一条空回包"。编辑触发的 render() 也走这里
-    // 回图,缓存自动跟到编辑后的状态,不会回旧图。
-    const t0 = performance.now();
-    vidCompCache = vidCompState(p);
-    __vidPerf.sigMs += performance.now() - t0;
-    const frameless = !vidCompCache.hasFrame;
-    if ((p.layerKey || '') === (activeLayerSet || '')) {
-        __vidPerf.repliesActive++;
-        replyVidFrame(p.reqId, blendCanvas, frameless);
-    } else {
-        __vidPerf.repliesTemp++;
-        replyVidFrame(p.reqId, composeVidFrameCanvas(p), frameless);
+    // **缺源帧的这一趟什么都不发**（也不画）：监视器与画布都先保留现画面。
+    // 发了就是一张缺面的合成图 —— 换段那一下的"闪"正是它：进 Layer 段时镜像视频还在加载/seek，
+    // 先回一张没有 decal 的图（多半是空的），几十毫秒后才补上真帧。旧的抓帧链路天然没这个洞
+    // （它抓到帧才回图）。一直缺（那条轨这段时间确实没有片）就别硬等：过 1 秒照原样发。
+    // **编辑**那一趟例外：暂停态没有后续包来补，等帧就是"编辑没反应"（见 vidFrameRedraw）。
+    const editing = !!p.editing;
+    p.editing = false;
+    if (!editing && !vidFrameSourcesReady(p) && (p.retries || 0) < 40) {
+        vidFrameRetryLater(true);
+        return;
     }
+    // "活画布这一套"只在**停下来**时成立：播放中活画布不上台也不重画（画面靠 stage 上的
+    // 合成图副本），所以哪怕当前套已经切到这一段，也走临时画布那条路。
+    const active = !p.playing && (p.layerKey || '') === (activeLayerSet || '');
+    vidInFlush = true;
+    try {
+        // 活画布这一套：着一包还没画过就先画（render 内部会把源帧折进去）。
+        if (active && !p.rendered) {
+            p.rendered = true;
+            __vidPerf.renders++;
+            render();
+        }
+        // 回图这一刻的真实状态记进缓存:下一包状态没变(图层没编辑、源帧帧号没动)就回
+        // cached 标记,零像素工作 —— 播放扫过一段"与时间无关"的图层集时,监视器那一趟
+        // 从"每帧全量重画 + 编码回传"变成"每帧一条空回包"。编辑触发的 render() 也走这里
+        // 回图,缓存自动跟到编辑后的状态,不会回旧图。
+        const t0 = performance.now();
+        vidCompCache = vidCompState(p);
+        __vidPerf.sigMs += performance.now() - t0;
+        const frameless = !vidCompCache.hasFrame;
+        if (active) {
+            __vidPerf.repliesActive++;
+            replyVidFrame(p.reqId, blendCanvas, frameless);
+            vidStageSync();          // 这一包说的正是活画布这套了：台上换成它（用户在编辑）
+        } else {
+            __vidPerf.repliesTemp++;
+            const cv = composeVidFrameCanvas(p);
+            // 播放中不切活画布 ⇒ 画面只能靠台下这块显示：合成图直接 blit 上去。
+            vidStageBlit(cv);
+            vidStageSync();          // 播放中不切活画布：台上这块显示合成图副本
+            replyVidFrame(p.reqId, cv, frameless);
+        }
+    } finally {
+        vidInFlush = false;
+    }
+    // 这一趟还有轨没拿到帧（1 秒后认了、照原样发过）：慢一点再试，别把监视器卡在缺面的那版。
+    if (p.frameMissing) vidFrameRetryLater();
+}
+
+/** 这一包的源帧是不是都在手上了（没有绑帧的面 = 天然齐）。
+ *  "这一轨压根没送"不算"还没到"：那说明这一段时间它就没有片（面 attribute 绑了一条空轨），
+ *  等也等不来 —— 照旧按"没有帧"折（这一枚这一趟什么都不出）。 */
+function vidFrameSourcesReady(packet) {
+    const need = vidFrameNeedTracks(packet.layerKey || '');
+    if (!need.size) return true;
+    for (const tr of need) {
+        if (!packet.sources.has(tr)) continue;
+        if (!vidFrameSource(packet.sources, tr)) return false;
+    }
+    return true;
+}
+
+// 缺帧重试：50ms 一回（认了之后 250ms），最多 120 回；帧到齐或换了包就停。
+// `force` = 这一趟根本没画（缺帧直接跳过），跟"画了但缺一面"用同一个计时器。
+let vidFrameRetryTimer = 0;
+function vidFrameRetryLater(force) {
+    const p = vidFramePacket;
+    if (!p || vidFrameRetryTimer) return;
+    if (!force && !p.frameMissing) return;
+    p.retries = (p.retries || 0) + 1;
+    if (p.retries > 120) return;
+    const delay = p.retries > 20 ? 250 : 50;
+    vidFrameRetryTimer = setTimeout(() => {
+        vidFrameRetryTimer = 0;
+        const q = vidFramePacket;
+        if (!q) return;
+        vidCompCache = null;                       // 缓存里是"还缺帧"的那一版，不能拿它挡重画
+        q.rendered = false;
+        scheduleVidFrameReply();
+    }, delay);
 }
 
 // 性能探针(只读,诊断用):逐帧合成链路的次数与耗时。宿主侧 __compPerf 配对。
@@ -4352,24 +4811,22 @@ let vidCompPending = null;         // 这一包算出的状态(回图后落到 v
 
 function vidCompState(packet) {
     const key = packet.layerKey || '';
-    const stack = vidFrameWorkLayers(key);
-    let hasFrame = false;
-    for (const l of stack) {
-        if (!l || !l.visible || !l.img) continue;
-        for (const r of attrRecordsOf(l)) {
-            if (!r || r.chain || !r.frameTrack || !attrEnabled(r)) continue;
-            const spec = ATTR_TYPES[r.type];
-            if (spec && spec.kind === 'surface') { hasFrame = true; break; }
-        }
-        if (hasFrame) break;
-    }
-    const isActive = key === (activeLayerSet || '');
+    // 绑了视频轨的面 = 这一包的结果随源帧变（每帧必然 miss）。**先算这个**：命中判定一旦注定落空，
+    // 逐层 16×16 采样那笔读回就是白付的（播放中每包都在付，30 包/秒）。
+    const hasFrame = vidFrameNeedTracks(key).size > 0;
+    // "这一包能在活画布上折" —— 播放中永远是 false：那时候画面走临时画布 + stage，
+    // 活画布一帧都不重画（一次 render 在冷缓存下是几百毫秒，正好落在换段那一刻）。
+    // 注意这**不是**"这一套是不是当前套"：播放中当前套照常切换（见 switchLayerSet），
+    // 只是活画布不上台、也不重画。
+    const isActive = !packet.playing && key === (activeLayerSet || '');
     return {
         key,
         isActive,
         hasFrame,
         setRef: isActive ? null : (layerSets.get(key) || null),   // 非活跃集:冻结对象,身份即内容
-        contentSig: isActive ? vidLayerSetSig(key) : '',
+        // 每帧都是新帧的段不需要内容签名:比较必然落在 t 上,签名只会白算。暂停态仍要算 ——
+        // 停在同一帧上编辑时,签名是唯一能认出"内容变了"的东西。
+        contentSig: (hasFrame && packet.playing) ? '' : (isActive ? vidLayerSetSig(key) : ''),
         grid: canvasW + 'x' + canvasH,
         t: packet.t,
     };
@@ -4387,6 +4844,7 @@ function handleVidFrameMessage(d) {
     const prev = vidFramePacket;
     const sources = new Map();
     const bitmaps = [];
+    // 老路：宿主抓好的位图（还在支持，便于两边不同版本混跑）。
     const list = Array.isArray(d.sources) ? d.sources : [];
     for (const s of list) {
         if (!s || !s.trackId || !s.bitmap) continue;
@@ -4394,10 +4852,13 @@ function handleVidFrameMessage(d) {
         sources.set(String(s.trackId), s.bitmap);
         bitmaps.push(s.bitmap);
     }
+    // 新路：本页自己的镜像视频（宿主只报 trackId/src/时刻）。把它对到这一包的时刻再折。
+    const mirrors = vidSrcSync(d);
+    for (const [k, v] of mirrors) sources.set(k, v);
     // 取帧这一趟也顺手把输出栅格立起来（宿主 <video> 的元数据那条路可能还没到）。
     const base = vidFrameSource(sources, typeof d.baseTrackId === 'string' ? d.baseTrackId : null)
         || sources.values().next().value || null;
-    if (base) noteVidGrid(base.width, base.height);
+    if (base) { const bs = vidFrameSizeOf(base); if (bs.w && bs.h) noteVidGrid(bs.w, bs.h); }
     // 上一包的源帧到这里就没用了（临时面已经把像素抄进自己的画布）。
     if (prev) for (const b of prev.bitmaps) { try { b.close(); } catch (e) { /* gone */ } }
     vidFramePacket = {
@@ -4407,6 +4868,10 @@ function handleVidFrameMessage(d) {
         baseTrackId: typeof d.baseTrackId === 'string' ? d.baseTrackId : null,
         sources,
         bitmaps,
+        playing: !!d.playing,
+        rendered: false,          // 这一包还没画（合成与回图都并到那一口 rAF，见 vidFrameFlush）
+        frameMissing: false,
+        retries: 0,
     };
     // 源帧收进 packet 就该画了，分两条走：这一包说的正是用户手上这套（选中了它）⇒ 重画活画布
     // （源帧折在上面，收尾会顺手抄一份回给监视器）；否则用户手上这套一个像素都不动，只单独折一张
@@ -4418,27 +4883,42 @@ function handleVidFrameMessage(d) {
     const st = vidCompState(vidFramePacket);
     __vidPerf.sigMs += performance.now() - tSig;
     __vidPerf.lastSig = st.contentSig ? String(st.contentSig).slice(0, 40) : (st.isActive ? '(active)' : '(frozen)');
-    if (vidCompSame(st, vidCompCache)) {
+    // 命中还要求**源帧此刻真拿得到**：状态一样只说明"这套图层 + 这个时刻"没变，可镜像视频
+    // 刚换源/还在 seek 时这一趟根本折不出那张图（活画布会只剩空壳）。这种"命中"必须当没中。
+    if (vidFrameSourcesReady(vidFramePacket) && vidCompSame(st, vidCompCache)) {
         __vidPerf.hits++;
         replyVidFrameCached(vidFramePacket.reqId | 0, !st.hasFrame);
+        // 命中只保证"内容与上一次回图一致"，**不保证活画布此刻就摆着它**（刚切到这一段时
+        // 画布还停在上一套，或者干脆是"缺源帧"那张空图）。所以活画布这套补画一次再让底片
+        // 退场 —— 少了这一下，换段那一手会露出画布上的空图（用户看到的就是"闪一下"）。
+        if (st.isActive) {
+            if (!vidFramePacket.rendered) { vidFramePacket.rendered = true; __vidPerf.renders++; render(); }
+            applyVidBaseMode();          // 活画布这套补画完了：换手到它
+        }
         return;
     }
     __vidPerf.misses++;
     vidCompCache = st;             // 乐观记录:这一包将画出的正是 st 状态(编辑触发的重画会把
                                     // 下一包顶成 miss,不会回旧图;回图那一刻 flush 再记一遍真值)
-    if ((vidFramePacket.layerKey || '') === (activeLayerSet || '')) { __vidPerf.renders++; render(); }
-    else scheduleVidFrameReply();
+    // 画与回图都交给那一口 rAF：同一帧里来几包只合成最后一包（宿主可以放心按 30Hz 发包）。
+    scheduleVidFrameReply();
 }
 
 function vidFrameOff() {
     const prev = vidFramePacket;
+    // 播放中离开 Layer 段也会走这里（宿主发 frame-off）：那一趟**不能**重画活画布 ——
+    // 它没在上台、重画一次就是几百毫秒，正好落在换段那一刻。画面已经交回 stage 上的底片帧。
+    const wasPlaying = !!(prev && prev.playing);
     vidFramePacket = null;
+    if (vidFrameRetryTimer) { clearTimeout(vidFrameRetryTimer); vidFrameRetryTimer = 0; }
     if (vidFrameRaf) { cancelAnimationFrame(vidFrameRaf); vidFrameRaf = 0; }
     if (prev) for (const b of prev.bitmaps) { try { b.close(); } catch (e) { /* gone */ } }
     vidFrameSurfaces.clear();
+    vidSrcPauseAll();          // 合成停了：镜像视频别在后台接着解码
     if (vidFrameCanvas) { vidFrameCanvas.width = 0; vidFrameCanvas.height = 0; }
     // 帧包撤了：再画一趟，把面 attribute 换回它们自己的像素（画布不再是合成图）。
-    render();
+    if (!wasPlaying) render();
+    applyVidBaseMode();          // 台上该换回底片了
 }
 
 // ==================== The Guidance card ====================
@@ -5045,7 +5525,7 @@ function replyVidLayerCopy(reqId, from, to) {
     window.parent.postMessage({ type: 'blend-vid-layer-copied', reqId, ok }, '*');
 }
 
-function switchLayerSet(key) {
+function switchLayerSet(key, opts) {
     const k = String(key || '');
     if (k === activeLayerSet) return;
     // 那个还在等栅格的 Add 属于上一段，不能落进新选中的这一套里。
@@ -5073,10 +5553,27 @@ function switchLayerSet(key) {
         lastActionKey = null;
         undoStack = [tagHistoryStep(snapshotState(), null, 'Layer segment opened')];
     }
-    render();
+    // **播放中只换数据，不重画活画布**：整画布 render（含特效链）冷缓存下是几百毫秒，而它
+    // 原本正好落在换段那一刻 —— 那就是画面"跳一下"。播放时画面由 stage 上的合成图副本负责
+    // （见 vidFrameFlush），停下那一刻（第一包 playing=false）会补上这次 render。
+    // 播放位由宿主在命令里明说（opts.playing）：这一刻手上那一包可能还是上一段的、甚至已经被
+    // 撤掉（进段时先 frame-off），拿它判断会让"该跳过的"那一趟照样重画。
+    const playing = (opts && typeof opts.playing === 'boolean')
+        ? opts.playing
+        : !!(vidFramePacket && vidFramePacket.playing);
+    if (!playing) render();
     syncStackRows();
     syncHistoryUI();
     setStatus(k ? 'Layer segment — this segment owns its own layers' : 'Document layers');
+    // 手上那一包现在能在**活画布**上折了（源帧也在手上）：立刻重折一次并回图。
+    // 不催这一下的话，进段那一刻包里还没有"这一套"，走的是临时画布；要等下一个包
+    // 才会切到活画布 —— 换段那一下托着的底片也就多顶一会儿。
+    if (vidFramePacket && (vidFramePacket.layerKey || '') === k) {
+        vidFramePacket.rendered = false;
+        vidCompCache = null;
+        vidFrameRedraw();
+    }
+    applyVidBaseMode();              // 切过来这一套了：台上换成活画布（用户要编辑它）
 }
 
 function resetHistory(label) {
@@ -13281,7 +13778,7 @@ const UI_COMMANDS = {
     'canvas-modify': () => startCanvasModify(),
     // 带值的尺寸写口：Video 模式下活画布被挪到视口外，弹窗看不见 —— 宿主那两颗输入框
     // 直接走这条，落地仍是同一个 setCanvasSize（尺寸/上限校验也共用）。
-    'layer-set': v => switchLayerSet(v && v.key),
+    'layer-set': v => switchLayerSet(v && v.key, v),
     'canvas-resize': v => {
         const w = Math.max(1, Math.round(Number(v && v.w) || 0));
         const h = Math.max(1, Math.round(Number(v && v.h) || 0));
@@ -14326,11 +14823,13 @@ window.addEventListener('message', event => {
         return;
     }
     if (d.type === 'blend-vid-frame') { handleVidFrameMessage(d); return; }
+    if (d.type === 'blend-vid-warm') { handleVidWarm(d); return; }
     if (d.type === 'blend-vid-layer-sig') { replyVidLayerSigs(d.reqId, d.keys); return; }
     if (d.type === 'blend-vid-kf-get') { replyVidKf(d.reqId); return; }
     if (d.type === 'blend-vid-layer-copy') { replyVidLayerCopy(d.reqId, d.from, d.to); return; }
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
     if (d.type === 'blend-vid-base') { handleVidBaseMessage(d); return; }
+    if (d.type === 'blend-vid-base-src') { handleVidBaseSrcMessage(d); return; }
     if (d.type === 'blend-vid-base-off') { vidBaseOff(); return; }
     if (d.type === 'blend-vid-grid') { noteVidGrid(d.width, d.height); return; }
     if (d.type === 'blend-guidance-republish') {

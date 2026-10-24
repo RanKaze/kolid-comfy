@@ -2310,10 +2310,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, [blendIframeRef]);
   // 播放器报"游标底下是哪一段 Layer 段"：画布内容、Layers 面板的作用对象、Transform 的开工条件
   // 全跟着游标走 —— 离开段就回到主图层集（画布转成视频底片，见页面 vidBaseOn）。
+  // 播放中**也照常切套**：切套本身只是换一份数据（layers / selectedId / decal / 历史），真正的
+  // 开销是切完那次整画布重渲染 —— 那一笔由页面在播放中跳过（见 blend_node.html 的 switchLayerSet），
+  // 画面由临时合成那条链负责。反过来，如果不切套，Layers 面板与页面里的工作栈就不是同一套：
+  // 播放中在面板上做的任何事（显隐、参数、添加、拖动）都会落在"上一段"上 —— 画面上毫无反应，
+  // 看上去就是"图层渲染失效了"。
   const showPlayLayer = useCallback((key: string | null) => {
     const next = key || '';
     setVidLayerKey(prev => (prev === next ? prev : next));
-    onBlendUiCommand('layer-set', { key: next });
+    // 带上播放位：页面据此决定"切完要不要重画活画布"（播放中不重画 —— 那是几百毫秒，
+    // 正好落在换段那一刻）。页面手上那一包这时候可能还是上一段的，不能拿它判断。
+    onBlendUiCommand('layer-set', { key: next, playing: vidPlayingRef.current });
   }, [onBlendUiCommand]);
   // ── 缺失 / relink（A5）：工程引用的每个哈希，仓库里还有没有 ────────────────────────────────
   // 什么时候问：工程变了（去抖 250ms），以及删除/入库之后（`recheckMissing` 手动，绕过去重）。

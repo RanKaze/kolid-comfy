@@ -58,106 +58,52 @@ export const vidFrameAt = (fps: number, t: number): number => {
   return Math.floor(Math.max(0, t) * f + 1e-6) / f;
 };
 
-const sourceTime = (clip: VidClip, frameT: number): number => {
+/** 时间线上的 frameT 落到这个片段的源内第几秒（夹在源时长里）。
+ *  合成包就是拿它告诉工作台页"这条轨的镜像视频该对到哪" —— 时刻的算法只在这里写一次。 */
+export const sourceTime = (clip: VidClip, frameT: number): number => {
   const raw = clip.offset + (frameT - clip.start);
   const end = Math.max(0, clip.srcDuration - 0.001);
   return Math.max(0, Math.min(raw, end));
 };
 
 // ── 取帧 ────────────────────────────────────────────────────────────────────────────────────
-// 底图那一轨由 Player 的主 <video> 自己播（播放时它就是跟手的那一帧，零额外 seek）；
-// 其余视频轨（面 attribute 可能指名任何一条）用隐藏的 <video> 逐次 seek 取帧。
-// 同一条抓取器串行跑：一条轨上一次 seek 没落地就又来一发，只会把解码器按在地上摩擦。
-type Grab = { v: HTMLVideoElement; src: string; ready: Promise<boolean>; chain: Promise<unknown> };
+// **取帧已经不在这一侧。** 逐帧合成的源帧由工作台页面自己的镜像 <video> 播放（见 blend_node 的
+// vidSrcSync）：这里只把"这一条轨的源内第几秒"报过去。原先那套"主 <video> 抄一帧 / 其余轨用
+// 隐藏 <video> 精确 seek"的路子成本全在跨窗搬像素与 seek 上，播放时每帧都要付一次。
 
-const waitEvent = (v: HTMLVideoElement, name: string, ms: number): Promise<void> =>
-  new Promise(resolve => {
-    let done = false;
-    const fin = () => { if (done) return; done = true; v.removeEventListener(name, fin); resolve(); };
-    v.addEventListener(name, fin);
-    setTimeout(fin, ms);
-  });
+// ── 预热（换段不顿的关键）────────────────────────────────────────────────────────────────────
+// 进 Layer 段那一刻如果要现做这些事：建源帧镜像 <video> + 等它 loadeddata + seek + 切图层集 +
+// 整画布重渲染 + 首帧合成 —— 主线程上是一整坨，播放里就是一次可感的顿/闪。能提前做的都提前：
+// **提前 look 秒算出"下一段要什么"，先把镜像视频挂上加载好、对到那一刻**，进段只剩"折一张图"。
+export type VidWarm = {
+  /** 下一段 Layer 段的 key 与它开始的时刻。 */
+  layerKey: string;
+  at: number;
+  /** 那一刻每条视频轨命中的段（页面自己按 attribute 的 frameTrack 挑要哪几条）。 */
+  tracks: { trackId: string; src: string; want: number }[];
+};
 
-export class VidFrameGrabber {
-  private grabs = new Map<string, Grab>();
-  private scratch = document.createElement('canvas');
-  private disposed = false;
-
-  /** 主 <video> 可能就是这一段的源：播放中直接抄当前帧；暂停时等它 seek 到目标（Player 的
-   *  transport 订阅者已经把 currentTime 拨过去了，这里只负责等落地）。 */
-  async capture(clip: VidClip, frameT: number, main: HTMLVideoElement | null,
-    playing: boolean): Promise<ImageBitmap | null> {
-    if (this.disposed) return null;
-    const want = sourceTime(clip, frameT);
-    if (main && main.dataset.clipId === clip.id && main.readyState >= 2) {
-      if (!playing) {
-        if (Math.abs(main.currentTime - want) > 1 / 60) {
-          try { main.currentTime = want; } catch { /* not seekable yet */ }
-          await waitEvent(main, 'seeked', 500);
-        }
-      }
-      return this.snap(main);
-    }
-    const g = this.grab(clip);
-    return this.serial(g, async () => {
-      if (!(await g.ready) || this.disposed) return null;
-      if (Math.abs(g.v.currentTime - want) > 1 / 120) {
-        try { g.v.currentTime = want; } catch { /* not seekable yet */ }
-        await waitEvent(g.v, 'seeked', 1200);
-      }
-      return this.snap(g.v);
-    });
+/** `look` 秒之内会不会走到一个 Layer 段？会就返回它那一刻的源帧清单（没有就 null）。
+ *  只认"起点落在 (t, t+look]"的那一段 —— 已经在段里不算（那是现在的活，不是预热）。 */
+export const warmAheadOf = (
+  p: VidProject, t: number, muted: ReadonlySet<string>, look = 1.5,
+): VidWarm | null => {
+  let best: VidClip | null = null;
+  for (const c of p.clips) {
+    if (c.kind !== 'layer' || c.pending) continue;
+    if (c.start <= t || c.start > t + look) continue;
+    const tr = p.tracks.find(x => x.id === c.trackId);
+    if (!tr || muted.has(tr.id)) continue;                 // 静音的 Layer 轨不合成，也不用预热
+    if (!best || c.start < best.start) best = c;
   }
-
-  dispose(): void {
-    this.disposed = true;
-    for (const g of this.grabs.values()) {
-      try { g.v.pause(); g.v.removeAttribute('src'); g.v.load(); } catch { /* already gone */ }
-    }
-    this.grabs.clear();
+  if (!best) return null;
+  const at = best.start;
+  const buckets = clipsByTrack(p);
+  const tracks: VidWarm['tracks'] = [];
+  for (const tr of p.tracks) {
+    if (tr.kind !== 'video') continue;
+    const hit = (buckets.get(tr.id) || []).find(c => !c.pending && at >= c.start && at < c.start + c.duration);
+    if (hit) tracks.push({ trackId: tr.id, src: hit.src, want: sourceTime(hit, at) });
   }
-
-  private grab(clip: VidClip): Grab {
-    const old = this.grabs.get(clip.id);
-    if (old && old.src === clip.src) return old;
-    if (old) {
-      try { old.v.pause(); old.v.removeAttribute('src'); old.v.load(); } catch { /* already gone */ }
-      this.grabs.delete(clip.id);
-    }
-    const v = document.createElement('video');
-    v.muted = true;
-    v.playsInline = true;
-    v.preload = 'auto';
-    v.src = clip.src;
-    const ready = new Promise<boolean>(resolve => {
-      const ok = () => resolve(true);
-      const bad = () => resolve(false);
-      v.addEventListener('loadeddata', ok, { once: true });
-      v.addEventListener('error', bad, { once: true });
-      setTimeout(bad, 8000);
-    });
-    const g: Grab = { v, src: clip.src, ready, chain: Promise.resolve() };
-    this.grabs.set(clip.id, g);
-    return g;
-  }
-
-  private serial<T>(g: Grab, job: () => Promise<T>): Promise<T> {
-    const p = g.chain.then(job, job);
-    g.chain = p.catch(() => { /* keep the chain alive */ });
-    return p;
-  }
-
-  private async snap(v: HTMLVideoElement): Promise<ImageBitmap | null> {
-    const w = v.videoWidth, h = v.videoHeight;
-    if (!w || !h || this.disposed) return null;
-    if (this.scratch.width !== w || this.scratch.height !== h) {
-      this.scratch.width = w;
-      this.scratch.height = h;
-    }
-    const g = this.scratch.getContext('2d');
-    if (!g) return null;
-    g.clearRect(0, 0, w, h);
-    try { g.drawImage(v, 0, 0, w, h); } catch { return null; }
-    try { return await createImageBitmap(this.scratch); } catch { return null; }
-  }
-}
+  return { layerKey: best.layerKey || best.id, at, tracks };
+};

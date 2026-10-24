@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>gl-equiv</title></head>
+<body style="margin:0;background:#111">
+<canvas id="a2d" width="400" height="400"></canvas>
+<script>
+// 实验：同一张源图 + 同一个仿射变换，三条路画出来差多少像素？
+//   A  canvas 2D  —— drawLayer 现在用的写法（translate → rotate → drawImage(-tw/2,-th/2,tw,th)）
+//   B  WebGL2 straight 纹理 + SRC_ALPHA/ONE_MINUS_SRC_ALPHA
+//   C  WebGL2 预乘上传 + ONE/ONE_MINUS_SRC_ALPHA（与 canvas 2D 内部的预乘混合一致）
+// 输出：window.__r = { aVsB: {...}, aVsC: {...} }，maxdiff = 0 才叫"能逐像素一致"。
+const W = 400, H = 400;
+const TR = { cx: 0.5, cy: 0.5, w: 0.8, h: 0.8, rotation: 0.37 };
+
+function makeSrc() {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  const lg = g.createLinearGradient(0, 0, W, H);
+  lg.addColorStop(0, '#ff2020'); lg.addColorStop(0.5, '#20c060'); lg.addColorStop(1, '#2040ff');
+  g.fillStyle = lg; g.fillRect(0, 0, W, H);
+  g.fillStyle = '#00ff80'; g.fillRect(40, 40, 120, 90);          // 硬边：看对齐
+  const rg = g.createRadialGradient(W * 0.7, H * 0.7, 8, W * 0.7, H * 0.7, W * 0.32);
+  rg.addColorStop(0, 'rgba(255,255,255,1)'); rg.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = rg; g.beginPath(); g.arc(W * 0.7, H * 0.7, W * 0.32, 0, 7); g.fill();
+  g.globalCompositeOperation = 'destination-out';                 // 右侧整条透明：看 alpha 边缘
+  g.fillStyle = '#000'; g.fillRect(W * 0.86, 0, W * 0.14, H);
+  return c;
+}
+
+function cv2d() { const c = document.createElement('canvas'); c.width = W; c.height = H; return c; }
+const src = makeSrc();
+
+// ── A：canvas 2D（逐字照 drawLayer）─────────────────────────────────────────
+const A = cv2d(); {
+  const g = A.getContext('2d');
+  const tw = TR.w * W, th = TR.h * H;
+  g.save(); g.translate(TR.cx * W, TR.cy * H); g.rotate(TR.rotation);
+  g.drawImage(src, -tw / 2, -th / 2, tw, th); g.restore();
+}
+
+// ── B / C：WebGL2 ─────────────────────────────────────────────────────────
+const VS = `#version 300 es
+in vec2 aPos; in vec2 aUV; out vec2 vUV;
+uniform vec2 uRes; uniform vec2 uC; uniform float uRot; uniform vec2 uSize;
+void main() {
+  vec2 p = aPos * uSize;                       // 以图层尺寸为单位
+  float s = sin(uRot), c = cos(uRot);
+  vec2 r = vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+  vec2 px = uC + r;                            // 画布像素坐标（中心在 uC）
+  gl_Position = vec4(px.x / uRes.x * 2.0 - 1.0, 1.0 - px.y / uRes.y * 2.0, 0.0, 1.0);
+  vUV = aUV;
+}`;
+const FS = `#version 300 es
+precision highp float;
+in vec2 vUV; out vec4 Frag; uniform sampler2D uSrc;
+void main() { Frag = texture(uSrc, vUV); }`;
+
+function drawGL(premultiply) {
+  const c = cv2d();
+  const gl = c.getContext('webgl2', { premultipliedAlpha: true, antialias: false, alpha: true });
+  if (!gl) return { err: 'no webgl2' };
+  const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o);
+    if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; };
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(p); gl.useProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) return { err: gl.getProgramInfoLog(p) };
+
+  // 两个三角，aUV 覆盖 0..1（注意 v 不翻：纹理上传时 UNPACK_FLIP_Y 处理）
+  const quad = new Float32Array([
+    -0.5, -0.5, 0, 0, 0.5, -0.5, 1, 0, 0.5, 0.5, 1, 1,
+    -0.5, -0.5, 0, 0, 0.5, 0.5, 1, 1, -0.5, 0.5, 0, 1,
+  ]);
+  const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(p, 'aPos'), aUV = gl.getAttribLocation(p, 'aUV');
+  gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(aUV); gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 16, 8);
+
+  gl.uniform2f(gl.getUniformLocation(p, 'uRes'), W, H);
+  gl.uniform2f(gl.getUniformLocation(p, 'uC'), TR.cx * W, TR.cy * H);
+  gl.uniform1f(gl.getUniformLocation(p, 'uRot'), TR.rotation);
+  gl.uniform2f(gl.getUniformLocation(p, 'uSize'), TR.w * W, TR.h * H);
+
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, !!premultiply);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  if (premultiply) gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  else gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  gl.finish();
+
+  // readPixels 是"预乘"的（alpha 目标）。要比的是 straight RGBA：
+  // 逐像素把预乘除回去，才能与 canvas 2D 的 getImageData 同口径。
+  const buf = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  const out = cv2d(); const g2 = out.getContext('2d');
+  const img = g2.createImageData(W, H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const si = ((H - 1 - y) * W + x) * 4, di = (y * W + x) * 4;
+      const a = buf[si + 3];
+      img.data[di + 3] = a;
+      if (a === 0) { img.data[di] = img.data[di + 1] = img.data[di + 2] = 0; continue; }
+      const k = 255 / a;
+      img.data[di] = Math.min(255, Math.round(buf[si] * k));
+      img.data[di + 1] = Math.min(255, Math.round(buf[si + 1] * k));
+      img.data[di + 2] = Math.min(255, Math.round(buf[si + 2] * k));
+    }
+  }
+  g2.putImageData(img, 0, 0);
+  return out;
+}
+
+function cmp(a, b) {
+  const da = a.getContext('2d').getImageData(0, 0, W, H).data;
+  const db = b.getContext('2d').getImageData(0, 0, W, H).data;
+  let max = 0, sum = 0, n = 0, over1 = 0, strict = 0;
+  for (let i = 0; i < da.length; i += 4) {
+    let m = 0;
+    for (let k = 0; k < 4; k++) { const d = Math.abs(da[i + k] - db[i + k]); if (d > m) m = d; sum += d; }
+    n += 4;
+    if (m > max) max = m;
+    if (m > 1) over1++;
+    if (m > 0) strict++;
+  }
+  return { maxdiff: max, mean: +(sum / n).toFixed(4), pxOver1: over1, pxAny: strict, total: W * H };
+}
+
+try {
+  const B = drawGL(false);
+  const C = drawGL(true);
+  const r = { aVsB: (B.err ? { err: B.err } : cmp(A, B)), aVsC: (C.err ? { err: C.err } : cmp(A, C)) };
+  window.__r = r;
+  document.title = 'done ' + JSON.stringify(r);
+  // 拼一张对照图，方便人眼确认真的画出来了
+  const strip = document.createElement('canvas'); strip.width = W * 3; strip.height = H;
+  const sg = strip.getContext('2d');
+  sg.fillStyle = '#222'; sg.fillRect(0, 0, W * 3, H);
+  sg.drawImage(A, 0, 0); if (!B.err) sg.drawImage(B, W, 0); if (!C.err) sg.drawImage(C, W * 2, 0);
+  window.__png = strip.toDataURL('image/png');
+  // 原始 RGBA（不合成到任何底上）——像素统计只能用这几张
+  window.__raw = { a: A.toDataURL('image/png'),
+                   b: (B && !B.err) ? B.toDataURL('image/png') : null,
+                   c: (C && !C.err) ? C.toDataURL('image/png') : null };
+} catch (e) {
+  window.__r = { err: String(e && e.message || e) };
+  document.title = 'err ' + window.__r.err;
+}
+</script>
+</body></html>

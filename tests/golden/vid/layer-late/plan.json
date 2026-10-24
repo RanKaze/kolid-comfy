@@ -1,0 +1,95 @@
+{
+  "v": 0,
+  "note": "raw capture — P1 编译器把它编译成 RenderPlan",
+  "key": "lclmvmi14uafd",
+  "grid": [
+    832,
+    1216
+  ],
+  "layers": [
+    {
+      "id": 99,
+      "name": "Stash 1",
+      "src": "",
+      "img": {},
+      "asset": null,
+      "buffer": null,
+      "srcRef": "img_3",
+      "visible": true,
+      "fragment": false,
+      "raster": true,
+      "stash": true,
+      "three": false,
+      "sceneUid": null,
+      "stack": "layer",
+      "cud": null,
+      "text": null,
+      "dir": null,
+      "transform": {
+        "cx": 0.5,
+        "cy": 0.5,
+        "w": 1,
+        "h": 1,
+        "rotation": 0
+      },
+      "attrs": [
+        {
+          "id": "attr_adixid3",
+          "type": "effects",
+          "chain": [
+            {
+              "id": 15,
+              "type": "vector_blur",
+              "enabled": true,
+              "params": {
+                "angle": 77,
+                "distance": 32,
+                "anchor": "center"
+              }
+            }
+          ]
+        },
+        {
+          "id": "attr_adixid5",
+          "type": "mask",
+          "surface": {}
+        }
+      ]
+    },
+    {
+      "id": 98,
+      "name": "Layer 1",
+      "src": "",
+      "img": {},
+      "asset": null,
+      "buffer": null,
+      "srcRef": "img_4",
+      "visible": true,
+      "fragment": false,
+      "raster": false,
+      "stash": false,
+      "three": false,
+      "sceneUid": null,
+      "stack": "layer",
+      "cud": null,
+      "text": null,
+      "dir": null,
+      "transform": {
+        "cx": 0.5,
+        "cy": 0.5,
+        "w": 1,
+        "h": 1,
+        "rotation": 0
+      },
+      "attrs": [
+        {
+          "id": "attr_adixid4",
+          "type": "decal",
+          "surface": null,
+          "frameTrack": "trkmvmi206h100"
+        }
+      ]
+    }
+  ],
+  "activeSet": "lclmvmi14uafd"
+}

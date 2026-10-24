@@ -1,0 +1,28 @@
+{
+  "case": "layer-late",
+  "note": "同段后部（源帧变化）",
+  "requestedT": 4.55,
+  "t": 4.5333,
+  "kind": "compose",
+  "layerKey": "lclmvmi14uafd",
+  "grid": [
+    832,
+    1216
+  ],
+  "fps": 30,
+  "layersN": 2,
+  "sha256": "9cae6390cc48402eb8fb2a8725ed7ecbbafda968a4bd248b81ac1f0b0832e7b7",
+  "bytes": 905447,
+  "stable": true,
+  "format": "png-rgba-straight",
+  "tolerance": {
+    "sameDevice": 0,
+    "crossDevice": 1
+  },
+  "env": {
+    "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36",
+    "gl": "swiftshader",
+    "headless": true
+  },
+  "capturedAt": "2026-10-24T18:34:52.515Z"
+}

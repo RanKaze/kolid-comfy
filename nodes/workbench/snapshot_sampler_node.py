@@ -381,6 +381,36 @@ def cud_composite_bytes(path):
         return None
 
 
+def cud_asset_bytes(path, asset_id):
+    """取 .cud 里第 `asset_id` 枚资源的**原始字节**（P2：RenderPlan 的资源解析）。
+
+    与 cud_composite_bytes 同一套排布：`CUD1` + 4 字节头长 + JSON 头 + 按 assets 顺序首尾相接。
+    `asset_id` 是头里 `assets[].id`（老档里图层用它、attributes 的 surface 也用它）。
+    """
+    try:
+        if not path or not str(path).lower().endswith('.cud'):
+            return None
+        with open(path, 'rb') as f:
+            blob = f.read()
+        if len(blob) < 12 or blob[:4] != b'CUD1':
+            return None
+        import struct
+        hlen = struct.unpack('<I', blob[4:8])[0]
+        head = json.loads(blob[8:8 + hlen].decode('utf-8'))
+        off = 8 + hlen
+        for a in head.get('assets') or []:
+            n = int(a.get('length') or 0)
+            if a.get('id') == asset_id:
+                if n <= 0 or off + n > len(blob):
+                    return None
+                return blob[off:off + n]
+            off += n
+        return None
+    except Exception as e:
+        print(f'[CudAsset] cannot read {path}#{asset_id}: {type(e).__name__}: {e}')
+        return None
+
+
 def cud_thumb_path(path, w=96):
     """一份 .cud 合成图的**缩略图**落盘路径（按需生成，取不到返回 None）。
 
@@ -3813,6 +3843,31 @@ class SnapshotDetailerSamplerServer:
                                      'total': len(items), 'assets': items})
                 except Exception as e:
                     self._send_json({'ok': False, 'error': str(e), 'assets': []}, 500)
+                return
+
+            if urlparse(self.path).path == '/api/cud_asset':
+                qs = parse_qs(urlparse(self.path).query)
+                cud_path = unquote((qs.get('path') or [''])[0])
+                try:
+                    aid = int((qs.get('id') or ['-1'])[0])
+                except (TypeError, ValueError):
+                    aid = -1
+                data = cud_asset_bytes(cud_path, aid)
+                if data is None:
+                    self.send_error(404)
+                    return
+                if data[:8] == b'\x89PNG\r\n\x1a\n':
+                    ctype = 'image/png'
+                elif data[:2] == b'\xff\xd8':
+                    ctype = 'image/jpeg'
+                else:
+                    ctype = 'application/octet-stream'
+                self.send_response(200)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'max-age=3600')
+                self.end_headers()
+                self.wfile.write(data)
                 return
 
             if req.path.startswith('/api/asset_media/'):

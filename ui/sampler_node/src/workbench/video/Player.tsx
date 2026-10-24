@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type VidController, type VidClip, audioAudible, clipAt, clipAtSolo, fmtTime, vidDuration,
 } from './model';
-import { compositePlanAt, VidFrameGrabber, type VidCompositePlan } from './composite';
+import { compositePlanAt, sourceTime, warmAheadOf, type VidCompositePlan } from './composite';
 import { decodeAudio, vidAudio } from './audio';
 import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame } from './previews';
 import { acquireAudioSlot, buildStereoProbe, releaseAudioSlot, type AudioProbe } from './audioFocus';
@@ -50,10 +50,14 @@ export const VidPlayer: React.FC<{
 
   // ── 逐帧合成（Layer 轨压在最上层的那几帧）──────────────────────────────────────────────
   // 计划由 compositePlanAt 在 transport 每一次 tick 上现算：命中 layer 段就向工作台页面发一包
-  // 「这一帧的源帧」，页面用那一段自己的图层集合成后回一张图 —— 画面只有那些图层，不叠脚下的
+  // 「这一帧该看什么」，页面用那一段自己的图层集合成后回一张图 —— 画面只有那些图层，不叠脚下的
   // 视频帧（空段就是空图）。画面与音频各走各的 —— 主 <video> 没有被停掉：它仍然播着脚下那条
-  // 视频轨，给输出定栅格、也当那一轨源帧的取帧器（播放时零额外 seek），声音仍然只从 VidAudio
-  // 出来。`compMode` 只在换段/进出合成那一刻走 React；每一帧的回图直改 canvas，不惊动整页。
+  // 视频轨，给输出定栅格，声音仍然只从 VidAudio 出来。`compMode` 只在换段/进出合成那一刻走
+  // React；每一帧的回图直改 canvas，不惊动整页。
+  // **帧不再从这里抓。** 源帧由工作台页面自己的镜像 <video> 播放（见 blend_node 的 vidSrcSync）：
+  // 这一侧只发"哪条轨、源在哪、这一帧源内第几秒"，一个像素都不过界。早先那条路每帧要给每条
+  // 被引用的轨做一次精确 seek（100ms 级）再把整幅位图 transfer 过去 —— 播放时的顿感与换段时
+  // 那一秒空白都出在那儿。
   const compCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const compModeRef = useRef<{ id: string; name: string } | null>(null);
   const [compMode, setCompMode] = useState<{ id: string; name: string } | null>(null);
@@ -62,17 +66,21 @@ export const VidPlayer: React.FC<{
   const compLayerRef = useRef<string | null>(null);
   const onCompLayerRef = useRef(onCompLayer);
   onCompLayerRef.current = onCompLayer;
-  const grabberRef = useRef<VidFrameGrabber | null>(null);
   const liveRef = useRef(true);
   const vidRef = useRef(vid);
   vidRef.current = vid;
   const compReq = useRef({
-    seq: 0, inflight: 0, inFlight: false, key: '',
+    seq: 0, inflight: 0, key: '',
     /** 在途那一包说的 layerKey —— 回包按它维护 frameless 集(compLayerRef 在回包到达时
      *  可能已跟着游标挪到别的段,不能拿它对账)。 */
     layerKey: '',
-    lastReply: 0, pending: null as { plan: VidCompositePlan; t: number } | null,
+    lastReply: 0,
+    /** 最新想发的那一包（上一包还在路上时压在这儿，回包一到就放行）。 */
+    want: null as { plan: VidCompositePlan; q: number; key: string } | null,
+    /** 上一包的发出时刻与往返时延（ms，滑动平均）—— 发帧节奏按它走，见 requestComposite。 */
+    sentAt: 0, rtt: 0,
   });
+  const pumpRef = useRef<() => void>(() => {});
   const requestRef = useRef<(plan: VidCompositePlan | null, t: number, force?: boolean) => void>(() => {});
 
   // 活片段：transport 的订阅者比对 id，只有换段才 setState（React 重渲染是稀罕事）。
@@ -130,56 +138,34 @@ export const VidPlayer: React.FC<{
     vidAudio.start(id, buf, c.offset + (cur - c.start));
   }, [transport]);
 
-  // 一包源帧：逐条抓（主 <video> 优先；其余走隐藏取帧器），同一个 reqId 绑一次回图。
-  // 抓取期间来的新请求只留**最后一包**（pending）—— 中间那些帧已经过时，补发出去也只会让
-  // 监视器落后更多。回图由下面那个 message 监听按 reqId 收。
+  // 一包「这一帧该看什么」：同一个 reqId 绑一次回图。发包是**同步**的（帧从这里过不了界了）。
+  // 发得比页面画得快不要紧 —— 页面把合成与回图都并到同一口 rAF，一帧最多画一次、只认最新的
+  // 那一包；这里只拦"同一帧连发两包"。
   // frameless 集:页面报过"这一段的图层集不绑视频帧"(frameless:true)的 layerKey —— 这些段的
-  // 合成与源帧无关,后续帧不再抓帧不传帧,只发时刻。图层集后来绑了帧,页面会报 frameless:false,
-  // 这里删掉标记恢复抓帧(自愈)。
-  // usedTracks 表:页面报过"这段**实际消费**哪些轨的源帧"(面 attribute 引用的轨)—— 只抓
-  // 这些 + 底轨。非主轨的精确 seek 一次 100ms 级,没被引用的轨抓了也白抓。没有记录(第一包)
-  // 时全抓,回包后按需收敛;图层改绑别的轨,回包集合跟着变,自愈。
+  // 合成与 t 无关，**后续帧一个包都不该发**（图层集后来绑了帧，页面会报 frameless:false 自愈）。
   const compFrameless = useRef(new Set<string>());
+  // 页面报过"这段实际吃了哪几条轨的帧"—— 只作诊断（帧不再由这一侧抓，见下面的说明）。
   const compUsedTracks = useRef(new Map<string, Set<string>>());
-  // 性能探针(只读,诊断用):合成发包端的次数/耗时/回包分类,与页面 __vidPerf 配对。
-  const compPerf = useRef({ sends: 0, grabs: 0, grabMs: 0, cachedReplies: 0, bitmapReplies: 0, baseSends: 0 });
+  /** 已经报过的预热（layerKey@at）：同一段只报一次，别每个 tick 都发。 */
+  const warmSent = useRef('');
+  // 性能探针(只读,诊断用):合成发包端的次数/回包分类,与页面 __vidPerf 配对。
+  const compPerf = useRef({ sends: 0, grabs: 0, grabMs: 0, cachedReplies: 0, bitmapReplies: 0, baseSends: 0, rtt: 0 });
   (window as unknown as { __compPerf?: unknown }).__compPerf = compPerf.current;
-  const sendComposite = useCallback(async (plan: VidCompositePlan, q: number) => {
+  const sendComposite = useCallback((plan: VidCompositePlan, q: number) => {
     const r = compReq.current;
-    r.inFlight = true;
-    const grabber = grabberRef.current ?? (grabberRef.current = new VidFrameGrabber());
-    const main = videoRef.current;
-    const playing = playingRef.current;
-    const frameless = compFrameless.current.has(plan.layerKey);
-    const sources: { trackId: string; bitmap: ImageBitmap }[] = [];
+    const reqId = ++r.seq;
+    r.inflight = reqId;
+    r.layerKey = plan.layerKey;
+    r.sentAt = performance.now();
     compPerf.current.sends++;
-    try {
-      if (!frameless) {
-        const used = compUsedTracks.current.get(plan.layerKey);
-        for (const src of plan.sources) {
-          if (used && !used.has(src.trackId) && src.trackId !== plan.baseTrackId) continue;
-          const t0 = performance.now();
-          const bmp = await grabber.capture(src.clip, q, main, playing);
-          compPerf.current.grabMs += performance.now() - t0;
-          compPerf.current.grabs++;
-          if (!liveRef.current) { bmp?.close(); return; }
-          if (bmp) sources.push({ trackId: src.trackId, bitmap: bmp });
-        }
-      }
-      const reqId = ++r.seq;
-      r.inflight = reqId;
-      r.layerKey = plan.layerKey;
-      const sent = vid.blendPost({
-        type: 'blend-vid-frame', reqId, t: q, layerKey: plan.layerKey,
-        baseTrackId: plan.baseTrackId, sources,
-      }, sources.map(s => s.bitmap));
-      if (!sent) sources.forEach(s => s.bitmap.close());
-    } finally {
-      r.inFlight = false;
-      const pend = r.pending;
-      r.pending = null;
-      if (pend && liveRef.current) requestRef.current(pend.plan, pend.t, true);
-    }
+    // 时刻的算法留在这一侧（片段偏移 + 播放头 - 起点）；页面只负责把它对到那条镜像视频上。
+    const tracks = plan.sources.map(s => ({
+      trackId: s.trackId, src: s.clip.src, want: sourceTime(s.clip, q),
+    }));
+    vid.blendPost({
+      type: 'blend-vid-frame', reqId, t: q, layerKey: plan.layerKey,
+      baseTrackId: plan.baseTrackId, tracks, playing: playingRef.current,
+    });
   }, [vid]);
 
   const requestComposite = useCallback((plan: VidCompositePlan | null, t: number, force = false) => {
@@ -188,103 +174,89 @@ export const VidPlayer: React.FC<{
     if (!plan) {
       if (r.key) {
         r.key = '';
-        r.pending = null;
+        r.want = null;
         vid.blendPost({ type: 'blend-vid-frame-off' });
       }
       return;
     }
-    // 合成刷新量化到 COMP_FPS:监视器上的 Layer 合成是预览(内容随帧变的段每帧都是
-    // "抓多轨源帧的精确 seek + 全图层重画 + 特效链重算 + 编码回传"的全链,24fps 跑不动,
-    // 也不必跑) —— 12fps 的预览肉眼可接受,全链开销直接减半;内容不随帧变的段反正
-    // 走缓存,量化只是让 cached 回包更稀。
-    const COMP_FPS = 12;
-    const q = Math.max(0, Math.floor(t * COMP_FPS) / COMP_FPS);
-    const key = plan.layer.id + '@' + q;
-    if (!force && key === r.key) return;
-    r.key = key;
-    if (r.inFlight) { r.pending = { plan, t: q }; return; }
-    void sendComposite(plan, q);
-  }, [vid, visible, sendComposite]);
+    // 内容不随帧变的段（页面报过 frameless）：这一段的画面只由图层集决定 ⇒ 只在**换段**时发一包，
+    // 播放中一包都不发。原先一律 12fps 地发，"反正走缓存"——可每包都要现算一次图层集签名
+    // （逐层 16×16 采样读回），30 包/秒就是白烧。
+    // 随帧变的那条链：量化到 COMP_FPS（= 30，与工程帧率同格）—— 页面按 rAF 合成，落地的节拍
+    // 由它决定，发多发少都不会积压。
+    const COMP_FPS = 30;
+    const q = Math.max(0, Math.floor(t * COMP_FPS + 1e-6) / COMP_FPS);
+    const staticSeg = compFrameless.current.has(plan.layerKey);
+    const key = staticSeg ? plan.layer.id + '@static' : plan.layer.id + '@' + q;
+    if (!force && key === r.key && !r.want) return;
+    r.want = { plan, q: staticSeg ? t : q, key };
+    pumpRef.current();
+  }, [vid, visible]);
+  pumpRef.current = () => {
+    const r = compReq.current;
+    const w = r.want;
+    if (!w || !liveRef.current) return;
+    const now = performance.now();
+    // 页面那边按 rAF 合成（一帧最多画一次、同一帧来几包只算最后一包），所以"发得比画得快"
+    // 不反噬 —— 这里只压一道最小间隔：别在同一帧里连发两包。
+    if (r.inflight && now - r.sentAt < 16) return;
+    r.want = null;
+    r.key = w.key;
+    sendComposite(w.plan, w.q);
+  };
   requestRef.current = requestComposite;
 
   // ── 底片预览（游标不在 Layer 段上）────────────────────────────────────────────────────
-  // 视频模式下工作台画布常驻：游标一离开 Layer 段，画布内容就换成当前视频帧。帧只有宿主拿得到
-  // （<video> 在这儿），所以逐帧抓了送过去。同一帧号只送一次；抓取期间只留最后一帧，播放不掉队。
-  const baseReq = useRef({
-    key: '\u0000', on: false, busy: false,
-    retryAt: 0,                       // 抓帧失败后的下一次重试时刻（见 sendBase 里那段）
-    pending: null as { clip: VidClip | null; q: number; key: string } | null,
-  });
-  const postBase = useCallback((q: number, bmp: ImageBitmap | null) => {
+  // 视频模式下工作台画布常驻：游标一离开 Layer 段，画布内容就换成当前视频帧。
+  // **帧不再从这里抓。** 早先是"抓一帧 → createImageBitmap 整幅 → 跨窗 transfer → 画布再画
+  // 一遍"，6Hz 地跑：每一趟都要把正在播的画面从合成器读回来、在主线程排队，正在播的 <video>
+  // 还会被拽去走拷贝路径 —— 播放时的规律性顿感就是它（而且抓得越勤越顿）。
+  // 现在工作台页面自己挂一只同源的 <video> 播同一个文件（blend_node 的 #vidBaseVideo）：这一侧
+  // 只报"哪一段、源内第几秒、在不在播"，5~6Hz 的小消息，一个像素都不过界。
+  const baseReq = useRef({ key: '\u0000', on: false, hidden: false });
+  const sendBaseSrc = useCallback((clip: VidClip | null, q: number, playing: boolean, hidden: boolean) => {
     const r = baseReq.current;
-    const sent = vid.blendPost({ type: 'blend-vid-base', t: q, bitmap: bmp }, bmp ? [bmp] : []);
-    if (!sent) {
-      // 页面还没挂上（iframe 尚未加载）：这一帧作废，键清回去让下一个 tick 重试。
-      r.key = '\u0000';
+    compPerf.current.baseSends = (compPerf.current.baseSends || 0) + 1;
+    if (!clip) {
+      if (!r.on) return;
       r.on = false;
-      if (bmp) { try { bmp.close(); } catch { /* gone */ } }
+      r.hidden = false;
+      vid.blendPost({ type: 'blend-vid-base-off' });
       return;
     }
-    r.on = true;
+    const sent = vid.blendPost({
+      type: 'blend-vid-base-src', src: clip.src,
+      start: clip.start, offset: clip.offset, t: q, playing, hidden,
+    });
+    r.on = sent;
+    r.hidden = hidden;
+    if (!sent) r.key = '\u0000';       // 页面还没挂上（iframe 尚未加载）：下一个 tick 重来
   }, [vid]);
-  const sendBase = useCallback(async (clip: VidClip | null, q: number, key: string) => {
-    const r = baseReq.current;
-    r.busy = true;
-    compPerf.current.baseSends = (compPerf.current.baseSends || 0) + 1;
-    try {
-      let bmp: ImageBitmap | null = null;
-      if (clip) {
-        const grabber = grabberRef.current ?? (grabberRef.current = new VidFrameGrabber());
-        bmp = await grabber.capture(clip, q, videoRef.current, playingRef.current);
-      }
-      // 抓取期间游标又走了：这一帧已经过时，丢掉（别让底片倒着播）。
-      if (!liveRef.current || r.key !== key) { bmp?.close(); return; }
-      // 有片段却没抓到帧（源还在解码/找不到/被删）：**不能**把底片翻成空白 —— 那会让整个画布
-      // 变成空的（"按了播放什么都没有了"就是这个症状）。保留上一帧，键清回去让后面的 tick 重试。
-      if (clip && !bmp) {
-        r.key = '\u0000';
-        r.retryAt = performance.now() + 500;
-        return;
-      }
-      r.retryAt = 0;                      // 拿到帧了：重试窗口清掉
-      postBase(q, bmp);
-    } finally {
-      r.busy = false;
-      const pend = r.pending;
-      r.pending = null;
-      if (pend && liveRef.current) sendBaseRef.current(pend.clip, pend.q, pend.key);
-    }
-  }, [postBase]);
-  const sendBaseRef = useRef<(clip: VidClip | null, q: number, key: string) => void>(() => {});
-  sendBaseRef.current = (clip, q, key) => { void sendBase(clip, q, key); };
-  const requestBase = useCallback((t: number) => {
+  const requestBase = useCallback((t: number, hidden = false) => {
     if (!visible) return;
     const p = projectRef.current;
     // 底片跟着监视器走：静音的轨不送帧（画布在视频模式就是监视器，mute 要两边一致）。
     // 这里被调用时 solo 必为空（onTick 里 soloActive 走的是 requestBaseOff），
     // 但用 clipAtSolo 一处口径更稳 —— 空 solo 集时它与 clipAt(…, 'video') 等价。
     const c = clipAtSolo(p, t, soloRef.current.video, muteRef.current) ?? null;
-    // 底片是**工作台画布上的辅助预览**(监视器有自己的画面),不值得每个输出帧都抓一次
-    // 全分辨率帧 + 编码 + 跨 iframe 传输 —— 量化到 BASE_FPS,60fps 播放下抓帧次数降一个
-    // 数量级,预览上那点步进不在主视线里。抓到的源内时刻仍按量化格对齐。
-    const BASE_FPS = 6;
-    const q = Math.max(0, Math.floor(t * BASE_FPS) / BASE_FPS);
-    // 键里带上片段的起点/源内偏移：剪一下片段，就算帧号没变，取到的源帧也不是同一张。
-    const key = c ? `${c.id}@${c.start}@${c.offset}@${q}` : '';
+    // 时刻量化：播放中只要 6Hz（页面那边是**纠偏**，粒度不影响画面本身的帧率 —— 画面由镜像
+    // <video> 原生出帧）；暂停时按工程帧率量化 —— 那时候这一格就是"此刻那一帧"，差 100ms
+    // 是看得出来的，而工程帧栅格上的量化既准又能把拖动时的消息压到每帧一条。
+    const playing = playingRef.current;
+    const BASE_FPS = playing ? 6 : (p.fps > 0 ? p.fps : 30);
+    const q = Math.max(0, Math.floor(t * BASE_FPS + 1e-6) / BASE_FPS);
+    // 键里带上片段的起点/源内偏移、播放态与"是否被合成压着"：剪一下片段、从暂停转播放、
+    // 或者进出 Layer 段，都得让页面重新对时/换台。
+    const key = c ? `${c.id}@${c.start}@${c.offset}@${q}@${playing ? 1 : 0}@${hidden ? 1 : 0}` : '';
     const r = baseReq.current;
     if (key === r.key) return;
-    // 上一次抓帧失败过：等重试窗口过去再试，别每个 tick 都去捅一次解码器。
-    if (r.retryAt && performance.now() < r.retryAt) return;
     r.key = key;
-    if (r.busy) { r.pending = { clip: c, q, key }; return; }
-    sendBaseRef.current(c, q, key);
-  }, [visible]);
+    sendBaseSrc(c, q, playing, hidden);
+  }, [visible, sendBaseSrc]);
   const requestBaseOff = useCallback(() => {
     if (!visible) return;
     const r = baseReq.current;
     r.key = '\u0000';                  // 再回到"段外"时第一帧要重新送
-    r.retryAt = 0;
-    r.pending = null;
     if (!r.on) return;
     r.on = false;
     vid.blendPost({ type: 'blend-vid-base-off' });
@@ -360,12 +332,20 @@ export const VidPlayer: React.FC<{
           }
         }
       }
-      // 底片与合成都送走 / 停掉。solo 时：不送底片（requestBase 一律不调），
-      // 并确保画布那边的底片态与合成态都已退（requestBaseOff / requestComposite(null)
-      // 都有守卫，不会重复发消息）。
+      // 底片态：solo 时整个退场（requestBaseOff）；Layer 段压着时**不退**，只报 hidden ——
+      // 页面那颗镜像继续跟着播，一出段就能立刻露出正在那一帧（退掉再重开 = 先露旧帧再 seek
+      // 跳一下，那就是"出 Layer 段闪一下"）。
+      // **预热**：还没进 Layer 段时，提前 1.5 秒把下一段的源帧镜像挂好、对到那一刻。
+      // 不预热的话，"建镜像 + 等 loadeddata + seek + 切图层集 + 整画布重渲染 + 首帧合成"
+      // 全挤在边界那一帧里 —— 播放中就是一次可感的顿（画面上像闪一下）。
+      const warm = soloActive ? null : warmAheadOf(proj, t, muted, 4);   // 4 秒的提前量：够它把文件加载完
+      const warmKey = warm ? `${warm.layerKey}@${warm.at.toFixed(2)}` : '';
+      if (warmKey !== warmSent.current) {
+        warmSent.current = warmKey;
+        if (warm) vid.blendPost({ type: 'blend-vid-warm', layerKey: warm.layerKey, t: warm.at, tracks: warm.tracks });
+      }
       if (soloActive) requestBaseOff();
-      else if (plan) requestBaseOff();
-      else requestBase(t);
+      else requestBase(t, !!plan);
       requestComposite(plan, t);   // solo 时 plan 为 null → 停掉合成（发 frame-off）
     };
     // seek 落定 = 真帧已上屏：撤掉缩略条替身。两个守卫防止拖动中闪替身——
@@ -411,76 +391,87 @@ export const VidPlayer: React.FC<{
       const r = compReq.current;
       const bmp = d.bitmap ?? null;
       if (typeof d.reqId !== 'number' || d.reqId !== r.inflight) { bmp?.close(); return; }
-      r.lastReply = performance.now();
+      const now = performance.now();
+      r.lastReply = now;
+      // 往返时延（滑动平均）：一包从发出到回图的真实耗时 —— 播放时这个数除以 1 就是页面合成
+      // 这一帧的天花板帧率（探针里直接读它）。
+      const rtt = now - r.sentAt;
+      r.rtt = r.rtt ? r.rtt * 0.75 + rtt * 0.25 : rtt;
+      compPerf.current.rtt = +r.rtt.toFixed(1);
       if (d.cached === true) compPerf.current.cachedReplies++;
       else compPerf.current.bitmapReplies++;
-      // frameless 标记的维护:页面说这段不绑视频帧 → 以后免抓免传;说绑了(或缓存命中沿用
-      // 上次的结论)→ 照它说的更新集合。按在途包的 layerKey 对账。
+      // frameless 标记的维护:页面说这段不绑视频帧 → 这一段的合成与时刻无关,以后只在换段时
+      // 发一包;说绑了(或缓存命中沿用上次的结论)→ 照它说的更新集合。按在途包的 layerKey 对账。
       if (d.frameless === true) compFrameless.current.add(r.layerKey);
       else if (d.frameless === false) compFrameless.current.delete(r.layerKey);
-      // 引用轨集合同批更新(空数组 = 没有面吃帧,与 frameless 同义)。
+      // 引用轨集合同批更新(空数组 = 没有面吃帧,与 frameless 同义)。**只作诊断**：帧不再由
+      // 这一侧抓，页面自己按 attribute 的 frameTrack 决定开哪几条镜像。
       if (Array.isArray(d.usedTracks)) {
         compUsedTracks.current.set(r.layerKey, new Set(d.usedTracks.map(String)));
       }
-      // 缓存命中:内容与画面上这张完全一致 —— 一个像素都不动,保留现画面即可(离段再回来时
-      // compCanvas 的像素还在,直接亮出来)。
-      if (d.cached === true) { setHasComp(true); return; }
-      const cv = compCanvasRef.current;
-      if (!cv) { bmp?.close(); return; }
-      if (!bmp) { setHasComp(false); return; }
       try {
-        cv.width = bmp.width;
-        cv.height = bmp.height;
-        const bctx = cv.getContext('bitmaprenderer');
-        if (bctx) {
-          bctx.transferFromImageBitmap(bmp);
-        } else {
-          const ctx = cv.getContext('2d');
-          if (!ctx) { bmp.close(); return; }
-          ctx.clearRect(0, 0, cv.width, cv.height);
-          ctx.drawImage(bmp, 0, 0);
-          bmp.close();
-        }
-        setHasComp(true);
-      } catch { try { bmp.close(); } catch { /* gone */ } }
+        // 缓存命中:内容与画面上这张完全一致 —— 一个像素都不动,保留现画面即可(离段再回来时
+        // compCanvas 的像素还在,直接亮出来)。
+        if (d.cached === true) { setHasComp(true); return; }
+        const cv = compCanvasRef.current;
+        if (!cv) { bmp?.close(); return; }
+        if (!bmp) { setHasComp(false); return; }
+        try {
+          cv.width = bmp.width;
+          cv.height = bmp.height;
+          const bctx = cv.getContext('bitmaprenderer');
+          if (bctx) {
+            bctx.transferFromImageBitmap(bmp);
+          } else {
+            const ctx = cv.getContext('2d');
+            if (!ctx) { bmp.close(); return; }
+            ctx.clearRect(0, 0, cv.width, cv.height);
+            ctx.drawImage(bmp, 0, 0);
+            bmp.close();
+          }
+          setHasComp(true);
+        } catch { try { bmp.close(); } catch { /* gone */ } }
+      } finally {
+        pumpRef.current();            // 上一包回来了：压在 want 里的那一帧立刻放行
+      }
     };
     window.addEventListener('message', onMsg);
     return () => window.removeEventListener('message', onMsg);
   }, [vid]);
 
-  // 进出合成模式：切走时把那一格藏起来（主 <video> 重新露脸）；切进来时先撤掉拖动替身 ——
-  // 那条条上只有视频帧，盖在合成画面上是错的。
+  // 进出合成模式：**只在这一格彻底退场时**把合成图藏起来（主 <video> 重新露脸）。
+  // 从一个 Layer 段走到下一个 Layer 段时**别清**：那一下新合成还没回来，清了就等于先把旧合成
+  // 换成一帧裸视频、再被新合成盖住 —— 又是一次"闪"。（进段时 hasComp 本来就是 false。）
   useEffect(() => {
-    setHasComp(false);
-    if (compMode) hideStrip();
+    if (!compMode) setHasComp(false);
+    else hideStrip();                 // 条条上只有视频帧，盖在合成画面上是错的
   }, [compMode, hideStrip]);
 
-  // 收摊 / 藏起来：告诉页面这一包作废（它清掉缓存的源帧），底片态也一并退掉，取帧器稍后拆。
+  // 收摊 / 藏起来：告诉页面这一包作废（它停掉源帧镜像、清掉缓存的源帧），底片态也一并退掉。
   useEffect(() => {
     if (visible) return;
     compReq.current.key = '';
+    compReq.current.want = null;
     vid.blendPost({ type: 'blend-vid-frame-off' });
     baseReq.current.on = false;
     baseReq.current.key = '\u0000';
-    baseReq.current.pending = null;
     vid.blendPost({ type: 'blend-vid-base-off' });
   }, [visible, vid]);
   useEffect(() => () => {
     liveRef.current = false;
     compReq.current.key = '';
+    compReq.current.want = null;
     vidRef.current.blendPost({ type: 'blend-vid-frame-off' });
     vidRef.current.blendPost({ type: 'blend-vid-base-off' });
-    grabberRef.current?.dispose();
-    grabberRef.current = null;
   }, []);
 
-  // 看门狗：合成模式下页面还没回过任何一张图（iframe 刚挂载、消息比监听器早到），
-  // 就按当前帧再要一次。回图正常时它一个请求都不发。
+  // 看门狗：合成模式下页面还没回过任何一张图（iframe 刚挂载、镜像视频还在解码、消息比监听器
+  // 早到），就按当前帧再要一次。回图正常时它一个请求都不发。
   useEffect(() => {
     if (!visible || !compMode) return;
     const timer = setInterval(() => {
       const r = compReq.current;
-      if (r.inFlight || !r.key || performance.now() - r.lastReply < 1800) return;
+      if (!r.key || performance.now() - r.lastReply < 1800) return;
       const plan = compositePlanAt(projectRef.current, transport.get(), muteRef.current);
       if (plan) requestRef.current(plan, transport.get(), true);
     }, 800);
@@ -608,6 +599,20 @@ export const VidPlayer: React.FC<{
       releaseAudioSlot('player');
     }
   }, [playing, activeId, hideStrip, setPlaying]);
+
+  // ── 播放态变化要**立刻**报到工作台页 ──
+  // 画布上的画面现在是页面自己播的镜像视频（底片一只、源帧若干只）。播放头一停就不会再有
+  // tick，那几只镜像会自己接着播 —— 看起来就是"暂停了画面还在动"。所以这一下不等 tick，
+  // 直接补一包过去（包里带着 playing 位）。
+  useEffect(() => {
+    const t = transport.get();
+    const plan = soloRef.current.video.size > 0
+      ? null
+      : compositePlanAt(projectRef.current, t, muteRef.current);
+    requestBase(t, !!plan);
+    requestComposite(plan, t, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing]);
   // 卸载(Image 模式换走正文)时槽不该悬着。
   useEffect(() => () => releaseAudioSlot('player'), []);
 

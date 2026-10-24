@@ -79,6 +79,10 @@ w.__perfSample = async (): Promise<unknown> => {
       sends: comp.sends, grabs: comp.grabs, grabMs: +(comp.grabMs || 0).toFixed(1),
       cachedReplies: comp.cachedReplies, bitmapReplies: comp.bitmapReplies,
       baseSends: comp.baseSends || 0,
+      // 一包往返的真实耗时（ms）。播放时它决定合成预览的天花板帧率：1000/rtt。
+      // grabs/grabMs 在新的逐帧合成里恒为 0（源帧由工作台页自己播，不再跨窗抓送）。
+      rttMs: +(comp.rtt || 0).toFixed(1),
+      estCompFps: comp.rtt ? +(1000 / comp.rtt).toFixed(1) : undefined,
     } : '播放器还没挂',
   };
   console.log('[perf]', report);

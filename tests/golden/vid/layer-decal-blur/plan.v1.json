@@ -1,0 +1,167 @@
+{
+  "v": 1,
+  "doc": "视频测试.cud",
+  "t": 4.2,
+  "frame": {
+    "mode": "layers",
+    "source": null
+  },
+  "grid": {
+    "w": 832,
+    "h": 1216
+  },
+  "fps": 30.0,
+  "color": {
+    "in": "srgb",
+    "out": "srgb",
+    "premultiplied": false
+  },
+  "mask": null,
+  "tracks": [
+    {
+      "id": "trkmvmi206h100",
+      "kind": "video",
+      "name": "Video 2",
+      "resource": "res:d54755bf0682b994e2f5f996b3d9ce2c",
+      "clips": [
+        {
+          "start": 3.815829206924238,
+          "duration": 4.52,
+          "offset": 0,
+          "srcDuration": 4.52
+        }
+      ]
+    },
+    {
+      "id": "trkmvmi0bn02k",
+      "kind": "video",
+      "name": "Video 1",
+      "resource": "res:1716963e1821016705bc7389bf816fbe",
+      "clips": [
+        {
+          "start": 0,
+          "duration": 4.84,
+          "offset": 0,
+          "srcDuration": 4.84
+        }
+      ]
+    }
+  ],
+  "layers": [
+    {
+      "id": 98,
+      "name": "Layer 1",
+      "base": null,
+      "stack": "work",
+      "visible": true,
+      "opacity": 1,
+      "blend": "source-over",
+      "capture": null,
+      "transform": {
+        "cx": 0.5,
+        "cy": 0.5,
+        "w": 1.0,
+        "h": 1.0,
+        "rotation": 0.0
+      },
+      "strip": [
+        {
+          "kind": "surface",
+          "type": "decal",
+          "enabled": true,
+          "surface": null,
+          "frameTrack": "trkmvmi206h100"
+        }
+      ],
+      "timeMap": {
+        "clipId": "lclmvmi14uafd",
+        "start": 3.815829206924238,
+        "duration": 1.0241707930757618,
+        "offset": 0,
+        "srcDuration": 5
+      }
+    },
+    {
+      "id": 99,
+      "name": "Stash 1",
+      "base": null,
+      "stack": "work",
+      "visible": true,
+      "opacity": 1,
+      "blend": "source-over",
+      "capture": "below",
+      "transform": {
+        "cx": 0.5,
+        "cy": 0.5,
+        "w": 1.0,
+        "h": 1.0,
+        "rotation": 0.0
+      },
+      "strip": [
+        {
+          "kind": "chain",
+          "type": "effects",
+          "enabled": true,
+          "chain": [
+            {
+              "type": "vector_blur",
+              "enabled": true,
+              "params": {
+                "angle": 77,
+                "distance": 32,
+                "anchor": "center"
+              },
+              "maps": {}
+            }
+          ]
+        },
+        {
+          "kind": "surface",
+          "type": "mask",
+          "enabled": true,
+          "surface": {
+            "resource": "res:39f63ccb9faf80679a5ba0b21effd2f5"
+          },
+          "frameTrack": ""
+        }
+      ],
+      "timeMap": {
+        "clipId": "lclmvmi14uafd",
+        "start": 3.815829206924238,
+        "duration": 1.0241707930757618,
+        "offset": 0,
+        "srcDuration": 5
+      }
+    }
+  ],
+  "resources": [
+    {
+      "id": "res:1716963e1821016705bc7389bf816fbe",
+      "kind": "video",
+      "uri": "media://1716963e1821016705bc7389bf816fbe.mp4",
+      "w": null,
+      "h": null
+    },
+    {
+      "id": "res:39f63ccb9faf80679a5ba0b21effd2f5",
+      "kind": "image",
+      "uri": "inline:39f63ccb9faf80679a5ba0b21effd2f5",
+      "w": null,
+      "h": null,
+      "role": "mask",
+      "assetId": 3
+    },
+    {
+      "id": "res:d54755bf0682b994e2f5f996b3d9ce2c",
+      "kind": "video",
+      "uri": "media://d54755bf0682b994e2f5f996b3d9ce2c.mp4",
+      "w": null,
+      "h": null
+    }
+  ],
+  "source": {
+    "kind": "cud",
+    "path": "F:/Pathes/Pictures/RanKaze/AI修改/视频测试.cud",
+    "layerSet": "lclmvmi14uafd"
+  }
+}
