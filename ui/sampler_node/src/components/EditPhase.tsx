@@ -25,6 +25,7 @@ import { ingestFile } from '../workbench/video/ingest';
 import { beginVidProcRun, clearProcFill, clearProcQueue, dequeueProcClip, endVidProcRun, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, setVidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets, Card, type StoreAsset } from '../workbench/video/Assets';
+import { VidInspector, type InspectSel } from '../workbench/video/Inspector';
 import { VidPlayer } from '../workbench/video/Player';
 
 // The rename field of a preset row.
@@ -55,11 +56,11 @@ const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', '
 // 轨道与资产属于文档，不该只在 Video 模式下才看得见。播放器不单独占窗：
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
 // 标题条上有一颗 Image/Video 切换（见 heads）。
-const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets'];
+const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector'];
 const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'presets', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
   toolbar: 'File', context: 'Context', pipeline: 'Pipeline', presets: 'Pipeline Presets',
-  blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets',
+  blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets', vinspector: 'Inspector',
   ...WORKBENCH_TITLES,
 };
 const COLUMN_W = 340;
@@ -135,11 +136,16 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDocUnit(id),
-    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'vtracks' || id === 'vassets' || id === 'blocks',
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'blocks',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
     // 时间线与资产库同理：两份会一直长的列表。
-    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets',
+    // Inspector 回到 grows 名单:窗占容器的一份份额(与 vassets/vtracks 互摊,地板由
+    // DOCK_GROW_MIN_H 兜着),媒体在窗给的空间里信箱式 contain —— 宽高两个方向都 fit,
+    // 且**媒体永远不改变窗的大小**(画面区 flex:1 + 绝对定位媒体,见 Inspector.tsx)。
+    // 教训各半:不进 grows → 窗按内容定高,竖版媒体把列撑到六百多像素、挤走邻居;
+    // 区域跟媒体比例走 → 同样的事。唯一自洽的口径:窗吃份额、媒体贴进去。
+    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'vinspector',
     top: 'toolbar',
     // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
     // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
@@ -148,7 +154,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     columnW: COLUMN_W,
     // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里，Assets / Tracks 是普通成员
     // （默认窗，不靠任何切换逻辑出现）。
-    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks'],
+    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector'],
     rightW: RIGHT_W,
     // The size a NEW block opens at — asked per unit and per axis, because which axis the block will be
     // measured on is decided by the side it was dropped on (under a block it is a height, beside one it
@@ -158,6 +164,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
       if (isDoc(id)) return axis === 'v' ? DOC_BLOCK_H : DOC_BLOCK_W;
       if (id === 'vtracks') return axis === 'v' ? 320 : 900;
       if (id === 'vassets') return axis === 'v' ? 260 : PANEL_BLOCK_W;
+      if (id === 'vinspector') return axis === 'v' ? 300 : 460;
       return axis === 'v' ? PANEL_BLOCK_H : PANEL_BLOCK_W;
     },
   };
@@ -611,6 +618,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setDockState(next);
     if (persist) { try { localStorage.setItem(DOCK_STORE, JSON.stringify(next)); } catch { /* in-memory only */ } }
   }, []);
+  // 把一扇面板**切到前台**:折叠的开回来(sections),tab 组/块选中项拨到它(revealDoc 对任意
+  // 单元通用,浮窗原样 —— 已经看得见)。Assets 卡片双击"自动切出 Inspector"走这条。
+  const revealPanel = useCallback((id: UnitId) => {
+    setFold(id, true);
+    applyDock(revealDoc(dockRef.current, id));
+  }, [applyDock, setFold]);
   // 模式切换不动树：vtracks / vassets 本来就是默认提供的窗（起手树 / fitLayout 补缺都保证它们在）。
   // 切换只换 canvas 格的正文 —— 画布 ↔ 播放器 —— Tracks / Assets 与其它每一扇窗原地不动。
   // 模式同时是**工程自己的属性**（随 .cud 走）：写进活跃文档的桶并置脏，下一次落盘就带进
@@ -669,6 +682,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [vidSeek] = useState(() => createSeekCoalescer(vidTransport));
   const [vidPlaying, setVidPlaying] = useState(false);
   const [vidPps, setVidPps] = useState(60);
+  // ── Inspector 的选中 ── Assets 窗点卡片产生,Inspector 窗照它放大看(图/音/视频都收,
+  // 视频与音频用自己那条独立播放头,与主 transport 互不相识)。切换/关闭文档时清空:
+  // 选中指向的是**那一份工程/那一次清单**里的卡,文档换了它就什么也不是了。
+  const [vidInspect, setVidInspect] = useState<InspectSel | null>(null);
+  useEffect(() => { setVidInspect(null); }, [blendDocs.activeUid]);
   // ── solo / mute ── 正身在**工程**里（VidProject.soloAudioIds / soloVideoIds / muteIds），
   // 这里只是包成 Set 给两扇窗用：切换时写回工程、随 .cud 落盘，刷新 / 重开文档后还亮着。
   // solo 音频/视频分开（一边亮不影响另一边）；mute 所有轨类型共用一套。删轨时 removeTrack
@@ -3144,7 +3162,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     onVGenCudOpen={path => { void openVgenCud(path); }} />,
               vassets: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
-                : <VidAssets vid={vidCtl} />,
+                : <VidAssets vid={vidCtl} sel={vidInspect?.key ?? null} onSel={setVidInspect}
+                    onActivate={() => revealPanel('vinspector')} />,
+              // Inspector:放大看 Assets 里选中的那一件(图/音/视频)。与 vassets 同一道文档闸 ——
+              // 没有工程就没有资产可挑,选中态也随文档切换被清掉(见上方 effect)。
+              vinspector: blendDocs.activeUid === null
+                ? <div style={styles.vidVoid}>No project open — inspect assets from the Assets window.</div>
+                : <VidInspector sel={vidInspect} />,
               context: (<>
                 <div style={styles.dockCard}>
                   <div style={styles.contextPreviewWrap}>

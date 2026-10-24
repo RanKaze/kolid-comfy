@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { InspectSel } from './Inspector';
 import {
   type VidAsset, type VidController, fmtTime, isAudioName, isVideoName, addAsset, newVidId, removeAsset,
 } from './model';
@@ -308,8 +309,8 @@ const ClipIcon = () => (
 );
 
 /** 资产卡片的唯一长相（Assets 窗在用；绑帧弹窗等挑选场景也复用它 —— 选中态用 selected，
- *  整卡可点用 onClick，都不给就是窗里那张默认卡）。 */
-export const Card: React.FC<{ it: CardItem; selected?: boolean; onClick?: () => void }> = ({ it, selected, onClick }) => {
+ *  整卡可点用 onClick,双击用 onDoubleClick,都不给就是窗里那张默认卡）。 */
+export const Card: React.FC<{ it: CardItem; selected?: boolean; onClick?: () => void; onDoubleClick?: () => void }> = ({ it, selected, onClick, onDoubleClick }) => {
   const poster = useCardThumb(it.kind, it.src, it.poster);
   const [over, setOver] = useState(false);
   const badge = it.byteFrom ? BYTE_BADGE[it.byteFrom] : null;
@@ -317,6 +318,7 @@ export const Card: React.FC<{ it: CardItem; selected?: boolean; onClick?: () => 
     <div
       draggable={!!it.drag}
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
       onDragStart={e => {
         if (!it.drag) return;
         for (const k of Object.keys(it.drag)) {
@@ -383,7 +385,7 @@ const selStyle: React.CSSProperties = {
   outline: 'none', cursor: 'pointer', minWidth: 0,
 };
 
-export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
+export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSel?: (s: InspectSel | null) => void; onActivate?: () => void }> = ({ vid, sel, onSel, onActivate }) => {
   const { project: p } = vid;
   const [over, setOver] = useState(false);
   const [scope, setScope] = useState<Scope>('all');
@@ -401,6 +403,18 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
   const [extTick, setExtTick] = useState(assetsTick());
   useEffect(() => subscribeAssets(() => setExtTick(assetsTick())), []);
   const fileRef = useRef<HTMLInputElement | null>(null);
+
+  // ── 选中态 → Inspector ── 点卡片选中(再点同一张不切换),Inspector 窗照这份载荷放大看。
+  // 选中的卡被删掉/仓库条目消失 → 撤选。判**全量**两份列表(工程资产 + 仓库),与 scope/类型
+  // 过滤无关:过滤只是"这档里看不见",不是"不在了"。
+  useEffect(() => {
+    if (!sel) return;
+    const keys = new Set<string>([
+      ...p.assets.map(a => 'p:' + a.id),
+      ...(store ?? []).map(s => 's:' + (s.hash || s.name)),
+    ]);
+    if (!keys.has(sel)) onSel?.(null);
+  }, [sel, p.assets, store, onSel]);
 
   // ── 缺失 / relink（A5）─────────────────────────────────────────────────────────────────────
   // `vid.missing` 是宿主问过仓库的结论（工程引用的哈希里没字节的那些）。卡片挂 MISSING，
@@ -720,6 +734,15 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
           return (
             <Card
               key={'p:' + a.id}
+              selected={sel === 'p:' + a.id}
+              onDoubleClick={onActivate}
+              onClick={onSel ? () => onSel({
+                key: 'p:' + a.id, name: a.name, kind: k,
+                // 播放优先仓库地址(同一份字节,比 src 里的 objectURL 靠得住);缺字节退回 src。
+                src: a.asset && !miss ? '/api/asset_media/' + encodeURIComponent(a.asset) : a.src,
+                duration: a.duration, hasAudio: img ? null : a.hasAudio,
+                origin: a.origin, hash: a.asset,
+              }) : undefined}
               it={{
                 name: a.name, kind: k, src: a.src, duration: a.duration, hasAudio: img ? null : a.hasAudio,
                 byteFrom: miss ? 'missing' : 'store', origin: a.origin, usedBy: usedBy(a.src),
@@ -788,6 +811,15 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
           return (
             <Card
               key={'s:' + id}
+              selected={sel === 's:' + id}
+              onDoubleClick={onActivate}
+              onClick={onSel ? () => onSel({
+                key: 's:' + id, name: label, kind: s.kind,
+                src: s.kind === 'image' ? s.url : play,
+                duration: s.duration, hasAudio: s.hasAudio,
+                origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
+                hash: s.hash, size: s.size,
+              }) : undefined}
               it={{
                 name: label, kind: s.kind, src: s.kind === 'image' ? s.url : play, duration: s.duration, hasAudio: s.hasAudio,
                 poster: s.kind === 'image' ? (s.thumb || s.url) : null,

@@ -69,7 +69,9 @@ const sbKnobStyle = (side: 'l' | 'r'): React.CSSProperties => ({
 });
 // 四类轨同一高度：视频轨不再比音频 / Layer / process 高出一截，横向扫过去是一条齐线。
 const TRACK_H: Record<'video' | 'audio' | 'layer' | 'process', number> = { video: 46, audio: 46, layer: 46, process: 46 };
-const STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+// 末尾两档（10/20 分钟）给超长工程的全景缩放：50 分钟塞进一屏时 pps ≈ 0.3，300s 步长只剩
+// 九十来像素，再长就挤破 64px 的下限、刻度文字叠在一起。
+const STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200];
 // 吸附排除集里的"空集"：播放头 scrub / 入出点拖动每帧都要一个，共用一个常量，不每帧 new。
 const EMPTY_IDS: ReadonlySet<string> = new Set<string>();
 // 复制 / 粘贴的剪贴板，**按文档分桶**：Video 工程是每份文档一份 —— 粘进别的文档的段既没有
@@ -239,6 +241,10 @@ export const VidTimeline: React.FC<{
   // 订阅放在时间线这一层：一条队只敲一次重渲，不按片段各订一遍。
   const procQueue = useSyncExternalStore(subscribeProcQueue, getProcQueue);
   const dur = vidDuration(p);
+  // 铺满口径的"全长"：片段尽头之外还要盖住 range 出点 —— 出点可以比最后一枚片段更靠右
+  // （片段删掉/改短之后 range 仍留着）。内容宽、Fit、缩放下限都按它算，底部滚动手柄才
+  // 缩得到"range 两头都看得见"。
+  const span = Math.max(dur, p.outPoint > p.inPoint ? p.outPoint : 0);
   // 生成器段的接缝（可连的两两一对）：接缝徽章与 Ctrl 点击都照这份表来，按轨过滤后各画各的。
   const seams = vgenSeamsOf(p);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -903,10 +909,10 @@ export const VidTimeline: React.FC<{
 
   // ── 视口度量 ── 自定义横向滚动条需要滚动区/条子的宽度与 scrollLeft。
   const trackRef = useRef<HTMLDivElement | null>(null);
-  // 内容的宽度：工程时长再留 10s 余量，但**永远不少于可视区** —— 轨道是无限延伸的画布，
-  // 不能"到 0:04 就断掉、右边一片空"。窗口一变宽（拖分界线/全屏）这条跟着重算。
+  // 内容的宽度：全长（含 range 出点）再留 10s 余量，但**永远不少于可视区** —— 轨道是
+  // 无限延伸的画布，不能"到 0:04 就断掉、右边一片空"。窗口一变宽（拖分界线/全屏）这条跟着重算。
   const [viewW, setViewW] = useState(0);
-  const contentW = Math.max((dur + 10) * pps, viewW, 640);
+  const contentW = Math.max((span + 10) * pps, viewW, 640);
   const [trackW, setTrackW] = useState(0);
   const [scrollX, setScrollX] = useState(0);
   useEffect(() => {
@@ -924,14 +930,22 @@ export const VidTimeline: React.FC<{
 
   // ── Fit ── 整段时间线正好铺满可视 lane（左右留一点余量）。
   const userZoomedRef = useRef(false);                       // 用户手动缩放过 → 停止自动 Fit
-  const pendingAnchorRef = useRef<{ t: number; laneV: number } | null>(null);
+  const pendingAnchorRef = useRef<{ t: number; off: number } | null>(null);
+  // pps 下限不是固定的 6：50 分钟的工程按 6px/s 铺开近三万像素，视口永远装不下，滚动手柄
+  // 拖到最宽也看不到 range 两头。下限 = min(6, 把全长铺进 lane 的 pps)：短工程维持老下限 6
+  // 不变，长工程随"铺满"一起下调 —— lane 再窄，也总允许缩到整条时间线（含 range）正好进视野；
+  // 上限 480 不变。
+  const ppsFloor = (laneW: number, full: number) => Math.min(6, Math.max(0.05, laneW / Math.max(full + 10, 1)));
   const fitZoom = useCallback(() => {
     const sc = scrollRef.current;
     if (!sc) return;
-    const d = vidDuration(vid.project);
+    const pr = vid.project;
+    // Fit 的全长也含 range 出点：要一眼看到入/出两头，而不只是片段尽头。
+    const d = Math.max(vidDuration(pr), pr.outPoint > pr.inPoint ? pr.outPoint : 0);
     if (d <= 0) return;
-    const w = Math.max(sc.clientWidth - HEADER_W - 24, 120);
-    vid.setPps(Math.max(6, Math.min(480, w / d)));
+    const laneW = Math.max(sc.clientWidth - HEADER_W, 1);
+    const w = Math.max(laneW - 24, 120);
+    vid.setPps(Math.max(ppsFloor(laneW, d), Math.min(480, w / d)));
     userZoomedRef.current = false;
     sc.scrollLeft = 0;
   }, [vid]);
@@ -945,23 +959,28 @@ export const VidTimeline: React.FC<{
     if (!hasView) return;      // 还没量到真实宽度：兜底值不铺，等量出来这一趟再铺
     if (userZoomedRef.current || dragRef.current || scrubRef.current) return;
     fitZoom();
-  }, [dur, fitZoom, hasView]);
+  }, [dur, span, fitZoom, hasView]);
 
-  // ── 缩放 ── 以可视区中心的时间点为锚，缩放前后画面中心不动。
+  // ── 缩放 ── 播放头在视野里就以它为锚（缩放围着"正在播的时刻"转，线不从画面上溜走）；
+  // 不在视野里退回老行为：锚可视区中心，缩放前后画面中心不动。
   const zoomBy = (f: number) => {
     const sc = scrollRef.current;
     if (!sc) return;
     const laneV = Math.max(sc.clientWidth - HEADER_W, 1);
-    pendingAnchorRef.current = { t: (sc.scrollLeft + laneV / 2) / vid.pps, laneV };
+    const tH = transport.get();
+    const offH = tH * vid.pps - sc.scrollLeft;   // 播放头在 lane 视口里的偏移（0..laneV = 看得见）
+    pendingAnchorRef.current = offH >= 0 && offH <= laneV
+      ? { t: tH, off: offH }
+      : { t: (sc.scrollLeft + laneV / 2) / vid.pps, off: laneV / 2 };
     userZoomedRef.current = true;
-    vid.setPps(Math.max(6, Math.min(480, vid.pps * f)));
+    vid.setPps(Math.max(ppsFloor(laneV, span), Math.min(480, vid.pps * f)));
   };
   useEffect(() => {
     const a = pendingAnchorRef.current;
     if (!a) return;
     pendingAnchorRef.current = null;
     const sc = scrollRef.current;
-    if (sc) sc.scrollLeft = Math.max(0, a.t * vid.pps - a.laneV / 2);
+    if (sc) sc.scrollLeft = Math.max(0, a.t * vid.pps - a.off);
   }, [pps, vid.pps]);
 
   // ── 自定义横向滚动条 ── 几何：thumb 宽 = 视口占比，位置 = scrollLeft 比例。
@@ -994,9 +1013,14 @@ export const VidTimeline: React.FC<{
     /** 按下时 lane 的可视宽。改宽时**用它**换算（别在 effect 里重新量）：改宽会让轨道变高，
      *  纵向滚动条一出现 clientWidth 就少十几像素，重量的那一份会把钉住的边缘推歪。 */
     laneV: number;
+    /** 按下时播放头的锚（t = 时刻，off = 播放头在 lane 视口里的偏移）：看得见就钉它 ——
+     *  改宽（缩放）始终围着"正在播的时刻"转，线不从画面上溜走；不在视野里为 null，
+     *  退回钉对侧边缘的老行为。 */
+    hA: { t: number; off: number } | null;
   } | null>(null);
-  // 改宽后要落回去的 scrollLeft：按**对侧边缘的时刻**重算（等 pps 生效那一趟再写）。
-  const pendingSbRef = useRef<{ t: number; edge: 'l' | 'r'; laneV: number } | null>(null);
+  // 改宽后要落回去的 scrollLeft：锚一个（lane 坐标的）时刻 t 和它在视口里的偏移 off，
+  // pps 生效那一趟再写 scrollLeft = t·pps − off。
+  const pendingSbRef = useRef<{ t: number; off: number } | null>(null);
 
   // 落 scrollLeft **必须在 paint 之前**（useLayoutEffect，不是 useEffect）：
   // thumb 的宽来自 pps（这一帧就变了），位置来自 scrollX（要等滚动事件）。若滚动改在 paint 之后落，
@@ -1009,7 +1033,7 @@ export const VidTimeline: React.FC<{
     const sc = scrollRef.current;
     if (!sc) return;
     pendingSbRef.current = null;
-    const target = a.edge === 'l' ? a.t * vid.pps : a.t * vid.pps - a.laneV;
+    const target = a.t * vid.pps - a.off;
     const maxS = Math.max(sc.scrollWidth - sc.clientWidth, 0);
     sc.scrollLeft = Math.max(0, Math.min(maxS, target));
     setScrollX(sc.scrollLeft);        // 别等 scroll 事件：它比 paint 晚
@@ -1026,9 +1050,12 @@ export const VidTimeline: React.FC<{
       userZoomedRef.current = true;            // 手动改过视口占比 → 不再自动 Fit
       const laneV = Math.max(sc.clientWidth - HEADER_W, 1);
       const p = Math.max(vid.pps, 0.001);
+      const tH = transport.get();
+      const offH = tH * p - sc.scrollLeft;     // 播放头在 lane 视口里的偏移（0..laneV = 看得见）
       sbDrag.current = {
         mode: handle, x0: e.clientX, s0: sc.scrollLeft, w0: sbThumbW,
         tL: sc.scrollLeft / p, tR: (sc.scrollLeft + laneV) / p, laneV,
+        hA: offH >= 0 && offH <= laneV ? { t: tH, off: offH } : null,
       };
       return;
     }
@@ -1045,6 +1072,7 @@ export const VidTimeline: React.FC<{
     sbDrag.current = {
       mode: 'move', x0: e.clientX, s0: sc.scrollLeft, w0: sbThumbW,
       tL: sc.scrollLeft / p, tR: (sc.scrollLeft + laneV) / p, laneV,
+      hA: null,                               // 平移不是缩放：播放头跟着画面走，不钉
     };
   };
   const onSbMove = (e: React.PointerEvent) => {
@@ -1059,18 +1087,21 @@ export const VidTimeline: React.FC<{
     if (trackW <= 0) return;
     // 把手走过的像素 = thumb 宽的变化量。反解 pps：
     //   thumbW = trackW · laneViewW / laneContentW  ⇒  laneContentW = trackW · laneViewW / thumbW
-    //   laneContentW = contentW − HEADER_W = (dur + 10)·pps − HEADER_W
+    //   laneContentW = contentW − HEADER_W = (span + 10)·pps − HEADER_W
     const laneV = Math.max(sc.clientWidth - HEADER_W, 1);
     const want = Math.max(SB_THUMB_MIN, Math.min(trackW, d.mode === 'r' ? d.w0 + dx : d.w0 - dx));
     const laneWant = trackW * laneV / want;
-    const ppsWant = Math.max(6, Math.min(480, (laneWant + HEADER_W) / Math.max(dur + 10, 0.1)));
+    const ppsWant = Math.max(ppsFloor(laneV, span), Math.min(480, (laneWant + HEADER_W) / Math.max(span + 10, 0.1)));
+    // 播放头看得见就钉它（缩放围着"正在播的时刻"转，线不从画面上溜走）；看不见退回老行为：
     // 右把手动 ⇒ 左边缘的时刻钉住（往后看更多）；左把手动 ⇒ 右边缘钉住。
-    pendingSbRef.current = d.mode === 'r' ? { t: d.tL, edge: 'l', laneV: d.laneV } : { t: d.tR, edge: 'r', laneV: d.laneV };
+    pendingSbRef.current = d.hA
+      ? { t: d.hA.t, off: d.hA.off }
+      : d.mode === 'r' ? { t: d.tL, off: 0 } : { t: d.tR, off: d.laneV };
     if (Math.abs(ppsWant - vid.pps) > 1e-4) { vid.setPps(ppsWant); return; }
-    // pps 已经顶到 6 / 480：不会再触发上面那个 effect，这一趟就地落。
+    // pps 已经顶到下限 / 480：不会再触发上面那个 effect，这一趟就地落。
     const a = pendingSbRef.current;
     pendingSbRef.current = null;
-    const target = a.edge === 'l' ? a.t * vid.pps : a.t * vid.pps - a.laneV;
+    const target = a.t * vid.pps - a.off;
     const maxS = Math.max(sc.scrollWidth - sc.clientWidth, 0);
     sc.scrollLeft = Math.max(0, Math.min(maxS, target));
     setScrollX(sc.scrollLeft);
