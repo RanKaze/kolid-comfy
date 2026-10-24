@@ -311,6 +311,20 @@ python tests/golden/compare.py tests/golden/vid temporary/_golden_gl --edge --ma
 同一条规矩对预览也成立：合成用哪一帧必须由 t 决定，不许拿"视频顺手停在的那帧"当答案 ——
 这正是老架构"三套时钟"的病根。
 
+### 5.6 P2 实测：GL 后端与 2D 后端（`KCompositor` 的两个 backend）
+
+同一个合成器，`backend:'gl'`（GL 预乘混合）对 `backend:'2d'` 的基准：
+
+| case | 边缘外 maxdiff | 边缘带内差异 |
+|---|---|---|
+| `base-normal`（source） | **0** | 0 |
+| `after-layer`（source） | **0** | 0 |
+| `layer-decal-blur`（layers） | **1** | **0** |
+| `layer-late`（layers） | **1** | **0** |
+
+比 §5.4 的预判还好：原本允许"边缘带 1px 覆盖差"，实际连边缘带内都没有 —— 差的那 1 LSB 只在
+层的缩放采样上（预乘往返）。**P2 的验收因此收紧为 `--edge --maxdiff=1`。**
+
 **任何改动先在这四个用例上按 §5.3 的口径比。**
 
 ---
@@ -335,12 +349,27 @@ python tests/golden/compare.py tests/golden/vid temporary/_golden_gl --edge --ma
 |---|---|---|
 | **P0** ✅ | 本文 + golden 四例 + 生成/比对工具（`tests/golden/`） | 四例两次生成 sha 相同；`compare.py` 全 0 |
 | **P1** | plan 编译器（`.cud → plan`）+ 新 Compositor 接静态 plan | 编译器过 `tests/test_render_plan.py`（含与 golden raw 的交叉核对）；新 Compositor 与 golden **maxdiff 0**（仍是 2D 采样，§5.3 第一行） |
-| **P2** | FrameSource 接视频纹理 + Clock；单画布；**2D 叠加换成 GL 混合（预乘）** | 与 P1 输出 **`--edge --maxdiff=2` 过**（§5.4）；换段/换套/进出段零 >25ms 长任务；台上无空帧 |
+| **P2** | FrameSource（✅）+ 帧由 t 唯一决定（✅）+ **GL 预乘混合（✅）** + 单画布（待做） | 四例 `--edge --maxdiff=1` 过（§5.6）；换段/换套零 >25ms 长任务；台上无空帧 |
 | **P3** | 画笔直接写图层纹理 | 播放中编辑下一帧可见；暂停编辑即时；不产生第二次 draw 路径 |
 | **P4** | 删旧路径（双面、帧包、纠偏、hold/sync） | grep 不到旧符号；DOM 只有一块可见画布 |
 | **P5** | 导出 = 同一渲染器 + 编码器 | 导出帧 vs 预览帧 **≤1 LSB**；后端不出现像素算法 |
 
 ---
+
+## 7.1 P3 执行清单（下一轮照单做）
+
+顺序不能颠倒：**先让编辑有地方落笔，才能删掉第二块画布**。
+
+| 步 | 动作 | 判据 |
+|---|---|---|
+| **P3.1 编辑写纹理** | 笔刷/变换的目标从 `blendCtx`（2D）改成图层的 GL 纹理；`fxResolved` 的出口从"返回 canvas"改成"返回纹理句柄"（特效链已经在 GL 里，只是最后一步 readback 了）。容量上先只改**工作层像素**（`l.img`），decal/mask 暂留 canvas 走上传。 | 编辑一笔 → 下一帧合成里就能看到（不再等 render 整画布） |
+| **P3.2 唯一画布** | 新 `<canvas id="stageCanvas">`（webgl2，尺寸 = grid × dpr），`KCompositor` 直接渲染到它；把 context image 用 `readbackToCanvas` 单独喂给 Generation 读的那块。 | §4 的 I1 从 3 → 0；屏幕上只剩一块画布 |
+| **P3.3 删旧显示机** | 删 `applyVidBaseMode` / `vidStageIsLive` / `vidStageSync` / `vidStageBlit` / `vidBasePaintNow` / `vidBasePaintTick` / `vidBaseHidden` / `vidBaseStamp`；`blendCanvas` 退成"离屏上下文图"，不再参与显示。 | grep 不到这些符号；`tests/guards.py` 的 I1 = 0 |
+| **P3.4 删 playing 分支** | `vidFrameFlush` 的 `active` 判据、`switchLayerSet(key, opts.playing)`、`EditPhase.showPlayLayer` 的 playing 传参、`blend-vid-frame` 的 `playing` 位 —— 都没有存在的理由了（编辑与播放同一条路径）。 | I3/I5 收口；`layer-set {key, playing}` 只剩 `{key}` |
+| **P3.5 验收** | 四例 `--edge --maxdiff=1`；播放中编辑下一帧可见；换段/换套零 >25ms；`python tests/guards.py` I1=0。 | 全绿才进 P4 |
+
+**为什么 P3.1 必须先做**：现在 `blendCanvas` 既是"笔刷落点"又是"台上那块的最坏替补"。
+如果先删显示机，编辑就没地方落笔，画面会立刻空；反过来先把笔刷接到纹理，第二块画布就自然多余。
 
 ## 8. 未决（P1 之前必须定，不定就按括号里的默认走）
 

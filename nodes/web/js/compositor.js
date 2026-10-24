@@ -153,6 +153,115 @@ const KCompositor = (function () {
         ctx.restore();
     }
 
+    // ── GL 混合（P2 第二步）────────────────────────────────────────────────────────────────
+    // 目的：层的叠加不再走 canvas 2D，而是在**一个** GL 上下文里按预乘直接混（ONE / ONE_MINUS_SRC_ALPHA）。
+    // 取帧/折叠仍由上面的代码出 canvas（fx 链还是那条），这里只负责"把面按矩阵贴上去、按序混"。
+    // 与 2D 的差异只允许出现在几何边缘 1px（实测边缘外 maxdiff 2，见 tests/gl_equiv 与契约 §5.4）。
+    const VS = `#version 300 es
+in vec2 aPos; in vec2 aUV; out vec2 vUV;
+uniform vec2 uRes; uniform vec2 uC; uniform vec2 uSize; uniform float uRot; uniform int uFill;
+void main() {
+  if (uFill == 1) {                      // 铺满（source 形态）：quad 直接覆盖整幅
+    vUV = aPos + 0.5;
+    gl_Position = vec4(aPos.x * 2.0, -aPos.y * 2.0, 0.0, 1.0);
+    return;
+  }
+  vec2 p = aPos * uSize;                 // 以图层尺寸为单位，中心在原点
+  float s = sin(uRot), c = cos(uRot);
+  vec2 r = vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+  vec2 px = uC + r;                      // 画布像素坐标
+  gl_Position = vec4(px.x / uRes.x * 2.0 - 1.0, 1.0 - px.y / uRes.y * 2.0, 0.0, 1.0);
+  vUV = aUV;
+}`;
+    const FS = `#version 300 es
+precision highp float;
+in vec2 vUV; out vec4 Frag; uniform sampler2D uSrc;
+void main() { Frag = texture(uSrc, vUV); }`;
+
+    // 每个画布一份 GL 状态。传 target 时**直接渲染到那块画布**（P3.2 的唯一画布就靠这条），
+    // 不传就是内部那块离屏。preserveDrawingBuffer 只为了导出/截图能取到像素。
+    const glStates = new WeakMap();
+    const glOffscreen = { c: null };
+    function glInit(target) {
+        const c = target || (glOffscreen.c || (glOffscreen.c = document.createElement('canvas')));
+        if (glStates.has(c)) return glStates.get(c);
+        const gl = c.getContext('webgl2', { premultipliedAlpha: true, antialias: false, alpha: true,
+                                            preserveDrawingBuffer: true });
+        if (!gl) { glStates.set(c, false); return false; }
+        const sh = (t, src) => {
+            const o = gl.createShader(t); gl.shaderSource(o, src); gl.compileShader(o);
+            if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o));
+            return o;
+        };
+        const prog = gl.createProgram();
+        gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+        gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { glStates.set(c, false); return false; }
+        gl.useProgram(prog);
+        // 两种几何都用同一组 6 个顶点（uv 与 pos 同构，单位方块的四个角）
+        const quad = new Float32Array([
+            -0.5, -0.5, 0, 0, 0.5, -0.5, 1, 0, 0.5, 0.5, 1, 1,
+            -0.5, -0.5, 0, 0, 0.5, 0.5, 1, 1, -0.5, 0.5, 0, 1,
+        ]);
+        const buf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+        const aPos = gl.getAttribLocation(prog, 'aPos'), aUV = gl.getAttribLocation(prog, 'aUV');
+        gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+        gl.enableVertexAttribArray(aUV); gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 16, 8);
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        const state = { c, gl, prog, buf, tex, loc: {
+            uRes: gl.getUniformLocation(prog, 'uRes'), uC: gl.getUniformLocation(prog, 'uC'),
+            uSize: gl.getUniformLocation(prog, 'uSize'), uRot: gl.getUniformLocation(prog, 'uRot'),
+            uFill: gl.getUniformLocation(prog, 'uFill'), uSrc: gl.getUniformLocation(prog, 'uSrc'),
+        } };
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);      // 预乘混合（与 canvas 2D 内部一致）
+        glStates.set(c, state);
+        return state;
+    }
+
+    /** items: [{ src, transform|null }]（自底向上；transform=null 表示铺满）。返回 GL 的 canvas。 */
+    function compositeGL(items, w, h, target) {
+        const st = glInit(target || null);
+        if (!st) return null;
+        const { c, gl, tex, loc } = st;
+        if (c.width !== w) c.width = w;
+        if (c.height !== h) c.height = h;
+        gl.viewport(0, 0, w, h);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.uniform2f(loc.uRes, w, h);
+        gl.uniform1i(loc.uSrc, 0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+        for (const it of items) {
+            if (!it || !it.src) continue;
+            try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, it.src); } catch (e) { continue; }
+            if (!it.transform) {
+                gl.uniform1i(loc.uFill, 1);
+            } else {
+                const tr = it.transform;
+                gl.uniform1i(loc.uFill, 0);
+                gl.uniform2f(loc.uC, (tr.cx === undefined ? 0.5 : tr.cx) * w,
+                                       (tr.cy === undefined ? 0.5 : tr.cy) * h);
+                gl.uniform2f(loc.uSize, (tr.w === undefined ? 1 : tr.w) * w,
+                                         (tr.h === undefined ? 1 : tr.h) * h);
+                gl.uniform1f(loc.uRot, tr.rotation || 0);
+            }
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+        gl.finish();
+        return c;
+    }
+
     /**
      * Frame(plan, t) → target（一块 canvas）。纯函数：同样的 (plan, t, 资源) 必得同样的像素。
      * `stack` 可以只要 'work'（默认）或 'guidance'（GuidanceFrame 是 work + guidance 叠在一起，
@@ -175,24 +284,67 @@ const KCompositor = (function () {
         // 形态（契约 §2.3.1）：source = 这一帧就是那条轨的视频帧（拉伸铺满，与 paintVidBase 一致）；
         // layers = 图层合成，底片不参与。两者互斥 —— 别把视频叠到图层下面。
         const fr = plan.frame || {};
+        const items = [];
+        const useGL = o.backend === 'gl';
         if (fr.mode === 'source') {
             const src = (fr.source && fr.source.trackId && api.frame) ? api.frame(fr.source.trackId, t) : null;
-            if (src) { try { ctx.drawImage(src, 0, 0, w, h); } catch (e) { /* 没解出来 */ } }
-            else api.notes.push('source frame missing: ' + ((fr.source || {}).trackId || '-'));
+            if (!src) {
+                api.notes.push('source frame missing: ' + ((fr.source || {}).trackId || '-'));
+                return cv;
+            }
+            items.push({ src, transform: null });          // 铺满（与 paintVidBase 的拉伸一致）
+        } else {
+            const want = o.stack || 'work';
+            const stack = (plan.layers || []).filter(pl => pl && pl.visible !== false && (pl.stack || 'work') === want);
+            // Stash 层的输入是"以下所有层的合成"。2D 路径上那就是目标画布（边画边攒）；
+            // GL 路径上目标要等全都贴完才画，所以另开一块 2D 累积画布——**只在这种工程里**才建。
+            const needAcc = useGL && stack.some(pl => pl.capture === 'below');
+            const acc = needAcc ? blank(w, h) : null;
+            const actx = acc ? acc.getContext('2d') : null;
+            for (const pl of stack) {
+                const below = pl.capture === 'below' ? (acc || cv) : null;
+                const src = foldLayer(pl, t, w, h, below);
+                if (!src) continue;
+                items.push({ src, transform: pl.transform });
+                if (useGL) { if (actx) drawTransformed(actx, src, pl.transform, w, h); }
+                else drawTransformed(ctx, src, pl.transform, w, h);
+            }
+            if (useGL) {
+                const g = compositeGL(items, w, h, o.glTarget || null);
+                if (g) {
+                    if (o.glTarget) return g;                  // 直出：那块画布本身就是结果
+                    ctx.drawImage(g, 0, 0); return cv;         // 内部离屏：拷一次
+                }
+                api.notes.push('gl unavailable, fell back to 2d');
+            }
             return cv;
         }
-        const want = o.stack || 'work';
-        for (const pl of plan.layers || []) {
-            if (!pl || pl.visible === false) continue;
-            if ((pl.stack || 'work') !== want) continue;
-            const src = foldLayer(pl, t, w, h, pl.capture === 'below' ? cv : null);
-            if (!src) continue;
-            drawTransformed(ctx, src, pl.transform, w, h);
+        if (useGL) {
+            const g = compositeGL(items, w, h, o.glTarget || null);
+            if (g) { if (o.glTarget) return g; ctx.drawImage(g, 0, 0); return cv; }
+            api.notes.push('gl unavailable, fell back to 2d');
+        }
+        for (const it of items) {
+            if (!it.transform) { try { ctx.drawImage(it.src, 0, 0, w, h); } catch (e) { /* skip */ } }
+            else drawTransformed(ctx, it.src, it.transform, w, h);
         }
         return cv;
     }
 
-    return { api, render, foldLayer, blank };
+    /**
+     * 直接渲染到一块**外部**画布（必须是 webgl2，且只被这里用）。
+     * 这是"唯一显示面"的技术入口：合成结果就是屏幕上那块画布，中间不再有一次全幅拷贝。
+     * `scratch` 是给 Stash 层用的 2D 累积面（只有含 stash 的工程才需要）。
+     */
+    function renderTo(canvas, plan, t, opts) {
+        const w = (plan.grid && plan.grid.w) | 0;
+        const h = (plan.grid && plan.grid.h) | 0;
+        if (!canvas || !w || !h) return null;
+        const scratch = blank(w, h);
+        return render(plan, t, scratch, Object.assign({}, opts, { backend: 'gl', glTarget: canvas }));
+    }
+
+    return { api, render, renderTo, foldLayer, blank };
 })();
 
 // 离线入口（探针/导出用）：不与现有渲染路径抢任何东西
