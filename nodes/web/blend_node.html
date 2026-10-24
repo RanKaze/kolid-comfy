@@ -16,7 +16,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* 底部那条动作条（Extra Prompt + 动作钮 + 图池条 + Cancel / 进度）整条搬进宿主的 Staging dock 之后，
    画布不再需要给它让出下边距 —— 两块视口都铺满整幅 #canvasArea。 */
 #viewport { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: default; }
-#blendCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: block; transform-origin: 0 0; will-change: transform; border-radius: 4px; box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 10px 40px rgba(0,0,0,0.45);
+/* P3.2: the ONE displayed surface. KCompositor composites the picture here (webgl2); the three
+   canvases below are offscreen buffers now — context image (#blendCanvas), guidance image
+   (#guidanceCanvas) and the base-frame staging face (#vidBaseCanvas) — and never take part in
+   display. Nothing may switch display/visibility between them again (invariant I1). */
+#stageCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: block; transform-origin: 0 0; will-change: transform; border-radius: 4px; box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 10px 40px rgba(0,0,0,0.45); pointer-events: none;
     /* The transparency checkerboard: two 45deg gradients with hard 25%/75% stops tile a 16px box
        into an 8px alternate of #1a1a1a / #242424. The host preview reproduces this in canvas 2D
        (paintCheckerboard) so a thumbnail never shows a flat backdrop — keep the two in sync. */
@@ -24,9 +28,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     background-image: linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%),
                       linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%);
     background-size: 16px 16px; background-position: 0 0, 8px 8px; }
-/* Video 底片：游标不在 Layer 段上时，画布的内容就是当前视频帧 —— 文档尺寸、原样铺满，
-   不套任何图层 transform。它压在最底下；底片态里把 blend / guidance 藏起来就能看见它。 */
-#vidBaseCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: none; transform-origin: 0 0; will-change: transform; border-radius: 4px; pointer-events: none; }
+/* 三块离屏缓冲：尺寸与视图变换仍由 JS 写（sizeCanvasElement / applyView），CSS 只保证它们不上台。 */
+#blendCanvas, #guidanceCanvas, #vidBaseCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: none; }
 /* 底片自己播：这一页挂一只同源的 <video> 播放同一个文件，宿主只报时刻 —— 抓帧/传帧那条路
    （每 1/6 秒一次整幅 readback + 跨窗 transfer）整个不见了。尺寸与视图变换跟 #vidBaseCanvas 同源
    （sizeCanvasElement / applyView 一并写），所以两者可以互换而画面不动一下。 */
@@ -37,8 +40,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* The Guidances stack is a DISPLAY layer, not part of the picture: #blendCanvas stays exactly the
    context image (working layers only) so every consumer of it — the run input, the Tag regions,
    Layer Context, Export PNG, the host preview — is guidance-free without a single special case.
-   The guidance pixels are painted here, stacked over the canvas under the same view transform. */
-#guidanceCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: block; transform-origin: 0 0; will-change: transform; pointer-events: none; border-radius: 4px; }
+   The guidance pixels are painted into #guidanceCanvas (offscreen since P3.2) and composited over
+   the work picture on #stageCanvas by the same view transform. */
 /* The transform box lives on its own screen-space layer so its handles stay visible
    (and grabbable) even when they fall outside the canvas bounds. */
 #overlayCanvas { position: absolute; left: 0; top: 0; pointer-events: none; }
@@ -363,6 +366,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <input type="file" id="modelFile" accept=".fbx,.glb,.gltf,.obj" multiple hidden>
         <div id="canvasArea">
         <div id="viewport">
+            <canvas id="stageCanvas" data-visible-stage></canvas>
             <canvas id="vidBaseCanvas"></canvas>
             <video id="vidBaseVideo" muted playsinline preload="auto" aria-hidden="true"></video>
             <div id="vidSrcStage" aria-hidden="true"></div>
@@ -746,6 +750,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script>
 const canvasArea = document.getElementById('canvasArea');
 const viewport = document.getElementById('viewport');
+// P3.2：唯一显示面。`data-visible-stage` 是它的身份 —— 全页只有一块画布带这个属性。
+const stageCanvas = document.getElementById('stageCanvas');
+// 这台 webgl2 上下文只做一件事：把 items 合成到屏幕上（KCompositor.present）。
+// 取不到就退回 2D（同一块 canvas 还能拿 2d 上下文，因为 webgl2 那次返回了 null）。
+const stageGL = (() => {
+    try {
+        return !!stageCanvas.getContext('webgl2', { alpha: true, antialias: false, depth: false,
+            stencil: false, premultipliedAlpha: true, preserveDrawingBuffer: true });
+    } catch (e) { return false; }
+})();
+const stageCtx2d = stageGL ? null : stageCanvas.getContext('2d');
 const vidBaseCanvas = document.getElementById('vidBaseCanvas');
 const vidBaseCtx = vidBaseCanvas.getContext('2d');
 const vidBaseVideo = document.getElementById('vidBaseVideo');
@@ -946,6 +961,12 @@ let vidBaseSrc = '';           // #vidBaseVideo 上挂的源（哈希值，不�
 let vidBaseWant = 0;           // 这一包要的源内时刻（秒）
 let vidBasePlaying = false;    // 宿主在不在播
 let vidBaseHidden = false;     // 宿主说"这一段被 Layer 合成压着"：不上台，但继续跟着播
+// P3.2：唯一显示面此刻装的是哪一样 —— 'live'（活画布这套）/ 'base'（底片帧）/ 'composite'
+// （别段或播放中的合成图副本）。空串 = 缓冲刚被清掉，下一次 stageSync 必须重铺。
+let stageMode = '';
+let stageBaseStamp = '';       // 底片帧上台时用的时间戳（没变就不重传）
+let stageCompositeSrc = null;  // 合成图副本（vidFrameFlush 交给 stage 的那张面）
+let guidanceHasInk = false;    // 这一趟 guidance 栈里有没有真的落下像素（没有就不往 stage 上叠）
 let overlayDpr = 1;
 let viewDrag = null;           // {kind:'zoom'|'rotate'|'pan', sign, startX, startY, startView, anchorDoc, centerDoc, moved}
 let keySpace = false, keyAlt = false, keyCtrl = false, keyShift = false;
@@ -957,6 +978,10 @@ let lastScreen = null, lastDoc = null;
 
 let isDrawing = false;
 let isErasing = false;
+// P3.1: set while this stroke is landing in the layer's GPU decal texture instead of the 2D paint
+// surface. `{ layer }` = the stroke is live; null = the ordinary 2D path (mask target, eraser
+// fallback, Stash, a decal that is not the last step, shared face, or no WebGL2).
+let gpuStroke = null;
 // Eyedropper: Alt + left button in paint mode samples what is on the canvas; the colour is
 // applied on release, while holding just previews it (swatch + hex + rgb next to the cursor).
 let picking = null;            // {doc:{x,y}, clientX, clientY, rgb:[r,g,b]|null}
@@ -1054,6 +1079,11 @@ const strokeCtx = strokeCanvas.getContext('2d');
 // decal layer. See livePreviewStroke's source-in tinting.
 const strokeTintCanvas = document.createElement('canvas');
 const strokeTintCtx = strokeTintCanvas.getContext('2d');
+// P3.1: the finished ink (tinted + Color alpha + selection) as one full-grid canvas. The old path
+// drawImage'd it straight onto the paint surface; the texture path uploads it as-is, so the two
+// paths must bake exactly the same pixels here.
+const strokeInkCanvas = document.createElement('canvas');
+const strokeInkCtx = strokeInkCanvas.getContext('2d');
 const snapshotCanvas = document.createElement('canvas');
 const snapshotCtx = snapshotCanvas.getContext('2d');
 // Scratch for the layer Generate path. It must NOT be a surface the render hands out (layerSource's
@@ -1189,7 +1219,7 @@ function hasLayerImage(l) { return !!(l && l.img && l.src); }
 function sizeCanvasElement() {
     // The guidance overlay is the same doc-space bitmap as the composite: one size for both, so a
     // canvas resize can never leave the two out of register.
-    for (const c of [blendCanvas, guidanceCanvas, vidBaseCanvas]) {
+    for (const c of [stageCanvas, blendCanvas, guidanceCanvas, vidBaseCanvas]) {
         c.width = canvasW;
         c.height = canvasH;
         c.style.width = canvasW + 'px';
@@ -1200,6 +1230,7 @@ function sizeCanvasElement() {
     vidBaseVideo.style.height = canvasH + 'px';
     // 重设位图尺寸会清空内容：清 stamp，作画循环下一帧会按新尺寸重铺。
     vidBaseStamp = '';
+    stageMode = '';                 // stage 的缓冲也刚被清掉：下一次 stageSync 必须重铺
     if (vidBaseOn) paintVidBase();
 }
 
@@ -2437,20 +2468,16 @@ function applyView() {
     // translate · rotate · scale, applied to a 1:1 (doc px = CSS px) canvas element.
     // modOrigin 是 Canvas Modify 预览期的 doc 原点偏移（左/上边拖拽），随视图一起旋转/缩放。
     const mo = linMap(modOrigin);
-    // The guidance overlay rides the exact same transform — it is stacked over the canvas, not
-    // over the viewport, so panning/zooming/rotating keeps the two in register.
+    // P3.2：视图变换只写在**唯一显示面**上。三块离屏缓冲（context image / guidance / 底片暂存）
+    // 都是文档像素，不参与屏幕摆放。
     const viewTransform = `translate(${view.panX + mo.x}px, ${view.panY + mo.y}px) rotate(${view.rotation}rad) scale(${view.zoom * view.flipX}, ${view.zoom})`;
-    blendCanvas.style.transform = viewTransform;
-    guidanceCanvas.style.transform = viewTransform;
-    // 底片跟着同一套视图变换：缩放/平移/旋转/翻转都照常，只是它自己不带图层 transform。
-    vidBaseCanvas.style.transform = viewTransform;
-    vidBaseVideo.style.transform = viewTransform;
+    stageCanvas.style.transform = viewTransform;
     // Keep the transparency checkerboard at a constant size on screen.
     const cb = 16 / view.zoom;
-    if (blendCanvas._cb !== cb) {
-        blendCanvas._cb = cb;
-        blendCanvas.style.backgroundSize = `${cb}px ${cb}px, ${cb}px ${cb}px`;
-        blendCanvas.style.backgroundPosition = `0 0, ${cb / 2}px ${cb / 2}px`;
+    if (stageCanvas._cb !== cb) {
+        stageCanvas._cb = cb;
+        stageCanvas.style.backgroundSize = `${cb}px ${cb}px, ${cb}px ${cb}px`;
+        stageCanvas.style.backgroundPosition = `0 0, ${cb / 2}px ${cb / 2}px`;
     }
     updateBrushCursorSize();
     drawOverlay();
@@ -2751,6 +2778,11 @@ function layerSource(l) {
 function drawLayer(l, target) {
     const ctx = target || blendCtx;
     if (!l.visible || !l.img) return;
+    // P3.1: while a stroke owns this layer's GPU texture, the display reads that texture (already
+    // decal-over-base, no fold) instead of folding the untouched 2D surface again. Everywhere else
+    // `layerSource` stays the one authoritative picture (thumbs / Generate / history read it).
+    const live = (typeof fxPaintPresent === 'function') ? fxPaintPresent(l) : null;
+    const src = live || layerSource(l);
     if (isRasterLayer(l)) {
         // Raster pixels ARE canvas pixels — at rest they are drawn 1:1. The only exception is a
         // live drag: the content box the press promoted is carried to the box the drag holds, so
@@ -2758,11 +2790,11 @@ function drawLayer(l, target) {
         // rasterDragAffine). Nothing is lost by dragging past the canvas edge — the buffer still
         // holds those pixels until the bake clips them, which is what Enter is for.
         const frame = rasterLiveFrame(l);
-        if (!frame) { ctx.drawImage(layerSource(l), 0, 0); return; }
+        if (!frame) { ctx.drawImage(src, 0, 0); return; }
         const m = rasterDragAffine(frame.from, frame.to, canvasW, canvasH);
         ctx.save();
         ctx.transform(m.a, m.b, m.c, m.d, m.e, m.f);
-        ctx.drawImage(layerSource(l), 0, 0);
+        ctx.drawImage(src, 0, 0);
         ctx.restore();
         return;
     }
@@ -2774,7 +2806,7 @@ function drawLayer(l, target) {
     ctx.save();
     ctx.translate(tr.cx * canvasW, tr.cy * canvasH);
     ctx.rotate(tr.rotation);
-    ctx.drawImage(layerSource(l), -tw / 2, -th / 2, tw, th);
+    ctx.drawImage(src, -tw / 2, -th / 2, tw, th);
     ctx.restore();
 }
 
@@ -3985,17 +4017,71 @@ function pushPreview() {
     window.parent.postMessage({ type: 'blend-preview', image, width: canvasW, height: canvasH }, '*');
 }
 
+// 每层一张**自己的**临时面（笔刷预览的抄写 / 栅格拖动的烘焙）。按图层对象做键，图层没了它跟着回收。
+//   · 笔刷预览面（fxgl.canvas）是一块**共享画布**：每调一次 fxPaintPresent 就被下一层覆盖。items 是
+//     先攒后传的，所以预览面必须当场抄一份 —— 抄出来是直通 alpha 的 2D 面。
+//   · 栅格拖动要的是完整仿射，而 item 只认平移/旋转/缩放，所以那一帧烘成一张面。多选拖多张也不会串。
+const layerScratch = new WeakMap();
+function scratchFor(l, key, w, h) {
+    let o = layerScratch.get(l);
+    if (!o) { o = {}; layerScratch.set(l, o); }
+    let c = o[key];
+    if (!c) { c = document.createElement('canvas'); o[key] = c; }
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    const g = c.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    g.clearRect(0, 0, w, h);
+    return { c, g };
+}
+
+/** 一层这一帧要盖上去的那张面 + 落点。这是 `drawLayer` 的 GL 版：同一个 src、同一套几何，
+ *  只是把 drawImage 换成一条 item，交给 KCompositor 在唯一显示面上按预乘混合。 */
+function layerItem(l) {
+    if (!l || !l.visible || !l.img) return null;
+    // P3.1: while a stroke owns this layer's GPU texture, the display reads that texture (already
+    // decal-over-base, no fold) instead of folding the untouched 2D surface again.
+    const live = (typeof fxPaintPresent === 'function') ? fxPaintPresent(l) : null;
+    let src = null;
+    if (live) {
+        const s = scratchFor(l, 'paint', live.width, live.height);
+        s.g.drawImage(live, 0, 0);
+        src = s.c;
+    } else src = layerSource(l);
+    if (!src) return null;
+    if (isRasterLayer(l)) {
+        // Raster pixels ARE canvas pixels — at rest they are drawn 1:1, i.e. stretched over the
+        // whole grid (transform = null). A live drag needs the full affine `drawLayer` uses; item
+        // transforms only speak translate/rotate/scale, so bake that one frame into a scratch face.
+        const frame = rasterLiveFrame(l);
+        if (!frame) return { src, transform: null };
+        const m = rasterDragAffine(frame.from, frame.to, canvasW, canvasH);
+        const s = scratchFor(l, 'drag', canvasW, canvasH);
+        s.g.setTransform(m.a, m.b, m.c, m.d, m.e, m.f);
+        try { s.g.drawImage(src, 0, 0); } catch (e) { return null; }
+        return { src: s.c, transform: null };
+    }
+    // While Expand is armed, the live transform belongs to the dragged border, not the image:
+    // Expand only re-resolves the layer's own resolution, so the pixels must stay exactly where
+    // they are while the box grows — committing bakes that same geometry into the new buffer.
+    const tr = (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
+    return { src, transform: tr };
+}
+
 function render() {
-    // Two pictures out of one pass: the working layers ARE the context image (every consumer that
-    // ships pixels reads #blendCanvas — the run input, the Tag regions, Layer Context, Export PNG,
-    // the host preview), while the guidances are painted over them on their own canvas and reach
-    // nothing but the eye and the merged Guidance card.
+    // P3.2: one picture, one surface. The working stack is composited straight onto #stageCanvas
+    // (the only displayed canvas); #blendCanvas is the guidance-free **context image** that every
+    // pixel-shipping consumer reads (run input, Tag regions, Layer Context, Export PNG, host
+    // preview), and #guidanceCanvas stays the guidance image (card / merge / eyedropper). Neither
+    // of those two ever takes part in display again — the stage decides what is on screen.
     for (const c of [blendCtx, guidanceCtx]) {
         c.setTransform(1, 0, 0, 1, 0, 0);
         c.globalAlpha = 1;
         c.globalCompositeOperation = 'source-over';
         c.clearRect(0, 0, canvasW, canvasH);
     }
+    guidanceHasInk = false;
     if (canvasW > 0 && canvasH > 0) {
         // Direction 小窗开着时, 同一趟里顺手抄一张参考图给那张画布平面当贴图: 它 = 此刻的 context
         // image, 唯独不含正在编辑的这一枚自己的面 (guidance 本来也不进 context)。剔除的单位是那枚
@@ -4018,24 +4104,30 @@ function render() {
             ? vidFrameInject(vidFramePacket, vidFrameWorkLayers(activeLayerSet))
             : null;
         try {
+            // ── 工作栈：攒 items。Stash 层要读「以下所有层」的合成，所以碰到它就先落地一次。
+            let work = [];
+            let stageCleared = true;
+            const flushWork = () => {
+                stagePresent(work, stageCleared);
+                work = [];
+                stageCleared = false;
+                stageReadbackToBlend();        // context image = 到目前为止的工作栈
+            };
             for (let i = layers.length - 1; i >= 0; i--) {
                 const l = layers[i];
-                const guidance = isGuidanceLayer(l);
-                const target = guidance ? guidanceCtx : blendCtx;
+                if (isGuidanceLayer(l)) continue;
                 if (isStashLayer(l) && l.visible) {
-                    // guidance 栈里的 Stash 压在整条 Layers 合成之上:走到这里时 blendCtx 已画完全部
-                    // 工作层 (循环顺序保证),guidanceCtx 里摆好的是它以下那几层。指纹也吃两条栈 ——
-                    // 下面的工作层改了,它照样重抄;两条栈各带尺寸前缀,重复无妨。
-                    if (guidance) stashResample(l, blendCtx, belowWork + belowGuide, guidanceCtx);
-                    else stashResample(l, target, belowWork);
+                    flushWork();               // stage 上此刻就是「以下所有层」
+                    stashResample(l, blendCtx, belowWork);
                 }
-                drawLayer(l, target);
-                // 参考图吃的是**同一趟**的循环顺序, 所以它必须在 Stash 重抄之后才画 (那份抄写读的是 target
-                // 此刻的内容), 也不能吃进 guidance —— 它俩本来就不是一张图。
+                const it = layerItem(l);
+                if (it) work.push(it);
+                // 参考图吃的是**同一趟**的循环顺序, 所以它必须在 Stash 重抄之后才画 (那份抄写读的是
+                // target 此刻的内容), 也不能吃进 guidance —— 它俩本来就不是一张图。
                 // 一条例外: Stash 若在"正在编辑的那一枚"之后才轮到自己 (它压着那一枚), 它的快照里就带着
                 // 那一枚, 抄进参考面就又长出第二份。这种时候宁可少这一层 —— 它抄的那些像素本来也已经逐层
                 // 各自进来了 —— 也不许"两个标记"这件事发生。
-                if (dirRef && !guidance && !(isStashLayer(l) && dirPainted)) {
+                if (dirRef && !(isStashLayer(l) && dirPainted)) {
                     if (l.id === dirRef.skipLayer && l.visible && l.img) {
                         const rec = attrRecord(dirRef.skipRef);
                         const was = rec ? rec.enabled : null;
@@ -4045,13 +4137,31 @@ function render() {
                     } else drawLayer(l, dirRef.ctx);
                 }
                 if (dirRef && l.id === dirRef.skipLayer && l.visible && l.img) dirPainted = true;
-                if (guidance) belowGuide += stashLayerKey(l); else belowWork += stashLayerKey(l);
+                belowWork += stashLayerKey(l);
             }
+            flushWork();
+            // ── guidance 栈：照旧 2D 画进 guidanceCtx（卡片 / 合并 / 吸管都读它），再整张叠到显示面上。
+            // 它是**显示层**，不进 context image —— #blendCanvas 里永远只有工作栈。
+            for (let i = layers.length - 1; i >= 0; i--) {
+                const l = layers[i];
+                if (!isGuidanceLayer(l)) continue;
+                // guidance 栈里的 Stash 压在整条 Layers 合成之上:走到这里时 blendCtx 已画完全部工作层,
+                // guidanceCtx 里摆好的是它以下那几层。指纹也吃两条栈 —— 下面的工作层改了,它照样重抄。
+                if (isStashLayer(l) && l.visible) stashResample(l, blendCtx, belowWork + belowGuide, guidanceCtx);
+                if (l.visible && l.img) { drawLayer(l, guidanceCtx); guidanceHasInk = true; }
+                belowGuide += stashLayerKey(l);
+            }
+            if (guidanceHasInk) stagePresent([{ src: guidanceCanvas, transform: null }], false);
+            stageMode = 'live';               // 显示面上此刻就是活画布这套
         } finally {
             if (vidRestore) vidRestore();
         }
         if (dirRef) dirRefDone();       // 纹理看这个版本号决定要不要重传, 拖动期间它一个字节都没变
+    } else {
+        stagePresent([], true);
+        stageMode = 'live';
     }
+    stageSync();                        // 模式不是 live 时（底片 / 合成图副本）把它换回来
     updateTransformReadout();
     queueBlendUi();
     drawOverlay();
@@ -4428,52 +4538,105 @@ function paintVidBase() {
         // 铺满整张画布：直接拉到文档尺寸 —— 没有第二层 transform。
         vidBaseCtx.drawImage(vidBaseFrame, 0, 0, canvasW, canvasH);
     }
+    // 这块只是暂存面：真正上台的是 #stageCanvas。换了一帧就重传一次（没换就一个字节都不动）。
+    vidBaseStamp = 'bmp';
+    if (stageWanted() === 'base') stageShowBase(true);
 }
 
-// ── 台上露哪一块 ────────────────────────────────────────────────────────────────────────────
-// 视频模式下只有两块面：
-//   `live`  = 活画布 blendCanvas（用户手上正在编辑的那一套，笔刷/变换都在它上面）；
-//   `stage` = 台下这块 vidBaseCanvas。它装两样东西之一：
-//             · 正常段 = 底片帧（作画循环每帧画进去）；
-//             · Layer 段但活画布不是这套（**播放中就是这样，我们不再切套**）= 合成图的副本。
-// 为什么这么分：切活画布那套 = 整画布重渲染（含特效链），主线程上几百毫秒 —— 而它原本正好
-// 落在换段那一刻，屏幕上的"闪/跳"就是它。播放时合成走临时画布，把结果 blit 到 stage 上，
-// 一套显示面，内容自己变，永远不需要"换面"。
-function vidStageIsLive() {
+// ── 唯一显示面：台上装哪一样 ──────────────────────────────────────────────────────────────────
+// P3.2 起全页只有一块画布参与显示（#stageCanvas，webgl2）。它装三样东西之一：
+//   · `live`      = 活画布这套（工作栈 + guidance），由 render() 直接合成上来；
+//   · `base`      = 正常段的底片帧（#vidBaseCanvas 是它那块暂存面，换源/seek 时保留上一帧）；
+//   · `composite` = 别段 / 播放中的合成图副本（vidFrameFlush 折出来的临时面）。
+// 没有"换面"这回事了：只有"同一块面换内容"，所以再也不会出现两块画布交替时的闪/跳。
+function stageWanted() {
     const p = vidFramePacket;
-    if (!p) return !vidBaseOn;      // 没有合成包（正常段）：有底片就靠 stage 显示底片帧
-    // 播放中**永不上台活画布**：它不重画（见 vidFrameFlush 的 active），露出来就是上一套的
-    // 旧画面。画面一律由 stage 上那份（底片帧 / 合成图副本）负责。
-    if (p.playing) return false;
-    // 停下：这一包说的正是活画布上这套（用户手上就是在编辑它）⇒ 露活画布
-    return (p.layerKey || '') === (activeLayerSet || '');
+    // 没有合成包（正常段）：有底片就显示底片帧；被 Layer 合成压着就不上底片。
+    if (!p) return (vidBaseOn && !vidBaseHidden) ? 'base' : 'live';
+    // 播放中**永不上台活画布**：它不重画（见 vidFrameFlush 的 active），露出来就是上一套的旧画面。
+    if (p.playing) return 'composite';
+    // 停下：这一包说的正是活画布上这套（用户手上就是在编辑它）⇒ 露活画布。
+    return (p.layerKey || '') === (activeLayerSet || '') ? 'live' : 'composite';
 }
 
-function applyVidBaseMode() {
-    const live = vidStageIsLive();
-    vidBaseCanvas.style.display = live ? 'none' : 'block';
-    vidBaseVideo.style.display = 'none';        // <video> 只解码，从不上台（换源即黑，不能露）
-    blendCanvas.style.visibility = live ? '' : 'hidden';
-    guidanceCanvas.style.visibility = live ? '' : 'hidden';
-    applyView();
-    // 正常段（没有合成包）才立刻铺底片帧；Layer 段里台下这块装的是合成图副本（blit 来的），别盖掉。
-    if (!live && !vidBaseHidden && !vidFramePacket) vidStageRepaint();
+/** 把一组 items 合成到唯一显示面。GL 不可用时同一块 canvas 退成 2D（items 逐张 drawImage）。 */
+function stagePresent(items, clear) {
+    if (!canvasW || !canvasH || !items) return false;
+    if (stageGL && typeof KCompositor !== 'undefined' && KCompositor.present) {
+        if (KCompositor.present(stageCanvas, items, canvasW, canvasH, { clear: clear !== false })) return true;
+    }
+    if (!stageCtx2d) return false;
+    if (clear !== false) {
+        stageCtx2d.setTransform(1, 0, 0, 1, 0, 0);
+        stageCtx2d.globalAlpha = 1;
+        stageCtx2d.globalCompositeOperation = 'source-over';
+        stageCtx2d.clearRect(0, 0, canvasW, canvasH);
+    }
+    for (const it of items) {
+        if (!it || !it.src) continue;
+        const tr = it.transform;
+        if (!tr) { try { stageCtx2d.drawImage(it.src, 0, 0, canvasW, canvasH); } catch (e) { /* 这一张跳过 */ } continue; }
+        const tw = (tr.w === undefined ? 1 : tr.w) * canvasW, th = (tr.h === undefined ? 1 : tr.h) * canvasH;
+        stageCtx2d.save();
+        stageCtx2d.translate((tr.cx === undefined ? 0.5 : tr.cx) * canvasW, (tr.cy === undefined ? 0.5 : tr.cy) * canvasH);
+        stageCtx2d.rotate(tr.rotation || 0);
+        try { stageCtx2d.drawImage(it.src, -tw / 2, -th / 2, tw, th); } catch (e) { /* 这一张跳过 */ }
+        stageCtx2d.restore();
+    }
+    return true;
+}
+
+/** context image = 工作栈（不含 guidance）。stage 上此刻就是它，抄一次给读像素的那些入口
+ *  （生成/导出/存档/吸管/监视器）。P3.2 之后这块画布只当离屏上下文图，不再上台。 */
+function stageReadbackToBlend() {
+    resetCtx(blendCtx);
+    blendCtx.clearRect(0, 0, canvasW, canvasH);
+    try { blendCtx.drawImage(stageCanvas, 0, 0, canvasW, canvasH); } catch (e) { /* 没有像素可抄 */ }
+}
+
+/** 活画布这套上台。render() 通常已经把它合成在 stage 上了（stageMode === 'live'）；
+ *  从底片/副本切回来时才需要重铺一次。 */
+function stageShowLive() {
+    const items = [{ src: blendCanvas, transform: null }];
+    if (guidanceHasInk) items.push({ src: guidanceCanvas, transform: null });
+    if (!stagePresent(items, true)) return;
+    stageMode = 'live';
+}
+
+/** 底片帧上台。换源/seek 期间 vidBasePaintNow 不画 ⇒ stamp 不变 ⇒ 不重传，屏幕上保留上一帧。 */
+function stageShowBase(force) {
+    if (!vidBaseCanvas.width || !vidBaseCanvas.height) return;
+    vidBasePaintNow();
+    if (!force && stageMode === 'base' && vidBaseStamp === stageBaseStamp) return;
+    if (!stagePresent([{ src: vidBaseCanvas, transform: null }], true)) return;
+    stageBaseStamp = vidBaseStamp;
+    stageMode = 'base';
+}
+
+/** 合成图副本上台（播放中 / 游标不在活画布这套上）。 */
+function stageBlit(src) {
+    if (!src || !src.width || !src.height) return;
+    stageCompositeSrc = src;             // 先记下：模式切回 composite 时还要用它
+    if (!stagePresent([{ src, transform: null }], true)) return;
+    stageMode = 'composite';
 }
 
 /** 显示跟模式对账：只在真的不一致时才动（每帧都会调，别白干）。 */
-function vidStageSync() {
-    const live = vidStageIsLive();
-    const showingLive = blendCanvas.style.visibility !== 'hidden';
-    if (live !== showingLive) applyVidBaseMode();
+function stageSync(force) {
+    if (!canvasW || !canvasH) return;
+    const want = stageWanted();
+    if (!force && want === stageMode) {
+        // 同一模式里内容自己会变：底片帧要跟着 <video> 走，副本由 vidFrameFlush 交上来。
+        if (want === 'base') stageShowBase();
+        return;
+    }
+    if (want === 'live') stageShowLive();
+    else if (want === 'base') stageShowBase(true);
+    else if (stageCompositeSrc) stageBlit(stageCompositeSrc);
+    else stageMode = '';               // 还没有副本可放：下一趟再来
 }
 
-/** 台下这块该显示底片帧了：立刻同步画一次（不留下"上一手的合成图"露在人眼前的那一帧）。 */
-function vidStageRepaint() {
-    vidBaseStamp = '';
-    vidBasePaintNow();
-}
-
-/** 把底片帧画进 stage。只在"正常段 + 镜像有画面"时动手：换源/seek 期间不画 ⇒ 保留上一帧，
+/** 把底片帧画进它的暂存面。只在"正常段 + 镜像有画面"时动手：换源/seek 期间不画 ⇒ 保留上一帧，
  *  永远不会出现黑屏（<video> 时代正是在这里黑的）。 */
 function vidBasePaintNow() {
     const v = vidBaseVideo;
@@ -4489,24 +4652,11 @@ function vidBasePaintNow() {
     try { vidBaseCtx.drawImage(v, 0, 0, cw, ch); } catch (e) { /* 这一帧跳过 */ }
 }
 
-/** 合成图副本上台下这块（播放中不切活画布，画面就靠它显示）。 */
-function vidStageBlit(src) {
-    if (!src || !src.width || !src.height) return;
-    const cw = vidBaseCanvas.width, ch = vidBaseCanvas.height;
-    if (!cw || !ch) return;
-    vidBaseCtx.setTransform(1, 0, 0, 1, 0, 0);
-    vidBaseCtx.globalAlpha = 1;
-    vidBaseCtx.globalCompositeOperation = 'source-over';
-    vidBaseCtx.clearRect(0, 0, cw, ch);
-    try { vidBaseCtx.drawImage(src, 0, 0, cw, ch); } catch (e) { /* 这一帧跳过 */ }
-    vidBaseStamp = '';                 // 这块现在装的是合成图，不是底片帧
-}
-
-// 作画循环：正常段里跟着镜像视频出帧（一帧一次 drawImage，帧没变就不画）。
+// 作画循环：底片模式下跟着镜像视频出帧（一帧一次上传，帧没变就不传）。
 let vidBaseRaf = 0;
 function vidBasePaintTick() {
     vidBaseRaf = 0;
-    vidBasePaintNow();
+    if (stageWanted() === 'base') stageShowBase();
     vidBaseRaf = requestAnimationFrame(vidBasePaintTick);
 }
 requestAnimationFrame(vidBasePaintTick);
@@ -4558,7 +4708,7 @@ function handleVidBaseSrcMessage(d) {
         v.addEventListener('loadedmetadata', onMeta, { once: true });
         v.addEventListener('loadeddata', onMeta, { once: true });
     }
-    applyVidBaseMode();
+    stageSync(true);
     vidBaseSeek();
 }
 
@@ -4570,7 +4720,7 @@ function handleVidBaseMessage(d) {
     // 画布还没立起来（宿主还没报过栅格）：拿这一帧的尺寸当文档栅格。
     if (bmp && (canvasW <= 0 || canvasH <= 0)) noteVidGrid(bmp.width, bmp.height);
     // 每帧只重铺这张底图；进出底片态那一下才动可见性与视图变换。
-    if (!vidBaseOn) { vidBaseOn = true; applyVidBaseMode(); }
+    if (!vidBaseOn) { vidBaseOn = true; stageSync(true); }
     else paintVidBase();
 }
 
@@ -4583,7 +4733,7 @@ function vidBaseOff() {
     vidBaseStamp = '';             // 再回来时第一帧要重画
     if (!vidBaseOn) return;
     vidBaseOn = false;
-    applyVidBaseMode();
+    stageSync(true);
 }
 
 function vidFrameSurfaceFor(rec, w, h) {
@@ -4750,13 +4900,12 @@ function vidFrameFlush() {
         if (active) {
             __vidPerf.repliesActive++;
             replyVidFrame(p.reqId, blendCanvas, frameless);
-            vidStageSync();          // 这一包说的正是活画布这套了：台上换成它（用户在编辑）
+            stageSync();             // 这一包说的正是活画布这套了：台上换成它（用户在编辑）
         } else {
             __vidPerf.repliesTemp++;
             const cv = composeVidFrameCanvas(p);
             // 播放中不切活画布 ⇒ 画面只能靠台下这块显示：合成图直接 blit 上去。
-            vidStageBlit(cv);
-            vidStageSync();          // 播放中不切活画布：台上这块显示合成图副本
+            stageBlit(cv);           // 播放中不切活画布：台上这块显示合成图副本
             replyVidFrame(p.reqId, cv, frameless);
         }
     } finally {
@@ -4893,7 +5042,7 @@ function handleVidFrameMessage(d) {
         // 退场 —— 少了这一下，换段那一手会露出画布上的空图（用户看到的就是"闪一下"）。
         if (st.isActive) {
             if (!vidFramePacket.rendered) { vidFramePacket.rendered = true; __vidPerf.renders++; render(); }
-            applyVidBaseMode();          // 活画布这套补画完了：换手到它
+            stageSync(true);             // 活画布这套补画完了：换手到它
         }
         return;
     }
@@ -4918,7 +5067,7 @@ function vidFrameOff() {
     if (vidFrameCanvas) { vidFrameCanvas.width = 0; vidFrameCanvas.height = 0; }
     // 帧包撤了：再画一趟，把面 attribute 换回它们自己的像素（画布不再是合成图）。
     if (!wasPlaying) render();
-    applyVidBaseMode();          // 台上该换回底片了
+    stageSync(true);             // 台上该换回底片了
 }
 
 // ==================== The Guidance card ====================
@@ -5573,7 +5722,7 @@ function switchLayerSet(key, opts) {
         vidCompCache = null;
         vidFrameRedraw();
     }
-    applyVidBaseMode();              // 切过来这一套了：台上换成活画布（用户要编辑它）
+    stageSync(true);                 // 切过来这一套了：台上换成活画布（用户要编辑它）
 }
 
 function resetHistory(label) {
@@ -8094,8 +8243,93 @@ function shiftConstrain(pos) {
     };
 }
 
+// P3.1: a stroke may land in the layer's GPU decal texture instead of the 2D surface. It is exact
+// only while the decal is the layer's LAST enabled step (base = the fold with the decal temporarily
+// disabled; composed = decal over base), the face is private to this layer, and the layer is not a
+// Stash (its input is "everything below", which a per-layer texture does not hold).
+function gpuPaintEligible(l) {
+    if (!l || l.isMaskLayer || isMaskLayerTarget() || !isDecalTarget()) return false;
+    if (isStashLayer(l)) return false;
+    const r = paintRecordOf(l);
+    if (!r || r.type !== 'decal' || !r.surface || r.frameTrack) return false;
+    // The texture and the ink share the layer's native grid (fxPaintInk checks it); a face that was
+    // resampled/cropped away from that grid falls back to the 2D path.
+    const n = nativeSize(l.img);
+    if (!n.w || !n.h || r.surface.width !== n.w || r.surface.height !== n.h) return false;
+    const recs = attrRecordsOf(l);
+    const i = recs.indexOf(r);
+    if (i < 0) return false;
+    for (let k = i + 1; k < recs.length; k++) if (attrEnabled(recs[k])) return false;
+    if (layers.some(o => o !== l && attrRefList(o).indexOf(r.id) >= 0)) return false;
+    return true;
+}
+
+// The exact pixels this stroke should pour onto the paint surface: white alpha-only stamps, then
+// decal tint, then Color alpha (mask target), then the selection. Baked into one canvas so the 2D
+// path and the texture path composite the very same thing.
+function buildStrokeInk(l, w, h) {
+    let ink = strokeCanvas;
+    const maskInk = !isErasing && (isMaskLayerTarget() || !isDecalTarget());
+    if (!isErasing && isDecalTarget() && !isMaskLayerTarget()) {
+        if (strokeTintCanvas.width !== w || strokeTintCanvas.height !== h) {
+            strokeTintCanvas.width = w; strokeTintCanvas.height = h;
+        }
+        resetCtx(strokeTintCtx);
+        strokeTintCtx.clearRect(0, 0, w, h);
+        strokeTintCtx.drawImage(strokeCanvas, 0, 0, w, h);
+        strokeTintCtx.globalCompositeOperation = 'source-in';
+        strokeTintCtx.fillStyle = paintRGBA();
+        strokeTintCtx.fillRect(0, 0, w, h);
+        strokeTintCtx.globalCompositeOperation = 'source-over';
+        ink = strokeTintCanvas;
+    }
+    const alpha = maskInk ? brushAlpha : 1;
+    const sel = hasSelection() && ensureSelection();
+    const selMask = sel ? selectionLayerMask(l) : null;
+    if (sel && !(selMask && selMask.whole) && !selMask) return null;
+    if (!sel || (selMask && selMask.whole)) {
+        if (alpha === 1) return ink;
+        if (strokeInkCanvas.width !== w || strokeInkCanvas.height !== h) {
+            strokeInkCanvas.width = w; strokeInkCanvas.height = h;
+        }
+        resetCtx(strokeInkCtx);
+        strokeInkCtx.clearRect(0, 0, w, h);
+        strokeInkCtx.globalAlpha = alpha;
+        strokeInkCtx.drawImage(ink, 0, 0, w, h);
+        strokeInkCtx.globalAlpha = 1;
+        return strokeInkCanvas;
+    }
+    if (strokeInkCanvas.width !== w || strokeInkCanvas.height !== h) {
+        strokeInkCanvas.width = w; strokeInkCanvas.height = h;
+    }
+    resetCtx(strokeInkCtx);
+    strokeInkCtx.clearRect(0, 0, w, h);
+    strokeInkCtx.globalAlpha = alpha;
+    strokeInkCtx.drawImage(ink, 0, 0, w, h);
+    strokeInkCtx.globalAlpha = 1;
+    strokeInkCtx.globalCompositeOperation = 'destination-in';
+    strokeInkCtx.drawImage(selMask.cv, selMask.x, selMask.y);
+    strokeInkCtx.globalCompositeOperation = 'source-over';
+    return strokeInkCanvas;
+}
+
+// 2D path / commit: snapshot + this stroke's ink, in the surface's own grid.
+function applyStrokeToSurface(l, ink) {
+    const { w, h } = nativeSize(l.img);
+    const c = paintSurfaceCtx(l);
+    if (!c) return;
+    resetCtx(c);
+    c.clearRect(0, 0, w, h);
+    c.drawImage(snapshotCanvas, 0, 0, w, h);
+    c.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
+    if (ink) c.drawImage(ink, 0, 0, w, h);
+    c.globalCompositeOperation = 'source-over';
+    c.globalAlpha = 1;
+}
+
 function beginStroke() {
     const l = getSelected();
+    gpuStroke = null;
     if (!l) return false;
     if (groupPaintBlocked()) return false;      // a stroke has one target surface, never a set
     if (isMaskLayerTarget() && !ensureMaskLayer()) {
@@ -8112,6 +8346,12 @@ function beginStroke() {
     snapshotCtx.drawImage(paintSurface(l), 0, 0, w, h);
     resetCtx(strokeCtx);
     strokeCtx.clearRect(0, 0, w, h);
+    // P3.1: open the GPU texture (decal + base) now, so every preview frame after this one only
+    // uploads ink and re-composes — the 2D surface is not touched until commit.
+    if (gpuPaintEligible(l)) {
+        const rec = paintRecordOf(l);
+        if (fxPaintBegin(l, paintSurface(l), rec)) gpuStroke = { layer: l };
+    }
     return true;
 }
 
@@ -8187,70 +8427,60 @@ function queueLivePreview() {
 function livePreviewStroke() {
     const l = getSelected();
     if (!l || !paintSurface(l)) return;
-    markPainted(l);
     const { w, h } = nativeSize(l.img);
-    const c = paintSurfaceCtx(l);
-    resetCtx(c);
-    c.clearRect(0, 0, w, h);
-    c.drawImage(snapshotCanvas, 0, 0, w, h);
-    c.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
-    // strokeCanvas holds a white, alpha-only accumulation. A decal (not a mask) gets its
-    // colour applied here, uniformly, so overlapping 'lighter' stamps cannot shift the hue.
-    // The Color's Alpha rides along with it: source-in multiplies it into the ink (a
-    // translucent decal), and on a mask surface it caps the coverage the stroke can pour.
-    let ink = strokeCanvas;
-    const maskInk = !isErasing && (isMaskLayerTarget() || !isDecalTarget());
-    if (!isErasing && isDecalTarget() && !isMaskLayerTarget()) {
-        if (strokeTintCanvas.width !== w || strokeTintCanvas.height !== h) {
-            strokeTintCanvas.width = w; strokeTintCanvas.height = h;
+    const ink = buildStrokeInk(l, w, h);
+    // P3.1: this stroke owns the GPU texture. Upload only the ink and re-compose; the 2D surface
+    // stays exactly as it was at beginStroke, so no fold/readback runs on it this frame.
+    if (gpuStroke && gpuStroke.layer === l) {
+        if (fxPaintInk(l, ink, isErasing)) {
+            queueBlendUi();
+            render();
+            return;
         }
-        resetCtx(strokeTintCtx);
-        strokeTintCtx.clearRect(0, 0, w, h);
-        strokeTintCtx.drawImage(strokeCanvas, 0, 0, w, h);
-        strokeTintCtx.globalCompositeOperation = 'source-in';
-        strokeTintCtx.fillStyle = paintRGBA();
-        strokeTintCtx.fillRect(0, 0, w, h);
-        strokeTintCtx.globalCompositeOperation = 'source-over';
-        ink = strokeTintCanvas;
+        // The texture refused this frame (grid changed, face replaced): drop it and fall back to
+        // 2D for the rest of the stroke, so the display never keeps showing a frozen texture.
+        fxPaintEnd(l);
+        gpuStroke = null;
     }
-    if (maskInk) c.globalAlpha = brushAlpha;
-    // Multiply the ink through the selection's coverage over the footprint it actually covers, so a
-    // small marquee on a large layer costs a small number of pixels per preview frame. No selection
-    // and `whole` (the ants swallow everything this layer can paint) take the plain path; a selection
-    // that misses this layer entirely lets nothing through.
-    const sel = hasSelection() && ensureSelection();
-    const selMask = sel ? selectionLayerMask(l) : null;
-    if (!sel || (selMask && selMask.whole)) {
-        c.drawImage(ink, 0, 0, w, h);
-    } else if (selMask) {
-        if (selInkCanvas.width !== selMask.w || selInkCanvas.height !== selMask.h) {
-            selInkCanvas.width = selMask.w; selInkCanvas.height = selMask.h;
-        }
-        resetCtx(selInkCtx);
-        selInkCtx.clearRect(0, 0, selMask.w, selMask.h);
-        selInkCtx.drawImage(ink, selMask.x, selMask.y, selMask.w, selMask.h, 0, 0, selMask.w, selMask.h);
-        selInkCtx.globalCompositeOperation = 'destination-in';
-        selInkCtx.drawImage(selMask.cv, 0, 0);
-        selInkCtx.globalCompositeOperation = 'source-over';
-        c.drawImage(selInkCanvas, selMask.x, selMask.y);
-    }
-    if (maskInk) c.globalAlpha = 1;
-    c.globalCompositeOperation = 'source-over';
+    markPainted(l);
+    applyStrokeToSurface(l, ink);
     queueBlendUi();
     render();
 }
 
 function commitStroke() {
     previewQueued = false;         // this call draws the finished stroke itself
-    livePreviewStroke();
     const l = getSelected();
-    if (l) queueBlendUi();
+    if (gpuStroke && gpuStroke.layer === l) {
+        // The texture preview is over: write the same ink into the authoritative 2D surface once
+        // (history / save / export read it), then drop the texture so the next fold sees the face.
+        const { w, h } = nativeSize(l.img);
+        applyStrokeToSurface(l, buildStrokeInk(l, w, h));
+        markPainted(l);
+        fxPaintEnd(l);
+        gpuStroke = null;
+        queueBlendUi();
+        render();
+    } else {
+        livePreviewStroke();
+        if (l) queueBlendUi();
+    }
     resetCtx(strokeCtx);
     strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
     pushHistory(null, maskTool === 'eraser' ? 'Erase stroke' : 'Paint stroke');               // one stroke = one undo step (also clears any old anchor)
     // Only a Shift TAP may (re-)arm the connect chain — a plain or Shift DRAG in between, a
     // bucket fill or an undo are all interruptions just the same.
     if (keyShift && !strokeMoved && l) shiftAnchor = { x: lastX, y: lastY, layerId: l.id, target: paintTarget };
+}
+
+// P3.1: the compositor asks for a layer's live texture by plan layer. Name is the stable key the
+// editor and the plan share (see the golden plans); id is a second chance for same-session plans.
+if (typeof KCompositor !== 'undefined' && KCompositor.api) {
+    KCompositor.api.layerTexture = (pl) => {
+        if (!pl) return null;
+        const l = (layers || []).find(x => x && !x.isMaskLayer && (x.id === pl.id || x.name === pl.name));
+        return l ? fxPaintTexture(l) : null;
+    };
 }
 
 // ==================== Bucket（油漆桶,跟随 Mask/Decal 目标） ====================

@@ -17,8 +17,14 @@ const KCompositor = (function () {
         frame: null,
         /** 兜底：(planLayer, stepIndex, step) → 一张现成的面（页面内适配用；P2 第一步靠它）。 */
         bind: null,
+        /** P3.1 笔刷纹理：`(planLayer, t, w, h) → {tex, mask?}` 或 null。命中就直接贴纹理，
+         *  连 2D 折叠都不跑 —— 编辑一笔之后，下一帧合成看到的就是那张纹理。 */
+        layerTexture: null,
         /** 这一趟被跳过了什么（诊断；不参与画）。 */
         notes: [],
+        /** 这一趟的记账（P3.1 验收用）：items = 贴了几张面，texItems = 其中几张贴的是纹理，
+         *  upload = 画布进纹理的次数。链结果走纹理时，同一次合成里的 upload 应该少一层。 */
+        stats: { items: 0, texItems: 0, upload: 0 },
     };
 
     function blank(w, h) {
@@ -67,13 +73,43 @@ const KCompositor = (function () {
     }
 
     /**
-     * 折叠一层：底像素 + strip。返回一张 w×h 的面。
+     * 折叠一层 → `{ src }`（一张面）或 `{ tex, mask }`（纹理，P3.1 的出口）。
      * 语义逐条对齐 fxDropStrip（fx/gl.js）：
      *   · 每一枚蒙版都是它**右边所有链**的 silhouette（一路攒着）；
      *   · 蒙版按 destination-in 裁，decal 按 source-over 叠；
      *   · 整趟没有墨 ⇒ 就是底像素本身（fxResolved 的早退）。
+     *
+     * `texOK` = 这一层允许把链的结果留在纹理上（见 render 里的判据）。只有"最后一个出墨的步骤就是
+     * 那条链"时才能走 —— 链后面若还有 decal/生成器，就得回到 2D 画上去，那时纹理意味着又一次 readback。
+     * 链后面的**蒙版**例外：它是 alpha 乘，合成着色器里一句话（与 2D 的 destination-in 同义）。
      */
-    function foldLayer(pl, t, w, h, below) {
+    function foldLayer(pl, t, w, h, below, texOK) {
+        // 一笔正在纹理里（P3.1）：这一层的结果已经折好，直接交纹理。Stash 层的输入是「以下所有层」，
+        // 不在这一笔的纹理里，所以照旧走 2D 累积。
+        if (texOK && api.layerTexture && pl.capture !== 'below') {
+            try {
+                const lt = api.layerTexture(pl, t, w, h);
+                if (lt && lt.tex) return { tex: lt.tex, mask: lt.mask || null };
+            } catch (e) {
+                api.notes.push('layer texture failed: ' + (e && e.message || e));
+            }
+        }
+        const strip = pl.strip || [];
+        // 最后一个"会出墨的链"。跟 fxLastChainIndex 的判据同义，只是作用在 plan 的 strip 上。
+        let chIdx = -1;
+        if (texOK) {
+            for (let i = strip.length - 1; i >= 0; i--) {
+                const st = strip[i];
+                if (!st || st.enabled === false || st.kind !== 'chain') continue;
+                if ((st.chain || []).some(e => e && e.enabled !== false)) { chIdx = i; break; }
+            }
+            for (let i = chIdx + 1; chIdx >= 0 && i < strip.length; i++) {
+                const st = strip[i];
+                if (!st || st.enabled === false) continue;
+                if (st.kind === 'surface' && st.type === 'mask') continue;
+                chIdx = -1; break;                       // 链后还有别的墨 ⇒ 这一层走 canvas
+            }
+        }
         const base = pl.capture === 'below'
             ? (below || null)
             : (pl.base && pl.base.resource && api.resource ? api.resource(pl.base.resource) : null);
@@ -93,16 +129,28 @@ const KCompositor = (function () {
             paintGen: 0, fxCache: null,
         };
         const left = [];
+        const post = [];                                  // 链右边的蒙版：等结果成了纹理再乘
+        let tex = null;
         let inked = false;
-        const strip = pl.strip || [];
         for (let i = 0; i < strip.length; i++) {
             const st = strip[i];
             if (!st || st.enabled === false) continue;
             if (st.kind === 'chain') {
                 const chain = (st.chain || []).filter(e => e && e.enabled !== false);
                 if (!chain.length) continue;
+                const mask = stripCoverage(left, w, h);
+                if (i === chIdx) {
+                    try {
+                        tex = applyLayerEffectsTexture(fake, surf, { rec: { chain }, mask });
+                    } catch (e) {
+                        api.notes.push('chain failed: ' + (e && e.message || e));
+                        tex = null;
+                    }
+                    if (tex) { inked = true; continue; }
+                    chIdx = -1;                           // 没跑（不支持/太大）⇒ 后面照 2D 来
+                }
                 try {
-                    applyLayerEffects(fake, surf, { rec: { chain }, mask: stripCoverage(left, w, h) });
+                    applyLayerEffects(fake, surf, { rec: { chain }, mask });
                 } catch (e) {
                     api.notes.push('chain failed: ' + (e && e.message || e));
                 }
@@ -112,6 +160,7 @@ const KCompositor = (function () {
             if (st.kind === 'surface') {
                 const cv = faceOf(pl, i, st, t, w, h);
                 if (!cv) { api.notes.push('missing face: ' + st.type); continue; }
+                if (tex && st.type === 'mask') { post.push(cv); inked = true; continue; }
                 if (st.type === 'mask') {
                     left.push(cv);
                     g.globalCompositeOperation = 'destination-in';
@@ -134,7 +183,11 @@ const KCompositor = (function () {
                 inked = true;
             }
         }
-        return inked ? surf : (base ? flatten(base, w, h) : surf);
+        if (tex) {
+            const cov = post.length ? stripCoverage(post, w, h) : null;
+            return { tex: tex.tex, mask: cov };
+        }
+        return { src: inked ? surf : (base ? flatten(base, w, h) : surf) };
     }
 
     /** 与 drawLayer 逐字一致：translate(cx·W, cy·H) · rotate · drawImage(-tw/2,-th/2,tw,th)。 */
@@ -153,9 +206,11 @@ const KCompositor = (function () {
         ctx.restore();
     }
 
-    // ── GL 混合（P2 第二步）────────────────────────────────────────────────────────────────
+    // ── GL 混合（P2 第二步 / P3.1 纹理入口）──────────────────────────────────────────────────
     // 目的：层的叠加不再走 canvas 2D，而是在**一个** GL 上下文里按预乘直接混（ONE / ONE_MINUS_SRC_ALPHA）。
-    // 取帧/折叠仍由上面的代码出 canvas（fx 链还是那条），这里只负责"把面按矩阵贴上去、按序混"。
+    // 取帧/折叠仍由上面的代码出 canvas（fx 链还是那条），这里负责"把面按矩阵贴上去、按序混"。
+    // P3.1 起这一套**可以借 fx/gl.js 那台上下文**：链的结果只在它自己的上下文里是同一张纹理，
+    // 所以"链跑完不回读"这件事只有搬进去做才成立（见 foldLayer 的 tex 出口与 render 的 stage）。
     // 与 2D 的差异只允许出现在几何边缘 1px（实测边缘外 maxdiff 2，见 tests/gl_equiv 与契约 §5.4）。
     const VS = `#version 300 es
 in vec2 aPos; in vec2 aUV; out vec2 vUV;
@@ -173,21 +228,30 @@ void main() {
   gl_Position = vec4(px.x / uRes.x * 2.0 - 1.0, 1.0 - px.y / uRes.y * 2.0, 0.0, 1.0);
   vUV = aUV;
 }`;
+    // uMaskOn = 1 时把 alpha 乘上蒙版 —— 就是 2D 的 destination-in，只是发生在预乘域（两边的面色
+    // 都已经预乘，所以乘 alpha 等价于 rgb 与 a 一起乘）。
+    // uFlip = 1 用于**引擎那台上下文的纹理**：canvas 上传（FLIP_Y 关）是「v=0 在图上边」，而 FX 的
+    // 离屏面是「v=1 在图上边」（fxglUploadCanvas 开了 FLIP_Y，整条链一直在这个朝向里算）。同一张面
+    // 两种朝向，取样时按来源翻一次；蒙版永远来自画布，不翻。（同契约 §10.4 第 4 条。）
     const FS = `#version 300 es
 precision highp float;
-in vec2 vUV; out vec4 Frag; uniform sampler2D uSrc;
-void main() { Frag = texture(uSrc, vUV); }`;
+in vec2 vUV; out vec4 Frag;
+uniform sampler2D uSrc; uniform sampler2D uMask; uniform int uMaskOn; uniform int uFlip;
+void main() {
+  vec2 uv = uFlip == 1 ? vec2(vUV.x, 1.0 - vUV.y) : vUV;
+  vec4 c = texture(uSrc, uv);
+  if (uMaskOn == 1) c = c * texture(uMask, vUV).a;
+  Frag = c;
+}`;
 
-    // 每个画布一份 GL 状态。传 target 时**直接渲染到那块画布**（P3.2 的唯一画布就靠这条），
-    // 不传就是内部那块离屏。preserveDrawingBuffer 只为了导出/截图能取到像素。
+    // 每个**上下文**一份 GL 状态（不是每块画布）：借来的上下文里画不变量跟自建的一模一样，
+    // 只是那块画布归别人。自建上下文时 `canvas` 就是内部那块离屏，`preserveDrawingBuffer` 只为了
+    // 导出/截图能取到像素。
     const glStates = new WeakMap();
     const glOffscreen = { c: null };
-    function glInit(target) {
-        const c = target || (glOffscreen.c || (glOffscreen.c = document.createElement('canvas')));
-        if (glStates.has(c)) return glStates.get(c);
-        const gl = c.getContext('webgl2', { premultipliedAlpha: true, antialias: false, alpha: true,
-                                            preserveDrawingBuffer: true });
-        if (!gl) { glStates.set(c, false); return false; }
+    function glStateFor(gl, canvas) {
+        let st = glStates.get(gl);
+        if (st !== undefined) return st;
         const sh = (t, src) => {
             const o = gl.createShader(t); gl.shaderSource(o, src); gl.compileShader(o);
             if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o));
@@ -197,8 +261,11 @@ void main() { Frag = texture(uSrc, vUV); }`;
         gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
         gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
         gl.linkProgram(prog);
-        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { glStates.set(c, false); return false; }
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { glStates.set(gl, false); return false; }
         gl.useProgram(prog);
+        // 自己的 VAO：借上下文时（fxgl）对方会 bind 它自己那只且不还原，靠默认 VAO 就会串味。
+        const vao = gl.createVertexArray();
+        gl.bindVertexArray(vao);
         // 两种几何都用同一组 6 个顶点（uv 与 pos 同构，单位方块的四个角）
         const quad = new Float32Array([
             -0.5, -0.5, 0, 0, 0.5, -0.5, 1, 0, 0.5, 0.5, 1, 1,
@@ -210,41 +277,97 @@ void main() { Frag = texture(uSrc, vUV); }`;
         const aPos = gl.getAttribLocation(prog, 'aPos'), aUV = gl.getAttribLocation(prog, 'aUV');
         gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
         gl.enableVertexAttribArray(aUV); gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 16, 8);
-        const tex = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        const state = { c, gl, prog, buf, tex, loc: {
+        gl.bindVertexArray(null);
+        // 两张：0 = 这一项的源（画布要上传/纹理直接绑），1 = 蒙版。
+        const mk = () => {
+            const t = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, t);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            return t;
+        };
+        const state = { c: canvas, gl, prog, vao, buf, tex: mk(), mtex: mk(), loc: {
             uRes: gl.getUniformLocation(prog, 'uRes'), uC: gl.getUniformLocation(prog, 'uC'),
             uSize: gl.getUniformLocation(prog, 'uSize'), uRot: gl.getUniformLocation(prog, 'uRot'),
             uFill: gl.getUniformLocation(prog, 'uFill'), uSrc: gl.getUniformLocation(prog, 'uSrc'),
+            uMask: gl.getUniformLocation(prog, 'uMask'), uMaskOn: gl.getUniformLocation(prog, 'uMaskOn'),
+            uFlip: gl.getUniformLocation(prog, 'uFlip'),
         } };
-        gl.enable(gl.BLEND);
-        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);      // 预乘混合（与 canvas 2D 内部一致）
-        glStates.set(c, state);
+        glStates.set(gl, state);
         return state;
     }
 
-    /** items: [{ src, transform|null }]（自底向上；transform=null 表示铺满）。返回 GL 的 canvas。 */
+    /**
+     * items（自底向上）：
+     *   · `{ src, transform }` —— 一张画布/图片/视频，这里上传成纹理再贴；
+     *   · `{ tex, mask, transform }` —— **上下文里已有的纹理**（fx 链的结果，P3.1），不上传；
+     *     `mask` 是再乘一次的覆盖率画布（链右边的蒙版）。
+     * `transform = null` 表示铺满画布。返回承托结果的那块画布。
+     * `target`：null = 内部离屏；一块 canvas = 自建上下文画到它上面；`{ gl, canvas, clear? }` = 借这台
+     * 上下文（`clear === false` 表示在已有内容上继续叠，用于「工作栈 + guidance」两趟）。
+     */
     function compositeGL(items, w, h, target) {
-        const st = glInit(target || null);
+        const ext = !!(target && target.gl);
+        let gl, c;
+        if (ext) { gl = target.gl; c = target.canvas; }
+        else {
+            c = target || (glOffscreen.c || (glOffscreen.c = document.createElement('canvas')));
+            gl = c.getContext('webgl2', { premultipliedAlpha: true, antialias: false, alpha: true,
+                                           preserveDrawingBuffer: true });
+            if (!gl) return null;
+        }
+        const st = glStateFor(gl, c);
         if (!st) return null;
-        const { c, gl, tex, loc } = st;
+        const { tex, mtex, loc } = st;
         if (c.width !== w) c.width = w;
         if (c.height !== h) c.height = h;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, w, h);
-        gl.clearColor(0, 0, 0, 0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
+        if (!(target && target.clear === false)) {
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+        gl.useProgram(st.prog);
+        gl.bindVertexArray(st.vao);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);      // 预乘混合（与 canvas 2D 内部一致）
         gl.uniform2f(loc.uRes, w, h);
         gl.uniform1i(loc.uSrc, 0);
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+        gl.uniform1i(loc.uMask, 1);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, mtex);
+        gl.uniform1i(loc.uMaskOn, 0);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);      // fxgl 会把它开开关关，借上下文要自己钉住
         for (const it of items) {
-            if (!it || !it.src) continue;
-            try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, it.src); } catch (e) { continue; }
+            if (!it) continue;
+            gl.activeTexture(gl.TEXTURE0);
+            if (it.tex) {
+                gl.bindTexture(gl.TEXTURE_2D, it.tex);      // 已经是预乘、已经在这台上下文里
+            } else if (it.src) {
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                // `premul` = 这张源**本身**已经是预乘的（编辑器的笔刷纹理出口就是这样：它来自
+                // fx/gl.js 的 present，画布被浏览器按预乘解释）。再预乘一次会把半透明区压暗。
+                gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, !it.premul);
+                try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, it.src); }
+                catch (e) { continue; }
+                api.stats.upload++;
+            } else continue;
+            if (it.mask) {
+                gl.activeTexture(gl.TEXTURE1);
+                gl.bindTexture(gl.TEXTURE_2D, mtex);
+                gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);   // 蒙版永远来自画布
+                try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, it.mask); }
+                catch (e) { /* 蒙版坏了就当没有 */ }
+                gl.uniform1i(loc.uMaskOn, 1);
+                gl.activeTexture(gl.TEXTURE0);
+            } else {
+                gl.uniform1i(loc.uMaskOn, 0);
+            }
+            api.stats.items++;
+            if (it.tex) api.stats.texItems++;
+            gl.uniform1i(loc.uFlip, it.tex ? 1 : 0);
             if (!it.transform) {
                 gl.uniform1i(loc.uFill, 1);
             } else {
@@ -258,6 +381,10 @@ void main() { Frag = texture(uSrc, vUV); }`;
             }
             gl.drawArrays(gl.TRIANGLES, 0, 6);
         }
+        gl.disable(gl.BLEND);           // 借上下文时把状态还原干净（fxgl 的每一趟都是覆盖写）
+        // 借的是 fx/gl.js 那台上下文：把 pixelStore 还原成它的口径（上传直通 alpha 的面），
+        // 否则下一次 fxglUploadCanvas 会把画布预乘一次，链/笔刷就吃到二次预乘。
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
         gl.finish();
         return c;
     }
@@ -281,6 +408,7 @@ void main() { Frag = texture(uSrc, vUV); }`;
         ctx.globalCompositeOperation = 'source-over';
         ctx.clearRect(0, 0, w, h);
         api.notes.length = 0;
+        api.stats.items = api.stats.texItems = api.stats.upload = 0;
         // 形态（契约 §2.3.1）：source = 这一帧就是那条轨的视频帧（拉伸铺满，与 paintVidBase 一致）；
         // layers = 图层合成，底片不参与。两者互斥 —— 别把视频叠到图层下面。
         const fr = plan.frame || {};
@@ -296,24 +424,34 @@ void main() { Frag = texture(uSrc, vUV); }`;
         } else {
             const want = o.stack || 'work';
             const stack = (plan.layers || []).filter(pl => pl && pl.visible !== false && (pl.stack || 'work') === want);
+            // 纹理入口（P3.1）的前提：GL 合成、且**不往外部画布直出** —— 链的结果纹理只在 fx/gl.js 那台
+            // 上下文里是同一张，所以整趟合成也搬进去做（fxglStageSize 同时把发布区开新一页）。
+            // 借不到那台上下文（没有 WebGL2）就一个 tex 都不出，与 P2 一模一样。
+            const stage = (useGL && !o.glTarget && typeof fxglStageSize === 'function')
+                ? fxglStageSize(w, h) : null;
+            let lastBelow = -1;
+            for (let i = 0; i < stack.length; i++) if (stack[i].capture === 'below') lastBelow = i;
             // Stash 层的输入是"以下所有层的合成"。2D 路径上那就是目标画布（边画边攒）；
             // GL 路径上目标要等全都贴完才画，所以另开一块 2D 累积画布——**只在这种工程里**才建。
-            const needAcc = useGL && stack.some(pl => pl.capture === 'below');
-            const acc = needAcc ? blank(w, h) : null;
+            const acc = useGL && lastBelow >= 0 ? blank(w, h) : null;
             const actx = acc ? acc.getContext('2d') : null;
-            for (const pl of stack) {
+            for (let i = 0; i < stack.length; i++) {
+                const pl = stack[i];
                 const below = pl.capture === 'below' ? (acc || cv) : null;
-                const src = foldLayer(pl, t, w, h, below);
-                if (!src) continue;
-                items.push({ src, transform: pl.transform });
-                if (useGL) { if (actx) drawTransformed(actx, src, pl.transform, w, h); }
-                else drawTransformed(ctx, src, pl.transform, w, h);
+                // 只有**最后**一个 Stash 层之后才敢交纹理：在它之前的层都得落成画布，因为后面的 Stash
+                // 层要读"以下所有层的合成"，而那本账是 2D 攒的。
+                const got = foldLayer(pl, t, w, h, below, !!stage && i >= lastBelow);
+                if (!got) continue;
+                if (got.tex) { items.push({ tex: got.tex, mask: got.mask, transform: pl.transform }); continue; }
+                items.push({ src: got.src, transform: pl.transform });
+                if (useGL) { if (actx) drawTransformed(actx, got.src, pl.transform, w, h); }
+                else drawTransformed(ctx, got.src, pl.transform, w, h);
             }
             if (useGL) {
-                const g = compositeGL(items, w, h, o.glTarget || null);
+                const g = compositeGL(items, w, h, stage || o.glTarget || null);
                 if (g) {
                     if (o.glTarget) return g;                  // 直出：那块画布本身就是结果
-                    ctx.drawImage(g, 0, 0); return cv;         // 内部离屏：拷一次
+                    ctx.drawImage(g, 0, 0); return cv;         // 借/自建上下文：拷一次（P3.2 去掉这一步）
                 }
                 api.notes.push('gl unavailable, fell back to 2d');
             }
@@ -325,6 +463,7 @@ void main() { Frag = texture(uSrc, vUV); }`;
             api.notes.push('gl unavailable, fell back to 2d');
         }
         for (const it of items) {
+            if (it.tex) { api.notes.push('texture item on the 2d backend'); continue; }
             if (!it.transform) { try { ctx.drawImage(it.src, 0, 0, w, h); } catch (e) { /* skip */ } }
             else drawTransformed(ctx, it.src, it.transform, w, h);
         }
@@ -344,7 +483,23 @@ void main() { Frag = texture(uSrc, vUV); }`;
         return render(plan, t, scratch, Object.assign({}, opts, { backend: 'gl', glTarget: canvas }));
     }
 
-    return { api, render, renderTo, foldLayer, blank };
+    /**
+     * 把一组已经折好的 items 直接合成到一块**外部** webgl2 画布上（P3.2 的唯一显示面）。
+     * 与 `render(plan)` 的区别只有一处：这里没有 plan —— 调用方（编辑器）自己按图层次序攒 items，
+     * 每一层要放什么、摆在哪由它说了算。GL 不可用就回 false，调用方退回 2D。
+     *   items: `{ src, transform|null, premul? }`（src = 画布/图片/视频；premul = 源已是预乘）
+     *   opts:  `{ clear = true }`（false = 在已有内容上继续叠）
+     */
+    function present(canvas, items, w, h, opts) {
+        if (!canvas || !w || !h) return false;
+        let gl = null;
+        try { gl = canvas.getContext('webgl2'); } catch (e) { gl = null; }
+        if (!gl) return false;
+        return !!compositeGL(items || [], w, h,
+                             { gl, canvas, clear: !(opts && opts.clear === false) });
+    }
+
+    return { api, render, renderTo, present, foldLayer, blank };
 })();
 
 // 离线入口（探针/导出用）：不与现有渲染路径抢任何东西

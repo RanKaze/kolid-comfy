@@ -11,6 +11,9 @@ const FX_KAWASE_MAX_ITER = 8;            // 着色器里那个常数次循环的
 const fxgl = {
     gl: null, dead: '', skip: '', w: 0, h: 0, fmt: null, vao: null, maxTex: 0,
     off: [], texSrc: null, texMask: null, texMap: null, texMap2: null, texLut: null, progs: null, canvas: null, hasMask: 0, hasMap2: 0,
+    // 记账 (P3.1):合成侧要证明"每层少了一次 upload",只能数出来 —— upload = 画布进纹理的次数,
+    // readback = 把结果抄回 canvas 的次数, pub = 只留纹理、不回读的出口次数。探针读它,别拿它做判断。
+    stats: { upload: 0, readback: 0, pub: 0, paintBegin: 0, paintInk: 0, paintPresent: 0 },
 };
 
 const FX_VS = `#version 300 es
@@ -90,6 +93,25 @@ void main() {
     vec4 c = texture(uTex, vUV);
     Frag = vec4(c.rgb * c.a, c.a);
 }`;
+// 笔刷落点 (P3.1):两张直通 alpha 的面在着色器里合成,不经过 canvas 的 destination-in/out。
+//   uMode = 0  src over dst  —— 墨盖到 decal 上、decal 盖到 base 上,都是这一句;
+//   uMode = 1  dst dest-out src —— 橡皮:只擦 dst 的 alpha,颜色原样留着(与 canvas 的 destination-out 同义)。
+// 两张面都已是直通 alpha,所以这里先把 rgb 预乘、算完再除回去;与 canvas 2D 的 source-over 同一公式。
+const FX_FS_INK = `#version 300 es
+precision highp float;
+in vec2 vUV;
+layout(location = 0) out vec4 Frag;
+uniform sampler2D uDst;
+uniform sampler2D uSrc;
+uniform int uMode;
+void main() {
+    vec4 d = texture(uDst, vUV);
+    vec4 s = texture(uSrc, vUV);
+    if (uMode == 1) { Frag = vec4(d.rgb, d.a * (1.0 - s.a)); return; }
+    float a = s.a + d.a * (1.0 - s.a);
+    vec3 c = a > 0.0 ? (s.rgb * s.a + d.rgb * d.a * (1.0 - s.a)) / a : vec3(0.0);
+    Frag = vec4(c, a);
+}`;
 
 function fxglCompile(gl, type, src) {
     const s = gl.createShader(type);
@@ -147,8 +169,9 @@ function fxglInit() {
         sil: fxglProgram(gl, 'sil', FX_FS_SIL),
         box: fxglProgram(gl, 'box', FX_FS_BOX),
         present: fxglProgram(gl, 'present', FX_FS_PRESENT),
+        ink: fxglProgram(gl, 'ink', FX_FS_INK),
     };
-    let ready = progs.sil && progs.box && progs.present;
+    let ready = progs.sil && progs.box && progs.present && progs.ink;
     for (const spec of Object.values(EFFECT_TYPES)) {
         for (const name of Object.keys(spec.shaders || {})) {
             progs[name] = fxglProgram(gl, name, spec.shaders[name]);
@@ -182,10 +205,11 @@ function fxglInit() {
     return gl;
 }
 
-function fxglMakeBuffer(gl, w, h) {
+function fxglMakeBuffer(gl, w, h, fmt) {
+    const f = fmt || fxgl.fmt;
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, fxgl.fmt.internal, w, h, 0, gl.RGBA, fxgl.fmt.type, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, f.internal, w, h, 0, gl.RGBA, f.type, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -194,7 +218,7 @@ function fxglMakeBuffer(gl, w, h) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
     const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
-    return { tex, fb, ok };
+    return { tex, fb, ok, w, h, fmt: f };
 }
 
 function fxglResize(gl, w, h) {
@@ -221,8 +245,13 @@ function fxglUploadCanvas(tex, src) {
     const gl = fxgl.gl;
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    // 这台上下文会被合成器借去出图 (P3.1),而它上传画布时要把 UNPACK_PREMULTIPLY 开成 true。
+    // 链与笔刷这边的面一律是**直通 alpha**(预乘由出口的 present 那一步做),所以这里必须钉死 false:
+    // 否则借出去一趟之后,下一次上传就被预乘一次,再进 present 就是二次预乘(实测 maxdiff 22)。
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    fxgl.stats.upload++;
 }
 
 // dst = null 即画进默认缓冲(那张用于读回的 GL canvas)。vp 是可选的「这一趟只渲染多大一块」:
@@ -233,6 +262,9 @@ function fxglRunPass(dst, prog, setup, vp) {
     gl.viewport(0, 0, vp ? vp.w : fxgl.w, vp ? vp.h : fxgl.h);
     gl.useProgram(prog.p);
     gl.bindVertexArray(fxgl.vao);
+    // 合成器会借这台上下文出图(P3.1),它会开混合 —— 链条这边的每一趟都必须是不混合的覆盖写,
+    // 否则一条链会在上一趟的结果上再混一次。默认状态本来就不混合,这里只是把它钉死。
+    gl.disable(gl.BLEND);
     setup(prog);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
@@ -306,11 +338,12 @@ function fxHexToRgb01(hex) {
 const fxChainSkip = new WeakMap();
 function fxChainSkipReason(r) { return (r && fxChainSkip.get(r)) || ''; }
 
-// 就地跑一条链,结果写回 surface。返回 false = 整链没跑(不支持 / 太大),surface 原样留着;
-// fxgl.skip 带上原因,让状态栏能说清楚,而不是「特效静默地变成了没特效」。
+// 就地跑一条链,结果停在 fxgl.off[slot] 的**纹理**上(直通 alpha,还没预乘)。返回 { slot } 或 null。
+// 这是唯一的链执行体 —— 两个出口(present 回 canvas / 发布成纹理)只决定"结果怎么交出去",不碰像素。
+// 返回 null = 整链没跑(不支持 / 太大),surface 原样留着;fxgl.skip 带上原因,让状态栏能说清楚。
 // `opts.rec` = 这一枚 Effects attribute 的记录 (读它自己那条链), `opts.mask` = 它左边那些蒙版与起来的
 // 覆盖率。两个都不传 = 读图层上那三个老名字的最左边那一枚 (还没理解 strip 的调用点,见 attr/core.js)。
-function applyLayerEffects(l, surface, opts) {
+function fxglChainRun(l, surface, opts) {
     const o = opts || {};
     const chain = o.rec ? activeEffects(l, o.rec) : activeEffects(l);
     const mask = ('mask' in o) ? o.mask : l.mask;
@@ -318,11 +351,11 @@ function applyLayerEffects(l, surface, opts) {
     if (o.rec) fxChainSkip.delete(o.rec);
     // 全局那句照旧写 (状态栏要的是「最近一次」),这一枚记录那句同时写进 fxChainSkip。
     const note = () => { if (o.rec && fxgl.skip) fxChainSkip.set(o.rec, fxgl.skip); };
-    if (!chain.length) return false;
+    if (!chain.length) return null;
     const gl = fxglInit();
-    if (!gl) { fxgl.skip = fxgl.dead || 'WebGL2'; note(); return false; }
+    if (!gl) { fxgl.skip = fxgl.dead || 'WebGL2'; note(); return null; }
     const w = surface.width, h = surface.height;
-    if (!w || !h || !fxglResize(gl, w, h)) { note(); return false; }
+    if (!w || !h || !fxglResize(gl, w, h)) { note(); return null; }
 
     fxglUploadCanvas(fxgl.texSrc, surface);
     fxgl.hasMask = 0;
@@ -372,12 +405,76 @@ function applyLayerEffects(l, surface, opts) {
     }
     // 特效自己写在链上的那句也算这条记录的原因 (参数为 0 之类它自己决定不跑的情形)。
     note();
-    fxglRunPass(null, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0));
+    return { slot: col.slot };
+}
+
+// 出口①(P2 起就在用):把结果抄回 surface。链的像素一落地就成了"一张画布",所以它必须过一遍
+// present(直通 α → 预乘,canvas 被 drawImage 读走时按预乘解释)再画进去。
+// 返回 false = 整链没跑,surface 原样留着。
+function applyLayerEffects(l, surface, opts) {
+    const r = fxglChainRun(l, surface, opts);
+    if (!r) return false;
+    const w = surface.width, h = surface.height;
+    fxglRunPass(null, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[r.slot].tex, 0));
     const c2 = surface.getContext('2d');
     resetCtx(c2);
     c2.clearRect(0, 0, w, h);
     c2.drawImage(fxgl.canvas, 0, 0, w, h);
+    fxgl.stats.readback++;
     return true;
+}
+
+// 出口②(P3.1 的"编辑写纹理"):结果**不回读**,直接留在纹理上交给合成器。
+// 交出去的那张面来自**发布区**(不是 off[]) —— off[] 是公共借用区,下一条链就把 0/1 覆盖了,而合成
+// 要按图层次序贴很多层,每层的结果得同时存在。发布区是预乘 8 位:与"抄回 canvas 再 texImage2D"那条
+// 老路逐位同口径(那两步省掉的正是这一步拷贝),所以合成结果不许因为换了出口而变。
+// 返回 { gl, tex, w, h } 或 null(没跑 = 调用方照老路用 canvas)。
+function applyLayerEffectsTexture(l, surface, opts) {
+    const r = fxglChainRun(l, surface, opts);
+    if (!r) return null;
+    const pub = fxglPubTake(fxgl.w, fxgl.h);
+    if (!pub) return null;
+    fxglRunPass(pub, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[r.slot].tex, 0));
+    fxgl.stats.pub++;
+    return { gl: fxgl.gl, tex: pub.tex, w: pub.w, h: pub.h };
+}
+
+// 发布区:按需生长的纹理池,池里的面跨帧复用(每次合成开头 fxglPubReset 把 used 归零)。
+// 峰值条数 = 一帧里同时带着链结果的层数,不是历史总数 —— 这就是不设上限也安全的原因。
+const fxglPub = { list: [], used: 0 };
+const FX_PUB_FMT = () => ({ internal: fxgl.gl.RGBA8, type: fxgl.gl.UNSIGNED_BYTE });
+
+function fxglPubReset() { fxglPub.used = 0; }
+
+function fxglPubTake(w, h) {
+    const gl = fxgl.gl;
+    let p = fxglPub.list[fxglPub.used];
+    if (p && (p.w !== w || p.h !== h)) {
+        gl.deleteFramebuffer(p.fb);
+        gl.deleteTexture(p.tex);
+        p = null;
+    }
+    if (!p) {
+        const b = fxglMakeBuffer(gl, w, h, FX_PUB_FMT());
+        if (!b.ok) { fxgl.dead = 'framebuffer incomplete (publish)'; return null; }
+        p = b;
+        fxglPub.list[fxglPub.used] = p;
+    }
+    fxglPub.used++;
+    return p;
+}
+
+// 合成器往"这台 GL 的那块画布"出图之前先对这一句:让画布尺寸与它要画的网格一致,并把发布区开新一页。
+// 返回 { gl, canvas }(借出去的上下文),取不到 GL 就 null —— 调用方据此决定还能不能用纹理入口。
+function fxglStageSize(w, h) {
+    const gl = fxglInit();
+    if (!gl) return null;
+    if (fxgl.canvas.width !== w || fxgl.canvas.height !== h) {
+        fxgl.canvas.width = w;
+        fxgl.canvas.height = h;
+    }
+    fxglPubReset();
+    return { gl, canvas: fxgl.canvas };
 }
 
 // ---- 图层表面的缓存 ----
@@ -575,6 +672,178 @@ function fxResolved(l) {
     l.fxResolveGen = (l.fxResolveGen | 0) + 1;
     return surface;
     });
+}
+
+// ---- 笔刷落点：图层纹理 (P3.1 余下) ----
+// 一笔落在 decal 上时，**预览期间 2D 面一个字都不动**：墨直接进 GPU 的 decal 纹理，再由
+// 「decal over base」的合成纹理交给显示 / 合成器；提交那一刻才把同一笔墨写回 2D 面（历史、存档、
+// 导出读的仍是那张面）。所以下一帧看到的是纹理，不是把 2D 面重折一遍。
+//
+// 为什么拆成 decal/base 两张而不是往「整层结果」上直接盖墨：
+//   · 层结果 = decal over base。source-over 可以结合，但橡皮是 destination-out —— 它只该擦 decal，
+//     落在整层结果上会连 base 一起擦掉。两张面各自成立，两种笔都精确。
+//   · base = 「把这一枚 decal 临时停用后折出来的那层」。这只在 decal 是最后一步时成立（否则它右边
+//     的蒙版/链也得跟着重算），所以入口有一道判据（blend_node.html 的 gpuPaintEligible）。
+//
+// 纹理一律 RGBA8、直通 alpha（与链的中间面同口径）；ink 仍是一张 canvas，上传后由着色器合成 ——
+// 没有 readback，也没有整层重折。
+const fxPaintIds = new WeakMap();
+let fxPaintSeq = 0;
+function fxPaintId(o) {
+    if (!o) return '0';
+    let v = fxPaintIds.get(o);
+    if (v === undefined) { v = ++fxPaintSeq; fxPaintIds.set(o, v); }
+    return String(v);
+}
+
+// 与 fxResolved 的缓存键同义：面身份 + 落笔代次 + 链签名 + 贴图戳。只用于「下一次开始一笔时
+// 2D 面是不是已经换过」，预览期间不拿它判活纹理（见 fxPaintBegin 的 live）。
+function fxPaintLayerKey(l) {
+    const n = nativeSize(l.img);
+    let faces = '';
+    for (const r of attrRecordsOf(l)) faces += ':' + fxPaintId(r.surface);
+    return n.w + 'x' + n.h + ':' + fxPaintId(l.img) + faces + ':'
+        + fxSignature(l) + ':' + fxMapStamp(l) + ':' + fxExternalStamp(l) + ':'
+        + (l.paintGen | 0) + attrPaintGens(l);
+}
+
+const fxPaintCache = new WeakMap();
+const FX_PAINT_FMT = () => ({ internal: fxgl.gl.RGBA8, type: fxgl.gl.UNSIGNED_BYTE });
+
+function fxPaintBuffer(w, h) {
+    const b = fxglMakeBuffer(fxgl.gl, w, h, FX_PAINT_FMT());
+    if (!b.ok) { fxgl.dead = 'framebuffer incomplete (paint)'; return null; }
+    return b;
+}
+
+// 一张面 → 一张纹理。尺寸按面自己的 natural size（l.img 可能是 <img>，width 未必等于像素宽）。
+function fxPaintUpload(src) {
+    const n = nativeSize(src);
+    if (!n.w || !n.h) return null;
+    const b = fxPaintBuffer(n.w, n.h);
+    if (!b) return null;
+    fxglUploadCanvas(b.tex, src);
+    return b;
+}
+
+function fxPaintCompose(st) {
+    const gl = fxgl.gl;
+    fxglRunPass(st.composed, fxgl.progs.ink, p => {
+        fxglBindTex(p, 'uDst', st.base.tex, 0);        // dst = base（这一层没有 decal 的样子）
+        fxglBindTex(p, 'uSrc', st.decal[st.cur].tex, 1); // src = decal（这一笔的最新墨）
+        gl.uniform1i(fxglU(p, 'uMode'), 0);
+    }, { w: st.w, h: st.h });
+    return true;
+}
+
+// 开始一笔：把 2D 面（decal）与「没有它的那层」（base）各上传一次，之后预览只动纹理。
+// `rec` 是 decal 的 attribute 记录 —— 停用它只为折出 base，出口原样放回。
+function fxPaintBegin(l, surface, rec) {
+    const gl = fxglInit();
+    if (!gl || !l || !surface || !rec) return false;
+    const w = surface.width, h = surface.height;
+    if (!w || !h) return false;
+    let st = fxPaintCache.get(l);
+    if (!st || st.w !== w || st.h !== h) {
+        st = { w, h, decal: [null, null], cur: 0, base: null, composed: null, pub: null,
+               ink: null, live: false, seq: 0, pubSeq: -1, key: '' };
+        fxPaintCache.set(l, st);
+    }
+    for (const b of st.decal) if (b) { gl.deleteFramebuffer(b.fb); gl.deleteTexture(b.tex); }
+    if (st.base) { gl.deleteFramebuffer(st.base.fb); gl.deleteTexture(st.base.tex); }
+    if (st.composed) { gl.deleteFramebuffer(st.composed.fb); gl.deleteTexture(st.composed.tex); }
+    if (st.pub) { gl.deleteFramebuffer(st.pub.fb); gl.deleteTexture(st.pub.tex); st.pub = null; }
+    st.pubSeq = -1;
+    st.decal = [fxPaintUpload(surface), null];
+    if (!st.decal[0]) return false;
+    st.decal[1] = fxPaintBuffer(w, h);
+    if (!st.decal[1]) return false;
+    st.cur = 0;
+    // base：临时停用这枚 decal 再折。fxResolved 是同步调用，停用期间没有别的读者。
+    const was = rec.enabled;
+    rec.enabled = false;
+    let baseCv = null;
+    try { baseCv = fxResolved(l); } finally { rec.enabled = was; }
+    if (!baseCv) return false;
+    st.base = fxPaintUpload(baseCv);
+    if (!st.base) return false;
+    st.composed = fxPaintBuffer(w, h);
+    if (!st.composed) return false;
+    st.key = fxPaintLayerKey(l);
+    st.seq = 0;
+    if (!fxPaintCompose(st)) return false;
+    st.live = true;
+    fxgl.stats.paintBegin++;
+    return true;
+}
+
+// 预览的一帧：ink 已经是「要盖上去的那张墨」（上色/Alpha/选区都在调用方烘好）。
+// 它只改 decal 纹理，随后重合成 composed —— 2D 面仍然原样。
+function fxPaintInk(l, ink, erase) {
+    const gl = fxglInit();
+    const st = fxPaintCache.get(l);
+    if (!gl || !st || !st.live || !ink) return false;
+    const n = nativeSize(ink);
+    if (n.w !== st.w || n.h !== st.h) return false;    // 入口保证同一网格
+    if (!st.ink) {
+        st.ink = fxPaintBuffer(st.w, st.h);
+        if (!st.ink) return false;
+    }
+    fxglUploadCanvas(st.ink.tex, ink);
+    const dst = st.decal[st.cur], out = st.decal[1 - st.cur];
+    fxglRunPass(out, fxgl.progs.ink, p => {
+        fxglBindTex(p, 'uDst', dst.tex, 0);
+        fxglBindTex(p, 'uSrc', st.ink.tex, 1);
+        gl.uniform1i(fxglU(p, 'uMode'), erase ? 1 : 0);
+    }, { w: st.w, h: st.h });
+    st.cur = 1 - st.cur;
+    st.seq++;
+    if (!fxPaintCompose(st)) return false;
+    fxgl.stats.paintInk++;
+    return true;
+}
+
+// 合成器问「这一层有没有一笔正在纹理里」。没有就照旧折 2D 面。
+// 合成器的 tex 入口按**预乘**解释（与 applyLayerEffectsTexture 的 present 出口一致），所以这里
+// 懒一次 present：straight 的 composed → 预乘的 pub。编辑器的 fxPaintPresent 仍走 composed，
+// 不会二次预乘。
+function fxPaintTexture(l) {
+    const st = fxPaintCache.get(l);
+    if (!st || !st.live) return null;
+    if (!st.pub) {
+        st.pub = fxPaintBuffer(st.w, st.h);
+        if (!st.pub) return null;
+        st.pubSeq = -1;
+    }
+    if (st.pubSeq !== st.seq) {
+        fxglRunPass(st.pub, fxgl.progs.present, p => fxglBindTex(p, 'uTex', st.composed.tex, 0),
+                    { w: st.w, h: st.h });
+        st.pubSeq = st.seq;
+    }
+    return { gl: fxgl.gl, tex: st.pub.tex, w: st.w, h: st.h, seq: st.seq };
+}
+
+// 显示用：把 composed 呈到 fxgl 那块默认画布上（预乘出口，与链的 present 同一条），
+// 调用方拿到 canvas 后按图层矩阵 drawImage。这里不改 fxgl.w/h —— 链条的离屏池不参与。
+function fxPaintPresent(l) {
+    const st = fxPaintCache.get(l);
+    if (!st || !st.live) return null;
+    if (fxgl.canvas.width !== st.w) fxgl.canvas.width = st.w;
+    if (fxgl.canvas.height !== st.h) fxgl.canvas.height = st.h;
+    fxglRunPass(null, fxgl.progs.present, p => fxglBindTex(p, 'uTex', st.composed.tex, 0),
+                { w: st.w, h: st.h });
+    fxgl.stats.paintPresent++;
+    return fxgl.canvas;
+}
+
+// 提交：2D 面已经由调用方写好，纹理从此刻起不再代表这一层（下一次 begin 会按新面重传）。
+function fxPaintEnd(l) {
+    const st = fxPaintCache.get(l);
+    if (!st) return;
+    st.live = false;
+    st.key = '';
+    st.seq = 0;
+    st.pubSeq = -1;
 }
 
 // ---- 后端分界 (the split) ----
