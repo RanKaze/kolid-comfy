@@ -1,14 +1,16 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react';
 import type { PipelineBlock, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi, VideoGenConfig, VideoGenSlot } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, preprocessFlag, VIDEO_GEN_SLOTS, videoGenMissing } from '../types';
-import DebugModal, { DbgIcon } from './DebugModal';
-import LogModal from './LogModal';
+import { DebugPanel } from './DebugModal';
+import { LogPanel } from './LogModal';
 import RunStatusSeg from './RunStatusSeg';
 import VidSegModal from './VidSegModal';
 import { type DockMode, type DockRules, type UnitId, type Dock, docUnit, docUidOf, dockUnits, fitLayout, loadDock, revealDoc, setBlockMode, setToolbarDock, setToolbarDirDock, syncDocUnits } from '../dock/model';
 import { fetchLayouts } from '../dock/layoutStore';
 import { type DockDrag, type DockOver, DockPanel } from '../dock/DockView';
 import { registerProbe, note } from '../debug/probe';
+import { ProbePanelBody } from '../debug/ProbePanel';
+import { probePanelOpen, setProbePanelOpen, subscribePanel } from '../debug/install';
 import { onGlobalKey, keyIs } from '../hotkeys';
 import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
@@ -57,11 +59,19 @@ const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', '
 // 轨道与资产属于文档，不该只在 Video 模式下才看得见。播放器不单独占窗：
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
 // 标题条上有一颗 Image/Video 切换（见 heads）。
-const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vaudio'];
+const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vaudio', 'log', 'debug', 'probe'];
+// 工具窗的标识色:Log / Debug / Probe 三扇"看现场"的窗,图标与 tab 名同穿一件颜色的衣服,
+// 与内容窗(素色)一眼分开。icon 的着色与 titleColor 都从这里来 —— 一处定色,两处生效。
+const UNIT_COLORS: Partial<Record<string, string>> = {
+  log: '#64d2ff',    // 信息青:一条流水账
+  debug: '#ff9f0a',  // 警示橙:快照与过程数据
+  probe: '#bf5af2',  // 探针紫:布局巡检
+};
 const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'presets', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
   toolbar: 'File', context: 'Context', pipeline: 'Pipeline', presets: 'Pipeline Presets',
   blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets', vinspector: 'Inspector', vaudio: 'Audio Monitor',
+  log: 'Log', debug: 'Debug', probe: 'Probe',
   ...WORKBENCH_TITLES,
 };
 const COLUMN_W = 340;
@@ -127,9 +137,13 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     },
     // toolbar 条上一格一颗的记号。页面才知道"这一格是什么"，所以图和标题一样由这里给：
     // 工作台的二十格、宿主的五格、以及一枚文档（doc:*）都在 workbench/icons 那一张表里。
+    // 名字条上要列哪些单元由 listed 说了算;工具窗(Log/Debug/Probe)的图标与名字着同一色,
+    // 与内容窗划清界限 —— 颜色一处定义(UNIT_COLORS),两处生效。
+    titleColor: (id: UnitId) => UNIT_COLORS[id],
     icon: (id: UnitId) => {
       const Icon = unitIcon(id);
-      return <Icon size={15} />;
+      const c = UNIT_COLORS[id];
+      return c ? <span style={{ color: c, display: 'flex' }}><Icon size={15} /></span> : <Icon size={15} />;
     },
     keepMounted: isDocUnit,
     // A document window never folds: its fold would be stored under a uid the workbench re-issues from
@@ -137,16 +151,13 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDocUnit(id),
-    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vaudio' || id === 'blocks',
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'context' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vaudio' || id === 'log' || id === 'debug' || id === 'probe' || id === 'blocks',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
     // 时间线与资产库同理：两份会一直长的列表。
-    // Inspector 回到 grows 名单:窗占容器的一份份额(与 vassets/vtracks 互摊,地板由
-    // DOCK_GROW_MIN_H 兜着),媒体在窗给的空间里信箱式 contain —— 宽高两个方向都 fit,
-    // 且**媒体永远不改变窗的大小**(画面区 flex:1 + 绝对定位媒体,见 Inspector.tsx)。
-    // 教训各半:不进 grows → 窗按内容定高,竖版媒体把列撑到六百多像素、挤走邻居;
-    // 区域跟媒体比例走 → 同样的事。唯一自洽的口径:窗吃份额、媒体贴进去。
-    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'vinspector',
+    // Context 也进 grows:预览图要吃满窗的余量(图片 fit dock window),左列里它是那个"看图"的窗,
+    // 与 Inspector 同一待遇;Pipeline/Presets 照旧按内容定高。
+    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'context' || id === 'log' || id === 'debug' || id === 'probe',
     top: 'toolbar',
     // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
     // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
@@ -155,7 +166,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     columnW: COLUMN_W,
     // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里，Assets / Tracks 是普通成员
     // （默认窗，不靠任何切换逻辑出现）。
-    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector', 'vaudio'],
+    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector', 'vaudio', 'log', 'debug', 'probe'],
     rightW: RIGHT_W,
     // The size a NEW block opens at — asked per unit and per axis, because which axis the block will be
     // measured on is decided by the side it was dropped on (under a block it is a height, beside one it
@@ -167,6 +178,9 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
       if (id === 'vassets') return axis === 'v' ? 260 : PANEL_BLOCK_W;
       if (id === 'vinspector') return axis === 'v' ? 300 : 460;
       if (id === 'vaudio') return axis === 'v' ? 240 : 200;
+      if (id === 'log') return axis === 'v' ? 240 : 320;
+      if (id === 'debug') return axis === 'v' ? 380 : 460;
+      if (id === 'probe') return axis === 'v' ? 420 : 540;
       return axis === 'v' ? PANEL_BLOCK_H : PANEL_BLOCK_W;
     },
   };
@@ -538,10 +552,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 }) => {
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
-  // Debug 弹窗：上一次 Run / Generate 的全过程快照（Context 标题右侧的 🐞 按钮打开）。
-  const [showDebug, setShowDebug] = useState(false);
-  // Log 弹窗：最近 32 条行为记录 —— 画布那颗常显状态药丸撤掉后的去处。
-  const [showLog, setShowLog] = useState(false);
+  // Log / Debug 曾是这里两颗 useState 开关的 Modal;现在各自是一扇 dock 窗(见 bodies)。
   // Live thumbnail of the workbench composite — that composite *is* the Context Image.
   const [blendPreview, setBlendPreview] = useState<{ image: string; size: string } | null>(null);
   // Guidances 那张总卡的本客户端副本（与 blendPreview 同一条消息通道来）。图池里的
@@ -552,6 +563,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // Mask tint of that thumbnail, 0..1. Its own slider: the workbench's Mask layer has a separate
   // one that only tints the canvas. The tinting itself happens in the iframe, so we forward it.
   const [previewTint, setPreviewTint] = useState(0.3);
+  // Mask Tint 滑块改悬浮式:指针停在 Context 预览图上才浮出来(下面 context 正文用)。
+  const [ctxTintHover, setCtxTintHover] = useState(false);
   // Inline rename of a Pipeline Blocks tab (set): which set is being renamed and the draft text.
   const [renamingSetId, setRenamingSetId] = useState<string | null>(null);
   const [renamingValue, setRenamingValue] = useState('');
@@ -626,6 +639,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setFold(id, true);
     applyDock(revealDoc(dockRef.current, id));
   }, [applyDock, setFold]);
+  // Alt+D(探针热键)住在 debug/install 里,它只会掀 `probePanelOpen` 这口铃 —— 探针如今是
+  // 一扇 dock 窗,宿主在这里听铃:有人按了 Alt+D 就把 Probe 窗切到前台,并把开关消费掉。
+  useEffect(() => subscribePanel(() => {
+    if (!probePanelOpen()) return;
+    setProbePanelOpen(false);
+    revealPanel('probe');
+  }), [revealPanel]);
   // 模式切换不动树：vtracks / vassets 本来就是默认提供的窗（起手树 / fitLayout 补缺都保证它们在）。
   // 切换只换 canvas 格的正文 —— 画布 ↔ 播放器 —— Tracks / Assets 与其它每一扇窗原地不动。
   // 模式同时是**工程自己的属性**（随 .cud 走）：写进活跃文档的桶并置脏，下一次落盘就带进
@@ -3108,7 +3128,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   // 模式切换**只住这一处**：工程画布大窗（文档窗，doc:*）标题条右上、toolbar 化
                   // 按钮左边 —— 那扇窗就是 Video 模式的播放器宿主，别的窗一概不给。运行状态
                   // （进度条 + Cancel）排在它的**左边**：同一扇窗，同一句话 —— "这一趟 run 属于
-                  // 这份工程"。
+                  // 这份工程"。（Log / Debug 曾住这里,现在各自是一扇正式的 dock 窗。）
                   ...Object.fromEntries(blendDocs.docs.map(d => [docUnit(d.uid), (
                     <>
                       {/* 原本那颗 Cancel：视频 list 跑在飞时打断宿主这趟，否则照旧转页面的 staging-cancel */}
@@ -3116,22 +3136,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                       {vidModeSeg}
                     </>
                   )])),
-                  context: (<>
-                    {/* Log：画布上那颗常显状态药丸撤掉后，工作台的每一句反馈都攒在这里
-                        （工作台 setStatus + 宿主自身动作，最近 32 条）。 */}
-                    <button
-                      style={styles.logBtn}
-                      title="Log — 最近 32 条行为记录（工作台与本页每一步的反馈）"
-                      onClick={() => setShowLog(true)}
-                    ><DbgIcon name="log" size={15} /> Log{actionLog.length ? ` · ${actionLog.length}` : ''}</button>
-                    {/* Debug：打开上一次 Run / Generate 的全过程快照（prompt 链路 +
-                        各 Block 调用后数据 + 中间过程图/遮罩）。数据来自 /api/debug_trace。 */}
-                    <button
-                      style={styles.debugBtn}
-                      title="Debug — 查看上一次 Run / Generate 的全过程快照（prompt 链路、各 Block 数据、中间过程图与遮罩）"
-                      onClick={() => setShowDebug(true)}
-                    ><DbgIcon name="bug" size={15} /> Debug</button>
-                  </>),
                 },
                 bodies: {
               // 顶栏那一排就是原来 File 菜单的六项，一项一个入口，说明全在 tooltip 里。
@@ -3173,30 +3177,49 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 : <VidInspector sel={vidInspect} />,
               // Audio Monitor:谁持着全局独占音频槽就画谁(audioFocus 仲裁,页面级、不属于文档)。
               vaudio: <VidAudioMonitor />,
-              context: (<>
-                <div style={styles.dockCard}>
-                  <div style={styles.contextPreviewWrap}>
-                  {blendPreview ? (
-                    <>
-                      <img src={blendPreview.image} alt="Context preview" style={styles.blendPreviewImg} />
-                      {blendPreview.size && <div style={styles.blendPreviewBadge}>{blendPreview.size}</div>}
-                    </>
-                  ) : (
-                    <div style={styles.blendPreviewEmpty}>Add a layer to preview the composite</div>
-                  )}
+              // 工具窗三扇:Log(行为流水)/ Debug(上次 Run 快照)/ Probe(界面巡检)。
+              // 彩色图标与彩色 tab 名来自 UNIT_COLORS。
+              log: <LogPanel entries={actionLog} />,
+              debug: <DebugPanel />,
+              probe: <ProbePanelBody />,
+              context: (
+                // 无边框卡片(fullBleed + grows:预览吃满窗)。Mask Tint 不再常驻一行 ——
+                // 指针停在预览图上才浮出滑块(浮层是悬停区的子节点,挪上去不会中途消失)。
+                <div style={styles.contextCard}>
+                  <div
+                    style={styles.contextPreviewWrap}
+                    onPointerEnter={() => setCtxTintHover(true)}
+                    onPointerLeave={() => setCtxTintHover(false)}
+                  >
+                    {blendPreview ? (
+                      <>
+                        <img src={blendPreview.image} alt="Context preview" style={styles.blendPreviewImg} />
+                        {blendPreview.size && <div style={styles.blendPreviewBadge}>{blendPreview.size}</div>}
+                      </>
+                    ) : (
+                      <div style={styles.blendPreviewEmpty}>Add a layer to preview the composite</div>
+                    )}
+                    {ctxTintHover && blendPreview && (
+                      <div style={{
+                        position: 'absolute', left: '50%', bottom: 10, transform: 'translateX(-50%)', zIndex: 6,
+                        display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
+                        background: 'rgba(40,40,44,0.97)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
+                        border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 8,
+                        boxShadow: '0 6px 22px rgba(0,0,0,0.5)', maxWidth: 'calc(100% - 16px)',
+                      }}>
+                        <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 500, color: 'rgba(255,255,255,0.62)' }}>Mask Tint</span>
+                        <input
+                          type="range" min={0} max={1} step={0.01} value={previewTint}
+                          onChange={e => applyPreviewTint(parseFloat(e.target.value))}
+                          title="How strongly the Mask layer reads in this preview. Independent from the workbench's own Mask layer tint."
+                          style={{ flex: 1, minWidth: 90, accentColor: '#ff3b30', height: 14, cursor: 'pointer' }}
+                        />
+                        <span style={{ flexShrink: 0, fontSize: 10, color: 'rgba(255,255,255,0.5)', fontVariantNumeric: 'tabular-nums', minWidth: 24, textAlign: 'right' }}>{previewTint.toFixed(2)}</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div style={styles.previewTintRow}>
-                  <label style={styles.previewTintLabel}>Mask Tint</label>
-                  <input
-                    style={styles.previewTintRange}
-                    type="range" min={0} max={1} step={0.01} value={previewTint}
-                    onChange={e => applyPreviewTint(parseFloat(e.target.value))}
-                    title="How strongly the Mask layer reads in this preview. Independent from the workbench's own Mask layer tint."
-                  />
-                  <span style={styles.previewTintValue}>{previewTint.toFixed(2)}</span>
-                </div>
-                </div>
-              </>),
+              ),
 
               // PIPELINE — 这一格只有那一个下拉框：窗名已经说了它在选什么，再挂一枚
               // "Pipeline" 标签是同一句话说两遍；也不套内框（窗本身就是它的框）。
@@ -3649,9 +3672,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         </div>
       )}
 
-      {/* Debug — 上一次 Run / Generate 的全过程快照 */}
-      {showDebug && <DebugModal onClose={() => setShowDebug(false)} />}
-      {showLog && <LogModal entries={actionLog} onClose={() => setShowLog(false)} />}
       {/* Allow List 视频路的输入范围 + 分段帧数配置 —— 每次运行前由用户定（宿主才知道视频工程）。
           锚 = 第一行输入的源窗口（片段或资产），modal 里的输入范围就是它的跨度。 */}
       {vidSegCfg && (
@@ -4964,12 +4984,8 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(255,159,10,0.14)', border: '0.5px solid rgba(255,159,10,0.42)',
     color: '#ff9f0a', lineHeight: 1.5,
   },
-  previewTintRow: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 },
-  previewTintLabel: { fontSize: 12, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 58 },
-  previewTintRange: { flex: 1, minWidth: 0, accentColor: '#ff3b30' },
-  previewTintValue: { fontSize: 11, color: 'rgba(255,255,255,0.5)', minWidth: 26, textAlign: 'right' as const, fontVariantNumeric: 'tabular-nums' },
-  contextPreviewWrap: { position: 'relative', width: '100%', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' },
-  blendPreviewImg: { width: '100%', height: '100%', objectFit: 'contain', display: 'block' },
+  contextPreviewWrap: { position: 'relative', flex: 1, minHeight: 160, width: '100%', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' },
+  blendPreviewImg: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', display: 'block' },
   blendPreviewEmpty: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12, textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontSize: 11 } as React.CSSProperties,
   blendPreviewBadge: { position: 'absolute', right: 6, bottom: 6, padding: '2px 6px', borderRadius: 6, background: 'rgba(0,0,0,0.55)', color: 'rgba(255,255,255,0.78)', fontSize: 10, fontVariantNumeric: 'tabular-nums' },
   paramRow: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
@@ -5011,6 +5027,8 @@ const styles: Record<string, React.CSSProperties> = {
   // The dock's own frame (its boxes, bars, handles and windows) is styled in src/dock/DockView.tsx —
   // this is what a unit's BODY uses: interior cards and rows, same skin as the Settings page.
   dockCard: { background: 'rgba(28,28,30,0.72)', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 10, padding: '2px 10px', display: 'flex', flexDirection: 'column', gap: 8 },
+  // Context 的卡片:同款但**没有边框** —— 预览图自己就是这一格的画面,一条线围着它是多余的。
+  contextCard: { background: 'rgba(28,28,30,0.72)', borderRadius: 10, padding: '2px 10px', display: 'flex', flexDirection: 'column', gap: 8, height: '100%' },
   dockGtitle: { fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.42)', borderBottom: '0.5px solid rgba(84,84,88,0.55)', paddingBottom: 3 },
   dockGbody: { display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.10)' },
   dockGroup: { display: 'flex', flexDirection: 'column', gap: 6 },

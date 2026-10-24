@@ -543,7 +543,7 @@ const ToolbarStrip: React.FC<{
           <div data-dock-tb-pop={open} ref={popRef} style={{ ...dockStyles.tbPop, left: pop.x, top: pop.y, width: pop.w, height: pop.h }}>
             <div style={dockStyles.tbPopHead}>
               <span style={dockStyles.tbPopIcon}>{ctx.rules.icon(open)}</span>
-              <span style={dockStyles.tbPopName} title={ctx.hint?.(open)}>{ctx.rules.title(open)}</span>
+              <span style={{ ...dockStyles.tbPopName, color: ctx.rules.titleColor?.(open) }} title={ctx.hint?.(open)}>{ctx.rules.title(open)}</span>
               {ctx.tabOps?.(open)}
               {ctx.heads[open] && <span style={dockStyles.dockHeadSlot}>{ctx.heads[open]}</span>}
               <button style={dockStyles.dockAct} title="Tuck this panel away" onClick={close}>
@@ -725,7 +725,7 @@ const DockWindow: React.FC<{
               {...grab(ctx, [u])} onClick={() => pick(i)}>
               {/* Each tab carries its own mark: in a strip of documents, the dot is the only thing that
                   can say which one the workbench is actually running on. */}
-              <span style={dockTabName}>{ctx.badge?.(u)}{ctx.rules.title(u)}</span>
+              <span style={{ ...dockTabName, color: ctx.rules.titleColor?.(u) }}>{ctx.badge?.(u)}{ctx.rules.title(u)}</span>
               {/* 关掉这一份工程的那颗 ✕ 站在**它这一格**的右边 —— 关的是哪一份，按钮就在哪一份
                   旁边，不飘到整扇窗的右端去。 */}
               {ctx.tabOps?.(u)}
@@ -738,7 +738,7 @@ const DockWindow: React.FC<{
         // window. Leaving the name inert also keeps a FLOAT's bar draggable as a bar (a float is one
         // unit, and pressing anywhere on its bar has to move the window, not start an HTML5 drag).
         <span style={dockNameRow}>
-          <span style={dockStyles.dockName} title={ctx.hint?.(id)}>{ctx.badge?.(id)}{ctx.rules.title(id)}</span>
+          <span style={{ ...dockStyles.dockName, color: ctx.rules.titleColor?.(id) }} title={ctx.hint?.(id)}>{ctx.badge?.(id)}{ctx.rules.title(id)}</span>
           {ctx.tabOps?.(id)}
         </span>
       )) : null}

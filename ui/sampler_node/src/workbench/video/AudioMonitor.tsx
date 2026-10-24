@@ -28,8 +28,10 @@ export const VidAudioMonitor: React.FC = () => {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const raf = useRef(0);
-  // 两声道的运行时状态:表针电平(快攻慢放)+ 峰值保持线。
-  const meter = useRef({ lvlL: MIN_DB, lvlR: MIN_DB, holdL: MIN_DB, holdR: MIN_DB, holdT: 0 });
+  // 两声道的运行时状态:**各管各的** —— 表针电平(快攻慢放)+ 峰值保持线(各自的保持计时、
+  // 各自回落)。曾经两只声道共用一个保持计时、且任一出新高把两条线一起抬,结果一条被另一条
+  // 的活动反复托住、落不落底全看运气;拆开后没声音的声道,线自己落到底并消失。
+  const meter = useRef({ lvlL: MIN_DB, lvlR: MIN_DB, holdL: MIN_DB, holdR: MIN_DB, holdTL: 0, holdTR: 0 });
   // S 键:哑掉的声道。换持有者就复位(闸是持有者图里的节点,不能把上一家的哑带过来)。
   const [silenced, setSilenced] = useState<{ l: boolean; r: boolean }>({ l: false, r: false });
   useEffect(() => {
@@ -105,13 +107,16 @@ export const VidAudioMonitor: React.FC = () => {
       const level = cur
         ? { l: readDb(cur.probe.analyserL), r: readDb(cur.probe.analyserR) }
         : { l: MIN_DB, r: MIN_DB };
-      // 表针:快攻(直接跟)慢放(每帧 1.2dB);
+      // 表针:快攻(直接跟)慢放(每帧 1.2dB);峰值保持线:到顶站 HOLD_FRAMES 帧,然后按
+      // PEAK_FALL 落 —— 每声道独立一套,落到底(MIN_DB)就不再画线 = 消失。
       m.lvlL = Math.max(level.l, m.lvlL - 1.2);
+      if (m.lvlL >= m.holdL) { m.holdL = m.lvlL; m.holdTL = HOLD_FRAMES; }
+      else if (m.holdTL > 0) m.holdTL -= 1;
+      else m.holdL = Math.max(MIN_DB, m.holdL - PEAK_FALL);
       m.lvlR = Math.max(level.r, m.lvlR - 1.2);
-      // 峰值保持线:到顶站 HOLD_FRAMES 帧,然后按 PEAK_FALL 落。
-      if (m.lvlL >= m.holdL || m.lvlR >= m.holdR) { m.holdL = Math.max(m.holdL, m.lvlL); m.holdR = Math.max(m.holdR, m.lvlR); m.holdT = HOLD_FRAMES; }
-      else if (m.holdT > 0) m.holdT -= 1;
-      else { m.holdL = Math.max(MIN_DB, m.holdL - PEAK_FALL); m.holdR = Math.max(MIN_DB, m.holdR - PEAK_FALL); }
+      if (m.lvlR >= m.holdR) { m.holdR = m.lvlR; m.holdTR = HOLD_FRAMES; }
+      else if (m.holdTR > 0) m.holdTR -= 1;
+      else m.holdR = Math.max(MIN_DB, m.holdR - PEAK_FALL);
 
       const g = grad();
       const chW = Math.floor((w - 26) / 2);      // 右侧留 24px 给 dB 标尺
@@ -179,10 +184,16 @@ export const VidAudioMonitor: React.FC = () => {
       <div ref={wrapRef} style={{ flex: 1, minHeight: 110, position: 'relative', margin: '6px 8px 4px' }}>
         <canvas ref={canvasRef} style={{ position: 'absolute', inset: 0 }} />
       </div>
-      {/* 底排:左右各一枚 S(哑这个声道);没人持槽时置灰。 */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '0 8px 6px', flexShrink: 0 }}>
-        <button title="Silence the left channel" onClick={() => toggle('l')} style={sBtn(silenced.l)}>S</button>
-        <button title="Silence the right channel" onClick={() => toggle('r')} style={sBtn(silenced.r)}>S</button>
+      {/* 底排:两枚 M 各自居中在**自己那条声道**的下方 —— 布局镜像 canvas 的分格
+          (左右各 flex:1 + 右侧 26px 让给 dB 标尺),不再挤在正中间。 */}
+      <div style={{ display: 'flex', alignItems: 'center', padding: '0 8px 6px', flexShrink: 0 }}>
+        <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+          <button title="Mute the left channel" onClick={() => toggle('l')} style={sBtn(silenced.l)}>M</button>
+        </div>
+        <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+          <button title="Mute the right channel" onClick={() => toggle('r')} style={sBtn(silenced.r)}>M</button>
+        </div>
+        <div style={{ width: 26, flexShrink: 0 }} />
       </div>
     </div>
   );

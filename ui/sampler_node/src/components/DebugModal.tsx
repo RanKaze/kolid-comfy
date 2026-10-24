@@ -217,7 +217,11 @@ const copyText = async (text: string): Promise<boolean> => {
   }
 };
 
-const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+/**
+ * DebugPanel —— 上一次 Run / Generate 的全过程快照,dock 窗正文。
+ * (曾经是 Context 条上的按钮开的整屏 Modal;现在它是一扇正式的 dock 窗。)
+ */
+export const DebugPanel: React.FC = () => {
   const [trace, setTrace] = useState<DebugTraceResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('all');
@@ -246,17 +250,16 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
   useEffect(() => { void load(); }, [load]);
 
-  // Esc 关闭大图，再按一次关闭整个弹窗
+  // Esc 关大图(整窗的开关归 dock,不归正文)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       e.stopPropagation();
       if (zoom) setZoom(null);
-      else onClose();
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [zoom, onClose]);
+  }, [zoom]);
 
   const steps = trace?.steps || [];
 
@@ -304,7 +307,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         : meta?.from_blend ? 'Blend 工作台' : 'Run Detailer';
 
   return (
-    <div style={S.overlay} onClick={onClose}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, colorScheme: 'dark' }}>
       {/* Inline style props cannot reach ::-webkit-scrollbar, and this modal is dark on a page whose
           default scrollbars are light. The rules live here and are scoped by class, matching the
           workbench's own overlay scrollbar (faint pill, transparent track, no buttons). */}
@@ -317,31 +320,19 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         .dbg-scroll::-webkit-scrollbar-corner { background: transparent; }
         .dbg-scroll::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
       `}</style>
-      <div style={S.shell} onClick={e => e.stopPropagation()}>
-        {/* ── 头部 ── */}
-        <div style={S.head}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-            <span style={{ color: 'rgba(255,255,255,0.8)', display: 'flex' }}><DbgIcon name="bug" size={17} /></span>
-            <div style={{ minWidth: 0 }}>
-              <div style={S.headTitle}>Run Debug</div>
-              <div style={S.headSub}>
-                上一次 Run / Generate / Detect / Processor 的全过程快照
-              </div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-            <button
-              style={{ ...S.iconBtn, ...(copied ? { width: 'auto', padding: '0 8px' } : {}), ...(copied === 'ok' ? { color: '#30d158', borderColor: 'rgba(48,209,88,0.5)' } : {}) }}
-              title={trace?.available ? '复制整份快照为 Markdown，粘贴给 AI 让它帮你 debug' : '还没有快照可复制'}
-              disabled={!trace?.available}
-              onClick={() => void copyForAi()}
-            >
-              {copied ? <span style={{ fontSize: 11, fontWeight: 600 }}>{copied === 'ok' ? '已复制' : '复制失败'}</span> : <DbgIcon name="copy" size={13} />}
-            </button>
-            <button style={S.iconBtn} title="重新读取快照" onClick={() => void load()}><DbgIcon name="reload" size={13} /></button>
-            <button style={S.iconBtn} title="关闭 (Esc)" onClick={onClose}><DbgIcon name="close" size={12} /></button>
-          </div>
-        </div>
+      {/* ── 工具行:复制 / 刷新(dock 的标题条已写着 Debug,这里不再重复大标题)── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px 0', flexShrink: 0 }}>
+        <button
+          style={{ ...S.iconBtn, ...(copied ? { width: 'auto', padding: '0 8px' } : {}), ...(copied === 'ok' ? { color: '#30d158', borderColor: 'rgba(48,209,88,0.5)' } : {}) }}
+          title={trace?.available ? '复制整份快照为 Markdown,粘贴给 AI 让它帮你 debug' : '还没有快照可复制'}
+          disabled={!trace?.available}
+          onClick={() => void copyForAi()}
+        >
+          {copied ? <span style={{ fontSize: 11, fontWeight: 600 }}>{copied === 'ok' ? '已复制' : '复制失败'}</span> : <DbgIcon name="copy" size={13} />}
+        </button>
+        <button style={S.iconBtn} title="重新读取快照" onClick={() => void load()}><DbgIcon name="reload" size={13} /></button>
+        <span style={S.headSub}>上一次 Run / Generate / Detect / Processor 的全过程快照</span>
+      </div>
 
         {/* ── 元信息条 ── */}
         <div style={S.metaBar}>
@@ -432,10 +423,9 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
               </div>
             );
           })}
-        </div>
       </div>
 
-      {/* ── 大图预览 ── */}
+      {/* ── 大图预览(fixed:盖住视口,与所在格无关)── */}
       {zoom && (
         <div style={S.zoomOverlay} onClick={e => { e.stopPropagation(); setZoom(null); }}>
           <div style={S.zoomBar}>
@@ -674,4 +664,3 @@ const S: Record<string, React.CSSProperties> = {
   zoomImg: { maxWidth: '94vw', maxHeight: '84vh', objectFit: 'contain', borderRadius: 8, background: '#0a0a0a' },
 };
 
-export default DebugModal;

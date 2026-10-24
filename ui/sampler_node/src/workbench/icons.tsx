@@ -141,6 +141,25 @@ const VAudio: UnitIcon = p => <Svg {...p}>
   <rect x="3.4" y="7.2" width="3.4" height="6.4" rx="1" />
   <rect x="9.2" y="3.2" width="3.4" height="10.4" rx="1" />
 </Svg>;
+
+// ── 工具窗(Log / Debug / Probe)── 三扇"看现场"的窗,图标本身用 currentColor,
+// 颜色由 EditPhase 的 rules.icon 套的 span 给(与 titleColor 同一来源,见 UNIT_COLORS)。
+const PLog: UnitIcon = p => <Svg {...p}>
+  <circle cx="3.2" cy="4.4" r="1.1" fill="currentColor" stroke="none" />
+  <circle cx="3.2" cy="8" r="1.1" fill="currentColor" stroke="none" />
+  <circle cx="3.2" cy="11.6" r="1.1" fill="currentColor" stroke="none" />
+  <path d="M6.4 4.4h7.2M6.4 8h5.6M6.4 11.6h7.8" strokeWidth={1.5} />
+</Svg>;
+const PDebug: UnitIcon = p => <Svg {...p}>
+  <circle cx="8" cy="9.2" r="3.6" />
+  <path d="M6.8 3.2h2.4M8 6.4V3.2M5.6 2.4l1.3 2M10.4 2.4l-1.3 2" strokeWidth={1.4} />
+  <path d="M4.6 7.6 1.8 6.2M4.2 9.8H1.6M4.9 11.9l-2.8 2M11.4 7.6l2.8-1.4M11.8 9.8h2.6M11.1 11.9l2.8 2" strokeWidth={1.3} />
+</Svg>;
+const PProbe: UnitIcon = p => <Svg {...p}>
+  <circle cx="8" cy="8" r="5.4" />
+  <circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none" />
+  <path d="M8 .9v3M8 12.1v3M.9 8h3M12.1 8h3" strokeWidth={1.4} />
+</Svg>;
 // Video Generator：一条片子（竖着的胶片，两侧齿孔）加右上角一枚"生成"的星 —— 与 VPlayer 那一块
 // 幕布分开：这一格是**造**片子的，不是放片子的。
 const VideoGen: UnitIcon = p => <Svg {...p}>
@@ -213,6 +232,8 @@ export const UNIT_ICONS: Record<string, UnitIcon> = {
   layout: Layout, videoGen: VideoGen,
   // Video 模式
   vplayer: VPlayer, vtracks: VTracks, vassets: VAssets, vinspector: VInspector, vaudio: VAudio,
+  // 工具窗(彩色,见 UNIT_COLORS)
+  log: PLog, debug: PDebug, probe: PProbe,
   // 宿主
   toolbar: File, context: Context, pipeline: Pipeline, presets: Presets, blocks: Blocks,
 };

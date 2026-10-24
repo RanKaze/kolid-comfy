@@ -8,7 +8,6 @@ import { getBlendUiOf, setBlendUi, setBlendActiveUid, dropBlendUi, getActiveBlen
 import { getVidStagingOverlay, dropVidProcState } from './workbench/video/procRun';
 import { dropVidProcPicks } from './workbench/video/procPicks';
 import { bumpAssets } from './workbench/video/assetsTick';
-import { ProbePanel } from './debug';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -1951,9 +1950,6 @@ const App: React.FC = () => {
           {error}
         </div>
       )}
-
-      {/* 界面探针：常驻的角标 + Alt+D 拉开的面板。关着的时候只画那颗小角标。 */}
-      <ProbePanel />
     </div>
   );
 };
