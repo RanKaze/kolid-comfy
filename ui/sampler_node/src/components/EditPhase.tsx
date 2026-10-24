@@ -28,6 +28,7 @@ import { grabFrameFull } from '../workbench/video/previews';
 import { getVidSelection, subscribeVidSelection } from '../workbench/video/selection';
 import { getKfArmed, subscribeKfArmed } from '../workbench/video/kfArmed';
 import { bumpAssets } from '../workbench/video/assetsTick';
+import { markRender } from '../workbench/video/perf';
 import { beginVidProcRun, clearProcFill, clearProcQueue, dequeueProcClip, endVidProcRun, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, setVidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets, Card, type StoreAsset } from '../workbench/video/Assets';
@@ -554,6 +555,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   actionLog, pushLog, blendDocs, docStills, onDocCommand, onBlendUiCommand,
   stageUpload, stageRemove,
 }) => {
+  markRender('EditPhase');
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   // Log / Debug 曾是这里两颗 useState 开关的 Modal;现在各自是一扇 dock 窗(见 bodies)。

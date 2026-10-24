@@ -4053,6 +4053,7 @@ function render() {
 // 的读法一个字不改。
 const VID_FRAME_LUMA_FILTER = 'url(#vidFrameLumaAlpha)';
 let vidFramePacket = null;          // { reqId, t, layerKey, baseTrackId, sources:Map, bitmaps:[] }
+let vidLastUsedTracks = new Set();  // 最近一次注入真正吃掉的轨(见 vidFrameInject;回包报给宿主)
 let vidFrameRaf = 0;
 let vidFrameCanvas = null;          // 监视器那一趟的临时画布（只在"要看的那套 ≠ 活画布上这套"时用）
 let vidFrameCtx = null;
@@ -4217,6 +4218,9 @@ function vidFrameSurfaceFor(rec, w, h) {
 function vidFrameInject(packet, stack) {
     const touched = [];
     const used = new Set();
+    const usedTracks = new Set();          // 这一包**实际消费**了哪些轨的源帧(报给宿主:
+                                           // 没被任何面 attribute 引用的轨不必抓不必传 ——
+                                           // 精确 seek 一条轨是 100ms 级的买卖)
     for (const l of stack) {
         if (!l || !l.visible || !l.img) continue;
         const nat = nativeSize(l.img);
@@ -4240,10 +4244,12 @@ function vidFrameInject(packet, stack) {
             }
             touched.push({ r, had: Object.prototype.hasOwnProperty.call(r, 'surface'), was: r.surface });
             r.surface = src ? cv : null;
+            if (src) usedTracks.add(String(r.frameTrack));
         }
     }
     // 帧像素换了 ⇒ 折叠缓存必须重算。
     for (const t of touched) markAttrPainted(t.r);
+    vidLastUsedTracks = usedTracks;
     return function vidFrameRestore() {
         // 原样放回，并再 +1 代次：折叠缓存里此刻留的是**临时面**的身份，下一次正片重算
         // 必须认得出那份结果不能复用。
@@ -4282,16 +4288,23 @@ function composeVidFrameCanvas(packet) {
     return vidFrameCanvas;
 }
 
-function replyVidFrame(reqId, canvas) {
+function replyVidFrame(reqId, canvas, frameless) {
+    const used = [...vidLastUsedTracks];
     if (!canvas || !canvas.width || !canvas.height) {
-        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null }, '*');
+        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, frameless: !!frameless, usedTracks: used }, '*');
         return;
     }
     createImageBitmap(canvas).then(bmp => {
-        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: bmp }, '*', [bmp]);
+        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: bmp, frameless: !!frameless, usedTracks: used }, '*', [bmp]);
     }, () => {
-        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null }, '*');
+        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, frameless: !!frameless, usedTracks: used }, '*');
     });
+}
+
+// 缓存命中:内容与上一张回图完全一致,一个像素都不用动 —— 只回标记,宿主保留现画面。
+// frameless 一并报上(宿主据此跳过后续帧的源帧抓取,见 Player 的 compFrameless)。
+function replyVidFrameCached(reqId, frameless) {
+    window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, cached: true, frameless: !!frameless, usedTracks: [...vidLastUsedTracks] }, '*');
 }
 
 // 一帧回一张图给监视器。两半：
@@ -4301,13 +4314,73 @@ function replyVidFrame(reqId, canvas) {
 // 合并到 rAF 一口：播放时包按 fps 来，重绘（画笔/参数）又会在同一帧里喊一次 —— 都并到这一口。
 function scheduleVidFrameReply() {
     if (!vidFramePacket || vidFrameRaf) return;
-    vidFrameRaf = requestAnimationFrame(() => {
-        vidFrameRaf = 0;
-        const p = vidFramePacket;
-        if (!p) return;
-        if ((p.layerKey || '') === (activeLayerSet || '')) replyVidFrame(p.reqId, blendCanvas);
-        else replyVidFrame(p.reqId, composeVidFrameCanvas(p));
-    });
+    vidFrameRaf = requestAnimationFrame(vidFrameFlush);
+}
+
+// 回图这一趟的主体:合成(必要时)+ 记缓存 + 回包。rAF 只是"合帧"的调度壳(一帧最多回一张);
+// 本体独立出来 —— 诊断探针(window.__vidPerf)与同步测试都能直接驱动它。
+function vidFrameFlush() {
+    vidFrameRaf = 0;
+    const p = vidFramePacket;
+    if (!p) return;
+    // 回图这一刻的真实状态记进缓存:下一包状态没变(图层没编辑、源帧帧号没动)就回
+    // cached 标记,零像素工作 —— 播放扫过一段"与时间无关"的图层集时,监视器那一趟
+    // 从"每帧全量重画 + 编码回传"变成"每帧一条空回包"。编辑触发的 render() 也走这里
+    // 回图,缓存自动跟到编辑后的状态,不会回旧图。
+    const t0 = performance.now();
+    vidCompCache = vidCompState(p);
+    __vidPerf.sigMs += performance.now() - t0;
+    const frameless = !vidCompCache.hasFrame;
+    if ((p.layerKey || '') === (activeLayerSet || '')) {
+        __vidPerf.repliesActive++;
+        replyVidFrame(p.reqId, blendCanvas, frameless);
+    } else {
+        __vidPerf.repliesTemp++;
+        replyVidFrame(p.reqId, composeVidFrameCanvas(p), frameless);
+    }
+}
+
+// 性能探针(只读,诊断用):逐帧合成链路的次数与耗时。宿主侧 __compPerf 配对。
+window.__vidPerf = { packs: 0, hits: 0, misses: 0, renders: 0, sigMs: 0, repliesActive: 0, repliesTemp: 0, lastSig: '' };
+
+// ── 合成缓存的状态签名 ──────────────────────────────────────────────────────────────────────
+// "这一包的合成结果由什么决定":哪一段(layerKey)、它的图层集内容(活跃那套逐层算签名 —— 随时
+// 可能被编辑;非活跃那套存在 layerSets 里是冻结的,对象身份一变才算变)、有没有面 attribute 绑
+// 视频轨(绑了 ⇒ 结果随源帧帧号 t 变;没绑 ⇒ 结果与 t 无关,跨帧可缓存)、输出栅格。
+let vidCompCache = null;           // 最近一次**回图**时的状态(见 scheduleVidFrameReply)
+let vidCompPending = null;         // 这一包算出的状态(回图后落到 vidCompCache)
+
+function vidCompState(packet) {
+    const key = packet.layerKey || '';
+    const stack = vidFrameWorkLayers(key);
+    let hasFrame = false;
+    for (const l of stack) {
+        if (!l || !l.visible || !l.img) continue;
+        for (const r of attrRecordsOf(l)) {
+            if (!r || r.chain || !r.frameTrack || !attrEnabled(r)) continue;
+            const spec = ATTR_TYPES[r.type];
+            if (spec && spec.kind === 'surface') { hasFrame = true; break; }
+        }
+        if (hasFrame) break;
+    }
+    const isActive = key === (activeLayerSet || '');
+    return {
+        key,
+        isActive,
+        hasFrame,
+        setRef: isActive ? null : (layerSets.get(key) || null),   // 非活跃集:冻结对象,身份即内容
+        contentSig: isActive ? vidLayerSetSig(key) : '',
+        grid: canvasW + 'x' + canvasH,
+        t: packet.t,
+    };
+}
+
+function vidCompSame(a, b) {
+    if (!b) return false;
+    if (a.key !== b.key || a.isActive !== b.isActive || a.hasFrame !== b.hasFrame
+        || a.setRef !== b.setRef || a.contentSig !== b.contentSig || a.grid !== b.grid) return false;
+    // 绑了视频帧的面 ⇒ 同一帧号才算同一张图;没绑 ⇒ t 不进判定(跨帧命中正是缓存的用意)。
+    return !a.hasFrame || Math.abs(a.t - b.t) < 1e-6;
 }
 
 function handleVidFrameMessage(d) {
@@ -4338,7 +4411,22 @@ function handleVidFrameMessage(d) {
     // 源帧收进 packet 就该画了，分两条走：这一包说的正是用户手上这套（选中了它）⇒ 重画活画布
     // （源帧折在上面，收尾会顺手抄一份回给监视器）；否则用户手上这套一个像素都不动，只单独折一张
     // 临时画布回给监视器（旧口径：监视器看的始终是游标底下那一段）。
-    if ((vidFramePacket.layerKey || '') === (activeLayerSet || '')) render();
+    // 缓存命中(内容与上一张回图一致)⇒ 什么都不画,只回 cached 标记 —— 播放扫过一段没人动过的
+    // 图层集时,这条路径把"每帧 render/折叠 + 整画布编码回传"全省掉。
+    __vidPerf.packs++;
+    const tSig = performance.now();
+    const st = vidCompState(vidFramePacket);
+    __vidPerf.sigMs += performance.now() - tSig;
+    __vidPerf.lastSig = st.contentSig ? String(st.contentSig).slice(0, 40) : (st.isActive ? '(active)' : '(frozen)');
+    if (vidCompSame(st, vidCompCache)) {
+        __vidPerf.hits++;
+        replyVidFrameCached(vidFramePacket.reqId | 0, !st.hasFrame);
+        return;
+    }
+    __vidPerf.misses++;
+    vidCompCache = st;             // 乐观记录:这一包将画出的正是 st 状态(编辑触发的重画会把
+                                    // 下一包顶成 miss,不会回旧图;回图那一刻 flush 再记一遍真值)
+    if ((vidFramePacket.layerKey || '') === (activeLayerSet || '')) { __vidPerf.renders++; render(); }
     else scheduleVidFrameReply();
 }
 
@@ -4794,17 +4882,23 @@ function layerSetsToRecords() {
 // selectedId、undo/redo 栈、图层 id、srcRef 这类身份与编辑态一律不算 —— 两段内容一致 = 签名相等。
 // 活跃那套的活对象就是全局 layers；非活跃的在 layerSets 里各自存着（切换时存回）。
 let _vidSigErrSeq = 0;
+// 16×16 采样画布复用:vidPixelSig 的调用者(图层集签名,逐帧合成缓存的活跃侧每包跑一遍)对
+// 每层都来一次 —— 每次新建 canvas+ctx 的分配是白付的,攒一张复用。
+let _vidSig16 = null, _vidSig16Ctx = null;
 function vidPixelSig(img) {
     if (!img) return '';
     try {
         const w = Math.round(img.videoWidth || img.naturalWidth || img.width || 0);
         const h = Math.round(img.videoHeight || img.naturalHeight || img.height || 0);
         if (!w || !h) return '';
-        const cv = document.createElement('canvas');
-        cv.width = 16;
-        cv.height = 16;
-        const ctx = cv.getContext('2d', { willReadFrequently: true });
-        if (!ctx) return '?';
+        if (!_vidSig16) {
+            _vidSig16 = document.createElement('canvas');
+            _vidSig16.width = 16;
+            _vidSig16.height = 16;
+            _vidSig16Ctx = _vidSig16.getContext('2d', { willReadFrequently: true });
+        }
+        const ctx = _vidSig16Ctx;
+        if (!ctx) return '?' + (++_vidSigErrSeq);
         ctx.clearRect(0, 0, 16, 16);
         ctx.drawImage(img, 0, 0, 16, 16);
         const d = ctx.getImageData(0, 0, 16, 16).data;

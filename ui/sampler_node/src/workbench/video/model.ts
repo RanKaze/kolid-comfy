@@ -518,13 +518,25 @@ export const snapPlace = (p: VidProject, trackId: string, at: number): number =>
  *  监视器（段照常在时间线上，只是不播）。没有 solo/mute 时与 clipAt(…, 'video') 等价。
  *  solo/mute 集合里的轨可能已被删掉（删轨后到清理 effect 跑之前）：那些 id 不在 tracks 里，
  *  自然被跳过 —— 不会因此把画面整个挡掉。 */
+/** 段按轨分桶(一次 O(n)):播放循环里 clipAtSolo / compositePlanAt / 音频对表每帧都要
+ *  "每条轨找 t 处的段",各扫一遍全表是 O(轨×段) —— 桶化后每轨只在自家桶里找。 */
+export const clipsByTrack = (p: VidProject): Map<string, VidClip[]> => {
+  const m = new Map<string, VidClip[]>();
+  for (const c of p.clips) {
+    const b = m.get(c.trackId);
+    if (b) b.push(c); else m.set(c.trackId, [c]);
+  }
+  return m;
+};
+
 export const clipAtSolo = (p: VidProject, t: number, soloVideo: ReadonlySet<string>,
   muted: ReadonlySet<string>): VidClip | null => {
+  const buckets = clipsByTrack(p);
   for (const tr of p.tracks) {
     if (tr.kind !== 'video') continue;
     if (muted.has(tr.id)) continue;                        // mute 优先
     if (soloVideo.size > 0 && !soloVideo.has(tr.id)) continue;
-    const hit = p.clips.find(c => c.trackId === tr.id && !c.pending && t >= c.start && t < c.start + c.duration);
+    const hit = (buckets.get(tr.id) || []).find(c => !c.pending && t >= c.start && t < c.start + c.duration);
     if (hit) return hit;
   }
   return null;

@@ -13,6 +13,7 @@ import { ingestFile } from './ingest';
 import { GLOBAL_ITEM_TYPE } from './Assets';
 import { setVidSelection } from './selection';
 import { getKfArmed, setKfArmed, subscribeKfArmed } from './kfArmed';
+import { markRender } from './perf';
 import {
   ensureFrame, ensureStrip, ensureWaveform, frameBackend, peekStrip, stripComplete, stripFrame, subscribeStrip,
 } from './previews';
@@ -276,6 +277,7 @@ export const VidTimeline: React.FC<{
   // 占位段队列（多选 ▶ 排出的那一队）：还没轮到的段画 ⏸，正在跑的（有填充进度）画 ■。
   // 订阅放在时间线这一层：一条队只敲一次重渲，不按片段各订一遍。
   const procQueue = useSyncExternalStore(subscribeProcQueue, getProcQueue);
+  markRender('VidTimeline');
   const dur = vidDuration(p);
   // 铺满口径的"全长"：片段尽头之外还要盖住 range 出点 —— 出点可以比最后一枚片段更靠右
   // （片段删掉/改短之后 range 仍留着）。内容宽、Fit、缩放下限都按它算，底部滚动手柄才

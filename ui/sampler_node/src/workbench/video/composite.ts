@@ -1,4 +1,4 @@
-import type { VidClip, VidProject } from './model';
+import { clipsByTrack, type VidClip, type VidProject } from './model';
 
 // ── 逐帧合成：哪一帧归谁 ────────────────────────────────────────────────────────────────────
 // 口径（见 model.ts 的轨道序）：轨道的数组序就是上下序，**最上层命中的那一段**决定这一帧怎么出。
@@ -20,27 +20,28 @@ export type VidCompositePlan = {
   sources: VidCompositeSource[];
 };
 
-const clipOn = (p: VidProject, trackId: string, t: number): VidClip | null =>
+const clipOn = (trackId: string, t: number, buckets: Map<string, VidClip[]>): VidClip | null =>
   // 占位段（Processor 还没跑完的坑）没有画面：播放头掠过它 = 它不存在，命中顺延到下一层。
-  p.clips.find(c => c.trackId === trackId && !c.pending && t >= c.start && t < c.start + c.duration) ?? null;
+  (buckets.get(trackId) || []).find(c => !c.pending && t >= c.start && t < c.start + c.duration) ?? null;
 
 /** 哪一帧归谁。`muted` 里的 **Layer 轨被跳过**（mute = 这一段不合成，露出底下）—— 于是顶命中
- *  顺延到下一条轨：底下是视频段就照旧直接播，是另一条 Layer 段就换它合成。
+ * 顺延到下一条轨：底下是视频段就照旧直接播，是另一条 Layer 段就换它合成。
  *  视频轨的 mute **不影响 sources**：合成是主动创作（面 attribute 指名要哪条轨的帧），
  *  mute 是监视便利，不该把用户的合成设置弄坏。 */
 export const compositePlanAt = (p: VidProject, t: number, muted: ReadonlySet<string>): VidCompositePlan | null => {
+  const buckets = clipsByTrack(p);     // 一次分桶,下面每轨只扫自家桶(播放循环每帧都来,O(轨×段) 受不住)
   let top: VidClip | null = null;
   for (const tr of p.tracks) {
     if (tr.kind !== 'video' && tr.kind !== 'layer') continue;
     if (tr.kind === 'layer' && muted.has(tr.id)) continue;   // 静音的 Layer 段不参与合成
-    const hit = clipOn(p, tr.id, t);
+    const hit = clipOn(tr.id, t, buckets);
     if (hit) { top = hit; break; }
   }
   if (!top || top.kind !== 'layer') return null;
   const sources: VidCompositeSource[] = [];
   for (const tr of p.tracks) {
     if (tr.kind !== 'video') continue;
-    const hit = clipOn(p, tr.id, t);
+    const hit = clipOn(tr.id, t, buckets);
     if (hit) sources.push({ trackId: tr.id, clip: hit });
   }
   return {
