@@ -1,6 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { fmtTime } from './model';
 import { ensureWaveform } from './previews';
+import { audioCtx } from './audio';
+import { acquireAudioSlot, buildStereoProbe, releaseAudioSlot, type AudioProbe } from './audioFocus';
+
+// 媒体元素源一个元素只能建一次(createMediaElementSource 二次调用会抛)—— 探头按元素记。
+const elemProbes = new WeakMap<HTMLVideoElement, AudioProbe>();
+const probeFor = (v: HTMLVideoElement): AudioProbe => {
+  let p = elemProbes.get(v);
+  if (!p) {
+    p = buildStereoProbe(audioCtx().createMediaElementSource(v));
+    elemProbes.set(v, p);
+  }
+  return p;
+};
 
 // ── Inspector ───────────────────────────────────────────────────────────────────────────────
 // Assets 窗里"当前选中"的那一件,在这里放大看:视频/音频/图片三种都收。视频与音频的播放
@@ -88,9 +101,13 @@ export const VidInspector: React.FC<{ sel: InspectSel | null }> = ({ sel }) => {
   const startRaf = () => { if (!raf.current) raf.current = requestAnimationFrame(tick); };
   const stopRaf = () => { if (raf.current) { cancelAnimationFrame(raf.current); raf.current = 0; } };
   useEffect(() => stopRaf, []);
+  // 窗被切走(unmount)时槽也得让出来 —— 声音归零不等于槽空着。
+  useEffect(() => () => releaseAudioSlot('inspector'), []);
 
-  // 换资产:停表、归零、清面板。图片没有 <video>(vref 悬空,守卫都接得住)。
+  // 换资产:停表、归零、清面板,并把音频槽让出来(它属于"上一个资产的那次播放")。
+  // 图片没有 <video>(vref 悬空,守卫都接得住)。
   useEffect(() => {
+    releaseAudioSlot('inspector');
     setErr(null); setImgDim(null); setWave(null); setPlaying(false);
     stopRaf();
     const v = vref.current;
@@ -173,9 +190,19 @@ export const VidInspector: React.FC<{ sel: InspectSel | null }> = ({ sel }) => {
               ref={vref} src={sel.src} playsInline preload="metadata" muted={muted} loop={loop}
               style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', display: sel.kind === 'audio' ? 'none' : 'block' }}
               onLoadedMetadata={() => { const v = vref.current; if (v) paint(v.currentTime, durOf(v)); }}
-              onPlay={() => { setPlaying(true); startRaf(); }}
-              onPause={() => { setPlaying(false); stopRaf(); }}
-              onEnded={() => { setPlaying(false); stopRaf(); }}
+              // ── 独占音频槽 ── 起播即申请(被抢占的旧声源在自己的 onRevoked 里 pause);
+              // 暂停/播完释放。探头按元素记(createMediaElementSource 每元素只许一次)。
+              onPlay={() => {
+                setPlaying(true);
+                startRaf();
+                const v = vref.current;
+                if (v) acquireAudioSlot(
+                  { id: 'inspector', label: 'Inspector — ' + sel.name, probe: probeFor(v) },
+                  () => { try { v.pause(); } catch { /* 已经停了 */ } },
+                );
+              }}
+              onPause={() => { setPlaying(false); stopRaf(); releaseAudioSlot('inspector'); }}
+              onEnded={() => { setPlaying(false); stopRaf(); releaseAudioSlot('inspector'); }}
               // 暂停中的 seek 也得 repaint 一帧:timeupdate 就是那趟车(rAF 只在播时转)。
               onTimeUpdate={() => { if (!raf.current) { const v = vref.current; if (v) paint(v.currentTime, durOf(v)); } }}
               onError={() => setErr('The browser cannot play this stream (container/codec unsupported) — relink or transcode it in Assets.')}

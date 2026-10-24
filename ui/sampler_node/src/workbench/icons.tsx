@@ -136,6 +136,11 @@ const VInspector: UnitIcon = p => <Svg {...p}>
   <circle cx="10.3" cy="10.3" r="2.5" />
   <path d="M12.1 12.1 14 14" />
 </Svg>;
+// Audio Monitor：一对高低不齐的电平条 —— 只画"此刻在出声的那一路"(独占音频槽,见 audioFocus)。
+const VAudio: UnitIcon = p => <Svg {...p}>
+  <rect x="3.4" y="7.2" width="3.4" height="6.4" rx="1" />
+  <rect x="9.2" y="3.2" width="3.4" height="10.4" rx="1" />
+</Svg>;
 // Video Generator：一条片子（竖着的胶片，两侧齿孔）加右上角一枚"生成"的星 —— 与 VPlayer 那一块
 // 幕布分开：这一格是**造**片子的，不是放片子的。
 const VideoGen: UnitIcon = p => <Svg {...p}>
@@ -207,7 +212,7 @@ export const UNIT_ICONS: Record<string, UnitIcon> = {
   processor: Processor, guidances: Guidances, layers: Layers, history: History, fxParams: FxParams,
   layout: Layout, videoGen: VideoGen,
   // Video 模式
-  vplayer: VPlayer, vtracks: VTracks, vassets: VAssets, vinspector: VInspector,
+  vplayer: VPlayer, vtracks: VTracks, vassets: VAssets, vinspector: VInspector, vaudio: VAudio,
   // 宿主
   toolbar: File, context: Context, pipeline: Pipeline, presets: Presets, blocks: Blocks,
 };

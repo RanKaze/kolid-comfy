@@ -5,6 +5,11 @@ import {
 import { compositePlanAt, vidFrameAt, VidFrameGrabber, type VidCompositePlan } from './composite';
 import { decodeAudio, vidAudio } from './audio';
 import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame } from './previews';
+import { acquireAudioSlot, buildStereoProbe, releaseAudioSlot, type AudioProbe } from './audioFocus';
+
+// 播放器的电平探头:全部声源在 vidAudio.master 汇流,一只探头管整条时间线,缓存会话级一份。
+let playerProbe: AudioProbe | null = null;
+const probeOfPlayer = (): AudioProbe => (playerProbe ??= buildStereoProbe(vidAudio.node()));
 
 // ── Player 窗（监视器）───────────────────────────────────────────────────────────────────────
 // 播放头落在哪，画面就是最上层视频轨命中的那一段（合成口径"最上层优先"）。声音不走 <video>：
@@ -24,6 +29,7 @@ export const VidPlayer: React.FC<{
   onCompLayer?: (key: string | null) => void;
 }> = ({ vid, visible, onCompLayer }) => {
   const { project: p, transport, playing } = vid;
+  const setPlaying = vid.setPlaying;      // useState setter,引用恒稳 —— 放进 effect 依赖不会抖
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const readRef = useRef<HTMLSpanElement | null>(null);
   const projectRef = useRef(p);
@@ -540,9 +546,20 @@ export const VidPlayer: React.FC<{
       hideStrip();
       graceRef.current = performance.now() + 900;   // 起跑宽限：解码器热身期不纠偏
       holdDecoder();                                 // 播放期间后台抽条全程挂起 —— 解码器是正播的
+      // ── 独占音频槽 ── 时间线在放,槽就得在手;被抢占(Inspector 抢走)时 onRevoked 把
+      // playing 拨回 false —— 下面的 else 分支照常收摊(暂停/stopAll/还解码器)。
+      acquireAudioSlot(
+        { id: 'player', label: 'Player — timeline', probe: probeOfPlayer() },
+        () => setPlaying(false),
+      );
       void v.play().catch(() => { /* autoplay guards */ });
-    } else { v.pause(); vidAudio.stopAll(); releaseDecoder(); }
-  }, [playing, activeId, hideStrip]);
+    } else {
+      v.pause(); vidAudio.stopAll(); releaseDecoder();
+      releaseAudioSlot('player');
+    }
+  }, [playing, activeId, hideStrip, setPlaying]);
+  // 卸载(Image 模式换走正文)时槽不该悬着。
+  useEffect(() => () => releaseAudioSlot('player'), []);
 
   // ── 播放循环 ── 墙上时钟推进播放头（transport.set，不碰 React）；每帧对音频与画面。
   useEffect(() => {

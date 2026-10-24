@@ -97,6 +97,10 @@ export class VidAudio {
 
   has(id: string): boolean { return this.voices.has(id); }
 
+  /** 汇流节点(惰性建):audioFocus 的电平探头挂在它上面 —— 所有声源都在这条总线汇合,
+   *  一只探头就能代表整个播放器的电平。 */
+  node(): GainNode { return this.ensure(); }
+
   /** 这路声源现在播到 buffer 内的第几秒（未播 = null）。播放循环拿它跟游标该在的位置对表，
    *  差得多了就重新起播 —— 回绕、拖动、片段被搬动，全都是「想听的位置变了」这一种病。 */
   pos(id: string): number | null {

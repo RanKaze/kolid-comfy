@@ -26,6 +26,7 @@ import { beginVidProcRun, clearProcFill, clearProcQueue, dequeueProcClip, endVid
 import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets, Card, type StoreAsset } from '../workbench/video/Assets';
 import { VidInspector, type InspectSel } from '../workbench/video/Inspector';
+import { VidAudioMonitor } from '../workbench/video/AudioMonitor';
 import { VidPlayer } from '../workbench/video/Player';
 
 // The rename field of a preset row.
@@ -56,11 +57,11 @@ const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', '
 // 轨道与资产属于文档，不该只在 Video 模式下才看得见。播放器不单独占窗：
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
 // 标题条上有一颗 Image/Video 切换（见 heads）。
-const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector'];
+const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vaudio'];
 const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'presets', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
   toolbar: 'File', context: 'Context', pipeline: 'Pipeline', presets: 'Pipeline Presets',
-  blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets', vinspector: 'Inspector',
+  blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets', vinspector: 'Inspector', vaudio: 'Audio Monitor',
   ...WORKBENCH_TITLES,
 };
 const COLUMN_W = 340;
@@ -136,7 +137,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDocUnit(id),
-    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'blocks',
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vaudio' || id === 'blocks',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
     // 时间线与资产库同理：两份会一直长的列表。
@@ -154,7 +155,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     columnW: COLUMN_W,
     // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里，Assets / Tracks 是普通成员
     // （默认窗，不靠任何切换逻辑出现）。
-    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector'],
+    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector', 'vaudio'],
     rightW: RIGHT_W,
     // The size a NEW block opens at — asked per unit and per axis, because which axis the block will be
     // measured on is decided by the side it was dropped on (under a block it is a height, beside one it
@@ -165,6 +166,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
       if (id === 'vtracks') return axis === 'v' ? 320 : 900;
       if (id === 'vassets') return axis === 'v' ? 260 : PANEL_BLOCK_W;
       if (id === 'vinspector') return axis === 'v' ? 300 : 460;
+      if (id === 'vaudio') return axis === 'v' ? 240 : 200;
       return axis === 'v' ? PANEL_BLOCK_H : PANEL_BLOCK_W;
     },
   };
@@ -3169,6 +3171,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               vinspector: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — inspect assets from the Assets window.</div>
                 : <VidInspector sel={vidInspect} />,
+              // Audio Monitor:谁持着全局独占音频槽就画谁(audioFocus 仲裁,页面级、不属于文档)。
+              vaudio: <VidAudioMonitor />,
               context: (<>
                 <div style={styles.dockCard}>
                   <div style={styles.contextPreviewWrap}>
