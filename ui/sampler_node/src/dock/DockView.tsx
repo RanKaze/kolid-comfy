@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   type Dock, type DockBlock, type DockFit, type DockFloat, type DockMode, type DockNode, type DockRules, type UnitId, type Zone,
@@ -24,6 +24,9 @@ import { note } from '../debug/probe';
 const TB_SZ = 34;
 // toolbar 小窗的开口尺寸：够放下 Color / Brush 那一类卡片，又不至于盖掉半页。
 const TB_POP_W = 300, TB_POP_H = 380;
+// 内容自适应的下限:再小的面板也给一个够得着、点得中的格子(Log/Debug 这类"height:100%
+// 骨架"在 max-content 父级里会缩成一行,下限顺便当它们的身高)。
+const TB_POP_MIN_W = 200, TB_POP_MIN_H = 160;
 
 // 一块某个方向上是不是"就一条 bar 那么厚"。
 //
@@ -470,12 +473,27 @@ const ToolbarStrip: React.FC<{
     // 顺手把这一格"正在显示谁"也换过去：从小窗退回整扇窗时，看见的还是刚才那一格。
     onPick(i);
   };
+  // 小窗**自适应内容**:量出来的实际尺寸(下限/封顶都算上),位置翻转与贴边夹取要真数。
+  const [popSz, setPopSz] = useState<{ w: number; h: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!open) { setPopSz(null); return; }
+    const el = popRef.current;
+    if (!el) return;
+    const measure = () => setPopSz(sz =>
+      (sz && sz.w === el.offsetWidth && sz.h === el.offsetHeight) ? sz : { w: el.offsetWidth, h: el.offsetHeight });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open]);
   // 小窗贴在哪边：竖条开在右边（右边放不下就翻到左边），横条开在下面（下面放不下就翻到上面）。
-  // 每次渲染都重算，窗口一变它自己就跟上了。
+  // 每次渲染都重算，窗口一变它自己就跟上了。小窗**自适应内容**(max-content + 上下限封顶),
+  // 翻转与贴边夹取要真数 —— 量出来的尺寸在这里用,没量到前先按老常量占位(layout effect
+  // 在 paint 前完成补量,不闪)。
   const pop = (() => {
     if (!open || !anchor) return null;
-    const W = Math.min(TB_POP_W, window.innerWidth - 16);
-    const H = Math.min(TB_POP_H, window.innerHeight - 16);
+    const W = Math.min(popSz?.w ?? TB_POP_W, window.innerWidth - 12);
+    const H = Math.min(popSz?.h ?? TB_POP_H, window.innerHeight - 12);
     if (V) {
       const x = anchor.right + 6 + W <= window.innerWidth - 6 ? anchor.right + 6 : Math.max(6, anchor.x - 6 - W);
       return { x, y: Math.min(Math.max(6, anchor.y), window.innerHeight - H - 6), w: W, h: H };
@@ -540,7 +558,13 @@ const ToolbarStrip: React.FC<{
       </div>
       {open && pop && createPortal(
         <>
-          <div data-dock-tb-pop={open} ref={popRef} style={{ ...dockStyles.tbPop, left: pop.x, top: pop.y, width: pop.w, height: pop.h }}>
+          <div data-dock-tb-pop={open} ref={popRef} style={{
+            ...dockStyles.tbPop, left: pop.x, top: pop.y,
+            width: 'max-content', height: 'max-content',
+            minWidth: TB_POP_MIN_W, minHeight: TB_POP_MIN_H,
+            // 宽度再封 560:一行长文本的 max-content 会把小窗顶到全屏宽,没有意义。
+            maxWidth: 'min(calc(100vw - 12px), 560px)', maxHeight: 'calc(100vh - 12px)',
+          }}>
             <div style={dockStyles.tbPopHead}>
               <span style={dockStyles.tbPopIcon}>{ctx.rules.icon(open)}</span>
               <span style={{ ...dockStyles.tbPopName, color: ctx.rules.titleColor?.(open) }} title={ctx.hint?.(open)}>{ctx.rules.title(open)}</span>

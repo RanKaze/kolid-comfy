@@ -132,12 +132,11 @@ export const VidAudioMonitor: React.FC = () => {
           ctx2d.fillStyle = g;
           ctx2d.fillRect(x, 0, width, h);
           ctx2d.restore();
-          // 峰值保持线(亮白,压在表体上)。
-          if (hold > MIN_DB) {
-            const hy = Math.round(h - dbToFrac(hold) * h);
-            ctx2d.fillStyle = 'rgba(255,255,255,0.85)';
-            ctx2d.fillRect(x, hy, width, 1.5);
-          }
+          // 峰值保持线(亮白,压在表体上):落到底**趴在底边**,不消失 —— PR 的口径:
+          // 没声音时指示线停在刻度最底下,来了声音再跳上去。
+          const hy = Math.round(h - dbToFrac(hold) * h);
+          ctx2d.fillStyle = 'rgba(255,255,255,0.85)';
+          ctx2d.fillRect(x, Math.min(hy, h - 2), width, 1.5);
         }
         // 中缝。
         ctx2d.fillStyle = 'rgba(255,255,255,0.28)';
