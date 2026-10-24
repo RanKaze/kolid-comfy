@@ -2318,9 +2318,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const showPlayLayer = useCallback((key: string | null) => {
     const next = key || '';
     setVidLayerKey(prev => (prev === next ? prev : next));
-    // 带上播放位：页面据此决定"切完要不要重画活画布"（播放中不重画 —— 那是几百毫秒，
-    // 正好落在换段那一刻）。页面手上那一包这时候可能还是上一段的，不能拿它判断。
-    onBlendUiCommand('layer-set', { key: next, playing: vidPlayingRef.current });
+    // 只报"哪一段"：切套之后页面照常重画活画布（P3.4 —— 编辑与播放同一条路径，
+    // 不再有"播放中只换数据不重画"的分支，所以也不需要播放位）。
+    onBlendUiCommand('layer-set', { key: next });
   }, [onBlendUiCommand]);
   // ── 缺失 / relink（A5）：工程引用的每个哈希，仓库里还有没有 ────────────────────────────────
   // 什么时候问：工程变了（去抖 250ms），以及删除/入库之后（`recheckMissing` 手动，绕过去重）。

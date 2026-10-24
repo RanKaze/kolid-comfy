@@ -164,7 +164,7 @@ export const VidPlayer: React.FC<{
     }));
     vid.blendPost({
       type: 'blend-vid-frame', reqId, t: q, layerKey: plan.layerKey,
-      baseTrackId: plan.baseTrackId, tracks, playing: playingRef.current,
+      baseTrackId: plan.baseTrackId, tracks,
     });
   }, [vid]);
 
@@ -213,26 +213,24 @@ export const VidPlayer: React.FC<{
   // 还会被拽去走拷贝路径 —— 播放时的规律性顿感就是它（而且抓得越勤越顿）。
   // 现在工作台页面自己挂一只同源的 <video> 播同一个文件（blend_node 的 #vidBaseVideo）：这一侧
   // 只报"哪一段、源内第几秒、在不在播"，5~6Hz 的小消息，一个像素都不过界。
-  const baseReq = useRef({ key: '\u0000', on: false, hidden: false });
-  const sendBaseSrc = useCallback((clip: VidClip | null, q: number, playing: boolean, hidden: boolean) => {
+  const baseReq = useRef({ key: '\u0000', on: false });
+  const sendBaseSrc = useCallback((clip: VidClip | null, q: number, playing: boolean) => {
     const r = baseReq.current;
     compPerf.current.baseSends = (compPerf.current.baseSends || 0) + 1;
     if (!clip) {
       if (!r.on) return;
       r.on = false;
-      r.hidden = false;
       vid.blendPost({ type: 'blend-vid-base-off' });
       return;
     }
     const sent = vid.blendPost({
       type: 'blend-vid-base-src', src: clip.src,
-      start: clip.start, offset: clip.offset, t: q, playing, hidden,
+      start: clip.start, offset: clip.offset, t: q, playing,
     });
     r.on = sent;
-    r.hidden = hidden;
     if (!sent) r.key = '\u0000';       // 页面还没挂上（iframe 尚未加载）：下一个 tick 重来
   }, [vid]);
-  const requestBase = useCallback((t: number, hidden = false) => {
+  const requestBase = useCallback((t: number) => {
     if (!visible) return;
     const p = projectRef.current;
     // 底片跟着监视器走：静音的轨不送帧（画布在视频模式就是监视器，mute 要两边一致）。
@@ -245,13 +243,14 @@ export const VidPlayer: React.FC<{
     const playing = playingRef.current;
     const BASE_FPS = playing ? 6 : (p.fps > 0 ? p.fps : 30);
     const q = Math.max(0, Math.floor(t * BASE_FPS + 1e-6) / BASE_FPS);
-    // 键里带上片段的起点/源内偏移、播放态与"是否被合成压着"：剪一下片段、从暂停转播放、
-    // 或者进出 Layer 段，都得让页面重新对时/换台。
-    const key = c ? `${c.id}@${c.start}@${c.offset}@${q}@${playing ? 1 : 0}@${hidden ? 1 : 0}` : '';
+    // 键里带上片段的起点/源内偏移与播放态：剪一下片段、从暂停转播放，都得让页面重新对时。
+    // "是否被 Layer 合成压着"不再进键：底片只在没有合成包时才上台（见页面 stageWanted），
+    // 合成包本身就是"压着"的信号。
+    const key = c ? `${c.id}@${c.start}@${c.offset}@${q}@${playing ? 1 : 0}` : '';
     const r = baseReq.current;
     if (key === r.key) return;
     r.key = key;
-    sendBaseSrc(c, q, playing, hidden);
+    sendBaseSrc(c, q, playing);
   }, [visible, sendBaseSrc]);
   const requestBaseOff = useCallback(() => {
     if (!visible) return;
@@ -345,7 +344,7 @@ export const VidPlayer: React.FC<{
         if (warm) vid.blendPost({ type: 'blend-vid-warm', layerKey: warm.layerKey, t: warm.at, tracks: warm.tracks });
       }
       if (soloActive) requestBaseOff();
-      else requestBase(t, !!plan);
+      else requestBase(t);
       requestComposite(plan, t);   // solo 时 plan 为 null → 停掉合成（发 frame-off）
     };
     // seek 落定 = 真帧已上屏：撤掉缩略条替身。两个守卫防止拖动中闪替身——
@@ -603,13 +602,14 @@ export const VidPlayer: React.FC<{
   // ── 播放态变化要**立刻**报到工作台页 ──
   // 画布上的画面现在是页面自己播的镜像视频（底片一只、源帧若干只）。播放头一停就不会再有
   // tick，那几只镜像会自己接着播 —— 看起来就是"暂停了画面还在动"。所以这一下不等 tick，
-  // 直接补一包过去（包里带着 playing 位）。
+  // 直接补两包过去：底片包带着播放位（页面据此决定镜像视频播还是精确 seek），合成包按当前
+  // 时刻重折一张。
   useEffect(() => {
     const t = transport.get();
     const plan = soloRef.current.video.size > 0
       ? null
       : compositePlanAt(projectRef.current, t, muteRef.current);
-    requestBase(t, !!plan);
+    requestBase(t);
     requestComposite(plan, t, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing]);

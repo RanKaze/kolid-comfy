@@ -364,8 +364,8 @@ python tests/golden/compare.py tests/golden/vid temporary/_golden_gl --edge --ma
 |---|---|---|
 | **P3.1 编辑写纹理** | 笔刷/变换的目标从 `blendCtx`（2D）改成图层的 GL 纹理；`fxResolved` 的出口从"返回 canvas"改成"返回纹理句柄"（特效链已经在 GL 里，只是最后一步 readback 了）。容量上先只改**工作层像素**（`l.img`），decal/mask 暂留 canvas 走上传。**两步都已完成**：①链结果留纹理、合成器吃纹理；②笔刷落点写纹理（§10.3.1 / §10.3.2）。 | 编辑一笔 → 下一帧合成里就能看到（不再等 render 整画布） |
 | **P3.2 唯一画布** | 新 `<canvas id="stageCanvas">`（webgl2，`data-visible-stage`），`KCompositor.present` 直接合成到它；`blendCanvas` / `guidanceCanvas` / `vidBaseCanvas` 全部退成离屏缓冲，`applyVidBaseMode` 那套 display/visibility 切换整段删掉，换成"同一块面换内容"的 `stageSync`。**已完成**（见 §10.3.3）。 | §4 的 I1 从 3 → 0；屏幕上只剩一块画布 |
-| **P3.3 删旧显示机** | 删剩下的 `vidBasePaintNow` / `vidBasePaintTick` / `vidBaseHidden` / `vidBaseStamp`（`applyVidBaseMode` / `vidStageIsLive` / `vidStageSync` / `vidStageBlit` / `vidStageRepaint` 已随 P3.2 删掉）；`blendCanvas` 退成"离屏上下文图"，不再参与显示。 | grep 不到这些符号；`tests/guards.py` 的 I1 = 0 |
-| **P3.4 删 playing 分支** | `vidFrameFlush` 的 `active` 判据、`switchLayerSet(key, opts.playing)`、`EditPhase.showPlayLayer` 的 playing 传参、`blend-vid-frame` 的 `playing` 位 —— 都没有存在的理由了（编辑与播放同一条路径）。 | I3/I5 收口；`layer-set {key, playing}` 只剩 `{key}` |
+| **P3.3 删旧显示机** | 删掉 `vidBasePaintNow` / `vidBasePaintTick` / `vidBaseHidden` / `vidBaseStamp` / `paintVidBase` / `handleVidBaseMessage` 与整块 `#vidBaseCanvas` 暂存面（`applyVidBaseMode` / `vidStageIsLive` / `vidStageSync` / `vidStageBlit` / `vidStageRepaint` 已随 P3.2 删掉）：镜像 `<video>` **直接当纹理**传给 stage —— 帧没过界，也没落过面。**已完成**（见 §10.3.4）。 | grep 不到这些符号；`tests/guards.py` 的 I1 = 0 |
+| **P3.4 删 playing 分支** | `vidFrameFlush` 的 `active` 判据、`vidCompState` 的 `isActive` / `contentSig`、`vidFrameOff`、`switchLayerSet(key, opts.playing)`、`EditPhase.showPlayLayer` 的 playing 传参、`blend-vid-frame` 的 `playing` 位 —— 都没有存在的理由了（编辑与播放同一条路径）。播放位只剩"镜像视频播/停"一个用途，挪到底片包（`vidBasePlaying`）。**已完成**（见 §10.3.4）。 | `layer-set {key, playing}` 只剩 `{key}`；播放中 `stageMode='live'` |
 | **P3.5 验收** | 四例 `--edge --maxdiff=1`；播放中编辑下一帧可见；换段/换套零 >25ms；`python tests/guards.py` I1=0。 | 全绿才进 P4 |
 
 **为什么 P3.1 必须先做**：现在 `blendCanvas` 既是"笔刷落点"又是"台上那块的最坏替补"。
@@ -408,8 +408,9 @@ python tests/golden/compare.py tests/golden/vid temporary/_golden_gl --edge --ma
 | P3.1 第一步：链结果留在纹理上、合成器直接吃纹理 | **完成**（见 §10.3.1），四例仍全绿、PNG 字节与基线相同 |
 | P3.1 余下：笔刷落笔写纹理（decal 直写，base 预折，橡皮同路径） | **完成**（见 §10.3.2），`temporary/_probe_paint_tex.cjs` 全绿 |
 | P3.2 唯一画布：webgl2 `#stageCanvas` 直出，三块旧面退成离屏 | **完成**（见 §10.3.3），`temporary/_probe_stage.cjs` 全绿 |
-| P3.3 删旧显示机 / P3.4 删 playing 分支 | **未开始**（P3.3 只剩 `vidBase*` 四个符号） |
-| `tests/guards.py` | **40**（I1 3 → 0；其余是 P4/P5 的目标） |
+| P3.3 删旧显示机：底片 `<video>` 直传纹理，`#vidBaseCanvas` 整块消失 | **完成**（见 §10.3.4），`_probe_stage.cjs` 的 `natural.baseStamp` 是 `<media>@<时刻>`、`baseCoverage=1` |
+| P3.4 删 playing 分支：编辑与播放同一条路径 | **完成**（见 §10.3.4），`_probe_vid_playedit.cjs` 播放中 `stageMode='live'`、改图层 13ms 落地 |
+| `tests/guards.py` | **40**（I1 = 0；其余是 P4/P5 的目标） |
 
 ### 10.2 自检（改动后必跑）
 
@@ -421,6 +422,7 @@ node temporary/_probe_compositor.cjs --gl       # GL  → temporary/_cmp_gl
 node temporary/_probe_compositor.cjs --direct   # 直出 → temporary/_cmp_direct
 node temporary/_probe_paint_tex.cjs             # 笔刷落点 → temporary/_cmp_paint
 node temporary/_probe_stage.cjs                 # 唯一显示面 → temporary/_cmp_stage
+node temporary/_probe_vid_playedit.cjs          # 播放中编辑（P3.4）→ 控制台 JSON
 $PY tests/test_render_plan.py                                  # 编译器
 $PY tests/golden/compare.py tests/golden/vid temporary/_cmp_plan --maxdiff=0
 $PY tests/golden/compare.py tests/golden/vid temporary/_cmp_direct --edge --maxdiff=1
@@ -486,8 +488,9 @@ $PY tests/guards.py                                            # 不变量记账
 ### 10.3.3 唯一显示面（P3.2，已落地）
 
 **一句话**：全页只剩一块画布参与显示。`#stageCanvas`（webgl2、`data-visible-stage`）是它；`#blendCanvas`
-（context image）、`#guidanceCanvas`（guidance 图）、`#vidBaseCanvas`（底片暂存面）全部退成离屏缓冲，
-CSS 里 `display:none`，JS 里再没有一处按模式切 `display` / `visibility`。
+（context image）与 `#guidanceCanvas`（guidance 图）退成离屏缓冲，CSS 里 `display:none`，JS 里再没有
+一处按模式切 `display` / `visibility`。当时还有第三块 `#vidBaseCanvas`（底片暂存面），P3.3 把整块删了
+（见 §10.3.4）。
 
 | 位置 | 变成了什么 |
 |---|---|
@@ -495,7 +498,7 @@ CSS 里 `display:none`，JS 里再没有一处按模式切 `display` / `visibili
 | `blend_node.html` 显示机 | 删掉 `applyVidBaseMode` / `vidStageIsLive` / `vidStageSync` / `vidStageBlit` / `vidStageRepaint`，换成 `stageWanted()`（`live` / `base` / `composite`）+ `stageSync(force)` + `stageShowLive/Base` + `stageBlit`。模式没变就一个字节都不动；"换面"这个词从此不存在，只有同一块面换内容。 |
 | `render()` | 不再是"把每层 drawImage 进 blendCtx"，而是**攒 items**：`layerItem(l)` 返回 `{src, transform}`（栅格层 `transform:null` 铺满；栅格拖动那一种把仿射烘成一张临时面；Expand 期间用 `startTransform`）。碰到 Stash 层先 `flushWork()`（合成 + `stageReadbackToBlend()`）再 `stashResample`，然后继续往上叠。guidance 栈照旧 2D 画进 `guidanceCtx`，最后整张作为一个 item 叠到 stage 上。 |
 | context image | `#blendCanvas` 现在是 stage 的一次 readback（`stageReadbackToBlend`），只含工作栈 —— guidance 永远不进它。所有读像素的入口（run 输入 / Tag 区域 / Layer Context / Export PNG / 宿主预览 / 吸管）一行没改。readback 目前是**每趟 render 一次**（这些入口都假定它随时是最新的）；真嫌贵再改成"脏标记 + 消费者入口现抄"，那是 P4 的事。 |
-| 底片 / 副本 | 底片帧先画进 `#vidBaseCanvas`（换源/seek 期间保留上一帧），再整张上台；别段/播放中的合成图副本由 `stageBlit(cv)` 上台。两者都只是"同一块面换内容"。 |
+| 底片 / 副本 | 底片帧先画进 `#vidBaseCanvas`（换源/seek 期间保留上一帧），再整张上台 —— P3.3 起改成 `<video>` 直传（§10.3.4）；别段的合成图副本由 `stageBlit(cv)` 上台。两者都只是"同一块面换内容"。 |
 
 **为什么 items 要抄一份笔刷预览面**：`fxPaintPresent(l)` 返回的是 `fxgl.canvas` —— **一块共享画布**，
 每调一次就被下一层覆盖；而 items 是先攒后传的。所以 `layerItem` 当场把预览面抄进这一层自己的临时面
@@ -508,10 +511,35 @@ CSS 里 `display:none`，JS 里再没有一处按模式切 `display` / `visibili
 `sizeCanvasElement` + `applyView` 两处，并同时把 `linMap` 的换算带上。
 
 **验收**：`node temporary/_probe_stage.cjs`（后端 8700 要在跑）—— `[data-visible-stage]` 恰好一个且是
-`stageCanvas`；`blendCanvas` / `guidanceCanvas` / `vidBaseCanvas` 的 computed `display === 'none'`；
+`stageCanvas`；`blendCanvas` / `guidanceCanvas` 的 computed `display === 'none'`；
 `#stageCanvas` 的像素 == 旧 2D 路径（`drawLayer` 逐层叠）画出来的参考图（预乘差 ≤ 1，实测 0）；
 `#blendCanvas` == 只含工作栈的参考图；guidance 层 / 笔刷预览 / 提交 / `stageBlit` 之后仍然一致。
 `tests/guards.py` 的 I1 = 0（43 → 40）。
+
+### 10.3.4 旧显示机与 playing 分支（P3.3 + P3.4，已落地）
+
+**一句话**：底片不再经过任何暂存面，播放也不再是一条分叉的显示路径。
+
+| 位置 | 变成了什么 |
+|---|---|
+| `#vidBaseCanvas` | 整块删掉（CSS / markup / `vidBaseCtx` / `sizeCanvasElement` 的尺寸循环）。全页只剩两块离屏缓冲：`#blendCanvas`（context image）与 `#guidanceCanvas`。 |
+| `stageShowBase(force)` | 不再 `vidBasePaintNow()` + 上传暂存面，而是**直接把 `#vidBaseVideo` 当纹理**交给 `stagePresent`。去重戳只留一份：`stageBaseStamp = 源@currentTime(3位)`（`vidBaseStamp` 没了）。`readyState < 2` / `seeking` / 没有 `videoWidth` 时直接返回 ⇒ 屏幕上保留上一帧，不会黑。 |
+| `paintVidBase` / `handleVidBaseMessage` / `vidBaseFrame` | 删。宿主早就不再发 `blend-vid-base`（位图老路），那条分支只剩死代码。`blend-vid-base-src` 的 `hidden` 字段也一并删了 —— "被合成压着"由"有没有合成包"自己表达（`stageWanted`）。 |
+| 出帧循环 | `vidBasePaintTick` → `vidBaseTick`：每帧只比一次字符串，`stageWanted() === 'base'` 才动手。**没用 `requestVideoFrameCallback`**（见 §10.4 第 13 条）。 |
+| `vidFrameFlush` 的 `active` | `!p.playing && layerKey === activeLayerSet` → `layerKey === activeLayerSet`。播放中这一包也折在活画布上、也上台 —— 编辑与播放同一条路径。 |
+| `vidCompState` | `isActive` 同样去掉播放位；`contentSig` 从 `(hasFrame && playing) ? '' : …` 收敛成 `hasFrame ? '' : …`（随帧变的段本来就靠 `t` 比较）。 |
+| `vidFrameOff` / `switchLayerSet` | 不再有"播放中不重画"的分支：两处都直接 `render()`。`switchLayerSet(key)` 只剩一个参数，`layer-set` 只剩 `{key}`。 |
+| 播放位 | `blend-vid-frame` 不再带 `playing`。镜像源帧的播/停改读底片包的 `vidBasePlaying`（两个包由宿主同一次 tick 发出，最多差一包）。 |
+
+**一处顺手的性能守卫**：`vidFrameFlush` 的缓存命中路径原本无条件 `render()`（理由是"刚切到这一段，
+画布还停在上一套"）。P3.4 之后 `isActive` 在播放中恒为真，这条路每 1/30 秒走一次 ⇒ 会变成每秒 30 次
+整画布重画。改成 `stageMode !== 'live'` 才补画；随后的 `stageSync(true)` 也改成 `stageSync()`（强制那
+一趟会把整幅 context image 重新上传一次，同样白烧）。
+
+**验收**：`node temporary/_probe_stage.cjs` —— `natural.mode='base'`、`baseStamp` 是 `<media>@<时刻>`、
+`baseCoverage=1`（底片真的上了台），`shown` 只剩两块离屏缓冲；`node temporary/_probe_vid_playedit.cjs`
+—— 播放中 `stageMode='live'`（不再是 `composite`），在面板上点眼睛 13ms 落到当前段，停下后仍是 `live`。
+四例 `--edge --maxdiff=1` 与 2D `--maxdiff=0` 不变；`tests/guards.py` 仍是 40（I1 = 0）。
 
 ### 10.4 踩过的坑（照抄，别再踩）
 
@@ -540,3 +568,8 @@ CSS 里 `display:none`，JS 里再没有一处按模式切 `display` / `visibili
    2D 兜底之所以还能用，是因为兜底分支只在 webgl2 **返回 null** 时才走（那时 canvas 还没被绑）。
    另外 `preserveDrawingBuffer` 必须开 —— `stageReadbackToBlend` 靠 `drawImage(stageCanvas)` 抄
    context image，关掉就是一张黑图（或者上一帧）。
+13. **`display:none` 的 `<video>` 不能指望 `requestVideoFrameCallback`**（P3.3）：rVFC 的语义是"新帧
+   呈现给合成器时"，不在渲染树里的元素不保证有呈现。`drawImage` / `texImage2D` 照常能取到已解码的
+   帧，但"什么时候取"只能自己轮询（`vidBaseTick` 的 rAF + 一次 `currentTime` 比较）。
+14. **P3.4 之后 `isActive` 在播放中恒为真**：任何"命中就补画一次 / 强制重铺一次"的代码都会变成每秒
+   30 次。命中路径只在 `stageMode !== 'live'` 时补画，`stageSync` 不要带 `force`。

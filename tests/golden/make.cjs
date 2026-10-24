@@ -127,7 +127,7 @@ const CASES = [
       }
     }
     const v = document.getElementById('vidBaseVideo');
-    const w = vidBaseCanvas.width, h = vidBaseCanvas.height;
+    const w = canvasW, h = canvasH;
     if (!v || !v.videoWidth || !w || !h) return { kind: 'none', data: null };
     const c = document.createElement('canvas'); c.width = w; c.height = h;
     c.getContext('2d').drawImage(v, 0, 0, w, h);

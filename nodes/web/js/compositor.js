@@ -409,7 +409,7 @@ void main() {
         ctx.clearRect(0, 0, w, h);
         api.notes.length = 0;
         api.stats.items = api.stats.texItems = api.stats.upload = 0;
-        // 形态（契约 §2.3.1）：source = 这一帧就是那条轨的视频帧（拉伸铺满，与 paintVidBase 一致）；
+        // 形态（契约 §2.3.1）：source = 这一帧就是那条轨的视频帧（拉伸铺满，与底片态一致）；
         // layers = 图层合成，底片不参与。两者互斥 —— 别把视频叠到图层下面。
         const fr = plan.frame || {};
         const items = [];
@@ -420,7 +420,7 @@ void main() {
                 api.notes.push('source frame missing: ' + ((fr.source || {}).trackId || '-'));
                 return cv;
             }
-            items.push({ src, transform: null });          // 铺满（与 paintVidBase 的拉伸一致）
+            items.push({ src, transform: null });          // 铺满（与底片态的拉伸一致）
         } else {
             const want = o.stack || 'work';
             const stack = (plan.layers || []).filter(pl => pl && pl.visible !== false && (pl.stack || 'work') === want);

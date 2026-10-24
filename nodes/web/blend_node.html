@@ -16,10 +16,10 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* 底部那条动作条（Extra Prompt + 动作钮 + 图池条 + Cancel / 进度）整条搬进宿主的 Staging dock 之后，
    画布不再需要给它让出下边距 —— 两块视口都铺满整幅 #canvasArea。 */
 #viewport { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: default; }
-/* P3.2: the ONE displayed surface. KCompositor composites the picture here (webgl2); the three
-   canvases below are offscreen buffers now — context image (#blendCanvas), guidance image
-   (#guidanceCanvas) and the base-frame staging face (#vidBaseCanvas) — and never take part in
-   display. Nothing may switch display/visibility between them again (invariant I1). */
+/* P3.2: the ONE displayed surface. KCompositor composites the picture here (webgl2); the two
+   canvases below are offscreen buffers now — context image (#blendCanvas) and guidance image
+   (#guidanceCanvas) — and never take part in display. Nothing may switch display/visibility
+   between them again (invariant I1). */
 #stageCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: block; transform-origin: 0 0; will-change: transform; border-radius: 4px; box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 10px 40px rgba(0,0,0,0.45); pointer-events: none;
     /* The transparency checkerboard: two 45deg gradients with hard 25%/75% stops tile a 16px box
        into an 8px alternate of #1a1a1a / #242424. The host preview reproduces this in canvas 2D
@@ -28,11 +28,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     background-image: linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%),
                       linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%);
     background-size: 16px 16px; background-position: 0 0, 8px 8px; }
-/* 三块离屏缓冲：尺寸与视图变换仍由 JS 写（sizeCanvasElement / applyView），CSS 只保证它们不上台。 */
-#blendCanvas, #guidanceCanvas, #vidBaseCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: none; }
+/* 两块离屏缓冲：尺寸与视图变换仍由 JS 写（sizeCanvasElement / applyView），CSS 只保证它们不上台。 */
+#blendCanvas, #guidanceCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: none; }
 /* 底片自己播：这一页挂一只同源的 <video> 播放同一个文件，宿主只报时刻 —— 抓帧/传帧那条路
-   （每 1/6 秒一次整幅 readback + 跨窗 transfer）整个不见了。尺寸与视图变换跟 #vidBaseCanvas 同源
-   （sizeCanvasElement / applyView 一并写），所以两者可以互换而画面不动一下。 */
+   （每 1/6 秒一次整幅 readback + 跨窗 transfer）整个不见了。P3.3 起它不经过任何暂存面：
+   stageShowBase 直接把这只 <video> 当纹理传给 #stageCanvas（尺寸只决定文档栅格）。 */
 #vidBaseVideo { position: absolute; left: 0; top: 0; width: 0; height: 0; display: none; transform-origin: 0 0; will-change: transform; border-radius: 4px; pointer-events: none; object-fit: fill; background: transparent; }
 /* 逐帧合成的源帧镜像：不进画面（1px、透明），只为了让 <video> 保持"在视口里"而不被浏览器
    当成后台标签降频。它们同时最多几条，见 vidSrcVideoFor。 */
@@ -367,7 +367,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="canvasArea">
         <div id="viewport">
             <canvas id="stageCanvas" data-visible-stage></canvas>
-            <canvas id="vidBaseCanvas"></canvas>
             <video id="vidBaseVideo" muted playsinline preload="auto" aria-hidden="true"></video>
             <div id="vidSrcStage" aria-hidden="true"></div>
             <canvas id="blendCanvas"></canvas>
@@ -761,8 +760,6 @@ const stageGL = (() => {
     } catch (e) { return false; }
 })();
 const stageCtx2d = stageGL ? null : stageCanvas.getContext('2d');
-const vidBaseCanvas = document.getElementById('vidBaseCanvas');
-const vidBaseCtx = vidBaseCanvas.getContext('2d');
 const vidBaseVideo = document.getElementById('vidBaseVideo');
 const vidSrcStage = document.getElementById('vidSrcStage');
 const blendCanvas = document.getElementById('blendCanvas');
@@ -953,18 +950,22 @@ const MIN_ZOOM = 0.02, MAX_ZOOM = 64;
 const MIN_ROTATE_RADIUS = 12;  // px from the view centre where the pointer angle is still meaningful
 const view = { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true };
 // Video 底片态：游标不在 Layer 段上时，画布内容 = 当前视频帧 —— 这一页自己挂的 #vidBaseVideo
-// 播放那段源（老路是宿主逐帧送 ImageBitmap，仍接得住）。它只是显示用的一层底图，
-// **不进 blendCanvas** —— context image 仍然是那套工作图层。
+// 播放那段源。它只是显示用的一层底图，**不进 blendCanvas** —— context image 仍然是那套工作图层。
 let vidBaseOn = false;
-let vidBaseFrame = null;       // ImageBitmap：最近一帧视频（老路；换新帧时关掉旧的）
 let vidBaseSrc = '';           // #vidBaseVideo 上挂的源（哈希值，不是解析后的绝对 URL）
 let vidBaseWant = 0;           // 这一包要的源内时刻（秒）
 let vidBasePlaying = false;    // 宿主在不在播
-let vidBaseHidden = false;     // 宿主说"这一段被 Layer 合成压着"：不上台，但继续跟着播
 // P3.2：唯一显示面此刻装的是哪一样 —— 'live'（活画布这套）/ 'base'（底片帧）/ 'composite'
-// （别段或播放中的合成图副本）。空串 = 缓冲刚被清掉，下一次 stageSync 必须重铺。
+// （别段的合成图副本）。空串 = 缓冲刚被清掉，下一次 stageSync 必须重铺。
 let stageMode = '';
 let stageBaseStamp = '';       // 底片帧上台时用的时间戳（没变就不重传）
+// 镜像 <video> 的出帧计数：requestVideoFrameCallback 每呈现一帧 +1（见 vidBaseWatchFrames）。
+// 为什么不能拿 currentTime 当"有没有新帧"：那是媒体时钟，几乎每个 rAF tick 都在动
+// （实测 2 秒 309 个不同值），而 24fps 的片源 2 秒只出 49 帧 —— 按时刻去重等于一秒白传
+// 三十多次整幅纹理，每次都要把解码帧过一遍转换/拷贝。
+let vidBaseSeq = 0;            // 呈现过的帧数（rVFC 驱动）
+let vidBaseRvfcAt = 0;         // 最近一次 rVFC 的时刻（判断这条链还活着没有）
+let vidBaseRvfcPending = false; // 已挂、还没回调 —— rVFC 是一次性的，靠它防重复挂链
 let stageCompositeSrc = null;  // 合成图副本（vidFrameFlush 交给 stage 的那张面）
 let guidanceHasInk = false;    // 这一趟 guidance 栈里有没有真的落下像素（没有就不往 stage 上叠）
 let overlayDpr = 1;
@@ -1219,7 +1220,7 @@ function hasLayerImage(l) { return !!(l && l.img && l.src); }
 function sizeCanvasElement() {
     // The guidance overlay is the same doc-space bitmap as the composite: one size for both, so a
     // canvas resize can never leave the two out of register.
-    for (const c of [stageCanvas, blendCanvas, guidanceCanvas, vidBaseCanvas]) {
+    for (const c of [stageCanvas, blendCanvas, guidanceCanvas]) {
         c.width = canvasW;
         c.height = canvasH;
         c.style.width = canvasW + 'px';
@@ -1228,10 +1229,10 @@ function sizeCanvasElement() {
     // 底片那只 <video> 只是显示：文档尺寸铺满（object-fit: fill），位图尺寸由文件自己定。
     vidBaseVideo.style.width = canvasW + 'px';
     vidBaseVideo.style.height = canvasH + 'px';
-    // 重设位图尺寸会清空内容：清 stamp，作画循环下一帧会按新尺寸重铺。
-    vidBaseStamp = '';
-    stageMode = '';                 // stage 的缓冲也刚被清掉：下一次 stageSync 必须重铺
-    if (vidBaseOn) paintVidBase();
+    // 重设位图尺寸会清空内容：下一次 stageSync 必须重铺（底片那一趟直接重传当前帧）。
+    stageMode = '';
+    stageBaseStamp = '';
+    if (vidBaseOn) stageShowBase(true);
 }
 
 // ==================== 光栅图层 ====================
@@ -4262,7 +4263,7 @@ function vidSrcVideoFor(trackId, src) {
         const wt = (e.warmWant != null && e.want < 0) ? e.warmWant : e.want;
         if (wt >= 0) {
             try { v.currentTime = wt; } catch (err) { /* 还不能 seek */ }
-            if (vidFramePacket && vidFramePacket.playing && v.paused) void v.play().catch(() => { /* 自动播放政策 */ });
+            if (vidBasePlaying && v.paused) void v.play().catch(() => { /* 自动播放政策 */ });
         }
         vidSrcAskRedraw();
     }, { once: true });
@@ -4312,7 +4313,9 @@ function vidSrcSync(d) {
     const list = Array.isArray(d.tracks) ? d.tracks : null;
     if (!list) return out;
     const need = vidFrameNeedTracks(d.layerKey || '');
-    const playing = !!d.playing;
+    // 播/停从底片包读（vidBasePlaying）：合成包里没有播放位了 —— 编辑与播放走同一条路径，
+    // 包的形状与"停在哪"无关。两个包由宿主同一次 tick 发出，最多差一包。
+    const playing = vidBasePlaying;
     const now = performance.now();
     for (const t of list) {
         if (!t || !t.trackId || !t.src) continue;
@@ -4525,37 +4528,22 @@ function ensureVidCanvas() {
 // 主线程上排队 —— 画面越顺的地方它越贵，播放时的规律性顿感就是它。现在这一页自己挂一只同源的
 // <video> 播同一个文件（#vidBaseVideo）：宿主只报"哪一段、播到哪、在不在播"（5~6Hz 的小消息），
 // 解码与出画全交给浏览器，一个像素都不过界。
-// 这张底图只负责显示：blendCanvas 仍是 context image（工作图层），底片态里只是把它藏起来。
+// P3.3：连暂存面也没有了 —— 这只 <video> 直接当纹理传给唯一显示面（stageShowBase），
+// 画完就丢；"这一帧传过没有"只靠 stageBaseStamp 里那个 `源@帧号` 字符串比。
+// 这张底图只负责显示：blendCanvas 仍是 context image（工作图层）。
 // 状态（vidBaseSrc / vidBaseWant / vidBasePlaying）声明在画布变量区，见文件上方。
-
-function paintVidBase() {
-    const cw = vidBaseCanvas.width, ch = vidBaseCanvas.height;
-    vidBaseCtx.setTransform(1, 0, 0, 1, 0, 0);
-    vidBaseCtx.globalAlpha = 1;
-    vidBaseCtx.globalCompositeOperation = 'source-over';
-    vidBaseCtx.clearRect(0, 0, cw, ch);
-    if (vidBaseFrame && canvasW > 0 && canvasH > 0) {
-        // 铺满整张画布：直接拉到文档尺寸 —— 没有第二层 transform。
-        vidBaseCtx.drawImage(vidBaseFrame, 0, 0, canvasW, canvasH);
-    }
-    // 这块只是暂存面：真正上台的是 #stageCanvas。换了一帧就重传一次（没换就一个字节都不动）。
-    vidBaseStamp = 'bmp';
-    if (stageWanted() === 'base') stageShowBase(true);
-}
 
 // ── 唯一显示面：台上装哪一样 ──────────────────────────────────────────────────────────────────
 // P3.2 起全页只有一块画布参与显示（#stageCanvas，webgl2）。它装三样东西之一：
 //   · `live`      = 活画布这套（工作栈 + guidance），由 render() 直接合成上来；
-//   · `base`      = 正常段的底片帧（#vidBaseCanvas 是它那块暂存面，换源/seek 时保留上一帧）；
-//   · `composite` = 别段 / 播放中的合成图副本（vidFrameFlush 折出来的临时面）。
+//   · `base`      = 正常段的底片帧（镜像 <video> 直接上传，换源/seek 时保留上一帧）；
+//   · `composite` = 别段的合成图副本（vidFrameFlush 折出来的临时面）。
 // 没有"换面"这回事了：只有"同一块面换内容"，所以再也不会出现两块画布交替时的闪/跳。
 function stageWanted() {
     const p = vidFramePacket;
-    // 没有合成包（正常段）：有底片就显示底片帧；被 Layer 合成压着就不上底片。
-    if (!p) return (vidBaseOn && !vidBaseHidden) ? 'base' : 'live';
-    // 播放中**永不上台活画布**：它不重画（见 vidFrameFlush 的 active），露出来就是上一套的旧画面。
-    if (p.playing) return 'composite';
-    // 停下：这一包说的正是活画布上这套（用户手上就是在编辑它）⇒ 露活画布。
+    // 没有合成包（正常段）：有底片就显示底片帧。
+    if (!p) return vidBaseOn ? 'base' : 'live';
+    // 有包：这一包说的正是活画布上这套（用户手上就是在编辑它）⇒ 露活画布。
     return (p.layerKey || '') === (activeLayerSet || '') ? 'live' : 'composite';
 }
 
@@ -4603,13 +4591,41 @@ function stageShowLive() {
     stageMode = 'live';
 }
 
-/** 底片帧上台。换源/seek 期间 vidBasePaintNow 不画 ⇒ stamp 不变 ⇒ 不重传，屏幕上保留上一帧。 */
+/** 挂上"呈现了一帧"的回调。rVFC 是一次性的，回调里自己续；**换源会清掉这条链**
+ *  （setAttribute('src') + load() 清空 pending 回调），所以 load() 之后要重挂（见下面的 emptied）。
+ *  实测：这只 display:none 的 <video> 上它照常回调（2 秒 49 次，间隔 42ms，与
+ *  getVideoPlaybackQuality().totalVideoFrames 完全一致）—— 比 currentTime 准得多，见变量区注释。 */
+function vidBaseWatchFrames() {
+    const v = vidBaseVideo;
+    if (!v || vidBaseRvfcPending) return;
+    if (typeof v.requestVideoFrameCallback !== 'function') return;
+    vidBaseRvfcPending = true;
+    const onFrame = () => {
+        vidBaseRvfcPending = false;
+        vidBaseSeq++;
+        vidBaseRvfcAt = performance.now();
+        vidBaseWatchFrames();
+    };
+    v.requestVideoFrameCallback(onFrame);
+}
+
+/** 底片帧上台：把镜像 <video> 直接当纹理传一次。换源/seek 期间它没有可传的帧 ⇒ 直接返回，
+ *  屏幕上保留上一帧（<video> 时代正是在这里黑的）。
+ *  去重看**帧号**（rVFC 驱动）：一帧只传一次。rVFC 万一不回（老浏览器 / 解码器不给），
+ *  500ms 没来帧就退回按时刻比 —— 宁可多传，不能冻住。
+ *  `premul: true` 是**性能开关**，不是颜色开关：视频没有 alpha（不透明），预乘与直通逐像素相同；
+ *  而 WebGL 只要看到 UNPACK_PREMULTIPLY_ALPHA_WEBGL / UNPACK_FLIP_Y_WEBGL 为真，就借不到解码器
+ *  那帧纹理，得先读回 CPU 再做 YUV→RGBA —— 一帧 832×1216 是十毫秒级的活。置假才走零拷贝那条路。 */
 function stageShowBase(force) {
-    if (!vidBaseCanvas.width || !vidBaseCanvas.height) return;
-    vidBasePaintNow();
-    if (!force && stageMode === 'base' && vidBaseStamp === stageBaseStamp) return;
-    if (!stagePresent([{ src: vidBaseCanvas, transform: null }], true)) return;
-    stageBaseStamp = vidBaseStamp;
+    const v = vidBaseVideo;
+    if (!vidBaseOn || !vidBaseSrc || !v) return;
+    if (!canvasW || !canvasH || v.readyState < 2 || v.seeking) return;
+    if (!v.videoWidth || !v.videoHeight) return;
+    const fresh = !v.paused && vidBaseRvfcAt > 0 && performance.now() - vidBaseRvfcAt < 500;
+    const stamp = vidBaseSrc + '@' + (fresh ? '#' + vidBaseSeq : v.currentTime.toFixed(3));
+    if (!force && stageMode === 'base' && stamp === stageBaseStamp) return;
+    if (!stagePresent([{ src: v, transform: null, premul: true }], true)) return;
+    stageBaseStamp = stamp;
     stageMode = 'base';
 }
 
@@ -4636,30 +4652,18 @@ function stageSync(force) {
     else stageMode = '';               // 还没有副本可放：下一趟再来
 }
 
-/** 把底片帧画进它的暂存面。只在"正常段 + 镜像有画面"时动手：换源/seek 期间不画 ⇒ 保留上一帧，
- *  永远不会出现黑屏（<video> 时代正是在这里黑的）。 */
-function vidBasePaintNow() {
-    const v = vidBaseVideo;
-    if (!vidBaseOn || vidBaseHidden || !v || !vidBaseSrc) return;
-    const cw = vidBaseCanvas.width, ch = vidBaseCanvas.height;
-    if (!cw || !ch || v.readyState < 2 || v.seeking) return;
-    const stamp = vidBaseSrc + '@' + v.currentTime.toFixed(3);
-    if (stamp === vidBaseStamp) return;
-    vidBaseStamp = stamp;
-    vidBaseCtx.setTransform(1, 0, 0, 1, 0, 0);
-    vidBaseCtx.globalAlpha = 1;
-    vidBaseCtx.globalCompositeOperation = 'source-over';
-    try { vidBaseCtx.drawImage(v, 0, 0, cw, ch); } catch (e) { /* 这一帧跳过 */ }
-}
-
-// 作画循环：底片模式下跟着镜像视频出帧（一帧一次上传，帧没变就不传）。
-let vidBaseRaf = 0;
-function vidBasePaintTick() {
-    vidBaseRaf = 0;
+// 出帧循环：底片模式下把"这一帧"铺上台。**新帧由 rVFC 计数**（vidBaseWatchFrames），
+// 这里只是每个 rAF 去对一次账 —— 模式换了要重铺、帧号变了要重传；没变就只是一次字符串比较。
+// 不直接把上传塞进 rVFC 回调里，是因为还要照顾暂停/拖动（那时候按时刻比，rVFC 不回调）
+// 以及模式切换，这些都归 stageSync 这一处管。
+function vidBaseTick() {
     if (stageWanted() === 'base') stageShowBase();
-    vidBaseRaf = requestAnimationFrame(vidBasePaintTick);
+    requestAnimationFrame(vidBaseTick);
 }
-requestAnimationFrame(vidBasePaintTick);
+requestAnimationFrame(vidBaseTick);
+vidBaseWatchFrames();
+// load() 会把 pending 的 rVFC 回调清掉（换源就是这么做的）：链断了就重挂。
+vidBaseVideo.addEventListener('emptied', () => { vidBaseRvfcPending = false; vidBaseWatchFrames(); });
 
 function vidBasePause() {
     try { if (!vidBaseVideo.paused) vidBaseVideo.pause(); } catch (e) { /* 还没源 */ }
@@ -4684,18 +4688,15 @@ function vidBaseSeek() {
     if (v.paused) void v.play().catch(() => { /* autoplay 政策 */ });
 }
 
-// 宿主的底片包：{src,start,offset,t,playing,hidden}。只做三件事：换源、对时、播/停。
-// `hidden` = 这一段被 Layer 合成压着（画面上不露底片），但**照样跟着播/对时** —— 出段即用。
+// 宿主的底片包：{src,start,offset,t,playing}。只做三件事：换源、对时、播/停。
 function handleVidBaseSrcMessage(d) {
     const src = String(d.src || '');
     if (!src) { vidBaseOff(); return; }
     vidBaseWant = Math.max(0, (+d.offset || 0) + (+d.t || 0) - (+d.start || 0));
     vidBasePlaying = !!d.playing;
-    vidBaseHidden = !!d.hidden;
     vidBaseOn = true;
     if (src !== vidBaseSrc) {
         vidBaseSrc = src;
-        vidBaseFrame = null;                     // 老路的位图作废
         const v = vidBaseVideo;
         v.setAttribute('src', src);
         try { v.load(); } catch (e) { /* noop */ }
@@ -4712,25 +4713,9 @@ function handleVidBaseSrcMessage(d) {
     vidBaseSeek();
 }
 
-function handleVidBaseMessage(d) {
-    const bmp = d.bitmap || null;
-    const prev = vidBaseFrame;
-    vidBaseFrame = bmp;
-    if (prev && prev !== bmp) { try { prev.close(); } catch (e) { /* gone */ } }
-    // 画布还没立起来（宿主还没报过栅格）：拿这一帧的尺寸当文档栅格。
-    if (bmp && (canvasW <= 0 || canvasH <= 0)) noteVidGrid(bmp.width, bmp.height);
-    // 每帧只重铺这张底图；进出底片态那一下才动可见性与视图变换。
-    if (!vidBaseOn) { vidBaseOn = true; stageSync(true); }
-    else paintVidBase();
-}
-
 function vidBaseOff() {
-    const prev = vidBaseFrame;
-    vidBaseFrame = null;
-    if (prev) { try { prev.close(); } catch (e) { /* gone */ } }
     vidBasePause();
-    vidBaseHidden = false;
-    vidBaseStamp = '';             // 再回来时第一帧要重画
+    stageBaseStamp = '';           // 再回来时第一帧要重传
     if (!vidBaseOn) return;
     vidBaseOn = false;
     stageSync(true);
@@ -4878,9 +4863,9 @@ function vidFrameFlush() {
         vidFrameRetryLater(true);
         return;
     }
-    // "活画布这一套"只在**停下来**时成立：播放中活画布不上台也不重画（画面靠 stage 上的
-    // 合成图副本），所以哪怕当前套已经切到这一段，也走临时画布那条路。
-    const active = !p.playing && (p.layerKey || '') === (activeLayerSet || '');
+    // "活画布这一套" = 这一包说的正是用户手上那套 ⇒ 折在活画布上（收尾顺手抄一份回监视器）。
+    // P3.4 起播放中也走这条路：编辑与播放不再分叉，画面就是活画布本身。
+    const active = (p.layerKey || '') === (activeLayerSet || '');
     vidInFlush = true;
     try {
         // 活画布这一套：着一包还没画过就先画（render 内部会把源帧折进去）。
@@ -4904,8 +4889,8 @@ function vidFrameFlush() {
         } else {
             __vidPerf.repliesTemp++;
             const cv = composeVidFrameCanvas(p);
-            // 播放中不切活画布 ⇒ 画面只能靠台下这块显示：合成图直接 blit 上去。
-            stageBlit(cv);           // 播放中不切活画布：台上这块显示合成图副本
+            // 这一包说的不是手上这套（游标在别段）⇒ 台上放合成图副本；活画布一个像素都不动。
+            stageBlit(cv);
             replyVidFrame(p.reqId, cv, frameless);
         }
     } finally {
@@ -4963,19 +4948,16 @@ function vidCompState(packet) {
     // 绑了视频轨的面 = 这一包的结果随源帧变（每帧必然 miss）。**先算这个**：命中判定一旦注定落空，
     // 逐层 16×16 采样那笔读回就是白付的（播放中每包都在付，30 包/秒）。
     const hasFrame = vidFrameNeedTracks(key).size > 0;
-    // "这一包能在活画布上折" —— 播放中永远是 false：那时候画面走临时画布 + stage，
-    // 活画布一帧都不重画（一次 render 在冷缓存下是几百毫秒，正好落在换段那一刻）。
-    // 注意这**不是**"这一套是不是当前套"：播放中当前套照常切换（见 switchLayerSet），
-    // 只是活画布不上台、也不重画。
-    const isActive = !packet.playing && key === (activeLayerSet || '');
+    // "这一包能在活画布上折" = 这一包说的就是当前套（用户手上在编辑它）。P3.4 起播放中
+    // 也成立：编辑与播放同一条路径，活画布照常重画、照常上台。
+    const isActive = key === (activeLayerSet || '');
     return {
         key,
         isActive,
         hasFrame,
         setRef: isActive ? null : (layerSets.get(key) || null),   // 非活跃集:冻结对象,身份即内容
-        // 每帧都是新帧的段不需要内容签名:比较必然落在 t 上,签名只会白算。暂停态仍要算 ——
-        // 停在同一帧上编辑时,签名是唯一能认出"内容变了"的东西。
-        contentSig: (hasFrame && packet.playing) ? '' : (isActive ? vidLayerSetSig(key) : ''),
+        // 每帧都是新帧的段不需要内容签名:比较必然落在 t 上,签名只会白算。
+        contentSig: hasFrame ? '' : (isActive ? vidLayerSetSig(key) : ''),
         grid: canvasW + 'x' + canvasH,
         t: packet.t,
     };
@@ -5017,7 +4999,6 @@ function handleVidFrameMessage(d) {
         baseTrackId: typeof d.baseTrackId === 'string' ? d.baseTrackId : null,
         sources,
         bitmaps,
-        playing: !!d.playing,
         rendered: false,          // 这一包还没画（合成与回图都并到那一口 rAF，见 vidFrameFlush）
         frameMissing: false,
         retries: 0,
@@ -5040,9 +5021,13 @@ function handleVidFrameMessage(d) {
         // 命中只保证"内容与上一次回图一致"，**不保证活画布此刻就摆着它**（刚切到这一段时
         // 画布还停在上一套，或者干脆是"缺源帧"那张空图）。所以活画布这套补画一次再让底片
         // 退场 —— 少了这一下，换段那一手会露出画布上的空图（用户看到的就是"闪一下"）。
+        // 已经在 live 就不补：那说明画布上就是这一张。播放中每包都重画一遍整画布是白烧
+        // （P3.4 把"播放中不上台活画布"去掉之后，这条路径每 1/30 秒就会被走到一次）。
         if (st.isActive) {
-            if (!vidFramePacket.rendered) { vidFramePacket.rendered = true; __vidPerf.renders++; render(); }
-            stageSync(true);             // 活画布这套补画完了：换手到它
+            if (!vidFramePacket.rendered && stageMode !== 'live') {
+                vidFramePacket.rendered = true; __vidPerf.renders++; render();
+            }
+            stageSync();                 // 活画布这套补画完了：换手到它
         }
         return;
     }
@@ -5055,9 +5040,6 @@ function handleVidFrameMessage(d) {
 
 function vidFrameOff() {
     const prev = vidFramePacket;
-    // 播放中离开 Layer 段也会走这里（宿主发 frame-off）：那一趟**不能**重画活画布 ——
-    // 它没在上台、重画一次就是几百毫秒，正好落在换段那一刻。画面已经交回 stage 上的底片帧。
-    const wasPlaying = !!(prev && prev.playing);
     vidFramePacket = null;
     if (vidFrameRetryTimer) { clearTimeout(vidFrameRetryTimer); vidFrameRetryTimer = 0; }
     if (vidFrameRaf) { cancelAnimationFrame(vidFrameRaf); vidFrameRaf = 0; }
@@ -5066,7 +5048,8 @@ function vidFrameOff() {
     vidSrcPauseAll();          // 合成停了：镜像视频别在后台接着解码
     if (vidFrameCanvas) { vidFrameCanvas.width = 0; vidFrameCanvas.height = 0; }
     // 帧包撤了：再画一趟，把面 attribute 换回它们自己的像素（画布不再是合成图）。
-    if (!wasPlaying) render();
+    // 编辑与播放同一条路径（P3.4）：不管刚才在不在播，活画布都得对回"没有合成包"的样子。
+    render();
     stageSync(true);             // 台上该换回底片了
 }
 
@@ -5674,7 +5657,7 @@ function replyVidLayerCopy(reqId, from, to) {
     window.parent.postMessage({ type: 'blend-vid-layer-copied', reqId, ok }, '*');
 }
 
-function switchLayerSet(key, opts) {
+function switchLayerSet(key) {
     const k = String(key || '');
     if (k === activeLayerSet) return;
     // 那个还在等栅格的 Add 属于上一段，不能落进新选中的这一套里。
@@ -5702,15 +5685,9 @@ function switchLayerSet(key, opts) {
         lastActionKey = null;
         undoStack = [tagHistoryStep(snapshotState(), null, 'Layer segment opened')];
     }
-    // **播放中只换数据，不重画活画布**：整画布 render（含特效链）冷缓存下是几百毫秒，而它
-    // 原本正好落在换段那一刻 —— 那就是画面"跳一下"。播放时画面由 stage 上的合成图副本负责
-    // （见 vidFrameFlush），停下那一刻（第一包 playing=false）会补上这次 render。
-    // 播放位由宿主在命令里明说（opts.playing）：这一刻手上那一包可能还是上一段的、甚至已经被
-    // 撤掉（进段时先 frame-off），拿它判断会让"该跳过的"那一趟照样重画。
-    const playing = (opts && typeof opts.playing === 'boolean')
-        ? opts.playing
-        : !!(vidFramePacket && vidFramePacket.playing);
-    if (!playing) render();
+    // 切套之后活画布重画一次：编辑与播放同一条路径（P3.4），画面永远就是活画布本身 ——
+    // "播放中只换数据、不重画"那条分支没有了，所以也没有"停下那一刻再补一次"的欠账。
+    render();
     syncStackRows();
     syncHistoryUI();
     setStatus(k ? 'Layer segment — this segment owns its own layers' : 'Document layers');
@@ -14008,7 +13985,7 @@ const UI_COMMANDS = {
     'canvas-modify': () => startCanvasModify(),
     // 带值的尺寸写口：Video 模式下活画布被挪到视口外，弹窗看不见 —— 宿主那两颗输入框
     // 直接走这条，落地仍是同一个 setCanvasSize（尺寸/上限校验也共用）。
-    'layer-set': v => switchLayerSet(v && v.key, v),
+    'layer-set': v => switchLayerSet(v && v.key),
     'canvas-resize': v => {
         const w = Math.max(1, Math.round(Number(v && v.w) || 0));
         const h = Math.max(1, Math.round(Number(v && v.h) || 0));
@@ -15058,7 +15035,6 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-vid-kf-get') { replyVidKf(d.reqId); return; }
     if (d.type === 'blend-vid-layer-copy') { replyVidLayerCopy(d.reqId, d.from, d.to); return; }
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
-    if (d.type === 'blend-vid-base') { handleVidBaseMessage(d); return; }
     if (d.type === 'blend-vid-base-src') { handleVidBaseSrcMessage(d); return; }
     if (d.type === 'blend-vid-base-off') { vidBaseOff(); return; }
     if (d.type === 'blend-vid-grid') { noteVidGrid(d.width, d.height); return; }
