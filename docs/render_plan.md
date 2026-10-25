@@ -56,7 +56,7 @@
   "name": "Stash 1",
   "stack": "work" | "guidance",        // guidance 不进 context image，另有一张输出
   "visible": true,
-  "opacity": 1,                        // 现在恒 1；合成只有 source-over，字段先留
+  "opacity": 1,                        // 图层整体不透明度 0..1（编辑器图层行的 Opacity 滑杆；缺省 1 = 不透明）
   "blend": "source-over",
   "capture": null | "below",           // Stash 层：输入是"此刻以下所有层的合成"，不是自己的 img
   "transform": { "cx": 0.5, "cy": 0.5, "w": 1, "h": 1, "rotation": 0 },  // 画布归一化，语义见 §3.2
@@ -367,6 +367,7 @@ python tests/golden/compare.py tests/golden/vid temporary/_golden_gl --edge --ma
 | **P3.3 删旧显示机** | 删掉 `vidBasePaintNow` / `vidBasePaintTick` / `vidBaseHidden` / `vidBaseStamp` / `paintVidBase` / `handleVidBaseMessage` 与整块 `#vidBaseCanvas` 暂存面（`applyVidBaseMode` / `vidStageIsLive` / `vidStageSync` / `vidStageBlit` / `vidStageRepaint` 已随 P3.2 删掉）：镜像 `<video>` **直接当纹理**传给 stage —— 帧没过界，也没落过面。**已完成**（见 §10.3.4）。 | grep 不到这些符号；`tests/guards.py` 的 I1 = 0 |
 | **P3.4 删 playing 分支** | `vidFrameFlush` 的 `active` 判据、`vidCompState` 的 `isActive` / `contentSig`、`vidFrameOff`、`switchLayerSet(key, opts.playing)`、`EditPhase.showPlayLayer` 的 playing 传参、`blend-vid-frame` 的 `playing` 位 —— 都没有存在的理由了（编辑与播放同一条路径）。播放位只剩"镜像视频播/停"一个用途，挪到底片包（`vidBasePlaying`）。**已完成**（见 §10.3.4）。 | `layer-set {key, playing}` 只剩 `{key}`；播放中 `stageMode='live'` |
 | **P3.5 验收** | 四例 `--edge --maxdiff=1`；播放中编辑下一帧可见；换段/换套零 >25ms；`python tests/guards.py` I1=0。 | 全绿才进 P4 |
+| **P3.6 底片态就是 context image** | 底片帧上台后补 `stageReadbackToBlend()` + `schedulePreview()`：游标停在没 Layer 的段落上时，Context 卡 / 生成 / 导出读到的就是**此刻这一帧**（P3.3 当时刻意不抄，方向是反的）。预览节拍在底片态单独一档（`PREVIEW_INTERVAL_BASE_MS = 70`，编辑态仍 120ms）。**已完成**（见 §10.3.5）。 | 暂停时 `blendCanvas` 与 `vidBaseVideo` 逐像素 `max=0`；播放中预览 ≥10 次/秒且宿主收到的每张图都不同 |
 
 **为什么 P3.1 必须先做**：现在 `blendCanvas` 既是"笔刷落点"又是"台上那块的最坏替补"。
 如果先删显示机，编辑就没地方落笔，画面会立刻空；反过来先把笔刷接到纹理，第二块画布就自然多余。
@@ -411,6 +412,7 @@ python tests/golden/compare.py tests/golden/vid temporary/_golden_gl --edge --ma
 | P3.3 删旧显示机：底片 `<video>` 直传纹理，`#vidBaseCanvas` 整块消失 | **完成**（见 §10.3.4），`_probe_stage.cjs` 的 `natural.baseStamp` 是 `<media>@<时刻>`、`baseCoverage=1` |
 | P3.4 删 playing 分支：编辑与播放同一条路径 | **完成**（见 §10.3.4），`_probe_vid_playedit.cjs` 播放中 `stageMode='live'`、改图层 7ms 落地 |
 | P3.5 播放卡顿归因：底片按**帧号**上台（rVFC）、视频纹理走零拷贝、播放中不再每帧重发 UI 快照 | **完成**（见 §10.3.4 末段 + §10.4 第 13/15/16 条），`_probe_vid_cadence.cjs --gpu` 底片上传 166 次/秒 → 32 次/秒且间隔稳定 36ms |
+| P3.6 底片态 = context image：视频当前帧就是 Context 卡 / 生成 / 导出的输入 | **完成**（见 §10.3.5），`_probe_ctx_live.cjs --gpu` 暂停时 `blendCanvas` vs 视频帧 `max 0 / over1 0`，播放中 25 次预览 25 张不同图、0 条 longtask |
 | `tests/guards.py` | **40**（I1 = 0；其余是 P4/P5 的目标） |
 
 ### 10.2 自检（改动后必跑）
@@ -426,6 +428,7 @@ node temporary/_probe_stage.cjs                 # 唯一显示面 → temporary/
 node temporary/_probe_vid_playedit.cjs          # 播放中编辑（P3.4）→ 控制台 JSON
 node temporary/_probe_vid_cadence.cjs --gpu     # 播放节奏/每段耗时（P3.5）→ 控制台
 node temporary/_probe_vid_rate.cjs --gpu        # 包率 vs 回图率（P3.5）→ 控制台
+node temporary/_probe_ctx_live.cjs --gpu        # 底片态 context image / 预览节拍（P3.6）→ 控制台
 $PY tests/test_render_plan.py                                  # 编译器
 $PY tests/golden/compare.py tests/golden/vid temporary/_cmp_plan --maxdiff=0
 $PY tests/golden/compare.py tests/golden/vid temporary/_cmp_direct --edge --maxdiff=1
@@ -544,6 +547,9 @@ $PY tests/guards.py                                            # 不变量记账
 —— 播放中 `stageMode='live'`（不再是 `composite`），在面板上点眼睛 7ms 落到当前段，停下后仍是 `live`。
 四例 `--edge --maxdiff=1` 与 2D `--maxdiff=0` 不变；`tests/guards.py` 仍是 40（I1 = 0）。
 
+> P3.6 起 `stageShowBase()` 上台之后会把这一帧抄进 `blendCanvas` 当 context image（见 §10.3.5）——
+> 上面 P3.3 那句"这张底图只负责显示"已经被推翻。
+
 #### P3.5 播放卡顿归因（承接 P3.4，已落地）
 
 P3.4 之后用户仍报"播放有卡顿"。实测（`_probe_vid_cadence.cjs --gpu`，RTX 4070 / ANGLE D3D11）三处，
@@ -567,6 +573,37 @@ P3.4 之后用户仍报"播放有卡顿"。实测（`_probe_vid_cadence.cjs --gp
   `q = floor(t*30)/30` 取样，24.5fps 的内容落在 30Hz 的格子上，每帧被显示 1 或 2 格且不均匀 —— 看起来
   像轻微抖动，但这是采样节拍，不是丢帧。宿主 rAF 与主线程都干净（`_probe_host_jank.cjs --gpu`：
   0 条 longtask、p95 16.7ms、>33ms 的帧 1/307）。
+
+### 10.3.5 底片态就是 context image（P3.6，已落地）
+
+**一句话**：Video 模式下把游标停在没 Layer 的段落上时，context image **就是正在播的这一帧** ——
+不是"上一次工作栈的残留"。
+
+**症状**：底片态从来不走 `render()`，而 `pushPreview()` 只挂在 `render()` 末尾 ⇒ 宿主那张 Context 卡
+（`blend-preview` → `EditPhase.blendPreview` → `staging.tsx` 的 `contextSrc`，同时也是拖进图池的
+"context" 源）停在进底片态之前的那张工作栈图上，看着就是"预览死了"。
+
+| 位置 | 改法 |
+|---|---|
+| `stageShowBase()` | 上台成功之后补 `stageReadbackToBlend()` + `schedulePreview()`。stage 上此刻就是这一帧，从 live 路径**同一个入口**抄一次（那个函数的注释本来就是"stage 上此刻就是它"）。 |
+| `schedulePreview()` | 底片态走快档 `PREVIEW_INTERVAL_BASE_MS = 70`，编辑态仍 `PREVIEW_INTERVAL_MS = 120`。原来实测 155ms/次（≈6.5fps），肉眼看就是卡；改后 100~110ms（≈10fps）。 |
+| `pushPreview()` | 底片态不叠 Mask tint —— 那一帧里根本没有工作栈（更没有 Mask 层），叠上去就是在视频上糊一层红。 |
+| `vidBaseOff()` | 底片态里 `blendCanvas` 装的是视频帧，所以离开底片态要 `render()` 重折工作栈；否则 `stageShowLive()` 会把那张视频帧当成"活画布"再铺一次，屏幕就停在最后一帧上。 |
+
+**代价**（`_probe_ctx_live.cjs --gpu`，RTX 4070 SUPER / ANGLE D3D11）：`stageReadbackToBlend` **0.05ms**
+（`drawImage(webglCanvas → 2d)` 是延迟的，真开销记在下一个读像素的人头上），`pushPreview` 3.98ms
+（p95 4.8ms，含 JPEG 编码 + base64）；宿主收到 25 条消息 / 25 张互不相同的图、**0 条 longtask**。
+播放 2.5 秒的预览间隔 p50 113ms、p95 135ms。
+
+**验收**：
+- 暂停在 t≈1.5：`blendCanvas` 与 `vidBaseVideo` 同帧逐像素 **max 0 / over1 0**（832×1216；缩略签名
+  `111,102,98` 两边相同）。
+- 播放 2.5 秒：25 次预览推送，`stageMode` 全程 `base`；宿主 25 张图各不相同。
+- 离开底片态（自投 `blend-vid-base-off`）：`stageMode='live'`、`stage` 与 `blendCanvas` **max 0**，
+  且 `blendCanvas` **不再等于视频帧**（这条工程该时刻折出来是空栈 ⇒ 签名 `0,0,0`；判据是"换回工作栈了"，
+  不是"有内容"）。
+- golden 与 guards 不变：2D 四例 `maxdiff 0`；`--gl` / `--direct` 四例 `--edge --maxdiff=1`（0/0/1/1）；
+  `tests/guards.py` 40（I1 = 0）。
 
 ### 10.4 踩过的坑（照抄，别再踩）
 

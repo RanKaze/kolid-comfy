@@ -696,6 +696,8 @@ export type BlendStack = 'layer' | 'guidance';
 export type BlendLayerRow = {
   id: number; name: string; kind: string; badgeSvg: string; stack: BlendStack; cudName: string; cudLinked: boolean;
   selected: boolean; grouped: boolean; visible: boolean; canGen: boolean; hasImg: boolean;
+  /** 整体不透明度（0..1，PS 式）—— 行上那根 Opacity 滑杆读写的就是它（动作键 layer-opacity）。 */
+  opacity: number;
   native: { w: number; h: number }; orig: string; canvas: string; hover: string;
   menu: BlendRowMenu;
   attrs: BlendAttrChip[]; chains: BlendChainLane[];
@@ -1012,7 +1014,7 @@ export type BlendUiAction =
   | 'paint-color' | 'paint-alpha' | 'paint-hue' | 'paint-mode' | 'paint-swap'
   | 'mask-invert' | 'mask-layer-invert' | 'mask-layer-full' | 'mask-layer-clear'
   | 'mask-layer-eye' | 'mask-layer-select'
-  | 'layer-select' | 'layer-rename' | 'layer-jump' | 'layer-generate' | 'layer-eye'
+  | 'layer-select' | 'layer-rename' | 'layer-jump' | 'layer-generate' | 'layer-eye' | 'layer-opacity'
   | 'layer-remove' | 'layer-duplicate' | 'layer-expand' | 'layer-fit-mask' | 'layer-split-mask'
   | 'layer-rasterize' | 'layer-text-edit' | 'layer-combine' | 'layer-move'
   | 'layer-add' | 'layer-clear' | 'raster-drop' | 'hover-face'
@@ -1114,6 +1116,8 @@ export type BlendUiPayloads = {
   'layer-jump': { id: number };
   'layer-generate': { id: number };
   'layer-eye': { id: number };
+  /** 行上那根 Opacity 滑杆（整体不透明度 0..1）。拖动连发，页面端按层合并成一步撤销。 */
+  'layer-opacity': { id: number; opacity: number };
   'layer-remove': { id: number };
   'layer-duplicate': { id: number };
   'layer-expand': { id: number };

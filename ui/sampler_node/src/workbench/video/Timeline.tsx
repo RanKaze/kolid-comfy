@@ -2,8 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSy
 import { createPortal } from 'react-dom';
 import {
   type VidClip, type VidClipClipboard, type VidController, type VidPasteResult, type VidTrack, type VidMergeProbe,
-  addLayerClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, mergeVidClips, moveClip, moveTrack, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack,
-  replaceVidClipsWithMerged, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
+  addLayerClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfRemapLayerIds, kfTimes, mergeVidClips, moveClip, moveTrack, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
   vgenChainPrevOf, vgenSeamsOf, vgenWithDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
@@ -12,7 +11,6 @@ import { probeMedia } from './audio';
 import { ingestFile } from './ingest';
 import { GLOBAL_ITEM_TYPE } from './Assets';
 import { setVidSelection } from './selection';
-import { getKfArmed, setKfArmed, subscribeKfArmed } from './kfArmed';
 import { markRender } from './perf';
 import {
   ensureFrame, ensureStrip, ensureWaveform, frameBackend, peekStrip, stripComplete, stripFrame, subscribeStrip,
@@ -71,9 +69,7 @@ const sbKnobStyle = (side: 'l' | 'r'): React.CSSProperties => ({
 });
 // 四类轨同一高度：视频轨不再比音频 / Layer / process 高出一截，横向扫过去是一条齐线。
 const TRACK_H: Record<'video' | 'audio' | 'layer' | 'process', number> = { video: 46, audio: 46, layer: 46, process: 46 };
-// 末尾两档（10/20 分钟）给超长工程的全景缩放：50 分钟塞进一屏时 pps ≈ 0.3，300s 步长只剩
-// 九十来像素，再长就挤破 64px 的下限、刻度文字叠在一起。
-const STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200];
+// 刻度阶梯搬进 model（rulerStep）：Keyframes 窗的标尺必须和这里同一把尺，否则两处对不上时刻。
 // 吸附排除集里的"空集"：播放头 scrub / 入出点拖动每帧都要一个，共用一个常量，不每帧 new。
 const EMPTY_IDS: ReadonlySet<string> = new Set<string>();
 // 复制 / 粘贴的剪贴板，**按文档分桶**：Video 工程是每份文档一份 —— 粘进别的文档的段既没有
@@ -229,31 +225,7 @@ type DragState =
   | { mode: 'in' }
   | { mode: 'out' };
 
-// ── 关键帧录制钮 ── 亮红 = 录制中,暗红 = 关。开关走 kfArmed 外部 store(按钮自己订阅,
-// 状态与重渲都只发生在这一颗按钮上,不牵动整条时间线)。
-const KfRecordButton: React.FC = () => {
-  const armed = useSyncExternalStore(subscribeKfArmed, getKfArmed);
-  return (
-    <button
-      data-vid-kf-rec=""
-      onClick={() => setKfArmed(!armed)}
-      title={armed
-        ? 'Keyframe record is ON — every playhead stop inside a Layer segment records the layers\' transform and fx parameters at that time (stored on the segment). Click to stop recording.'
-        : 'Keyframe record is OFF — click to arm it: every playhead stop inside a Layer segment then records the layers\' transform and fx parameters at that time (stored on the segment).'}
-      style={{
-        position: 'absolute', left: 6, top: 5, zIndex: 40,
-        width: 20, height: 20, borderRadius: '50%', cursor: 'pointer', padding: 0,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: armed ? '#ff3b30' : 'rgba(96,26,22,0.92)',
-        border: armed ? '1px solid rgba(255,140,130,0.95)' : '1px solid rgba(255,255,255,0.22)',
-        boxShadow: armed ? '0 0 9px rgba(255,59,48,0.8)' : 'none',
-        transition: 'box-shadow 120ms, background 120ms',
-      }}
-    >
-      <span style={{ width: 8, height: 8, borderRadius: '50%', background: armed ? '#fff' : 'rgba(255,255,255,0.32)' }} />
-    </button>
-  );
-};
+// ── 关键帧录制钮 ── 已搬进 Keyframes 窗的工具条（一处一个入口）；开关仍是 kfArmed 外部 store。
 
 export const VidTimeline: React.FC<{
   vid: VidController;
@@ -336,19 +308,21 @@ export const VidTimeline: React.FC<{
     setSelIds(new Set(r.ids));
     selAnchorRef.current = r.ids[0];
     // Layer 段：请页面把那一套图层**整套克隆**到新 key，成功了才把 layerKey 换过去
-    // （克隆不成就继续共用源那套 —— 画面一定对，只是两段联动）。同一个 label ⇒ 与上面那笔并成一步撤销。
+    // （克隆不成就继续共用源那套 —— 画面一定对，只是两段联动）。回包同时带新旧层 id 映射：
+    // 复制过来的关键帧通道必须一起换到新 id，否则同一枚参数会在 Keyframes 窗里占两行。
+    // 同一个 label ⇒ 与上面那笔并成一步撤销。
     const copies = r.layerCopies;
     const layerCopy = vid.layerCopy;
     if (copies.length && layerCopy) {
-      void Promise.all(copies.map(cp => layerCopy(cp.from, cp.to).then(ok => (ok ? cp : null))))
+      void Promise.all(copies.map(cp => layerCopy(cp.from, cp.to).then(ids => (ids ? { ...cp, ids } : null))))
         .then(done => {
-          const ok = done.filter((x): x is typeof copies[number] => !!x);
+          const ok = done.filter((x): x is typeof copies[number] & { ids: Record<string, string> } => !!x);
           if (!ok.length) return;
           vid.update(proj => ({
             ...proj,
             clips: proj.clips.map(c => {
               const hit = ok.find(x => x.clipId === c.id);
-              return hit ? { ...c, layerKey: hit.to } : c;
+              return hit ? { ...c, layerKey: hit.to, keyframes: kfRemapLayerIds(c.keyframes, hit.ids) } : c;
             }),
           }), 'Paste clip');
         });
@@ -1162,7 +1136,7 @@ export const VidTimeline: React.FC<{
   const onSbUp = () => { sbDrag.current = null; };
 
   // ── 标尺刻度 ── 选一个 ≥64px 的步长。
-  const step = STEPS.find(s => s * pps >= 64) ?? STEPS[STEPS.length - 1];
+  const step = rulerStep(pps);
   const ticks: React.ReactNode[] = [];
   // 刻度画到**内容宽**为止（contentW 已含可视区）：短工程也不会在右边留一段没有刻度的空带。
   // 刻度文字从刻度线往右写，末尾必须给它留出宽度 —— 一旦刻度撑出 contentW，内容层的
@@ -1241,10 +1215,7 @@ export const VidTimeline: React.FC<{
 
   return (
     <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#141416', minWidth: 0, overflow: 'hidden' }}>
-      {/* 关键帧录制钮(左上角):亮红 = 录制中 —— 播放头每停一次,把该刻 Layer 段的图层参数
-          (fx 参数 + transform)写成关键帧(持久化在段上);暗红 = 关,什么都不记。
-          开关是外部 store(kfArmed):按钮自己订阅,重渲只发生在它身上。 */}
-      <KfRecordButton />
+      {/* 关键帧录制钮不在这里了：搬进 Keyframes 窗的工具条（一个动作一个可见入口）。 */}
       {/* 顶栏撤掉了:加轨走**轨头右键菜单**,Copy/Paste 走**段右键菜单**,Fit 走**滚动条双击**,
           Mask 绑定搬去了 Guidances 窗(Video 模式的 MaskRow)。只留两样无处可去的反馈:
           动作播报(actNote)与 Blade 提示 —— 覆盖在滚动区左下角,不吃指针。 */}
@@ -1528,6 +1499,13 @@ export const VidTimeline: React.FC<{
                       onStartDrag={startClipDrag} onPointerMove={onClipPointerMove} onPointerUp={endClipDrag}
                       onContextMenu={openMergeMenu}
                       onUnlink={() => { if (gid) vid.update(proj => unlinkGroup(proj, gid), 'Unlink'); }}
+                      onKfSeek={(id, t) => {
+                        // 菱形点下去：选中这一段（Keyframes 窗跟着选中走）+ 播放头跳到那一刻。
+                        const cc = p.clips.find(x => x.id === id);
+                        if (!cc) return;
+                        selectOnly(id);
+                        vid.seek(cc.start + t);
+                      }}
                       continueBlocked={continueBlocked}
                       queued={procQueue.queued.includes(c.id)}
                       onDequeue={id => vid.pauseProc?.(id)}
@@ -1861,7 +1839,9 @@ const Clip: React.FC<{
   chainPrev?: VidClip | null;
   /** 前一段已经跑出来的产物（末帧预览取它的最后一帧；没跑过 = null）。 */
   chainOut?: VidClip | null;
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onVGenCudOpen, chainPrev, chainOut }) => {
+  /** Layer 段面上的关键帧菱形被点：把播放头送到那一刻（段内秒）。编辑都在 Keyframes 窗里做，这里只跳转。 */
+  onKfSeek?: (clipId: string, localT: number) => void;
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onVGenCudOpen, chainPrev, chainOut, onKfSeek }) => {
   const isAudio = c.kind === 'audio';
   // 缺失：只有"真有来源"的段才可能缺（Layer 段、占位段、生成器段都没有仓库来源）。
   const gone = !!missing && c.kind !== 'layer' && !c.pending && !c.vgen;
@@ -2030,6 +2010,24 @@ const Clip: React.FC<{
       {isLayer && !micro && (
         <span style={{ display: 'flex', alignItems: 'center', color: '#ffd9a8', flexShrink: 0, position: 'relative', pointerEvents: 'none' }}><IconLayers /></span>
       )}
+      {/* Layer 段面上的关键帧菱形：琥珀色 = 这一段在这些时刻有帧（与段左缘同一口径 = 段内秒）。
+          只当"有没有帧 / 帧在哪"的读数 + 跳转，按下不接管拖拽（stopPropagation），改帧去 Keyframes 窗。 */}
+      {isLayer && !micro && kfTimes(c.keyframes).map(t => (
+        <button key={t} data-vid-kf-mark="" type="button"
+          title={`Keyframe ${t.toFixed(3)}s into this segment (timeline ${fmtTime(c.start + t)}) — click to put the playhead there. Edit keys in the Keyframes window.`}
+          onPointerDown={e => e.stopPropagation()}
+          onClick={e => { e.stopPropagation(); onKfSeek?.(c.id, t); }}
+          style={{
+            position: 'absolute', left: Math.min(c.duration * pps - 10, Math.max(0, t * pps - 5)), top: 2,
+            width: 10, height: 10, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 3,
+          }}
+        >
+          <svg width="9" height="9" viewBox="0 0 11 11" aria-hidden>
+            <path d="M5.5 1 10 5.5 5.5 10 1 5.5Z" fill="#ffd9a8" stroke="rgba(0,0,0,0.6)" strokeWidth="1" />
+          </svg>
+        </button>
+      ))}
       {/* 缺失：整段盖一层红斜纹（画面/波形还在也压得住），右边挂一颗「!」。 */}
       {gone && (
         <span style={{ position: 'absolute', inset: 0, pointerEvents: 'none',

@@ -1,4 +1,4 @@
-import { clipsByTrack, type VidClip, type VidProject } from './model';
+import { clipsByTrack, type VidClip, type VidFrameNeed, type VidProject } from './model';
 
 // ── 逐帧合成：哪一帧归谁 ────────────────────────────────────────────────────────────────────
 // 口径（见 model.ts 的轨道序）：轨道的数组序就是上下序，**最上层命中的那一段**决定这一帧怎么出。
@@ -24,18 +24,36 @@ const clipOn = (trackId: string, t: number, buckets: Map<string, VidClip[]>): Vi
   // 占位段（Processor 还没跑完的坑）没有画面：播放头掠过它 = 它不存在，命中顺延到下一层。
   (buckets.get(trackId) || []).find(c => !c.pending && t >= c.start && t < c.start + c.duration) ?? null;
 
+/** 这一段的 Frame source 是不是**引用了静音的视频轨**。
+ *  静音 = 这条轨不显示（"mute 优先"），而这一段只能靠它出画面 ⇒ 引用失效：这一段合成不出画面，
+ *  按"不合成"处理（露出底下），与静音的 Layer 轨同一读法。
+ *  **只认静音**：轨上那一刻没有片（空档）是正常编辑状态，decal 就该是空的，段照常合成。 */
+const layerRefMuted = (key: string, muted: ReadonlySet<string>, need?: VidFrameNeed): boolean => {
+  const list = key && need ? need[key] : null;
+  if (!list || !list.length) return false;
+  for (const tr of list) if (muted.has(tr)) return true;
+  return false;
+};
+
 /** 哪一帧归谁。`muted` 里的 **Layer 轨被跳过**（mute = 这一段不合成，露出底下）—— 于是顶命中
  * 顺延到下一条轨：底下是视频段就照旧直接播，是另一条 Layer 段就换它合成。
- *  视频轨的 mute **不影响 sources**：合成是主动创作（面 attribute 指名要哪条轨的帧），
- *  mute 是监视便利，不该把用户的合成设置弄坏。 */
-export const compositePlanAt = (p: VidProject, t: number, muted: ReadonlySet<string>): VidCompositePlan | null => {
+ * **Frame source 引用了静音视频轨的 Layer 段同样跳过**（见 layerRefMuted）：它拿不到画面。
+ *  其余情况下视频轨的 mute **不影响 sources**：合成是主动创作（面 attribute 指名要哪条轨的帧），
+ * 静音一条没被引用的轨不该把用户的合成设置弄坏。 */
+export const compositePlanAt = (
+  p: VidProject, t: number, muted: ReadonlySet<string>, need?: VidFrameNeed,
+): VidCompositePlan | null => {
   const buckets = clipsByTrack(p);     // 一次分桶,下面每轨只扫自家桶(播放循环每帧都来,O(轨×段) 受不住)
   let top: VidClip | null = null;
   for (const tr of p.tracks) {
     if (tr.kind !== 'video' && tr.kind !== 'layer') continue;
     if (tr.kind === 'layer' && muted.has(tr.id)) continue;   // 静音的 Layer 段不参与合成
     const hit = clipOn(tr.id, t, buckets);
-    if (hit) { top = hit; break; }
+    if (!hit) continue;
+    // 这一段的面只能从一条静音轨取帧 ⇒ 出不了画面，跳过（底下照常出）
+    if (hit.kind === 'layer' && layerRefMuted(hit.layerKey || hit.id, muted, need)) continue;
+    top = hit;
+    break;
   }
   if (!top || top.kind !== 'layer') return null;
   const sources: VidCompositeSource[] = [];
@@ -84,9 +102,10 @@ export type VidWarm = {
 };
 
 /** `look` 秒之内会不会走到一个 Layer 段？会就返回它那一刻的源帧清单（没有就 null）。
- *  只认"起点落在 (t, t+look]"的那一段 —— 已经在段里不算（那是现在的活，不是预热）。 */
+ *  只认"起点落在 (t, t+look]"的那一段 —— 已经在段里不算（那是现在的活，不是预热）。
+ *  **不会合成的段不预热**（静音的 Layer 轨、Frame source 引用了静音视频轨的段，见 compositePlanAt）。 */
 export const warmAheadOf = (
-  p: VidProject, t: number, muted: ReadonlySet<string>, look = 1.5,
+  p: VidProject, t: number, muted: ReadonlySet<string>, look = 1.5, need?: VidFrameNeed,
 ): VidWarm | null => {
   let best: VidClip | null = null;
   for (const c of p.clips) {
@@ -94,6 +113,7 @@ export const warmAheadOf = (
     if (c.start <= t || c.start > t + look) continue;
     const tr = p.tracks.find(x => x.id === c.trackId);
     if (!tr || muted.has(tr.id)) continue;                 // 静音的 Layer 轨不合成，也不用预热
+    if (layerRefMuted(c.layerKey || c.id, muted, need)) continue;   // 引用失效的段不会合成，别白等
     if (!best || c.start < best.start) best = c;
   }
   if (!best) return null;

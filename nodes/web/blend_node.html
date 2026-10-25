@@ -950,7 +950,8 @@ const MIN_ZOOM = 0.02, MAX_ZOOM = 64;
 const MIN_ROTATE_RADIUS = 12;  // px from the view centre where the pointer angle is still meaningful
 const view = { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true };
 // Video 底片态：游标不在 Layer 段上时，画布内容 = 当前视频帧 —— 这一页自己挂的 #vidBaseVideo
-// 播放那段源。它只是显示用的一层底图，**不进 blendCanvas** —— context image 仍然是那套工作图层。
+// 播放那段源。P3.3 时它只是显示用的一层底图（不进 blendCanvas）；P3.6 起**它同时就是 context
+// image**：没有工作栈可看的那一段，下游（Context 卡 / 生成 / 导出）要的正是"此刻这一帧"。
 let vidBaseOn = false;
 let vidBaseSrc = '';           // #vidBaseVideo 上挂的源（哈希值，不是解析后的绝对 URL）
 let vidBaseWant = 0;           // 这一包要的源内时刻（秒）
@@ -1277,7 +1278,7 @@ function stashLayerKey(l) {
     // 条带上每一枚的面都算输入:蒙版挪到链右边之后也是它在裁,只报最左边那一枚的身份会漏。
     let surf = '';
     for (const r of attrRecordsOf(l)) surf += ':' + stashSurfId(r.surface);
-    return l.id + ':' + (l.visible ? 1 : 0)
+    return l.id + ':' + (l.visible ? 1 : 0) + ':' + layerOpacity(l)
         + ':' + stashSurfId(l.img) + surf
         + ':' + (l.paintGen | 0) + attrPaintGens(l) + ':' + (l.fxResolveGen | 0)
         + ':' + tr.cx + ',' + tr.cy + ',' + tr.w + ',' + tr.h + ',' + tr.rotation + ';';
@@ -2382,6 +2383,8 @@ let blendUiSent = '';
 function sendBlendUiNow() {
     // 盖章：这份快照说的是活跃文档（盖完进等值闸，切换文档后 uid 变了自然算新的一条）。
     blendUiState.uid = activeDoc ? activeDoc.uid : null;
+    // 图层集的"吃哪几条轨的帧"摘要（宿主判引用失效要它）与这份快照同一个节拍，自己的等值闸。
+    pushVidFrameNeed();
     // 这两格是唯一需要像素的面：先把"要不要重编那几张"问过一遍，再去重。
     // 历史那几张要先编（它们只在进栈那一趟编一次，编法见 syncHistoryThumbs），再让面通道按
     // 可见区与预算决定这一帧发哪几张。
@@ -2795,9 +2798,18 @@ function layerSource(l) {
     return fxResolved(l);
 }
 
+// 图层整体不透明度（PS 式 Opacity）：0..1，缺省 1。住在图层对象上，进快照/克隆/签名/关键帧快照；
+// 关键帧回放经 `layer:<id>:opacity` 通道在**折叠那一趟**里临时打补丁（vidKfInject），真值不动。
+function layerOpacity(l) {
+    const a = l && l.opacity;
+    return (typeof a === 'number' && Number.isFinite(a)) ? Math.min(1, Math.max(0, a)) : 1;
+}
+
 function drawLayer(l, target) {
     const ctx = target || blendCtx;
     if (!l.visible || !l.img) return;
+    const opacity = layerOpacity(l);
+    if (opacity <= 0) return;
     // P3.1: while a stroke owns this layer's GPU texture, the display reads that texture (already
     // decal-over-base, no fold) instead of folding the untouched 2D surface again. Everywhere else
     // `layerSource` stays the one authoritative picture (thumbs / Generate / history read it).
@@ -2810,9 +2822,10 @@ function drawLayer(l, target) {
         // rasterDragAffine). Nothing is lost by dragging past the canvas edge — the buffer still
         // holds those pixels until the bake clips them, which is what Enter is for.
         const frame = rasterLiveFrame(l);
-        if (!frame) { ctx.drawImage(src, 0, 0); return; }
+        if (!frame) { const ga = ctx.globalAlpha; ctx.globalAlpha = ga * opacity; ctx.drawImage(src, 0, 0); ctx.globalAlpha = ga; return; }
         const m = rasterDragAffine(frame.from, frame.to, canvasW, canvasH);
         ctx.save();
+        ctx.globalAlpha *= opacity;
         ctx.transform(m.a, m.b, m.c, m.d, m.e, m.f);
         ctx.drawImage(src, 0, 0);
         ctx.restore();
@@ -2824,6 +2837,7 @@ function drawLayer(l, target) {
     const tr = (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
     const tw = tr.w * canvasW, th = tr.h * canvasH;
     ctx.save();
+    ctx.globalAlpha *= opacity;
     ctx.translate(tr.cx * canvasW, tr.cy * canvasH);
     ctx.rotate(tr.rotation);
     ctx.drawImage(src, -tw / 2, -th / 2, tw, th);
@@ -3972,6 +3986,9 @@ function cancelSelDrag() {
 // smooth, and the checkerboard satisfies JPEG's need for an opaque backdrop.
 const PREVIEW_MAX_SIDE = 512;
 const PREVIEW_INTERVAL_MS = 120;
+// 底片态（Video 播放，游标不在 Layer 段上）单独一档：那时预览就是"正在播的那一帧"，120ms 一顿
+// 肉眼就是卡（实测 155ms/次 ≈ 6.5fps）。编辑态仍用 120ms —— 笔刷路径对主线程更敏感。
+const PREVIEW_INTERVAL_BASE_MS = 70;
 const CHECKER_SIZE = 8;                     // must match #blendCanvas background-size
 const CHECKER_DARK = '#1a1a1a';             // must match #blendCanvas background-color
 const CHECKER_LIGHT = '#242424';            // must match the #blendCanvas gradient colour
@@ -3994,7 +4011,10 @@ function paintCheckerboard(ctx, w, h) {
 function schedulePreview() {
     if (window.parent === window) return;      // standalone: there is nobody to send it to
     if (previewTimer) return;                  // throttle, not debounce — keep updating while dragging
-    previewTimer = setTimeout(() => { previewTimer = null; pushPreview(); }, PREVIEW_INTERVAL_MS);
+    // 底片态走快档（见 PREVIEW_INTERVAL_BASE_MS）；stageMode 是上一次上台装的东西，底片帧上台后
+    // 它就是 'base'，所以这里的判断和"屏幕上现在是什么"一致。
+    const ms = stageMode === 'base' ? PREVIEW_INTERVAL_BASE_MS : PREVIEW_INTERVAL_MS;
+    previewTimer = setTimeout(() => { previewTimer = null; pushPreview(); }, ms);
 }
 
 // For host-driven changes (the preview's Mask Tint slider): user-initiated and at most one per
@@ -4021,7 +4041,8 @@ function pushPreview() {
     paintCheckerboard(previewCtx, w, h);
     previewCtx.drawImage(blendCanvas, 0, 0, w, h);
     // Tint strength comes from the host slider, not from the canvas one — independent on purpose.
-    if (maskLayer.visible && maskLayer.decal && previewMaskOpacity > 0) {
+    // 底片态例外：那一帧里根本没有工作栈（更没有 Mask 层），叠上去就是在视频上糊一层红。
+    if (stageMode !== 'base' && maskLayer.visible && maskLayer.decal && previewMaskOpacity > 0) {
         if (previewTintCanvas.width !== w || previewTintCanvas.height !== h) { previewTintCanvas.width = w; previewTintCanvas.height = h; }
         resetCtx(previewTintCtx);
         previewTintCtx.clearRect(0, 0, w, h);
@@ -4060,6 +4081,8 @@ function scratchFor(l, key, w, h) {
  *  只是把 drawImage 换成一条 item，交给 KCompositor 在唯一显示面上按预乘混合。 */
 function layerItem(l) {
     if (!l || !l.visible || !l.img) return null;
+    const opacity = layerOpacity(l);
+    if (opacity <= 0) return null;             // 完全透明：这一层这一帧什么都不出
     // P3.1: while a stroke owns this layer's GPU texture, the display reads that texture (already
     // decal-over-base, no fold) instead of folding the untouched 2D surface again.
     const live = (typeof fxPaintPresent === 'function') ? fxPaintPresent(l) : null;
@@ -4075,18 +4098,18 @@ function layerItem(l) {
         // whole grid (transform = null). A live drag needs the full affine `drawLayer` uses; item
         // transforms only speak translate/rotate/scale, so bake that one frame into a scratch face.
         const frame = rasterLiveFrame(l);
-        if (!frame) return { src, transform: null };
+        if (!frame) return { src, transform: null, opacity };
         const m = rasterDragAffine(frame.from, frame.to, canvasW, canvasH);
         const s = scratchFor(l, 'drag', canvasW, canvasH);
         s.g.setTransform(m.a, m.b, m.c, m.d, m.e, m.f);
         try { s.g.drawImage(src, 0, 0); } catch (e) { return null; }
-        return { src: s.c, transform: null };
+        return { src: s.c, transform: null, opacity };
     }
     // While Expand is armed, the live transform belongs to the dragged border, not the image:
     // Expand only re-resolves the layer's own resolution, so the pixels must stay exactly where
     // they are while the box grows — committing bakes that same geometry into the new buffer.
     const tr = (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
-    return { src, transform: tr };
+    return { src, transform: tr, opacity };
 }
 
 function render() {
@@ -4323,6 +4346,26 @@ function vidFrameNeedTracks(key) {
     return need;
 }
 
+// ── 把"每套图层集吃哪几条视频轨的帧"报给宿主 ───────────────────────────────────────────────
+// 宿主判"这一帧归谁"（compositePlanAt）时要知道：Frame source 指向一条**静音**的视频轨 ⇒ 这一段
+// 合成不出画面（静音 = 这条轨不显示），该跳过它露出底下 —— 与静音的 Layer 轨同一读法。
+// 静音是宿主那边的开关，图层数据又住在这边，所以反过来把摘要送上去；宿主每帧只读那份 ref。
+// 只在内容变了时发一条（跟 UI 快照同一个节拍，见 sendBlendUiNow）。
+let vidNeedSent = '';
+function pushVidFrameNeed() {
+    if (window.parent === window) return;
+    const need = {};
+    for (const k of [activeLayerSet, ...layerSets.keys()]) {
+        if (!k) continue;
+        const set = vidFrameNeedTracks(String(k));
+        if (set.size) need[String(k)] = [...set];
+    }
+    const json = JSON.stringify(need);
+    if (json === vidNeedSent) return;
+    vidNeedSent = json;
+    window.parent.postMessage({ type: 'blend-vid-frame-need', need }, '*');
+}
+
 /** 把镜像视频对到宿主报的时刻。宿主每包只送 {trackId, src, want} —— 时刻的算法（片段偏移 +
  *  播放头 - 起点）留在宿主那一侧，这里只执行。
  *  一个已知的异步缝：`currentTime = want` 之后画面上还是**上一帧**（seek 要几十毫秒才落），
@@ -4549,7 +4592,8 @@ function ensureVidCanvas() {
 // 解码与出画全交给浏览器，一个像素都不过界。
 // P3.3：连暂存面也没有了 —— 这只 <video> 直接当纹理传给唯一显示面（stageShowBase），
 // 画完就丢；"这一帧传过没有"只靠 stageBaseStamp 里那个 `源@帧号` 字符串比。
-// 这张底图只负责显示：blendCanvas 仍是 context image（工作图层）。
+// P3.6：这张底图不只是显示 —— 上台的同时它也被抄成 context image（见 stageShowBase 尾部），
+// 否则 Video 模式下没有 Layer 段的那一段，Context 卡 / 生成 / 导出读到的还是上一套工作图层。
 // 状态（vidBaseSrc / vidBaseWant / vidBasePlaying）声明在画布变量区，见文件上方。
 
 // ── 唯一显示面：台上装哪一样 ──────────────────────────────────────────────────────────────────
@@ -4581,10 +4625,19 @@ function stagePresent(items, clear) {
     }
     for (const it of items) {
         if (!it || !it.src) continue;
+        const itAlpha = (it.opacity === undefined || it.opacity === null) ? 1 : Math.min(1, Math.max(0, it.opacity));
+        if (itAlpha <= 0) continue;
         const tr = it.transform;
-        if (!tr) { try { stageCtx2d.drawImage(it.src, 0, 0, canvasW, canvasH); } catch (e) { /* 这一张跳过 */ } continue; }
+        if (!tr) {
+            stageCtx2d.save();
+            stageCtx2d.globalAlpha = itAlpha;
+            try { stageCtx2d.drawImage(it.src, 0, 0, canvasW, canvasH); } catch (e) { /* 这一张跳过 */ }
+            stageCtx2d.restore();
+            continue;
+        }
         const tw = (tr.w === undefined ? 1 : tr.w) * canvasW, th = (tr.h === undefined ? 1 : tr.h) * canvasH;
         stageCtx2d.save();
+        stageCtx2d.globalAlpha = itAlpha;
         stageCtx2d.translate((tr.cx === undefined ? 0.5 : tr.cx) * canvasW, (tr.cy === undefined ? 0.5 : tr.cy) * canvasH);
         stageCtx2d.rotate(tr.rotation || 0);
         try { stageCtx2d.drawImage(it.src, -tw / 2, -th / 2, tw, th); } catch (e) { /* 这一张跳过 */ }
@@ -4593,8 +4646,9 @@ function stagePresent(items, clear) {
     return true;
 }
 
-/** context image = 工作栈（不含 guidance）。stage 上此刻就是它，抄一次给读像素的那些入口
- *  （生成/导出/存档/吸管/监视器）。P3.2 之后这块画布只当离屏上下文图，不再上台。 */
+/** context image = stage 上此刻这一张（不含 guidance）。抄一次给读像素的那些入口
+ *  （生成/导出/存档/吸管/监视器）。两种情形都走这里：live 路径抄的是工作栈，底片态抄的是
+ *  当前视频帧（P3.6）。P3.2 之后这块画布只当离屏上下文图，不再上台。 */
 function stageReadbackToBlend() {
     resetCtx(blendCtx);
     blendCtx.clearRect(0, 0, canvasW, canvasH);
@@ -4646,6 +4700,14 @@ function stageShowBase(force) {
     if (!stagePresent([{ src: v, transform: null, premul: true }], true)) return;
     stageBaseStamp = stamp;
     stageMode = 'base';
+    // P3.6：底片态里 **context image 就是这一帧**。P3.3 当时刻意不抄（底图只负责显示，blendCanvas
+    // 留给工作图层），结果 Video 模式下把游标停在没 Layer 的段落上时，Context 卡 / 生成 / 导出 /
+    // 吸管读到的还是上一套工作图层 —— 预览看着是"死"的。stage 上此刻就是这一帧，从 live 路径那个
+    // 同一个入口抄一次即可（`stageReadbackToBlend` 的注释本来就说"stage 上此刻就是它"）。
+    stageReadbackToBlend();
+    // 预览的调度一直只挂在 render() 上，底片态没人叫它 ⇒ Context 卡停在旧图上。这里补上；
+    // 节奏仍由 schedulePreview 自己节流（底片态走 70ms 快档），不会跟着出帧率跑。
+    schedulePreview();
 }
 
 /** 合成图副本上台（播放中 / 游标不在活画布这套上）。 */
@@ -4737,7 +4799,11 @@ function vidBaseOff() {
     stageBaseStamp = '';           // 再回来时第一帧要重传
     if (!vidBaseOn) return;
     vidBaseOn = false;
-    stageSync(true);
+    // 底片态里 blendCanvas 装的是**视频帧**（P3.6，见 stageShowBase）：离开底片态得把工作栈重折
+    // 回来，否则 stageShowLive() 会把那张视频帧当成"活画布"再铺一次，屏幕就停在最后一帧上。
+    // render() 收尾自己会 stageSync，所以这一支不再单独叫它。
+    if (stageMode === 'base') render();
+    else stageSync(true);
 }
 
 function vidFrameSurfaceFor(rec, w, h) {
@@ -4805,9 +4871,56 @@ function vidFrameInject(packet, stack) {
     };
 }
 
+// ── 关键帧回放：把宿主采样好的通道值临时打进这一套图层 ───────────────────────────────────────
+// 宿主每帧把 `layer:<id>:opacity | layer:<id>:transform:<prop> | layer:<id>:fx:<fxId>:<param>` 的
+// 线性插值结果随合成包送来（blend-vid-frame 的 kf）。这里只做**折叠期补丁**：写进去 → 折这一趟 →
+// 原样放回 —— 图层的真值（用户手上的数据、存档、撤销栈）一个字不动，监视器看到的是"这一刻关键帧
+// 说了算"的画面。特效参数的补丁天然触发重算：折叠签名含参数值，补丁值与真值来回切，缓存各算各的。
+function vidKfInject(packet, stack) {
+    const kf = packet.kf;
+    if (!kf) return null;
+    const touched = [];
+    const byId = new Map();
+    for (const l of stack) byId.set(String(l.id), l);
+    for (const key in kf) {
+        const val = kf[key];
+        if (typeof val !== 'number' || !Number.isFinite(val)) continue;
+        const m = /^layer:([^:]+):(opacity|transform:.+|fx:.+)$/.exec(key);
+        if (!m) continue;
+        const l = byId.get(m[1]);
+        if (!l) continue;
+        const rest = m[2];
+        if (rest === 'opacity') {
+            const had = Object.prototype.hasOwnProperty.call(l, 'opacity');
+            touched.push({ o: l, k: 'opacity', had, was: l.opacity });
+            l.opacity = Math.min(1, Math.max(0, val));
+        } else if (rest.charCodeAt(0) === 116) {          // 'transform:<prop>'
+            const prop = rest.slice(10);
+            const tr = l.transform;
+            if (!tr || !(prop in tr)) continue;
+            touched.push({ o: tr, k: prop, had: true, was: tr[prop] });
+            tr[prop] = val;
+        } else {                                          // 'fx:<fxId>:<param>'
+            const mm = /^fx:(\d+):(.+)$/.exec(rest);
+            if (!mm) continue;
+            // l.effects 是最左那条链的视图，返回的就是链记录里的真对象 —— 补丁落的是折叠读的那份。
+            let eff = null;
+            for (const e of (l.effects || [])) if (String(e.id) === mm[1]) { eff = e; break; }
+            if (!eff || !eff.params || !(mm[2] in eff.params)) continue;
+            touched.push({ o: eff.params, k: mm[2], had: true, was: eff.params[mm[2]] });
+            eff.params[mm[2]] = val;
+        }
+    }
+    if (!touched.length) return null;
+    return function vidKfRestore() {
+        for (const t of touched) { if (t.had) t.o[t.k] = t.was; else delete t.o[t.k]; }
+    };
+}
+
 // 这一包说的那一段自己那套折进一张临时画布 —— 只在"监视器要看的那套不是活画布上这套"时才走
 // （没选中 Layer 段，或选中的不是游标底下那段）。活画布那一套已经由 render() 折好，直接抄；
-// 这条只补上"宿主监视器看到的仍是游标底下那一段"这个旧口径。
+// 这条只补上"宿主监视器看到的仍是游标底下那一段"这个旧口径。关键帧那一帧也走这里（kf 只该进
+// 监视器，不该糊上用户正在编辑的活图层 —— 见 vidFrameFlush 活跃分支）。
 function composeVidFrameCanvas(packet) {
     if (!canvasW || !canvasH) return null;
     if (!vidFrameCanvas) {
@@ -4825,9 +4938,11 @@ function composeVidFrameCanvas(packet) {
     // 从最下面那层往上画；guidances 不进监视器（它们只属于 Guidance 卡）。
     const stack = vidFrameWorkLayers(packet.layerKey);
     const restore = vidFrameInject(packet, stack);
+    const kfRestore = vidKfInject(packet, stack);
     try {
         for (let i = stack.length - 1; i >= 0; i--) drawLayer(stack[i], out);
     } finally {
+        if (kfRestore) kfRestore();
         restore();
     }
     return vidFrameCanvas;
@@ -4903,7 +5018,10 @@ function vidFrameFlush() {
         const frameless = !vidCompCache.hasFrame;
         if (active) {
             __vidPerf.repliesActive++;
-            replyVidFrame(p.reqId, blendCanvas, frameless);
+            // 关键帧生效的那一帧：监视器要的是"补丁后的画面"，活画布保持用户真值 —— 单独折一张
+            // 临时画布（与别段同一台），不把采样值糊上用户正在编辑的活图层。没有 kf 就照旧抄活画布。
+            const kfCv = p.kf ? composeVidFrameCanvas(p) : null;
+            replyVidFrame(p.reqId, kfCv || blendCanvas, frameless);
             stageSync();             // 这一包说的正是活画布这套了：台上换成它（用户在编辑）
         } else {
             __vidPerf.repliesTemp++;
@@ -4964,9 +5082,11 @@ let vidCompPending = null;         // 这一包算出的状态(回图后落到 v
 
 function vidCompState(packet) {
     const key = packet.layerKey || '';
-    // 绑了视频轨的面 = 这一包的结果随源帧变（每帧必然 miss）。**先算这个**：命中判定一旦注定落空，
+    // 绑了视频轨的面 = 这一包的结果随源帧变；带关键帧采样值（kf）同理 —— 每帧必然 miss、
+    // 也不许报 frameless（宿主会因此停发后续帧）。两样都**先算**：命中判定一旦注定落空，
     // 逐层 16×16 采样那笔读回就是白付的（播放中每包都在付，30 包/秒）。
-    const hasFrame = vidFrameNeedTracks(key).size > 0;
+    const kfCount = packet.kf ? Object.keys(packet.kf).length : 0;
+    const hasFrame = vidFrameNeedTracks(key).size > 0 || kfCount > 0;
     // "这一包能在活画布上折" = 这一包说的就是当前套（用户手上在编辑它）。P3.4 起播放中
     // 也成立：编辑与播放同一条路径，活画布照常重画、照常上台。
     const isActive = key === (activeLayerSet || '');
@@ -4977,6 +5097,8 @@ function vidCompState(packet) {
         setRef: isActive ? null : (layerSets.get(key) || null),   // 非活跃集:冻结对象,身份即内容
         // 每帧都是新帧的段不需要内容签名:比较必然落在 t 上,签名只会白算。
         contentSig: hasFrame ? '' : (isActive ? vidLayerSetSig(key) : ''),
+        // kf 的内容签名:同 t 两次包、采样值变了(用户在 Keyframes 窗里改了帧值)也要判 miss。
+        kfSig: kfCount ? JSON.stringify(packet.kf) : '',
         grid: canvasW + 'x' + canvasH,
         t: packet.t,
     };
@@ -4985,7 +5107,8 @@ function vidCompState(packet) {
 function vidCompSame(a, b) {
     if (!b) return false;
     if (a.key !== b.key || a.isActive !== b.isActive || a.hasFrame !== b.hasFrame
-        || a.setRef !== b.setRef || a.contentSig !== b.contentSig || a.grid !== b.grid) return false;
+        || a.setRef !== b.setRef || a.contentSig !== b.contentSig || a.kfSig !== b.kfSig
+        || a.grid !== b.grid) return false;
     // 绑了视频帧的面 ⇒ 同一帧号才算同一张图;没绑 ⇒ t 不进判定(跨帧命中正是缓存的用意)。
     return !a.hasFrame || Math.abs(a.t - b.t) < 1e-6;
 }
@@ -5016,6 +5139,9 @@ function handleVidFrameMessage(d) {
         t: +d.t || 0,
         layerKey: typeof d.layerKey === 'string' ? d.layerKey : '',
         baseTrackId: typeof d.baseTrackId === 'string' ? d.baseTrackId : null,
+        // 关键帧回放的采样值（宿主按这一刻把各通道线性插值好送来）：通道键 → 数值。
+        // 只在折叠那一趟里临时打进去（vidKfInject），图层的真值一个字不动。
+        kf: (d.kf && typeof d.kf === 'object') ? d.kf : null,
         sources,
         bitmaps,
         rendered: false,          // 这一包还没画（合成与回图都并到那一口 rAF，见 vidFrameFlush）
@@ -5218,6 +5344,8 @@ function snapshotLayerRecord(l) {
         // 逐层存 (img 只换不改的老规矩),表因此永远不必替历史保管任何东西。
         srcRef: l.srcRef,
         visible: l.visible,
+        // 整体不透明度（PS 式）。归一后存（undefined = 1 → 存 1，两代档互认）。
+        opacity: layerOpacity(l),
         fragment: !!l.fragment,
         raster: !!l.raster,
         stash: !!l.stash,
@@ -5285,6 +5413,8 @@ function liveLayersFromRecords(recs, byRef, byAttr) {
         asset: ls.asset || null,
         buffer: ls.buffer || null,
         visible: ls.visible,
+        // 老档没有这一格 = 缺省不透明；这里的 opacity 是"记录里带的就带"。
+        opacity: (typeof ls.opacity === 'number' && Number.isFinite(ls.opacity)) ? Math.min(1, Math.max(0, ls.opacity)) : undefined,
         fragment: !!ls.fragment,
         raster: !!ls.raster,
         stash: !!ls.stash,
@@ -5594,6 +5724,7 @@ function vidLayerSetSig(key) {
     const layers = ls.map(l => ({
         name: l.name,
         visible: !!l.visible,
+        opacity: layerOpacity(l),
         fragment: !!l.fragment,
         raster: !!l.raster,
         stash: !!l.stash,
@@ -5620,15 +5751,19 @@ function replyVidLayerSigs(reqId, keys) {
 }
 
 // ── 关键帧录制的参数快照 ────────────────────────────────────────────────────────────────────
-// 宿主录关键帧时问这里："当前图层集里,每一层的 transform 与特效链参数现在是什么?"(blend-vid-kf-get)
+// 宿主录/加关键帧时问这里："这一套图层集里,每一层的 transform 与特效链参数现在是什么?"
+// (blend-vid-kf-get,带 layerKey)
 // 只报数据不报 DOM;通道键由宿主编(数值参数进关键帧,颜色/曲线这些复杂值宿主自己先不收)。
-// 录哪个集:宿主按播放头切集(vid-layer-set),所以这里照实报**当前活跃**的 layers —— 播放头在
-// 哪个 Layer 段里,活跃的就是哪段的那套。
-function vidKfSnapshot() {
-    return (layers || []).filter(l => !l.isMaskLayer).map(l => ({
+// **按 key 取集**(与监视器折图同一把尺 vidFrameWorkLayers)：录制落在"选中的那一段"上,快照必须
+// 是那一段自己的图层集。照实报活跃那一套是错的 —— 活跃集跟着播放头走,选中的段和脚下一致时碰巧
+// 对,不一致时(两条 Layer 轨、静音、头在段外)录进去的是别一集的层 id,回放那一趟按 id 找层找不到,
+// 关键帧就成了哑帧。key 找不到 = 这一集不在内存里(见 layerSets 只在内存),照实回空表。
+function vidKfSnapshot(key) {
+    return vidFrameWorkLayers(key || '').filter(l => !l.isMaskLayer).map(l => ({
         id: String(l.id),
         name: l.name || '',
         visible: l.visible !== false,
+        opacity: layerOpacity(l),
         transform: l.transform ? Object.assign({}, l.transform) : null,
         effects: (l.effects || []).map(e => ({
             id: e.id, type: e.type, enabled: e.enabled !== false,
@@ -5636,10 +5771,10 @@ function vidKfSnapshot() {
         })),
     }));
 }
-function replyVidKf(reqId) {
-    let layers = [];
-    try { layers = vidKfSnapshot(); } catch (e) { layers = []; }
-    window.parent.postMessage({ type: 'blend-vid-kf', reqId, layers }, '*');
+function replyVidKf(reqId, key) {
+    let snapLayers = [];
+    try { snapLayers = vidKfSnapshot(key); } catch (e) { snapLayers = []; }
+    window.parent.postMessage({ type: 'blend-vid-kf', reqId, layers: snapLayers }, '*');
 }
 
 // ── Layer 段粘贴：整套克隆 ──────────────────────────────────────────────────────────────────
@@ -5650,12 +5785,16 @@ function replyVidKf(reqId) {
 // 撤销不会空转到别人身上（同"这一套还没人建过"那一支）。
 function copyLayerSetTo(from, to) {
     const src = String(from || ''), dst = String(to || '');
-    if (!src || !dst || src === dst) return false;
+    if (!src || !dst || src === dst) return null;
     const set = src === activeLayerSet ? captureLayerSet() : layerSets.get(src);
-    if (!set) return false;
+    if (!set) return null;
+    // 旧层 id → 新层 id：宿主拿去把段上已复制的关键帧通道换到新 id，否则旧 id 的帧会和新 id
+    // 的活参数各占一行（同一个变量出现两遍）。
+    const ids = {};
     const ls = (Array.isArray(set.layers) ? set.layers : []).map(l => {
         const c = cloneLayerFields(l, l.name);
         c.id = ++layerSeq;
+        ids[String(l.id)] = String(c.id);
         return c;
     });
     layerSets.set(dst, {
@@ -5665,15 +5804,15 @@ function copyLayerSetTo(from, to) {
         decalCtx: null,          // 切到这一套时由 switchLayerSet 现取（见那儿那两行）
         undoStack: [], redoStack: [], lastActionKey: null,
     });
-    return true;
+    return ids;
 }
-// 回执只有一句 ok：宿主只关心"副本那套建起来了没有"，建不起来它就退回共用源那一套（内容不丢）。
+// 回执：ok = 副本那套建起来了；ids = 旧层 id → 新层 id（宿主重写关键帧通道用）。
 // **回执的 type 必须与请求不同**（`-copied`）：这一页的 message 监听没有来源守卫，
 // 请求与回执同名时，页面直接打开（parent === self）会在自己身上来回弹成死循环。
 function replyVidLayerCopy(reqId, from, to) {
-    let ok = false;
-    try { ok = copyLayerSetTo(from, to); } catch (e) { ok = false; }
-    window.parent.postMessage({ type: 'blend-vid-layer-copied', reqId, ok }, '*');
+    let ids = null;
+    try { ids = copyLayerSetTo(from, to); } catch (e) { ids = null; }
+    window.parent.postMessage({ type: 'blend-vid-layer-copied', reqId, ok: !!ids, ids }, '*');
 }
 
 function switchLayerSet(key) {
@@ -5959,6 +6098,8 @@ function layerRowModel(l) {
         selected: l.id === selectedId,
         grouped: activeGroup().has(l.id),
         visible: !!l.visible,
+        // 整体不透明度（0..1）—— 行上那根 Opacity 滑杆读写的就是它（动作键 layer-opacity）。
+        opacity: layerOpacity(l),
         // ▶ 的两件事：这一行能不能当 Generate 的目标，和它现在到底有没有墨（那句 tooltip 的分支）。
         canGen: layerMaskIsMeaningful(l),
         hasImg: hasLayerImage(l) || stripGeneratorInk(l),
@@ -6430,6 +6571,19 @@ function toggleLayerVisibility(id) {
     pushHistory(null, 'Show / hide 「' + l.name + '」');
 }
 
+// 行上那根 Opacity 滑杆（PS 式整体不透明度）。拖杆是一条连续流：历史按 key 合并 —— 同一层上
+// 连着来的每次拨动并成一步撤销，松手再拨才算下一步。值归一 0..1，再拨也是它。
+function setLayerOpacity(id, a) {
+    const l = getLayer(id);
+    if (!l) return;
+    const v = Math.min(1, Math.max(0, +a || 0));
+    if (Math.abs(layerOpacity(l) - v) < 1e-4) return;
+    l.opacity = v;
+    refreshLayerPanels();
+    render();
+    pushHistory('layer-opacity:' + id, 'Opacity of 「' + l.name + '」 → ' + Math.round(v * 100) + '%');
+}
+
 // 跳转那枚按钮一直是"一个导航习惯，不是两个"：3D 行开它的场景 tab，cud 行开它的项目 tab。
 // 谁是谁由这一句判，不由按钮自己记 —— 行上只有一颗按钮，它只报这一行的 id。
 function jumpLayerRow(id) {
@@ -6831,6 +6985,8 @@ function cloneLayerFields(l, name) {
         buffer: l.buffer || null,
         img: l.img && l.img.getContext ? cloneCanvasSurface(l.img) : l.img,
         visible: l.visible,
+        // 副本带同一份不透明度（undefined 照抄 undefined = 缺省 1）。
+        opacity: l.opacity,
         transform: cloneTransform(l.transform),
         raster: !!l.raster,
         // 一份副本仍是一张 Stash:它抄的是「它下面那一叠」,位置变了抄的就是那一段的新合成图。
@@ -12707,6 +12863,11 @@ async function buildCudBlob() {
         }
         return out;
     };
+    // 存盘这一趟要跨 await（见下面的 requestHostVid），而播放头一跨段，宿主就会发 layer-set 换活跃那套。
+    // 三份东西必须说同一时刻的同一件事：`records`（活跃那套的内容）、`layerSetList`（其余各套）、
+    // header.activeLayerSet（活跃那套是哪一段）。活跃 key 只在这里取一次 —— 取两次就会在 await 中间
+    // 被换掉：列表里已经把它跳过了、header 又写着新的那一段，那套图层就整份丢失。
+    const activeKeyAtSave = activeLayerSet;
     const records = buildLayerRecords(layers);
     let maskSurface = (maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height)
         ? addAsset('masklayer', maskLayer.decal, maskLayer.decal.width, maskLayer.decal.height)
@@ -12720,7 +12881,7 @@ async function buildCudBlob() {
     // 读档照 key 装回 layerSets，于是"某一段的图层"活过重开，重开那天点回该段就是原样。
     const layerSetList = [];
     for (const [key, set] of layerSets) {
-        if (key === activeLayerSet) continue;                 // 活跃那套就是上面的 records
+        if (key === activeKeyAtSave) continue;                 // 活跃那套就是上面的 records
         const d = set && set.decal;
         layerSetList.push({
             key,
@@ -12857,7 +13018,7 @@ async function buildCudBlob() {
         // `layers` 装的是**活跃**那一套（旧读端只看这一份，行为与从前一致）；活跃那套属于哪一段由
         // activeLayerSet 说明。其余每一套（没在用的 Layer 段）在 layerSets 里各自成条，连自己的 decal。
         layers: records,
-        activeLayerSet,
+        activeLayerSet: activeKeyAtSave,
         layerSets: layerSetList,
         // The Guidance card is a projection of the stacks that are already in this file, so it must
         // not travel as a workspace image too — reloading would resurrect it as a plain entry and
@@ -14101,6 +14262,7 @@ const UI_COMMANDS = {
     'layer-jump': v => { const l = uiLayer(v); if (l) jumpLayerRow(l.id); },
     'layer-generate': v => { const l = uiLayer(v); if (l) openGenModal(l.id); },
     'layer-eye': v => { const l = uiLayer(v); if (l) toggleLayerVisibility(l.id); },
+    'layer-opacity': v => { const l = uiLayer(v); if (l) setLayerOpacity(l.id, Number(uiRow(v).opacity)); },
     'layer-remove': v => { const l = uiLayer(v); if (l) removeLayer(l.id); },
     'layer-duplicate': v => { const l = uiLayer(v); if (l) duplicateLayer(l); },
     'layer-expand': v => { const l = uiLayer(v); if (l) startExpand(l); },
@@ -15051,7 +15213,7 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-vid-frame') { handleVidFrameMessage(d); return; }
     if (d.type === 'blend-vid-warm') { handleVidWarm(d); return; }
     if (d.type === 'blend-vid-layer-sig') { replyVidLayerSigs(d.reqId, d.keys); return; }
-    if (d.type === 'blend-vid-kf-get') { replyVidKf(d.reqId); return; }
+    if (d.type === 'blend-vid-kf-get') { replyVidKf(d.reqId, d.layerKey); return; }
     if (d.type === 'blend-vid-layer-copy') { replyVidLayerCopy(d.reqId, d.from, d.to); return; }
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
     if (d.type === 'blend-vid-base-src') { handleVidBaseSrcMessage(d); return; }

@@ -141,6 +141,13 @@ const VAudio: UnitIcon = p => <Svg {...p}>
   <rect x="3.4" y="7.2" width="3.4" height="6.4" rx="1" />
   <rect x="9.2" y="3.2" width="3.4" height="10.4" rx="1" />
 </Svg>;
+// Keyframes：一条值轨上几枚菱形帧 —— Keyframes 窗摊开的就是这一串(时刻 + 值)。
+// 与 VTracks 那三条轨分开：这里是**一条参数**的关键帧序列，不是轨道布局。
+const VKf: UnitIcon = p => <Svg {...p}>
+  <path d="M1.9 8h12.2" opacity="0.55" />
+  <path d="M4.6 8l1.5-1.5L7.6 8l-1.5 1.5z" fill="currentColor" stroke="none" />
+  <path d="M9 8l1.5-1.5L12 8l-1.5 1.5z" fill="currentColor" stroke="none" />
+</Svg>;
 
 // ── 工具窗(Log / Debug / Probe)── 三扇"看现场"的窗,图标本身用 currentColor,
 // 颜色由 EditPhase 的 rules.icon 套的 span 给(与 titleColor 同一来源,见 UNIT_COLORS)。
@@ -231,7 +238,7 @@ export const UNIT_ICONS: Record<string, UnitIcon> = {
   processor: Processor, guidances: Guidances, layers: Layers, history: History, fxParams: FxParams,
   layout: Layout, videoGen: VideoGen,
   // Video 模式
-  vplayer: VPlayer, vtracks: VTracks, vassets: VAssets, vinspector: VInspector, vaudio: VAudio,
+  vplayer: VPlayer, vtracks: VTracks, vassets: VAssets, vinspector: VInspector, vkf: VKf, vaudio: VAudio,
   // 工具窗(彩色,见 UNIT_COLORS)
   log: PLog, debug: PDebug, probe: PProbe,
   // 宿主

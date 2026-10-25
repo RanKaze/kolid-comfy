@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  type VidController, type VidClip, audioAudible, clipAt, clipAtSolo, fmtTime, vidDuration,
+  type VidController, type VidClip, audioAudible, clipAt, clipAtSolo, fmtTime, kfSample, vidDuration,
 } from './model';
 import { compositePlanAt, sourceTime, warmAheadOf, type VidCompositePlan } from './composite';
 import { decodeAudio, vidAudio } from './audio';
@@ -44,6 +44,9 @@ export const VidPlayer: React.FC<{
   // mute 快照：同上（每帧都要问"这条轨静音了吗"）。
   const muteRef = useRef(vid.mute);
   muteRef.current = vid.mute;
+  // 每套图层集吃哪几条视频轨的帧（页面报上来的摘要）。判"这一段的面引用了静音轨 ⇒ 跳过"要用它；
+  // 宿主不重渲就变，所以直接读那个 ref 的 .current（见 EditPhase 的 frameNeedRef）。
+  const frameNeed = vid.frameNeed;
   const dur = vidDuration(p);
   const durRef = useRef(dur);
   durRef.current = dur;
@@ -151,6 +154,19 @@ export const VidPlayer: React.FC<{
   // 性能探针(只读,诊断用):合成发包端的次数/回包分类,与页面 __vidPerf 配对。
   const compPerf = useRef({ sends: 0, grabs: 0, grabMs: 0, cachedReplies: 0, bitmapReplies: 0, baseSends: 0, rtt: 0 });
   (window as unknown as { __compPerf?: unknown }).__compPerf = compPerf.current;
+  // 关键帧回放:这一刻各通道的采样值(段内秒、线性插值,见 kfSample)。段上没关键帧 = null ——
+  // 一个字段都不带,页面那头照旧按"内容与 t 无关"走缓存(frameless)。
+  const kfSampleAll = (clip: VidClip, timelineT: number): Record<string, number> | null => {
+    const kf = clip.keyframes;
+    if (!kf) return null;
+    const local = timelineT - clip.start;
+    const out: Record<string, number> = {};
+    for (const key of Object.keys(kf.channels)) {
+      const v = kfSample(kf, key, local);
+      if (v !== null && Number.isFinite(v)) out[key] = v;
+    }
+    return Object.keys(out).length ? out : null;
+  };
   const sendComposite = useCallback((plan: VidCompositePlan, q: number) => {
     const r = compReq.current;
     const reqId = ++r.seq;
@@ -162,9 +178,12 @@ export const VidPlayer: React.FC<{
     const tracks = plan.sources.map(s => ({
       trackId: s.trackId, src: s.clip.src, want: sourceTime(s.clip, q),
     }));
+    // 关键帧采样与源帧同一时刻口径(q):页面折叠那一趟把值临时打进图层,监视器看到的就是
+    // "这一刻关键帧说了算"的画面(图层的真值不动,见 blend_node 的 vidKfInject)。
+    const kf = kfSampleAll(plan.layer, q);
     vid.blendPost({
       type: 'blend-vid-frame', reqId, t: q, layerKey: plan.layerKey,
-      baseTrackId: plan.baseTrackId, tracks,
+      baseTrackId: plan.baseTrackId, tracks, ...(kf ? { kf } : {}),
     });
   }, [vid]);
 
@@ -273,8 +292,9 @@ export const VidPlayer: React.FC<{
       const soloActive = soloV.size > 0;
       const muted = muteRef.current;
       // 这一帧归谁：layer 段在最上 → 交给工作台合成；否则照旧。solo 时一律不合成；
-      // **静音的 Layer 轨被 compositePlanAt 跳过**（它的段不合成，露出底下）。
-      const plan = soloActive ? null : compositePlanAt(proj, t, muted);
+      // **静音的 Layer 轨被 compositePlanAt 跳过**（它的段不合成，露出底下）；
+      // Frame source 引用了静音视频轨的 Layer 段同样跳过（拿不到画面）。
+      const plan = soloActive ? null : compositePlanAt(proj, t, muted, frameNeed.current);
       const modeId = plan ? plan.layer.id : null;
       if ((compModeRef.current?.id ?? null) !== modeId
         || (plan && compModeRef.current?.name !== plan.layer.name)) {
@@ -337,7 +357,7 @@ export const VidPlayer: React.FC<{
       // **预热**：还没进 Layer 段时，提前 1.5 秒把下一段的源帧镜像挂好、对到那一刻。
       // 不预热的话，"建镜像 + 等 loadeddata + seek + 切图层集 + 整画布重渲染 + 首帧合成"
       // 全挤在边界那一帧里 —— 播放中就是一次可感的顿（画面上像闪一下）。
-      const warm = soloActive ? null : warmAheadOf(proj, t, muted, 4);   // 4 秒的提前量：够它把文件加载完
+      const warm = soloActive ? null : warmAheadOf(proj, t, muted, 4, frameNeed.current);   // 4 秒的提前量：够它把文件加载完
       const warmKey = warm ? `${warm.layerKey}@${warm.at.toFixed(2)}` : '';
       if (warmKey !== warmSent.current) {
         warmSent.current = warmKey;
@@ -370,7 +390,7 @@ export const VidPlayer: React.FC<{
     v0?.addEventListener('seeked', onSeeked);
     // 挂载时无条件报一次（含 null = 游标不在任何 Layer 段上）：宿主那边可能还留着上一份文档 /
     // 上一轮的值，而 onTick 只在"换段"时开口，起手正好不在段上就永远不会刷新。
-    const plan0 = compositePlanAt(projectRef.current, transport.get(), muteRef.current);
+    const plan0 = compositePlanAt(projectRef.current, transport.get(), muteRef.current, frameNeed.current);
     compLayerRef.current = plan0 ? plan0.layerKey : null;
     onCompLayerRef.current?.(compLayerRef.current);
     onTick();
@@ -471,7 +491,7 @@ export const VidPlayer: React.FC<{
     const timer = setInterval(() => {
       const r = compReq.current;
       if (!r.key || performance.now() - r.lastReply < 1800) return;
-      const plan = compositePlanAt(projectRef.current, transport.get(), muteRef.current);
+      const plan = compositePlanAt(projectRef.current, transport.get(), muteRef.current, frameNeed.current);
       if (plan) requestRef.current(plan, transport.get(), true);
     }, 800);
     return () => clearInterval(timer);
@@ -608,11 +628,23 @@ export const VidPlayer: React.FC<{
     const t = transport.get();
     const plan = soloRef.current.video.size > 0
       ? null
-      : compositePlanAt(projectRef.current, t, muteRef.current);
+      : compositePlanAt(projectRef.current, t, muteRef.current, frameNeed.current);
     requestBase(t);
     requestComposite(plan, t, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing]);
+  // 工程一变就把当前这一格**强制**重折一张：暂停态没有 tick 会来补，而 Keyframes 窗里改帧值
+  // 恰恰发生在暂停态（录/改完想立刻看到）。requestComposite 的按帧去重会把这些拦掉，所以这里
+  // 走 force；页面的缓存身份带 kfSig/内容签名，真没变的帧会命中缓存，一个像素都不白画。
+  useEffect(() => {
+    if (!visible) return;
+    const t = transport.get();
+    const plan = soloRef.current.video.size > 0
+      ? null
+      : compositePlanAt(projectRef.current, t, muteRef.current, frameNeed.current);
+    requestRef.current(plan, t, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p]);
   // 卸载(Image 模式换走正文)时槽不该悬着。
   useEffect(() => () => releaseAudioSlot('player'), []);
 

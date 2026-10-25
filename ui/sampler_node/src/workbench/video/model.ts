@@ -116,7 +116,10 @@ export type VidClip = {
 export type VidKfValue = number;
 /** 一枚关键帧:t = **段内秒**(相对段头 —— 段挪动,关键帧跟着走),v = 该通道此刻的值。 */
 export type VidKeyframe = { t: number; v: VidKfValue };
-export type VidKeyframes = { channels: Record<string, VidKeyframe[]> };
+/** 通道键里各所有者的**名字快照**,录制时一并落档:层名会改、特效会被删,Keyframes 窗要能
+ *  照旧说出"这一条是谁的什么"——不追着页面实时问,档里带的就是答案。effects 的 key 是特效 id。 */
+export type VidKfMeta = { layers: Record<string, { name: string; effects: Record<string, string> }> };
+export type VidKeyframes = { channels: Record<string, VidKeyframe[]>; meta?: VidKfMeta };
 
 /** 工作台回的参数快照(blend-vid-kf):当前图层集里每层的 transform 与特效链参数。
  *  值保持 JSON 原样 —— 宿主只挑数值的进关键帧,复杂值(颜色/曲线)之后再说。 */
@@ -125,6 +128,7 @@ export type VidKfSnapshot = {
     id: string;
     name: string;
     visible: boolean;
+    opacity?: number;
     transform: Record<string, unknown> | null;
     effects: { id: number; type: string; enabled: boolean; params: Record<string, unknown> }[];
   }[];
@@ -133,9 +137,13 @@ export type VidKfSnapshot = {
 /** 同刻判定:两枚关键帧的时刻差小于它算同一枚(覆盖,不并存)。 */
 export const KF_EPS = 0.005;
 
-/** 录制:往一枚段的关键帧系统里 upsert 一批通道值(播放头每停一次,把当下的参数写进去)。
- *  每个通道各自:摘掉同刻旧帧 → 按时间序插回。channels 惰性建,别的段原样不动。 */
-export const kfRecord = (p: VidProject, clipId: string, t: number, values: Record<string, VidKfValue>): VidProject => ({
+/** 落帧:往一枚段的关键帧系统里 upsert 一批通道值。● 录制 = 整套参数一起落;Keyframes 窗的手动
+ *  加帧/改值 = 其中一条或几条 —— 两条路共用这一颗,同刻判定与 meta 合并只此一份规矩。
+ *  每个通道各自:摘掉同刻旧帧 → 按时间序插回。通道**惰性建**:段上还没有这条通道就新开一条
+ *  (一枚参数的第一帧因此出得来,不必先靠录制把整套装进来);channels 里不留空数组。
+ *  meta(所有者名字快照)浅合并进段 —— 带上来就存,新通道才报得出层名与特效名。 */
+export const kfRecord = (p: VidProject, clipId: string, t: number, values: Record<string, VidKfValue>,
+  meta?: VidKfMeta): VidProject => ({
   ...p,
   clips: p.clips.map(c => {
     if (c.id !== clipId) return c;
@@ -145,9 +153,147 @@ export const kfRecord = (p: VidProject, clipId: string, t: number, values: Recor
       const next = [...list, { t, v }].sort((a, b) => a.t - b.t);
       channels[key] = next;
     }
-    return { ...c, keyframes: { channels } };
+    const prevMeta = c.keyframes?.meta;
+    const nextMeta: VidKfMeta | undefined = meta
+      ? { layers: { ...(prevMeta?.layers ?? {}), ...meta.layers } }
+      : prevMeta;
+    return { ...c, keyframes: { channels, meta: nextMeta } };
   }),
 });
+
+/** 挪一枚关键帧的时刻(拖菱形)。值不变;`to` 撞上同刻的旧帧按同一把尺覆盖 ——
+ *  拖动落点永远只留一枚帧,不会出现两枚挤在同一时刻。 */
+export const kfMoveKey = (p: VidProject, clipId: string, key: string, t: number, to: number): VidProject => ({
+  ...p,
+  clips: p.clips.map(c => {
+    if (c.id !== clipId || !c.keyframes?.channels[key]) return c;
+    const from = c.keyframes.channels[key].find(k => Math.abs(k.t - t) < KF_EPS);
+    if (!from) return c;
+    const list = c.keyframes.channels[key].filter(k => Math.abs(k.t - t) >= KF_EPS && Math.abs(k.t - to) >= KF_EPS);
+    const channels = { ...c.keyframes.channels, [key]: [...list, { t: to, v: from.v }].sort((a, b) => a.t - b.t) };
+    return { ...c, keyframes: { ...c.keyframes, channels } };
+  }),
+});
+
+/** 删一枚关键帧(按时刻)。通道空了就整条摘掉 —— channels 里不留空数组。 */
+export const kfRemoveKey = (p: VidProject, clipId: string, key: string, t: number): VidProject => ({
+  ...p,
+  clips: p.clips.map(c => {
+    if (c.id !== clipId || !c.keyframes?.channels[key]) return c;
+    const kept = c.keyframes.channels[key].filter(k => Math.abs(k.t - t) >= KF_EPS);
+    const channels = { ...c.keyframes.channels };
+    if (kept.length) channels[key] = kept;
+    else delete channels[key];
+    return { ...c, keyframes: { ...c.keyframes, channels } };
+  }),
+});
+
+/** 删一整条通道(某一参数的全部关键帧)。 */
+export const kfRemoveChannel = (p: VidProject, clipId: string, key: string): VidProject => ({
+  ...p,
+  clips: p.clips.map(c => {
+    if (c.id !== clipId || !c.keyframes?.channels[key]) return c;
+    const channels = { ...c.keyframes.channels };
+    delete channels[key];
+    return { ...c, keyframes: { ...c.keyframes, channels } };
+  }),
+});
+
+/** 通道键 → 所有者与参数名(Keyframes 窗的显示口径)。键形如
+ *  `layer:<id>:opacity` / `layer:<id>:transform:<prop>` / `layer:<id>:fx:<fxId>:<param>`。 */
+export type VidKfChannelInfo = { layerId: string; layerName: string; param: string; fxId?: string; fxName?: string };
+const KF_TRANSFORM_LABELS: Record<string, string> = { cx: 'X', cy: 'Y', w: 'Width', h: 'Height', rotation: 'Rotation', opacity: 'Opacity' };
+export const kfChannelInfo = (key: string, meta?: VidKfMeta): VidKfChannelInfo | null => {
+  const m = /^layer:([^:]+):(.+)$/.exec(key);
+  if (!m) return null;
+  const layerId = m[1];
+  const rest = m[2];
+  const layerName = meta?.layers?.[layerId]?.name || `Layer ${layerId}`;
+  if (rest === 'opacity') return { layerId, layerName, param: 'Opacity' };
+  if (rest.startsWith('transform:')) {
+    const prop = rest.slice('transform:'.length);
+    return { layerId, layerName, param: KF_TRANSFORM_LABELS[prop] || prop };
+  }
+  const fx = /^fx:([^:]+):(.+)$/.exec(rest);
+  if (fx) {
+    const fxName = meta?.layers?.[layerId]?.effects?.[fx[1]];
+    // fxId 给窗内排序用(特效链的先后),名字仍是快照里那一个。
+    return { layerId, layerName, param: fx[2], fxId: fx[1], fxName: fxName || `fx ${fx[1]}` };
+  }
+  return null;
+};
+
+/** 工作台快照 → 通道键值表。**录制与手动加帧共用这一份口径** —— 两处各自解析快照的话,
+ *  同一枚参数在两条路上会写成两个不同的键。旁路的特效不算(它不影响画面,与录制同规矩)。 */
+export const kfSnapshotValues = (snap: VidKfSnapshot): Record<string, number> => {
+  const out: Record<string, number> = {};
+  for (const l of snap.layers) {
+    const pfx = `layer:${l.id}`;
+    if (typeof l.opacity === 'number' && Number.isFinite(l.opacity)) out[`${pfx}:opacity`] = l.opacity;
+    if (l.transform) {
+      for (const [k, v] of Object.entries(l.transform)) {
+        if (typeof v === 'number' && Number.isFinite(v)) out[`${pfx}:transform:${k}`] = v;
+      }
+    }
+    for (const e of l.effects) {
+      if (!e.enabled) continue;
+      for (const [pk, pv] of Object.entries(e.params || {})) {
+        if (typeof pv === 'number' && Number.isFinite(pv)) out[`${pfx}:fx:${e.id}:${pk}`] = pv;
+      }
+    }
+  }
+  return out;
+};
+
+/** 录制去重:两趟参数快照逐通道比较,只留下**真的动过**的通道(值没变的变量不再反复写帧)。
+ *  `prev` 为空 = 这套图层集还没录过 —— 没有比较基准,整份都算"动过"(起始姿态)。
+ *  上一趟没有的新通道(新图层、新特效参数)同样算动过。 */
+export const kfChangedValues = (prev: Record<string, number> | undefined,
+  next: Record<string, number>): Record<string, number> => {
+  if (!prev) return next;
+  const out: Record<string, number> = {};
+  for (const [key, v] of Object.entries(next)) {
+    const before = prev[key];
+    if (typeof before !== 'number' || Math.abs(before - v) > 1e-6) out[key] = v;
+  }
+  return out;
+};
+
+/** 粘贴 Layer 段时页面给整套图层重新发号(见 blend_node 的 copyLayerSetTo)：把段上关键帧的
+ *  通道键与 meta 里的旧层 id 一并换到新 id。不换 = 同一枚参数在 Keyframes 窗里出现两份
+ *  （旧 id 记下的帧一组、新 id 的活参数一组），这正是"一个变量两行"的来源。 */
+export const kfRemapLayerIds = (kf: VidKeyframes | undefined, map: Record<string, string>): VidKeyframes | undefined => {
+  if (!kf) return kf;
+  const rename = (key: string): string => {
+    const m = /^(layer:)([^:]+)(:.*)$/.exec(key);
+    const to = m ? map[m[2]] : undefined;
+    return m && to ? `${m[1]}${to}${m[3]}` : key;
+  };
+  const channels: Record<string, VidKeyframe[]> = {};
+  for (const [key, frames] of Object.entries(kf.channels)) {
+    const nk = rename(key);
+    const prev = channels[nk];
+    if (!prev) { channels[nk] = frames; continue; }
+    // 两枚旧 id 真撞到同一枚新 id（理论上不会）：同刻只留一枚，其余按时间序并进来。
+    const all = [...prev, ...frames].sort((a, b) => a.t - b.t);
+    channels[nk] = all.filter((f, i) => !i || Math.abs(f.t - all[i - 1].t) >= KF_EPS);
+  }
+  const meta: VidKfMeta | undefined = kf.meta
+    ? { layers: Object.fromEntries(Object.entries(kf.meta.layers).map(([id, v]) => [map[id] || id, v])) }
+    : undefined;
+  return { channels, meta };
+};
+
+/** 工作台快照 → 所有者名字表(层名 + 特效名),录制时随档落进去。 */
+export const kfSnapshotMeta = (snap: VidKfSnapshot): VidKfMeta => {
+  const layers: VidKfMeta['layers'] = {};
+  for (const l of snap.layers) {
+    const effects: Record<string, string> = {};
+    for (const e of l.effects) effects[String(e.id)] = e.type;
+    layers[l.id] = { name: l.name || `Layer ${l.id}`, effects };
+  }
+  return { layers };
+};
 
 /** 采样:一个通道在某时刻的值(线性插值;头尾夹取;空通道 = null)。
  *  这是回放引擎要用的那一半 —— 录制先落数据,回放接上来就用同一口。 */
@@ -166,6 +312,17 @@ export const kfSample = (kf: VidKeyframes | undefined, key: string, t: number): 
     }
   }
   return last.v;
+};
+
+/** 一枚段的关键帧**时刻表**(段内秒,升序,同刻合一):Tracks 段条上的菱形、Keyframes 窗拖帧的
+ *  吸附目标都读它 —— 时刻在通道之间对齐成一列,才是"这一帧动过"的那个意思。 */
+export const kfTimes = (kf: VidKeyframes | undefined): number[] => {
+  const all: number[] = [];
+  for (const list of Object.values(kf?.channels ?? {})) for (const k of list ?? []) all.push(k.t);
+  all.sort((a, b) => a - b);
+  const out: number[] = [];
+  for (const t of all) if (!out.length || Math.abs(t - out[out.length - 1]) >= KF_EPS) out.push(t);
+  return out;
 };
 
 /** Processor 占位段里的**执行快照**：Run 确认的当下就在轨上摆好的坑（每段一个、预分配
@@ -406,6 +563,11 @@ export const createSeekCoalescer = (transport: VidTransport) => {
 };
 
 // 两扇窗（Player / Timeline）共用的控制器快照：宿主每轮渲染组装一份。
+/** 每套图层集吃哪几条视频轨的帧（= 可见图层上启用的 surface attribute 的 `frameTrack`），
+ *  由工作台页面报上来（`blend-vid-frame-need`，见 blend_node 的 `pushVidFrameNeed`）。key = layerKey。
+ *  图层数据住在页面里，宿主只有这一份摘要 —— 判"Frame source 引用了静音轨"要它。 */
+export type VidFrameNeed = Readonly<Record<string, readonly string[]>>;
+
 export type VidController = {
   project: VidProject;
   /** 播放头（外置，不进 React 渲染图 —— 见 VidTransport）。 */
@@ -449,9 +611,16 @@ export type VidController = {
   stopProc?: (clipId: string) => void;
   /** Layer 段合并用：向工作台页要这些图层集的内容签名（key → 签名，两套一致才许合并）。页面不在/超时 = 空表。 */
   layerSigs?: (keys: string[]) => Promise<Record<string, string>>;
-  /** Layer 段粘贴：请页面把 `from` 那套图层**整套克隆**到新 key `to` 上（副本各改各的）。
-   *  返回 false = 页面不在 / 源 key 不存在 —— 调用方退回"共用同一套"（内容不丢，但两段联动）。 */
-  layerCopy?: (from: string, to: string) => Promise<boolean>;
+  /** 粘贴 Layer 段：请页面把源那套图层整套克隆到新 key。回包 = 旧层 id → 新层 id 的映射
+   *  （调用方据此把已复制过来的关键帧通道换到新 id）；null = 页面不在/超时/克隆失败。 */
+  layerCopy?: (from: string, to: string) => Promise<Record<string, string> | null>;
+  /** 关键帧「手动加帧/出行」取当下值的那一口：向工作台页要**那一套图层集**的 transform + fx 参数
+   *  快照（与录制同一条 `blend-vid-kf-get`，按 layerKey 取集 —— 传选中段自己的 key，别拿"活跃那套"
+   *  的值录进这一段，回放按层 id 对不上就成了哑帧）。页面不在/超时 = null —— 调用方不动工程。 */
+  kfSnapshot?: (layerKey: string) => Promise<VidKfSnapshot | null>;
+  /** 每套图层集吃哪几条视频轨的帧（页面报上来的摘要，key = layerKey）。判"Frame source 引用了
+   *  静音轨 ⇒ 这一段跳过"要它 —— 图层住在页面里，宿主没有别的来源。引用恒稳，内容变化就地替换。 */
+  frameNeed: { current: VidFrameNeed };
   /** 仓库里已经找不到的哈希（工程引用了，但字节不在了）。打开工程与每次改动后刷新：
    *  时间线画红线、Assets 卡挂 MISSING、relink 按它挑目标。 */
   missing: ReadonlySet<string>;
@@ -1658,6 +1827,13 @@ export const fmtTime = (s: number): string => {
   const sec = s - m * 60;
   return `${m}:${sec < 10 ? '0' : ''}${sec.toFixed(1)}`;
 };
+
+/** 标尺的步长阶梯（秒）：取第一个"一格至少 64px"的档。**Tracks 与 Keyframes 共用这一把尺** ——
+ *  两扇窗的刻度对不上，同一时刻就会被读成两个位置。
+ *  末尾两档（10/20 分钟）给超长工程的全景缩放：刻度文字再挤也会保住 64px 的下限。 */
+export const RULER_STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200];
+export const rulerStep = (pps: number): number =>
+  RULER_STEPS.find(s => s * pps >= 64) ?? RULER_STEPS[RULER_STEPS.length - 1];
 
 export const isVideoName = (name: string): boolean =>
   /\.(mp4|webm|mov|m4v|mkv|avi|ogv|mpg|mpeg)$/i.test(name || '');

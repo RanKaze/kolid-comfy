@@ -16,7 +16,7 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfRecord, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfRecord, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
@@ -34,6 +34,7 @@ import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets, Card, type StoreAsset } from '../workbench/video/Assets';
 import { VidInspector, type InspectSel } from '../workbench/video/Inspector';
 import { VidAudioMonitor } from '../workbench/video/AudioMonitor';
+import { VidKeyframes } from '../workbench/video/Keyframes';
 import { VidPlayer } from '../workbench/video/Player';
 
 // The rename field of a preset row.
@@ -64,7 +65,7 @@ const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', '
 // 轨道与资产属于文档，不该只在 Video 模式下才看得见。播放器不单独占窗：
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
 // 标题条上有一颗 Image/Video 切换（见 heads）。
-const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vaudio', 'log', 'debug', 'probe'];
+const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe'];
 // 工具窗的标识色:Log / Debug / Probe 三扇"看现场"的窗,图标与 tab 名同穿一件颜色的衣服,
 // 与内容窗(素色)一眼分开。icon 的着色与 titleColor 都从这里来 —— 一处定色,两处生效。
 const UNIT_COLORS: Partial<Record<string, string>> = {
@@ -75,7 +76,8 @@ const UNIT_COLORS: Partial<Record<string, string>> = {
 const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'presets', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
   toolbar: 'File', context: 'Context', pipeline: 'Pipeline', presets: 'Pipeline Presets',
-  blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets', vinspector: 'Inspector', vaudio: 'Audio Monitor',
+  blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets', vinspector: 'Inspector', vkf: 'Keyframes',
+  vaudio: 'Audio Monitor',
   log: 'Log', debug: 'Debug', probe: 'Probe',
   ...WORKBENCH_TITLES,
 };
@@ -156,13 +158,13 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDocUnit(id),
-    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'context' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vaudio' || id === 'log' || id === 'debug' || id === 'probe' || id === 'blocks',
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'context' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vkf' || id === 'vaudio' || id === 'log' || id === 'debug' || id === 'probe' || id === 'blocks',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
     // 时间线与资产库同理：两份会一直长的列表。
     // Context 也进 grows:预览图要吃满窗的余量(图片 fit dock window),左列里它是那个"看图"的窗,
     // 与 Inspector 同一待遇;Pipeline/Presets 照旧按内容定高。
-    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'context' || id === 'log' || id === 'debug' || id === 'probe',
+    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vkf' || id === 'context' || id === 'log' || id === 'debug' || id === 'probe',
     top: 'toolbar',
     // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
     // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
@@ -171,7 +173,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     columnW: COLUMN_W,
     // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里，Assets / Tracks 是普通成员
     // （默认窗，不靠任何切换逻辑出现）。
-    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector', 'vaudio', 'log', 'debug', 'probe'],
+    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe'],
     rightW: RIGHT_W,
     // The size a NEW block opens at — asked per unit and per axis, because which axis the block will be
     // measured on is decided by the side it was dropped on (under a block it is a height, beside one it
@@ -182,6 +184,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
       if (id === 'vtracks') return axis === 'v' ? 320 : 900;
       if (id === 'vassets') return axis === 'v' ? 260 : PANEL_BLOCK_W;
       if (id === 'vinspector') return axis === 'v' ? 300 : 460;
+      if (id === 'vkf') return axis === 'v' ? 360 : 900;
       if (id === 'vaudio') return axis === 'v' ? 240 : 200;
       if (id === 'log') return axis === 'v' ? 240 : 320;
       if (id === 'debug') return axis === 'v' ? 380 : 460;
@@ -962,15 +965,31 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const kfWaiters = useRef(new Map<number, (snap: VidKfSnapshot | null) => void>());
   const kfTimers = useRef(new Map<number, number>());
   // Layer 段粘贴：请页面把源段那套图层**整套克隆**到新 key（见页面 copyLayerSetTo）。
-  // 回包按 reqId 认领；页面不在 / 1.5s 没回 = false（调用方退回"共用同一套"，内容不丢）。
+  // 回包按 reqId 认领，带旧层 id → 新层 id 的映射；页面不在 / 1.5s 没回 = null（调用方退回
+  // "共用同一套"，内容不丢）。
   const layerCopySeq = useRef(1);
-  const layerCopyWaiters = useRef(new Map<number, (ok: boolean) => void>());
+  const layerCopyWaiters = useRef(new Map<number, (ids: Record<string, string> | null) => void>());
+  // 每套图层集吃哪几条视频轨的帧（页面报上来的摘要，key = layerKey）。判"Frame source 引用了静音轨
+  // ⇒ 这一段跳过"要用它（见 composite.ts 的 compositePlanAt）。走 ref：每帧都读，不进渲染图。
+  const frameNeedRef = useRef<VidFrameNeed>({});
   // iframe 的两条 Video 消息：保存时按 uid 来要快照；读档/重开时把文件里那份送回桶里。
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
       const d = e.data as { type?: string; uid?: number; project?: unknown; files?: unknown; at?: number;
-        reqId?: number; sigs?: Record<string, string>; ok?: boolean } | null;
+        reqId?: number; sigs?: Record<string, string>; ok?: boolean; ids?: Record<string, string> | null; need?: unknown } | null;
       if (!d || typeof d.type !== 'string') return;
+      // 页面报"每套图层集吃哪几条视频轨的帧"（只在内容变了时发一条，见页面 pushVidFrameNeed）。
+      // 播放器拿它判"Frame source 引用了静音轨 ⇒ 这一段跳过"，所以必须认来源窗口。
+      if (d.type === 'blend-vid-frame-need') {
+        if (e.source !== blendIframeRef.current?.contentWindow) return;
+        const raw = (d.need && typeof d.need === 'object') ? d.need as Record<string, unknown> : {};
+        const need: Record<string, string[]> = {};
+        for (const [k, v] of Object.entries(raw)) {
+          if (Array.isArray(v) && v.length) need[k] = v.map(String);
+        }
+        frameNeedRef.current = need;
+        return;
+      }
       if (d.type === 'blend-vid-layer-sig') {
         if (e.source !== blendIframeRef.current?.contentWindow) return;
         const rid = Math.round(Number(d.reqId) || 0);
@@ -998,7 +1017,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         const finish = layerCopyWaiters.current.get(rid);
         if (finish) {
           layerCopyWaiters.current.delete(rid);
-          finish(d.ok === true);
+          const ids = d.ok === true && d.ids && typeof d.ids === 'object' ? d.ids : null;
+          finish(ids);
         }
         return;
       }
@@ -1749,9 +1769,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     }), 'Bind frame');
   }, [vidUpdate]);
 
-  /** 关键帧录制的参数快照:向工作台页要"当前图层集"的 transform + fx 参数(见 blend_node 的
-   *  blend-vid-kf-get)。与 layerSigs 同一条 reqId/waiter 模式,1.5s 超时兜底。 */
-  const layerKfParams = useCallback((): Promise<VidKfSnapshot | null> => {
+  /** 关键帧录制/加帧的参数快照:向工作台页要**那一套图层集**的 transform + fx 参数
+   *  (见 blend_node 的 blend-vid-kf-get)。layerKey 传选中段自己的集 key —— 页面那头照 key 取集,
+   *  不再照"活跃那套"报:活跃集跟着播放头走,录进选中段的值必须是选中段自己的层,否则回放的
+   *  那一趟按层 id 找不到层,关键帧就成了哑帧。与 layerSigs 同一条 reqId/waiter 模式,1.5s 超时兜底。 */
+  const layerKfParams = useCallback((layerKey: string): Promise<VidKfSnapshot | null> => {
     const win = blendIframeRef.current?.contentWindow;
     if (!win) return Promise.resolve(null);
     return new Promise(resolve => {
@@ -1766,43 +1788,47 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       };
       kfTimers.current.set(reqId, window.setTimeout(() => finish(null), 1500));
       kfWaiters.current.set(reqId, finish);
-      win.postMessage({ type: 'blend-vid-kf-get', reqId }, '*');
+      win.postMessage({ type: 'blend-vid-kf-get', reqId, layerKey }, '*');
     });
   }, [blendIframeRef]);
 
-  // ── 关键帧录制 ── Record 钮(kfArmed store,Tracks 左上角)亮着时:播放头每停一个位置
-  // (暂停态的 scrub、播放头拖动),就把该刻所在 **Layer 段**的图层参数快照写成关键帧
-  // (段内秒,持久化在段上)。播放中不记(逐帧太密);拉快照异步,去抖 150ms —— 停稳了才落。
-  // 开录那一刻也先记一笔。臂的开关经 kfArmed 外部 store,这里订阅它,不碰控制器。
+  // ── 关键帧录制 ── Record 钮(kfArmed store,住在 Keyframes 窗的工具条里)亮着时:播放头每停一个
+  // 位置(暂停态的 scrub、播放头拖动),就把**当前选中的那枚 Layer 段**的图层参数快照写成关键帧
+  // (段内秒,持久化在段上)。目标跟着窗口走 —— 以前记"播放头脚下的段",和 Keyframes 摊开的那一枚
+  // 不是一回事,帧会落到看不见的段上。播放中不记(逐帧太密);拉快照异步,去抖 150ms —— 停稳了才落。
+  // **只落真的动过的变量**:按段记住上一趟快照,这一趟逐通道比,没变的通道不再重复写帧;
+  // 段上还没有任何关键帧时,第一趟仍整套落一遍(起始姿态),之后才开始只记变化。
+  // 臂的开关经 kfArmed 外部 store,这里订阅它,不碰控制器。
   const vidKfArmRef = useRef(false);
   useEffect(() => subscribeKfArmed(() => { vidKfArmRef.current = getKfArmed(); }), []);
   vidKfArmRef.current = getKfArmed();
+  const kfRecLast = useRef(new Map<string, Record<string, number>>());
   const recordKfAtPlayhead = useCallback(async () => {
     if (!getKfArmed() || vidPlayingRef.current) return;
     const proj = vidProjectRef.current;
     const t = vidTransport.get();
-    const clip = proj.clips.find(c => c.kind === 'layer' && !c.pending && t >= c.start && t < c.start + c.duration);
+    const sel = getVidSelection();
+    if (sel.size !== 1) return;
+    const clip = proj.clips.find(c => c.id === [...sel][0] && c.kind === 'layer' && !c.pending);
     if (!clip) return;
     const local = Math.round((t - clip.start) * 1000) / 1000;
-    const snap = await layerKfParams();
+    // 播放头在这段之外 = 这一刻在段里没有意义,什么都不记。
+    if (local < 0 || local > clip.duration) return;
+    const snap = await layerKfParams(clip.layerKey || clip.id);
     if (!snap || !getKfArmed()) return;
-    const values: Record<string, number> = {};
-    for (const l of snap.layers) {
-      const pfx = `layer:${l.id}`;
-      if (l.transform) {
-        for (const [k, v] of Object.entries(l.transform)) {
-          if (typeof v === 'number' && Number.isFinite(v)) values[`${pfx}:transform:${k}`] = v;
-        }
-      }
-      for (const e of l.effects) {
-        if (!e.enabled) continue;                 // 旁路的特效不记(它不影响画面)
-        for (const [pk, pv] of Object.entries(e.params || {})) {
-          if (typeof pv === 'number' && Number.isFinite(pv)) values[`${pfx}:fx:${e.id}:${pk}`] = pv;
-        }
-      }
-    }
+    // 通道键与所有者名字都走 model 那两份公共口径 —— 手动加帧(Keyframes 窗)与录制不能再各写一套。
+    const values = kfSnapshotValues(snap);
     if (!Object.keys(values).length) return;
-    vidUpdate(proj2 => kfRecord(proj2, clip.id, local, values), 'Record keyframes');
+    const recKey = clip.id;
+    const prev = kfRecLast.current.get(recKey);
+    // 第一次录这一段:段上一枚关键帧都没有才落整套起始姿态;已有曲线的段只建立比较基准,
+    // 不把已经存在的动画在当前位置整套压平。之后每一趟只落与上一趟不同的通道。
+    const changed = prev
+      ? kfChangedValues(prev, values)
+      : (clip.keyframes && Object.keys(clip.keyframes.channels).length ? {} : values);
+    kfRecLast.current.set(recKey, values);
+    if (!Object.keys(changed).length) return;
+    vidUpdate(proj2 => kfRecord(proj2, clip.id, local, changed, kfSnapshotMeta(snap)), 'Record keyframes');
   }, [layerKfParams, vidUpdate, vidTransport]);
   const kfTimer = useRef(0);
   useEffect(() => {
@@ -1813,9 +1839,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     };
     const unArm = subscribeKfArmed(() => { if (getKfArmed()) schedule(); });
     const unT = vidTransport.subscribe(schedule);
-    if (getKfArmed()) schedule();                 // 挂载/依赖变化时:已在录制中就先记一笔
+    // 挂载/依赖变化时:已在录制中(且此刻不在播)就先记一笔。vidPlaying 在依赖里 = **按 Pause/Stop
+    // 那一趟也走这里** —— 播放头停住正是"停了一次",可 transport 从这一刻起不再发 tick,
+    // 不补这一下就要等下一次挪头才落帧(录制亮着却按暂停 = 什么都不记,看着就是"播放里完全没用")。
+    if (getKfArmed()) schedule();
     return () => { unArm(); unT(); if (kfTimer.current) window.clearTimeout(kfTimer.current); };
-  }, [recordKfAtPlayhead, vidTransport]);
+  }, [recordKfAtPlayhead, vidTransport, vidPlaying]);
 
   // ── Pipeline Preset 的视频路（骨架与 Processor 视频路同一套）────────────────────────────
   // 差别只在"预设没有输入口"：喂哪段视频由**每次运行**的 modal 定（Tracks / Sel. Track /
@@ -2268,21 +2297,22 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, [blendIframeRef]);
   // Layer 段粘贴：把源段那套图层整套克隆到新 key（见页面 copyLayerSetTo）。**成套克隆**是必须的：
   // 共用一套的话，改副本的图层会把原件一起改掉（"复制"在用户眼里不是"链接"）。
-  const layerCopy = useCallback((from: string, to: string): Promise<boolean> => {
+  // 回包是旧层 id → 新层 id 的映射：调用方拿它把段上关键帧通道换到新 id（否则一个变量会占两行）。
+  const layerCopy = useCallback((from: string, to: string): Promise<Record<string, string> | null> => {
     const win = blendIframeRef.current?.contentWindow;
-    if (!win || !from || !to || from === to) return Promise.resolve(false);
+    if (!win || !from || !to || from === to) return Promise.resolve(null);
     return new Promise(resolve => {
       const reqId = layerCopySeq.current++;
       let done = false;
       let timer = 0;
-      const finish = (ok: boolean) => {
+      const finish = (ids: Record<string, string> | null) => {
         if (done) return;
         done = true;
         window.clearTimeout(timer);
         layerCopyWaiters.current.delete(reqId);
-        resolve(ok);
+        resolve(ids);
       };
-      timer = window.setTimeout(() => finish(false), 1500);
+      timer = window.setTimeout(() => finish(null), 1500);
       layerCopyWaiters.current.set(reqId, finish);
       win.postMessage({ type: 'blend-vid-layer-copy', reqId, from, to }, '*');
     });
@@ -2394,6 +2424,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     blendPost, blendWindow,
     solo: { audio: soloAudio, video: soloVideo }, toggleSolo,
     mute, toggleMute,
+    frameNeed: frameNeedRef,
     // 占位段上的 ▶：按快照续跑这一段（见 continuePendingClip）。
     continueProc: continuePendingClip,
     // 多选时点 ▶：整批按 左→右 / 同起点 下→上 依次跑（见 continueManyPendingClips）。
@@ -2404,7 +2435,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // Layer 段合并：向页面要图层集签名，两段一致才允许并。
     layerSigs,
     layerCopy,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs, layerCopy, vidMissing, vidRelink, recheckMissing]);
+    // Keyframes 窗手动加帧的"当下的值"：与录制同一条 blend-vid-kf-get（见 layerKfParams）。
+    kfSnapshot: layerKfParams,
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs, layerCopy, layerKfParams, vidMissing, vidRelink, recheckMissing]);
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。
@@ -3114,6 +3147,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .layer-type-badge.model { color: #7ee0d0; }
         .layer-type-badge.stash { color: #e3d17a; }
         .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+        /* 行上那根 Opacity 滑杆（PS 式整体不透明度）：固定小宽（名字让位后剩下的空间不多），
+           百分比读数定宽右对齐，拖动时数字不跳。off = 视频模式下没选中 Layer 段那道编辑闸。 */
+        .layer-opacity { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+        .layer-opacity input[type="range"] { width: 50px; height: 14px; margin: 0; accent-color: #0a84ff; cursor: pointer; }
+        .layer-opacity span { font-size: 9px; color: rgba(255,255,255,0.48); font-variant-numeric: tabular-nums; min-width: 27px; text-align: right; }
+        .layer-opacity.off { opacity: 0.4; }
+        .layer-opacity.off input[type="range"] { cursor: default; }
         /* 双击行名就地改名（拍板 7.a：编辑归宿主，提交发 layer-rename）。这一条与页面同文。 */
         .layer-rename { width: 100%; min-width: 0; box-sizing: border-box; font-size: 12px; color: #fff; background: #1b1b1f; border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; padding: 1px 4px; outline: none; }
         .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -3351,6 +3391,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               vinspector: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — inspect assets from the Assets window.</div>
                 : <VidInspector sel={vidInspect} />,
+              // Keyframes:Dopesheet —— 选中的那枚 Layer 段里,一行一个参数,右侧泳道按段内秒摊开
+              // 关键帧菱形,一根播放头贯穿两列。与 Tracks 同一道文档闸 —— 关键帧住在段上,没有工程就没有段。
+              vkf: blendDocs.activeUid === null
+                ? <div style={styles.vidVoid}>No project open — keyframes live on Layer segments.</div>
+                : <VidKeyframes vid={vidCtl} />,
               // Audio Monitor:谁持着全局独占音频槽就画谁(audioFocus 仲裁,页面级、不属于文档)。
               vaudio: <VidAudioMonitor />,
               // 工具窗三扇:Log(行为流水)/ Debug(上次 Run 快照)/ Probe(界面巡检)。

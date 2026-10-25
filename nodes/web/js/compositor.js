@@ -190,16 +190,20 @@ const KCompositor = (function () {
         return { src: inked ? surf : (base ? flatten(base, w, h) : surf) };
     }
 
-    /** 与 drawLayer 逐字一致：translate(cx·W, cy·H) · rotate · drawImage(-tw/2,-th/2,tw,th)。 */
-    function drawTransformed(ctx, src, tr, w, h) {
+    /** 与 drawLayer 逐字一致：translate(cx·W, cy·H) · rotate · drawImage(-tw/2,-th/2,tw,th)。
+     *  opacity（0..1，缺省 1）是图层整体不透明度 —— 与 GL 那边的 uAlpha 同一个语义。 */
+    function drawTransformed(ctx, src, tr, w, h, opacity) {
         const t = tr || {};
         const cx = t.cx === undefined ? 0.5 : t.cx;
         const cy = t.cy === undefined ? 0.5 : t.cy;
         const ww = t.w === undefined ? 1 : t.w;
         const hh = t.h === undefined ? 1 : t.h;
         const rot = t.rotation || 0;
+        const a = (opacity === undefined || opacity === null) ? 1 : Math.min(1, Math.max(0, opacity));
+        if (a <= 0) return;
         const tw = ww * w, th = hh * h;
         ctx.save();
+        ctx.globalAlpha *= a;
         ctx.translate(cx * w, cy * h);
         ctx.rotate(rot);
         ctx.drawImage(src, -tw / 2, -th / 2, tw, th);
@@ -236,12 +240,12 @@ void main() {
     const FS = `#version 300 es
 precision highp float;
 in vec2 vUV; out vec4 Frag;
-uniform sampler2D uSrc; uniform sampler2D uMask; uniform int uMaskOn; uniform int uFlip;
+uniform sampler2D uSrc; uniform sampler2D uMask; uniform int uMaskOn; uniform int uFlip; uniform float uAlpha;
 void main() {
   vec2 uv = uFlip == 1 ? vec2(vUV.x, 1.0 - vUV.y) : vUV;
   vec4 c = texture(uSrc, uv);
   if (uMaskOn == 1) c = c * texture(uMask, vUV).a;
-  Frag = c;
+  Frag = c * uAlpha;
 }`;
 
     // 每个**上下文**一份 GL 状态（不是每块画布）：借来的上下文里画不变量跟自建的一模一样，
@@ -293,7 +297,7 @@ void main() {
             uSize: gl.getUniformLocation(prog, 'uSize'), uRot: gl.getUniformLocation(prog, 'uRot'),
             uFill: gl.getUniformLocation(prog, 'uFill'), uSrc: gl.getUniformLocation(prog, 'uSrc'),
             uMask: gl.getUniformLocation(prog, 'uMask'), uMaskOn: gl.getUniformLocation(prog, 'uMaskOn'),
-            uFlip: gl.getUniformLocation(prog, 'uFlip'),
+            uFlip: gl.getUniformLocation(prog, 'uFlip'), uAlpha: gl.getUniformLocation(prog, 'uAlpha'),
         } };
         glStates.set(gl, state);
         return state;
@@ -368,6 +372,9 @@ void main() {
             api.stats.items++;
             if (it.tex) api.stats.texItems++;
             gl.uniform1i(loc.uFlip, it.tex ? 1 : 0);
+            // 图层整体不透明度：预乘域里乘一次 alpha 就等于 canvas 2D 的 globalAlpha。
+            gl.uniform1f(loc.uAlpha, (it.opacity === undefined || it.opacity === null) ? 1
+                : Math.min(1, Math.max(0, it.opacity)));
             if (!it.transform) {
                 gl.uniform1i(loc.uFill, 1);
             } else {
@@ -442,10 +449,10 @@ void main() {
                 // 层要读"以下所有层的合成"，而那本账是 2D 攒的。
                 const got = foldLayer(pl, t, w, h, below, !!stage && i >= lastBelow);
                 if (!got) continue;
-                if (got.tex) { items.push({ tex: got.tex, mask: got.mask, transform: pl.transform }); continue; }
-                items.push({ src: got.src, transform: pl.transform });
-                if (useGL) { if (actx) drawTransformed(actx, got.src, pl.transform, w, h); }
-                else drawTransformed(ctx, got.src, pl.transform, w, h);
+                if (got.tex) { items.push({ tex: got.tex, mask: got.mask, transform: pl.transform, opacity: pl.opacity }); continue; }
+                items.push({ src: got.src, transform: pl.transform, opacity: pl.opacity });
+                if (useGL) { if (actx) drawTransformed(actx, got.src, pl.transform, w, h, pl.opacity); }
+                else drawTransformed(ctx, got.src, pl.transform, w, h, pl.opacity);
             }
             if (useGL) {
                 const g = compositeGL(items, w, h, stage || o.glTarget || null);
@@ -464,8 +471,14 @@ void main() {
         }
         for (const it of items) {
             if (it.tex) { api.notes.push('texture item on the 2d backend'); continue; }
-            if (!it.transform) { try { ctx.drawImage(it.src, 0, 0, w, h); } catch (e) { /* skip */ } }
-            else drawTransformed(ctx, it.src, it.transform, w, h);
+            const a = (it.opacity === undefined || it.opacity === null) ? 1 : Math.min(1, Math.max(0, it.opacity));
+            if (a <= 0) continue;
+            if (!it.transform) {
+                ctx.save(); ctx.globalAlpha *= a;
+                try { ctx.drawImage(it.src, 0, 0, w, h); } catch (e) { /* skip */ }
+                ctx.restore();
+            }
+            else drawTransformed(ctx, it.src, it.transform, w, h, a);
         }
         return cv;
     }

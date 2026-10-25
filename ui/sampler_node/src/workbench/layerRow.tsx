@@ -479,6 +479,8 @@ const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend;
   const inputRef = useRef<HTMLInputElement | null>(null);
   const origRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  // 与 StackHead / 行尾那排同一道闸：视频模式下没选中 Layer 段时这一摞不许写 —— 滑杆跟着灰。
+  const blocked = useLayerEditBlocked();
   useFaceVisible(origRef, row.orig);
   useFaceVisible(canvasRef, row.canvas);
   const rowKey = 'row:' + row.id;
@@ -586,6 +588,29 @@ const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend;
                 }}
                 onBlur={commit} />
             : row.name + nameSuffix(row)}
+        </div>
+        {/* Opacity 滑杆（PS 式整体不透明度）。点击不冒泡（不选层/不进重命名）；拖动逐值发
+            layer-opacity，页面按 key 合并历史 —— 一次拖动 = 一步撤销。关键帧录制亮着时，停在段内的
+            每个位置都会把当下的值记成一枚关键帧（通道 layer:<id>:opacity）。
+            draggable + 自撤 dragstart：整行是拖拽源，在滑杆上按下横拖会被 Chromium 当成"拖这一行"
+            （dragstart 的目标是最近的可拖祖先=行本身，行上的处理器看不出从哪儿抓的）。子元素写
+            draggable={false} 挡不住祖先，只能让它自己成为拖拽源、再把这一枚 dragstart 取消掉。
+            还要 stopPropagation：只 preventDefault 的话这一枚仍旧冒泡进行自己手上，行会把这一下记成
+            "正在拖一行"（拖拽态不退、rowDragId 悬着一个旧 id）。 */}
+        <div className={'layer-opacity' + (blocked ? ' off' : '')}
+          draggable
+          onDragStart={ev => { ev.preventDefault(); ev.stopPropagation(); }}
+          title={blocked
+            ? 'Move the playhead onto a Layer segment in the Tracks window first'
+            : `Opacity of「${row.name}」— ${Math.round(row.opacity * 100)}%. Recorded as a keyframe channel when record is armed.`}
+          onClick={ev => ev.stopPropagation()}
+          onDoubleClick={ev => ev.stopPropagation()}>
+          <input type="range" min={0} max={1} step={0.01} value={row.opacity} disabled={blocked}
+            onChange={ev => {
+              const v = parseFloat(ev.target.value);
+              if (Number.isFinite(v)) send('layer-opacity', { id: row.id, opacity: v });
+            }} />
+          <span>{Math.round(row.opacity * 100)}%</span>
         </div>
         {isJump && (
           <button type="button" className="icon-btn" disabled={row.kind !== 'model' && !row.cudLinked}
