@@ -251,6 +251,17 @@ void main() {
     // 每个**上下文**一份 GL 状态（不是每块画布）：借来的上下文里画不变量跟自建的一模一样，
     // 只是那块画布归别人。自建上下文时 `canvas` 就是内部那块离屏，`preserveDrawingBuffer` 只为了
     // 导出/截图能取到像素。
+    /** 一张空纹理（LINEAR + CLAMP，与画面贴图同一套采样参数）。 */
+    function mkTexture(gl) {
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return t;
+    }
+
     const glStates = new WeakMap();
     const glOffscreen = { c: null };
     function glStateFor(gl, canvas) {
@@ -282,17 +293,13 @@ void main() {
         gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
         gl.enableVertexAttribArray(aUV); gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 16, 8);
         gl.bindVertexArray(null);
-        // 两张：0 = 这一项的源（画布要上传/纹理直接绑），1 = 蒙版。
-        const mk = () => {
-            const t = gl.createTexture();
-            gl.bindTexture(gl.TEXTURE_2D, t);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            return t;
-        };
-        const state = { c: canvas, gl, prog, vao, buf, tex: mk(), mtex: mk(), loc: {
+        // 两张常备纹理：0 = 这一项的源（画布要上传/纹理直接绑），1 = 蒙版。
+        const state = { c: canvas, gl, prog, vao, buf, tex: mkTexture(gl), mtex: mkTexture(gl),
+            // 源纹理缓存：同一张画布 + 同一份内容身份（items 里的 `gen`）⇒ 不再上传。
+            // 播放一层带关键帧的段时一帧要贴好几张面（源帧、每条链的结果、Stash 的抄写图），其中
+            // **只有真变了的那一张**需要 texImage2D —— 剩下的整幅上传是纯烧（832×1216 一张 ~3ms，
+            // 30 包/秒就是十几毫秒/帧）。`gen` 缺席 ⇒ 老规矩每次上传（不会贴旧图）。
+            srcTex: new Map(), srcTexUse: 0, loc: {
             uRes: gl.getUniformLocation(prog, 'uRes'), uC: gl.getUniformLocation(prog, 'uC'),
             uSize: gl.getUniformLocation(prog, 'uSize'), uRot: gl.getUniformLocation(prog, 'uRot'),
             uFill: gl.getUniformLocation(prog, 'uFill'), uSrc: gl.getUniformLocation(prog, 'uSrc'),
@@ -301,6 +308,51 @@ void main() {
         } };
         glStates.set(gl, state);
         return state;
+    }
+
+    // 源纹理缓存上限：足够装下"工作栈 + guidance 栈 + 几张链结果"，再多的按最久没用淘汰
+    // （纹理是 GL 对象，不淘汰就是泄漏；上限也让这张表永远不随画过的画布数增长）。
+    const TEX_CACHE_MAX = 12;
+    /** 这台上下文里"这张源画布、这份内容"的纹理。`gen` 一致 = 像素没换过 ⇒ 复用。 */
+    function texForSource(st, it) {
+        const gl = st.gl, src = it.src;
+        const gen = it.gen === undefined ? null : it.gen;
+        if (gen === null) {
+            // 调用方没给内容身份：老规矩，每次上传进那只共享纹理（绝不贴旧图）。
+            gl.bindTexture(gl.TEXTURE_2D, st.tex);
+            gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, !it.premul);
+            try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src); }
+            catch (e) { return null; }
+            api.stats.upload++;
+            return st.tex;
+        }
+        const w = src.width | 0, h = src.height | 0;
+        if (!w || !h) return null;
+        const pre = it.premul ? 1 : 0;
+        let ent = st.srcTex.get(src);
+        if (ent && ent.gen === gen && ent.pre === pre && ent.w === w && ent.h === h) {
+            ent.use = ++st.srcTexUse;
+            return ent.tex;
+        }
+        if (!ent) {
+            if (st.srcTex.size >= TEX_CACHE_MAX) {
+                let oldest = 0, at = Infinity;
+                for (const [k, v] of st.srcTex) if (v.use < at) { at = v.use; oldest = k; }
+                if (oldest) { gl.deleteTexture(st.srcTex.get(oldest).tex); st.srcTex.delete(oldest); }
+            }
+            ent = { tex: mkTexture(gl), gen: null, pre: -1, w: 0, h: 0, use: 0 };
+            st.srcTex.set(src, ent);
+        }
+        ent.use = ++st.srcTexUse;
+        gl.bindTexture(gl.TEXTURE_2D, ent.tex);
+        // `premul` 在**上传那一刻**就烘进纹理（见下面 doc 注释）：同一张画布被要求换一种预乘读法时，
+        // 身份里必须带上它，否则会拿上一次的读法去贴。
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, !it.premul);
+        try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src); }
+        catch (e) { gl.deleteTexture(ent.tex); st.srcTex.delete(src); return null; }
+        api.stats.upload++;
+        ent.gen = gen; ent.pre = pre; ent.w = w; ent.h = h;
+        return ent.tex;
     }
 
     /**
@@ -350,13 +402,10 @@ void main() {
             if (it.tex) {
                 gl.bindTexture(gl.TEXTURE_2D, it.tex);      // 已经是预乘、已经在这台上下文里
             } else if (it.src) {
-                gl.bindTexture(gl.TEXTURE_2D, tex);
-                // `premul` = 这张源**本身**已经是预乘的（编辑器的笔刷纹理出口就是这样：它来自
-                // fx/gl.js 的 present，画布被浏览器按预乘解释）。再预乘一次会把半透明区压暗。
-                gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, !it.premul);
-                try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, it.src); }
-                catch (e) { continue; }
-                api.stats.upload++;
+                // 带上 `gen`（= 这张源的像素没换过的证明）时走缓存：没变过就不再 texImage2D。
+                const t = texForSource(st, it);
+                if (!t) continue;
+                gl.bindTexture(gl.TEXTURE_2D, t);
             } else continue;
             if (it.mask) {
                 gl.activeTexture(gl.TEXTURE1);

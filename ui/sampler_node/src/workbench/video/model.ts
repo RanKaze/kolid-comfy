@@ -130,7 +130,9 @@ export type VidKfSnapshot = {
     visible: boolean;
     opacity?: number;
     transform: Record<string, unknown> | null;
-    effects: { id: number; type: string; enabled: boolean; params: Record<string, unknown> }[];
+    /** defs = 这一枚特效各数值参数的出厂默认值（录制第一趟靠它认出"用户动过的参数"）。 */
+    effects: { id: number; type: string; enabled: boolean; params: Record<string, unknown>;
+      defs?: Record<string, number> }[];
   }[];
 };
 
@@ -255,6 +257,48 @@ export const kfChangedValues = (prev: Record<string, number> | undefined,
   for (const [key, v] of Object.entries(next)) {
     const before = prev[key];
     if (typeof before !== 'number' || Math.abs(before - v) > 1e-6) out[key] = v;
+  }
+  return out;
+};
+
+/** 图层参数的"出厂姿态"（变换 + 整体不透明度）。录制第一趟拿它认出没被动过的参数。 */
+const KF_NEUTRAL_POSE: Record<string, number> = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0, opacity: 1 };
+
+/** 这条通道此刻的值是不是"出厂默认"（没被用户动过）。认不出默认值的（没有 defs 的特效参数）
+ *  一律当"动过" —— 宁可多落一枚，也不要漏掉用户真改过的值。 */
+export const kfIsDefaultValue = (key: string, v: number, snap?: VidKfSnapshot | null): boolean => {
+  const m = /^layer:([^:]+):(.+)$/.exec(key);
+  if (!m) return false;
+  const rest = m[2];
+  if (rest === 'opacity') return Math.abs(v - KF_NEUTRAL_POSE.opacity) < 1e-6;
+  const tr = /^transform:([^:]+)$/.exec(rest);
+  if (tr) {
+    const d = KF_NEUTRAL_POSE[tr[1]];
+    return typeof d === 'number' && Math.abs(v - d) < 1e-6;
+  }
+  const fx = /^fx:([^:]+):(.+)$/.exec(rest);
+  if (!fx) return false;
+  const layer = snap ? snap.layers.find(l => l.id === m[1]) : null;
+  const eff = layer ? layer.effects.find(e => String(e.id) === fx[1]) : null;
+  const d = eff && eff.defs ? eff.defs[fx[2]] : undefined;
+  return typeof d === 'number' && Math.abs(v - d) < 1e-6;
+};
+
+/** 第一趟（这一段还没有比较基准）该落哪些通道 —— **按通道**判，不再按段一刀切：
+ *  · 段上**已经在动**的参数：只进基准、不落帧（否则会把已有的动画在当前位置整套压平）；
+ *  · 段上**还没有曲线**的参数：落那些**偏离出厂默认值**的 —— 用户动过的参数就是这条新曲线的
+ *    起点（alpha 从 1 拖到 0.4、图层挪了位置、特效旋钮拧过…），没动过的摆在那儿只会让 ● 一开
+ *    就凭空长出一整排帧；
+ *  · 段上**一枚帧都没有**（全新的一段）：整套落一遍，那本来就是它的起始姿态。
+ *  少了这一条，一枚已经有 fx 曲线的段永远开不出 alpha / 变换的曲线：第一趟只建基准，后面每一趟
+ *  又都是"没变化"，滑杆拖出来的结果被静默吞掉 —— 用户看到的就是"● 录制亮着，alpha 却记不进去"。 */
+export const kfFirstPassValues = (kf: VidKeyframes | undefined, t: number,
+  next: Record<string, number>, snap?: VidKfSnapshot | null): Record<string, number> => {
+  const started = !!kf && Object.keys(kf.channels).length > 0;
+  const out: Record<string, number> = {};
+  for (const [key, v] of Object.entries(next)) {
+    if (kfSample(kf, key, t) !== null) continue;                 // 已经在动 = 只建基准
+    if (!started || !kfIsDefaultValue(key, v, snap)) out[key] = v;
   }
   return out;
 };

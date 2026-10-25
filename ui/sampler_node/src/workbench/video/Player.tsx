@@ -28,7 +28,10 @@ export const VidPlayer: React.FC<{
   visible: boolean;
   /** 游标底下的 Layer 段 key（null = 不在任何 Layer 段上）。宿主拿它决定这一格给画布还是给视频。 */
   onCompLayer?: (key: string | null) => void;
-}> = ({ vid, visible, onCompLayer }) => {
+  /** 工作台画布的 iframe 此刻**压在这一格上面**（Video 模式里它盖住画面区）。压着的时候合成位图
+   *  没人看得见，页面就不必逐帧编码回传 —— 那是播放一层 Layer 段最大的固定开销之一。 */
+  stageCovers?: boolean;
+}> = ({ vid, visible, onCompLayer, stageCovers }) => {
   markRender('VidPlayer');
   const { project: p, transport, playing } = vid;
   const setPlaying = vid.setPlaying;      // useState setter,引用恒稳 —— 放进 effect 依赖不会抖
@@ -70,6 +73,9 @@ export const VidPlayer: React.FC<{
   const onCompLayerRef = useRef(onCompLayer);
   onCompLayerRef.current = onCompLayer;
   const liveRef = useRef(true);
+  /** 画布 iframe 是否压着这一格（不进渲染图：发包时读 ref，值变了也不必重渲）。 */
+  const stageCoversRef = useRef(!!stageCovers);
+  stageCoversRef.current = !!stageCovers;
   const vidRef = useRef(vid);
   vidRef.current = vid;
   const compReq = useRef({
@@ -198,6 +204,9 @@ export const VidPlayer: React.FC<{
     vid.blendPost({
       type: 'blend-vid-frame', reqId, t: q, layerKey: plan.layerKey,
       baseTrackId: plan.baseTrackId, tracks, ...(kf ? { kf } : {}), ...(kfMeta ? { kfMeta } : {}),
+      // 画布的 iframe 压在这一格上时，监视器那张位图没人看得见 —— 页面据此跳过"编码一帧 +
+      // 跨窗传一张整幅位图"（播放时每帧一次，纯粹是白烧）。见 EditPhase 传进来的 stageCovers。
+      stageCovers: stageCoversRef.current,
     });
   }, [vid]);
 

@@ -900,8 +900,8 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
           type="button"
           onClick={() => setKfArmed(!armed)}
           title={armed
-            ? 'Keyframe record is ON — a playhead stop records only the layer transform and fx parameters that changed since the previous stop. Click to stop recording.'
-            : 'Keyframe record is OFF — click to arm it: playhead stops then record only the parameters you actually changed (stored on the segment).'}
+            ? 'Keyframe record is ON — a change you make to the layer (opacity / alpha, transform, fx values) is stored as a keyframe right where the playhead is, and a playhead stop records whatever is still different since the previous stop. Click to stop recording.'
+            : 'Keyframe record is OFF — click to arm it: changes to the layer (opacity / alpha, transform, fx values) then land as keyframes where you make them, and playhead stops record anything else that changed (stored on the segment).'}
           style={{
             width: 18, height: 18, borderRadius: '50%', cursor: 'pointer', padding: 0, flexShrink: 0,
             display: 'flex', alignItems: 'center', justifyContent: 'center',

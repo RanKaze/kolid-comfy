@@ -16,7 +16,7 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfRecord, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
@@ -975,7 +975,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // iframe 的两条 Video 消息：保存时按 uid 来要快照；读档/重开时把文件里那份送回桶里。
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
-      const d = e.data as { type?: string; uid?: number; project?: unknown; files?: unknown; at?: number;
+      const d = e.data as { type?: string; uid?: number; project?: unknown; files?: unknown; at?: number; kind?: string;
         reqId?: number; sigs?: Record<string, string>; ok?: boolean; ids?: Record<string, string> | null; need?: unknown } | null;
       if (!d || typeof d.type !== 'string') return;
       // 页面报"每套图层集吃哪几条视频轨的帧"（只在内容变了时发一条，见页面 pushVidFrameNeed）。
@@ -1025,6 +1025,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       if (d.type === 'blend-edited') {
         // 页面刚提交了一步图层动作（或刚撤销/重做了一步）：Ctrl+Z 从此归它，直到视频又被改动。
         layerEditAt.current = Number(d.at) || Date.now();
+        // 录制亮着时，这一步就是"停下了一次"：立刻按**播放头此刻**的位置落帧。
+        // 少了这一句，拖完 alpha / 变换 / 特效参数必须再挪一下播放头才记 —— 而且记在挪到的那一
+        // 刻上，不是用户改它的那一刻（"录了 alpha 却没有帧"就是这条 + 第一趟的规则一起造成的）。
+        // 撤销/重做回放出来的那一趟（kind='history'）不录：那把值不是用户新改的手，录进去的话
+        // 录制亮着时撤销就等于"把帧改成撤销后的值"，撤不干净。播放中不记（录制定时器自己挡）。
+        if (d.kind !== 'history') kfScheduleRef.current();
         return;
       }
       if (d.type === 'blend-request-vid') {
@@ -1821,29 +1827,38 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     if (!Object.keys(values).length) return;
     const recKey = clip.id;
     const prev = kfRecLast.current.get(recKey);
-    // 第一次录这一段:段上一枚关键帧都没有才落整套起始姿态;已有曲线的段只建立比较基准,
-    // 不把已经存在的动画在当前位置整套压平。之后每一趟只落与上一趟不同的通道。
+    // 第一次录这一段:已经有曲线的参数只建立比较基准(不把已有动画压平),**还没有曲线的参数里
+    // 用户动过的那些照落** —— 它们没有历史,此刻就是起点(见 kfFirstPassValues)。之后每一趟只落
+    // 与上一趟不同的通道。
     const changed = prev
       ? kfChangedValues(prev, values)
-      : (clip.keyframes && Object.keys(clip.keyframes.channels).length ? {} : values);
+      : kfFirstPassValues(clip.keyframes, local, values, snap);
     kfRecLast.current.set(recKey, values);
     if (!Object.keys(changed).length) return;
     vidUpdate(proj2 => kfRecord(proj2, clip.id, local, changed, kfSnapshotMeta(snap)), 'Record keyframes');
   }, [layerKfParams, vidUpdate, vidTransport]);
   const kfTimer = useRef(0);
+  /** 录制节奏的唯一入口:挪播放头、点亮 ●、以及图层上刚提交的一步(见 blend-edited)都走它。
+   *  去抖 150ms —— 拖滑杆是一串连续的提交,停稳了才落一帧。 */
+  const kfScheduleRef = useRef<() => void>(() => {});
   useEffect(() => {
     const schedule = () => {
       if (vidPlayingRef.current || !getKfArmed()) return;
       if (kfTimer.current) window.clearTimeout(kfTimer.current);
       kfTimer.current = window.setTimeout(() => { kfTimer.current = 0; void recordKfAtPlayhead(); }, 150);
     };
+    kfScheduleRef.current = schedule;
     const unArm = subscribeKfArmed(() => { if (getKfArmed()) schedule(); });
     const unT = vidTransport.subscribe(schedule);
     // 挂载/依赖变化时:已在录制中(且此刻不在播)就先记一笔。vidPlaying 在依赖里 = **按 Pause/Stop
     // 那一趟也走这里** —— 播放头停住正是"停了一次",可 transport 从这一刻起不再发 tick,
     // 不补这一下就要等下一次挪头才落帧(录制亮着却按暂停 = 什么都不记,看着就是"播放里完全没用")。
     if (getKfArmed()) schedule();
-    return () => { unArm(); unT(); if (kfTimer.current) window.clearTimeout(kfTimer.current); };
+    return () => {
+      // 录制关掉/本窗卸掉之后,晚到的一步提交不该再落帧。
+      kfScheduleRef.current = () => {};
+      unArm(); unT(); if (kfTimer.current) window.clearTimeout(kfTimer.current);
+    };
   }, [recordKfAtPlayhead, vidTransport, vidPlaying]);
 
   // ── Pipeline Preset 的视频路（骨架与 Processor 视频路同一套）────────────────────────────
@@ -2733,7 +2748,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const active = d.uid === blendDocs.activeUid;
     const still = active ? null : docStills[d.uid];
     docBodies[docUnit(d.uid)] = active && vidMode === 'video'
-      ? <VidPlayer vid={vidCtl} visible={tab === 'draw'} onCompLayer={showPlayLayer} />
+      ? <VidPlayer vid={vidCtl} visible={tab === 'draw'} onCompLayer={showPlayLayer}
+          stageCovers={!!frameRect && vidMode === 'video'} />
       : still
         ? <img src={still} alt={d.name} style={styles.docStill} />
         : <div style={styles.docVoid} />;
