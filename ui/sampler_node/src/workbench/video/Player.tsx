@@ -152,8 +152,15 @@ export const VidPlayer: React.FC<{
   /** 已经报过的预热（layerKey@at）：同一段只报一次，别每个 tick 都发。 */
   const warmSent = useRef('');
   // 性能探针(只读,诊断用):合成发包端的次数/回包分类,与页面 __vidPerf 配对。
-  const compPerf = useRef({ sends: 0, grabs: 0, grabMs: 0, cachedReplies: 0, bitmapReplies: 0, baseSends: 0, rtt: 0 });
+  // kf = 页面最近一包关键帧注入的读数(keys/applied/落空原因),关键帧"有值却不动"时先看它。
+  const compPerf = useRef({
+    sends: 0, grabs: 0, grabMs: 0, cachedReplies: 0, bitmapReplies: 0, baseSends: 0, rtt: 0,
+    kfSends: 0, kfKeysLast: 0,
+    kf: null as { keys: number; applied: number; noLayer: number; noFx: number; noParam: number; bad: number; sample: string[] } | null,
+  });
   (window as unknown as { __compPerf?: unknown }).__compPerf = compPerf.current;
+  /** 关键帧"宿主发了、页面一条都没打进去"的告警节流（每秒最多一条，见回包处的 kf 读数）。 */
+  const kfWarnAt = useRef(0);
   // 关键帧回放:这一刻各通道的采样值(段内秒、线性插值,见 kfSample)。段上没关键帧 = null ——
   // 一个字段都不带,页面那头照旧按"内容与 t 无关"走缓存(frameless)。
   const kfSampleAll = (clip: VidClip, timelineT: number): Record<string, number> | null => {
@@ -178,12 +185,19 @@ export const VidPlayer: React.FC<{
     const tracks = plan.sources.map(s => ({
       trackId: s.trackId, src: s.clip.src, want: sourceTime(s.clip, q),
     }));
-    // 关键帧采样与源帧同一时刻口径(q):页面折叠那一趟把值临时打进图层,监视器看到的就是
-    // "这一刻关键帧说了算"的画面(图层的真值不动,见 blend_node 的 vidKfInject)。
+    // 关键帧采样与源帧同一时刻口径(q):页面折叠那一趟把值临时打进图层,屏幕上那块画布折的就是
+    // "这一刻关键帧说了算"的画面(图层的真值不动,见 blend_node 的 render opts.vidKf / vidKfInject)。
     const kf = kfSampleAll(plan.layer, q);
+    // 名字表跟着走：通道键里的层 id / 特效 id 可能是换号前的旧值（粘贴出来的副本、旧工程），
+    // 页面按它把帧认到**同名层 / 同类型特效**上 —— 与关键帧窗合并行的规则同一条。
+    const kfMeta = kf ? (plan.layer.keyframes?.meta ?? null) : null;
+    if (kf) {
+      compPerf.current.kfSends++;
+      compPerf.current.kfKeysLast = Object.keys(kf).length;
+    }
     vid.blendPost({
       type: 'blend-vid-frame', reqId, t: q, layerKey: plan.layerKey,
-      baseTrackId: plan.baseTrackId, tracks, ...(kf ? { kf } : {}),
+      baseTrackId: plan.baseTrackId, tracks, ...(kf ? { kf } : {}), ...(kfMeta ? { kfMeta } : {}),
     });
   }, [vid]);
 
@@ -205,7 +219,12 @@ export const VidPlayer: React.FC<{
     // 由它决定，发多发少都不会积压。
     const COMP_FPS = 30;
     const q = Math.max(0, Math.floor(t * COMP_FPS + 1e-6) / COMP_FPS);
-    const staticSeg = compFrameless.current.has(plan.layerKey);
+    // **带关键帧的段一律不算"不随帧变"**：段上的采样值逐帧都在变，画面就是随帧变的。页面那边的
+    // frameless 结论只有回过一包才会更新，而"录完关键帧就开始播"这条路上没有中间那一包 —— 靠它
+    // 自觉会让整段动画一个包都收不到（画面上就是"关键帧完全没生效"）。
+    const kfChannels = plan.layer.keyframes?.channels;
+    const hasKf = !!kfChannels && Object.keys(kfChannels).length > 0;
+    const staticSeg = !hasKf && compFrameless.current.has(plan.layerKey);
     const key = staticSeg ? plan.layer.id + '@static' : plan.layer.id + '@' + q;
     if (!force && key === r.key && !r.want) return;
     r.want = { plan, q: staticSeg ? t : q, key };
@@ -224,6 +243,22 @@ export const VidPlayer: React.FC<{
     sendComposite(w.plan, w.q);
   };
   requestRef.current = requestComposite;
+  // 关键帧被改过（工程对象换了一份）就立刻重合成一次：那一改只发生在宿主这边，页面一无所知 ——
+  // 暂停态又没有后续 tick，改完一个帧值要等看门狗（~2s）画面才动，看起来就像"关键帧的数值根本没
+  // 生效"。这一包同时也是页面把**动画视图接回来**的那个时机（用户刚在图层上手改过的那一趟走的是
+  // 真值，见 blend_node 的 render opts.vidKf），所以它按"帧包驱动"那一趟折。
+  // 只在关键帧本身换了才发：拖片段 / 改名字这类工程改动不必每一下都重合成一张整画布。
+  const kfReposted = useRef('');
+  useEffect(() => {
+    if (!visible) return;
+    const t = transport.get();
+    const plan = compositePlanAt(projectRef.current, t, muteRef.current, frameNeed.current);
+    if (!plan || !plan.layer.keyframes?.channels) return;
+    const sig = plan.layer.id + '@' + t.toFixed(4) + '@' + JSON.stringify(plan.layer.keyframes);
+    if (sig === kfReposted.current) return;
+    kfReposted.current = sig;
+    requestRef.current(plan, t, true);
+  }, [p, visible, transport]);
 
   // ── 底片预览（游标不在 Layer 段上）────────────────────────────────────────────────────
   // 视频模式下工作台画布常驻：游标一离开 Layer 段，画布内容就换成当前视频帧。
@@ -405,9 +440,18 @@ export const VidPlayer: React.FC<{
     const onMsg = (event: MessageEvent) => {
       if (event.source !== vid.blendWindow()) return;
       const d = event.data as { type?: string; reqId?: number; bitmap?: ImageBitmap | null;
-        cached?: boolean; frameless?: boolean; usedTracks?: string[] } | null;
+        cached?: boolean; frameless?: boolean; usedTracks?: string[];
+        kf?: { keys: number; applied: number; noLayer: number; noFx: number; noParam: number; bad: number; sample: string[] } | null } | null;
       if (!d || d.type !== 'blend-vid-composite') return;
       const r = compReq.current;
+      // 页面那一趟关键帧注入的读数：宿主侧 __compPerf.kf 与之配对（见 blend_node 的 vidKfInject）。
+      if (d.kf) {
+        compPerf.current.kf = d.kf;
+        if (d.kf.keys && !d.kf.applied && performance.now() - kfWarnAt.current > 1000) {
+          kfWarnAt.current = performance.now();
+          console.warn('[kf] sampled keyframes reached the page but none applied —', d.kf);
+        }
+      }
       const bmp = d.bitmap ?? null;
       if (typeof d.reqId !== 'number' || d.reqId !== r.inflight) { bmp?.close(); return; }
       const now = performance.now();

@@ -4112,7 +4112,11 @@ function layerItem(l) {
     return { src, transform: tr, opacity };
 }
 
-function render() {
+// `opts.vidKf` = 这一趟是**帧包驱动**的（播放 / 拖游标 / 宿主改完帧值后的重发，见 vidFrameFlush），
+// 于是同一趟里连关键帧那批采样值一起折进活画布 —— 用户看到的画面才真的在动（见下面 kfRestore）。
+// 用户自己在图层上动手的那一趟（拖参数 / 拖图层 / 切显隐 / 撤销）不带这个开关：手上改的东西要立刻
+// 看得见，不能被他这一刻的采样值盖住；下一条帧包再把动画视图接回来。
+function render(opts) {
     // P3.2: one picture, one surface. The working stack is composited straight onto #stageCanvas
     // (the only displayed canvas); #blendCanvas is the guidance-free **context image** that every
     // pixel-shipping consumer reads (run input, Tag regions, Layer Context, Export PNG, host
@@ -4125,6 +4129,8 @@ function render() {
         c.clearRect(0, 0, canvasW, canvasH);
     }
     guidanceHasInk = false;
+    // 这一趟要重折画面：先按"画布上放的是真值"记账，只有真的折了采样值（见 kfRestore 那段）才改写。
+    vidKfOnLive = '';
     if (canvasW > 0 && canvasH > 0) {
         // Direction 小窗开着时, 同一趟里顺手抄一张参考图给那张画布平面当贴图: 它 = 此刻的 context
         // image, 唯独不含正在编辑的这一枚自己的面 (guidance 本来也不进 context)。剔除的单位是那枚
@@ -4146,6 +4152,17 @@ function render() {
             && (vidFramePacket.layerKey || '') === (activeLayerSet || '')
             ? vidFrameInject(vidFramePacket, vidFrameWorkLayers(activeLayerSet))
             : null;
+        // 关键帧回放：与源帧同一趟、同一套图层。补丁同样只活在**折叠这一趟**里（vidKfInject 的
+        // 返回值把每个被改过的字段原样放回），图层的真值 —— 存档、撤销栈、面板读数、录制快照 ——
+        // 一个字都不动。这里的开关只有一条：这一趟是不是帧包驱动的（见 render 头上那句）。
+        // 少了它，采样值只进得了「回给宿主监视器的那张临时图」，而 Video 模式的画面是这块**活画布**
+        // （画布的 iframe 就压在播放器上）—— 于是关键帧窗里曲线走得再好，屏幕上一个像素都不动。
+        const kfPacket = (opts && opts.vidKf && vidFramePacket
+            && (vidFramePacket.layerKey || '') === (activeLayerSet || '')) ? vidFramePacket : null;
+        const kfRestore = kfPacket ? vidKfInject(kfPacket, vidFrameWorkLayers(activeLayerSet)) : null;
+        // 记账：活画布上此刻折的是哪一份采样值（'' = 画布上是真值）。回包靠它决定"直接抄活画布"
+        // 还是"另折一张临时图"（见 vidFrameFlush）—— 抄的时候别再白折第二遍整条链。
+        vidKfOnLive = kfPacket ? vidKfSigOf(kfPacket.kf) : '';
         try {
             // ── 工作栈：攒 items。Stash 层要读「以下所有层」的合成，所以碰到它就先落地一次。
             let work = [];
@@ -4197,6 +4214,9 @@ function render() {
             if (guidanceHasInk) stagePresent([{ src: guidanceCanvas, transform: null }], false);
             stageMode = 'live';               // 显示面上此刻就是活画布这套
         } finally {
+            // 先放回采样值再放回源帧：两块字段不重叠，但"值 → 像素"的次序读起来更顺（面上的帧
+            // 还原之后，下一次折叠看见的就是图层自己的面）。
+            if (kfRestore) kfRestore();
             if (vidRestore) vidRestore();
         }
         if (dirRef) dirRefDone();       // 纹理看这个版本号决定要不要重传, 拖动期间它一个字节都没变
@@ -4874,42 +4894,122 @@ function vidFrameInject(packet, stack) {
 // ── 关键帧回放：把宿主采样好的通道值临时打进这一套图层 ───────────────────────────────────────
 // 宿主每帧把 `layer:<id>:opacity | layer:<id>:transform:<prop> | layer:<id>:fx:<fxId>:<param>` 的
 // 线性插值结果随合成包送来（blend-vid-frame 的 kf）。这里只做**折叠期补丁**：写进去 → 折这一趟 →
-// 原样放回 —— 图层的真值（用户手上的数据、存档、撤销栈）一个字不动，监视器看到的是"这一刻关键帧
-// 说了算"的画面。特效参数的补丁天然触发重算：折叠签名含参数值，补丁值与真值来回切，缓存各算各的。
+// 原样放回 —— 图层的真值（用户手上的数据、存档、撤销栈）一个字不动。特效参数的补丁天然触发重算：
+// 折叠签名含参数值，补丁值与真值来回切，缓存各算各的。
+// **折在哪张画布上**是这条路成不成立的关键，两处都折（见 vidFrameFlush）：
+//   · 活画布（render 的 kfRestore）：Video 模式的画面就是它 —— 画布的 iframe 压在播放器上，
+//     所以"只给监视器那张位图打补丁"等于什么都没做。帧包驱动的那一趟带 opts.vidKf。
+//   · 临时合成（composeVidFrameCanvas）：这一包说的不是活画布上这套时（游标在别段），监视器
+//     以及台上那张副本仍旧要看到"这一刻"。
+// 最近一趟注入的读数（回包里一并报给宿主，供 __compPerf / __vidPerf 对账）：
+// keys = 这一包送来的通道数，applied = 真打进去的，其余按落空原因分开记。
+// 关键帧"看着有值、画面上却不动"时，这张表能一句话说清断在哪一段：层 id 对不上（noLayer）、
+// 特效 id 不在这个图层上（noFx）、参数键对不上（noParam）、键格式不认识（bad）。
+let vidKfDiag = null;
+let vidKfWarnAt = 0;
+// 活画布上此刻折进去的是哪一份采样值（vidKfSigOf 的结果；'' = 画布上是真值、不是动画）。
+// 回包靠它决定"直接抄活画布"还是"另折一张临时图"（见 vidFrameFlush）—— 抄的时候别再白折第二遍。
+let vidKfOnLive = '';
+/** 一份采样值的身份。宿主每包都送新对象，所以比 JSON 而不比对象身份（通道少、值都是数，便宜）。 */
+function vidKfSigOf(kf) { return kf ? JSON.stringify(kf) : ''; }
 function vidKfInject(packet, stack) {
     const kf = packet.kf;
     if (!kf) return null;
     const touched = [];
+    const diag = { keys: 0, applied: 0, byName: 0, noLayer: 0, noFx: 0, noParam: 0, bad: 0, sample: [] };
+    const miss = (kind, key, extra) => {
+        diag[kind]++;
+        if (diag.sample.length < 6) diag.sample.push(kind + ': ' + key + (extra || ''));
+    };
     const byId = new Map();
     for (const l of stack) byId.set(String(l.id), l);
+    // 档里的名字表（随包送来）：层 id / 特效 id 换过号之后（粘出来的副本、旧工程），
+    // 关键帧窗按名字把帧并到了活参数上 —— 回放这一趟必须用同一条认亲规则，否则窗里
+    // 看着有一条完整的曲线，画面却一个值都不动。只在**唯一**同名/同类型时认（与窗口一致）。
+    const meta = packet.kfMeta || null;
+    const metaOf = id => (meta && meta.layers && meta.layers[id]) || null;
+    const layerByName = name => {
+        if (!name) return null;
+        let hit = null;
+        for (const l of stack) {
+            if ((l.name || '') !== name) continue;
+            if (hit) return null;                 // 同名两枚 = 不猜
+            hit = l;
+        }
+        return hit;
+    };
     for (const key in kf) {
+        diag.keys++;
         const val = kf[key];
-        if (typeof val !== 'number' || !Number.isFinite(val)) continue;
+        if (typeof val !== 'number' || !Number.isFinite(val)) { miss('bad', key); continue; }
         const m = /^layer:([^:]+):(opacity|transform:.+|fx:.+)$/.exec(key);
-        if (!m) continue;
-        const l = byId.get(m[1]);
-        if (!l) continue;
+        if (!m) { miss('bad', key); continue; }
+        let l = byId.get(m[1]);
+        if (!l) {
+            const stale = metaOf(m[1]);
+            l = layerByName(stale && stale.name);
+            if (l) diag.byName++;
+            else {
+                miss('noLayer', key, ' (stack: ' + [...byId.keys()].join(',') + ')');
+                continue;
+            }
+        }
         const rest = m[2];
         if (rest === 'opacity') {
             const had = Object.prototype.hasOwnProperty.call(l, 'opacity');
             touched.push({ o: l, k: 'opacity', had, was: l.opacity });
             l.opacity = Math.min(1, Math.max(0, val));
+            diag.applied++;
         } else if (rest.charCodeAt(0) === 116) {          // 'transform:<prop>'
             const prop = rest.slice(10);
             const tr = l.transform;
-            if (!tr || !(prop in tr)) continue;
+            if (!tr || !(prop in tr)) { miss('noParam', key); continue; }
             touched.push({ o: tr, k: prop, had: true, was: tr[prop] });
             tr[prop] = val;
+            diag.applied++;
         } else {                                          // 'fx:<fxId>:<param>'
             const mm = /^fx:(\d+):(.+)$/.exec(rest);
-            if (!mm) continue;
-            // l.effects 是最左那条链的视图，返回的就是链记录里的真对象 —— 补丁落的是折叠读的那份。
+            if (!mm) { miss('bad', key); continue; }
+            // 特效 id 可能住在**任何**一枚 Effects 容器里（一个图层可以挂好几条链）。老名字
+            // `l.effects` 只看最左边那枚 —— 右边那枚里的关键帧会静默落空，所以按 id 扫全串。
             let eff = null;
-            for (const e of (l.effects || [])) if (String(e.id) === mm[1]) { eff = e; break; }
-            if (!eff || !eff.params || !(mm[2] in eff.params)) continue;
+            for (const r of attrRecordsOf(l)) {
+                if (!r.chain) continue;
+                const hit = r.chain.find(e => e && String(e.id) === mm[1]);
+                if (hit) { eff = hit; break; }
+            }
+            if (!eff) {
+                // 旧特效 id：按档里记下的**类型名**认到活表那一步（同类型挂了两枚时不猜）。
+                const fxType = (metaOf(m[1]) && metaOf(m[1]).effects && metaOf(m[1]).effects[mm[1]]) || '';
+                if (fxType) {
+                    const cands = [];
+                    for (const r of attrRecordsOf(l)) {
+                        for (const e of (r.chain || [])) if (e && e.type === fxType) cands.push(e);
+                    }
+                    if (cands.length === 1) { eff = cands[0]; diag.byName++; }
+                }
+            }
+            if (!eff) {
+                const chains = attrRecordsOf(l).filter(r => r.chain)
+                    .map(r => r.chain.map(e => e && e.id).join('/')).join('|');
+                miss('noFx', key, ' (fx in layer: ' + chains + ')');
+                continue;
+            }
+            if (!eff.params || !(mm[2] in eff.params)) {
+                miss('noParam', key, ' (params: ' + Object.keys(eff.params || {}).join(',') + ')');
+                continue;
+            }
             touched.push({ o: eff.params, k: mm[2], had: true, was: eff.params[mm[2]] });
             eff.params[mm[2]] = val;
+            diag.applied++;
         }
+    }
+    vidKfDiag = diag;
+    if (typeof __vidPerf === 'object' && __vidPerf) __vidPerf.kf = diag;
+    // 一包通道全落空 = 关键帧哑在注入这一环（原因就在 sample 里）。节流 1 秒，别逐帧刷屏。
+    if (diag.keys && !diag.applied && performance.now() - vidKfWarnAt > 1000) {
+        vidKfWarnAt = performance.now();
+        console.warn('[kf] no keyframe value applied', diag, 'stack:', [...byId.keys()]);
     }
     if (!touched.length) return null;
     return function vidKfRestore() {
@@ -4918,9 +5018,10 @@ function vidKfInject(packet, stack) {
 }
 
 // 这一包说的那一段自己那套折进一张临时画布 —— 只在"监视器要看的那套不是活画布上这套"时才走
-// （没选中 Layer 段，或选中的不是游标底下那段）。活画布那一套已经由 render() 折好，直接抄；
-// 这条只补上"宿主监视器看到的仍是游标底下那一段"这个旧口径。关键帧那一帧也走这里（kf 只该进
-// 监视器，不该糊上用户正在编辑的活图层 —— 见 vidFrameFlush 活跃分支）。
+// （没选中 Layer 段，或选中的不是游标底下那段）。活画布那一套已经由 render() 折好（源帧与采样值
+// 都在上面），直接抄；这条只补上"宿主监视器看到的仍是游标底下那一段"这个旧口径。
+// 采样值在这里也折一遍：这一包说的不是手上这套时，活画布照旧是用户手改的那一版，动画视图只活在
+// 这张临时图上（它同时也是台上那张副本，见 vidFrameFlush 的非活跃分支）。
 function composeVidFrameCanvas(packet) {
     if (!canvasW || !canvasH) return null;
     if (!vidFrameCanvas) {
@@ -4950,26 +5051,28 @@ function composeVidFrameCanvas(packet) {
 
 function replyVidFrame(reqId, canvas, frameless) {
     const used = [...vidLastUsedTracks];
+    const kf = vidKfDiag;
     if (!canvas || !canvas.width || !canvas.height) {
-        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, frameless: !!frameless, usedTracks: used }, '*');
+        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, frameless: !!frameless, usedTracks: used, kf }, '*');
         return;
     }
     createImageBitmap(canvas).then(bmp => {
-        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: bmp, frameless: !!frameless, usedTracks: used }, '*', [bmp]);
+        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: bmp, frameless: !!frameless, usedTracks: used, kf }, '*', [bmp]);
     }, () => {
-        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, frameless: !!frameless, usedTracks: used }, '*');
+        window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, frameless: !!frameless, usedTracks: used, kf }, '*');
     });
 }
 
 // 缓存命中:内容与上一张回图完全一致,一个像素都不用动 —— 只回标记,宿主保留现画面。
 // frameless 一并报上(宿主据此跳过后续帧的源帧抓取,见 Player 的 compFrameless)。
 function replyVidFrameCached(reqId, frameless) {
-    window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, cached: true, frameless: !!frameless, usedTracks: [...vidLastUsedTracks] }, '*');
+    window.parent.postMessage({ type: 'blend-vid-composite', reqId, bitmap: null, cached: true, frameless: !!frameless, usedTracks: [...vidLastUsedTracks], kf: vidKfDiag }, '*');
 }
 
 
 // 一帧回一张图给监视器。两半：
-//   · 这一包说的那一段就是活画布上这套（最常见：正选中它）+ 画布正显示着 ⇒ 直接抄 blendCanvas；
+//   · 这一包说的那一段就是活画布上这套（最常见：正选中它）+ 画布正显示着 ⇒ 直接抄 blendCanvas
+//     （源帧与关键帧采样值都已经折在上面了，见 render 的 opts.vidKf）；
 //   · 否则（没选中 Layer 段、或选中的是别段）⇒ 单独把游标底下那段折进临时画布，监视器仍是旧口径。
 // **一帧只做一次**：合成（render / 折临时画布）+ 回图都并到这一口 rAF 里。宿主可以按 30Hz
 // 发包，落地节拍由这里决定 —— 同一帧来几包就只合成最后一包。这一层是"发得比画得快"不反噬的
@@ -5002,11 +5105,13 @@ function vidFrameFlush() {
     const active = (p.layerKey || '') === (activeLayerSet || '');
     vidInFlush = true;
     try {
-        // 活画布这一套：着一包还没画过就先画（render 内部会把源帧折进去）。
+        // 活画布这一套：这一包还没画过就先画。源帧与**关键帧采样值**同在一趟里折进去
+        // （render 的 opts.vidKf / kfRestore）：Video 模式的画面就是这块活画布，采样值不进这一趟
+        // 就等于没进画面 —— 关键帧窗里的曲线走得再好，屏幕上也是一个像素都不动。
         if (active && !p.rendered) {
             p.rendered = true;
             __vidPerf.renders++;
-            render();
+            render({ vidKf: true });
         }
         // 回图这一刻的真实状态记进缓存:下一包状态没变(图层没编辑、源帧帧号没动)就回
         // cached 标记,零像素工作 —— 播放扫过一段"与时间无关"的图层集时,监视器那一趟
@@ -5018,9 +5123,11 @@ function vidFrameFlush() {
         const frameless = !vidCompCache.hasFrame;
         if (active) {
             __vidPerf.repliesActive++;
-            // 关键帧生效的那一帧：监视器要的是"补丁后的画面"，活画布保持用户真值 —— 单独折一张
-            // 临时画布（与别段同一台），不把采样值糊上用户正在编辑的活图层。没有 kf 就照旧抄活画布。
-            const kfCv = p.kf ? composeVidFrameCanvas(p) : null;
+            // 活画布这一趟已经把采样值折进去了（vidKfOnLive 记着是哪一份）⇒ 监视器抄它就行，
+            // 别再白折一遍整条链。只有"活画布上是真值"（用户刚在图层上动过手、还没等到帧包重画）
+            // 才另折一张临时画布，让监视器那一格仍是"这一刻"。
+            const onLive = !!p.kf && vidKfOnLive === vidKfSigOf(p.kf);
+            const kfCv = (p.kf && !onLive) ? composeVidFrameCanvas(p) : null;
             replyVidFrame(p.reqId, kfCv || blendCanvas, frameless);
             stageSync();             // 这一包说的正是活画布这套了：台上换成它（用户在编辑）
         } else {
@@ -5142,6 +5249,9 @@ function handleVidFrameMessage(d) {
         // 关键帧回放的采样值（宿主按这一刻把各通道线性插值好送来）：通道键 → 数值。
         // 只在折叠那一趟里临时打进去（vidKfInject），图层的真值一个字不动。
         kf: (d.kf && typeof d.kf === 'object') ? d.kf : null,
+        // 通道键里那些 **id 的所有者名字**（录制时随档落下）。id 换过号之后靠它按名字认亲，
+        // 与关键帧窗的合并规则同一条（见 vidKfInject）。
+        kfMeta: (d.kfMeta && typeof d.kfMeta === 'object') ? d.kfMeta : null,
         sources,
         bitmaps,
         rendered: false,          // 这一包还没画（合成与回图都并到那一口 rAF，见 vidFrameFlush）
@@ -5169,8 +5279,11 @@ function handleVidFrameMessage(d) {
         // 已经在 live 就不补：那说明画布上就是这一张。播放中每包都重画一遍整画布是白烧
         // （P3.4 把"播放中不上台活画布"去掉之后，这条路径每 1/30 秒就会被走到一次）。
         if (st.isActive) {
-            if (!vidFramePacket.rendered && stageMode !== 'live') {
-                vidFramePacket.rendered = true; __vidPerf.renders++; render();
+            // 关键帧视图掉了也要补画：暂停态里用户在图层上动过手 ⇒ 画布上折的是真值，
+            // 而这一包要的是"这一刻"（宿主改完帧值后的重发正是这种包）。补画时把采样值带上。
+            const wantKf = !!vidFramePacket.kf && vidKfOnLive !== vidKfSigOf(vidFramePacket.kf);
+            if (wantKf || (!vidFramePacket.rendered && stageMode !== 'live')) {
+                vidFramePacket.rendered = true; __vidPerf.renders++; render(wantKf ? { vidKf: true } : undefined);
             }
             stageSync();                 // 活画布这套补画完了：换手到它
         }
@@ -5765,10 +5878,18 @@ function vidKfSnapshot(key) {
         visible: l.visible !== false,
         opacity: layerOpacity(l),
         transform: l.transform ? Object.assign({}, l.transform) : null,
-        effects: (l.effects || []).map(e => ({
-            id: e.id, type: e.type, enabled: e.enabled !== false,
-            params: e.params ? JSON.parse(JSON.stringify(e.params)) : {},
-        })),
+        // 一个图层可以挂好几枚 Effects 容器，每条链都是这一层的参数 —— 只报最左边那枚
+        // （老名字 `l.effects`）会让右边那条链上的参数根本录不进关键帧。
+        effects: attrRecordsOf(l).filter(r => r.chain).reduce((out, r) => {
+            for (const e of r.chain) {
+                if (!e) continue;
+                out.push({
+                    id: e.id, type: e.type, enabled: e.enabled !== false,
+                    params: e.params ? JSON.parse(JSON.stringify(e.params)) : {},
+                });
+            }
+            return out;
+        }, []),
     }));
 }
 function replyVidKf(reqId, key) {
