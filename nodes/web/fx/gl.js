@@ -8,6 +8,14 @@
 // 图层之间尺寸通常一致,所以一帧里多个图层走特效也不会反复分配。
 const FX_MAX_PIXELS = 12e6;              // 5 × RGBA16F ≈ 480 MB 的地板,超过就整链跳过并说明原因
 const FX_KAWASE_MAX_ITER = 8;            // 着色器里那个常数次循环的上界
+// P3.7：全页只有一台 GL —— 特效引擎与合成器共用**显示面**那把上下文（见 fxglBindStage）。
+// 以前 fxgl 自己造一块离屏画布：链的结果要先"抄回 2D 画布"，合成器再把它上传成纹理，一层每帧
+// 两趟全幅搬运（回读 + 上传）。合成一个上下文之后，链的结果直接就是合成器能绑的那张纹理
+// （applyLayerEffectsTexture → layerItem 的 tex 条目）：显示那条路上一趟搬运都不剩。
+// 代价：默认帧缓冲从此是**显示面**，所有"抄回 2D 画布"的出口都要改成渲进 FBO 再 readPixels
+// （见 fxglReadFace / applyLayerEffects），绝不能往默认帧缓冲上画。
+let fxglStageBind = null;                // { canvas, gl } —— 绑定的显示面（没绑就自造一块离屏的）
+let fxglShared = false;                  // fxgl.canvas 是借来的显示面：不许改它的尺寸
 const fxgl = {
     gl: null, dead: '', skip: '', w: 0, h: 0, fmt: null, vao: null, maxTex: 0,
     off: [], texSrc: null, texMask: null, texMap: null, texMap2: null, texLut: null, progs: null, canvas: null, hasMask: 0, hasMap2: 0,
@@ -148,13 +156,37 @@ function fxglU(prog, name) {
     return prog.u[name];
 }
 
+/** 把这台引擎绑到**显示面**那把上下文上（页面在拿到 stage 上下文之后、任何特效调用之前喊一次）。
+ *  必须在 fxglInit 之前——它就是 Init 要用的那台上下文。 */
+function fxglBindStage(canvas, gl) {
+    if (!canvas || !gl) return false;
+    if (fxgl.gl === gl && fxglShared) return true;
+    if (fxgl.gl && fxgl.gl !== gl) {
+        // 之前自立过一台：把那边的缓冲丢掉，别把别人的上下文里的对象留着。
+        try {
+            for (const b of fxgl.off) { fxgl.gl.deleteFramebuffer(b.fb); fxgl.gl.deleteTexture(b.tex); }
+            if (fxglOut) { fxgl.gl.deleteFramebuffer(fxglOut.fb); fxgl.gl.deleteTexture(fxglOut.tex); }
+            for (const [, p] of fxglPub.byKey) { fxgl.gl.deleteFramebuffer(p.fb); fxgl.gl.deleteTexture(p.tex); }
+        } catch (e) { /* 上下文已经没了 */ }
+    }
+    fxglStageBind = { canvas, gl };
+    fxgl.gl = null; fxgl.dead = ''; fxgl.progs = null; fxgl.vao = null;
+    fxgl.off = []; fxgl.w = 0; fxgl.h = 0;
+    fxglOut = null;
+    fxglPub.list = []; fxglPub.byKey = new Map(); fxglPub.used = 0;
+    return true;
+}
+
 function fxglInit() {
     if (fxgl.gl || fxgl.dead) return fxgl.gl;
-    const canvas = document.createElement('canvas');
-    const gl = canvas.getContext('webgl2', { alpha: true, antialias: false, depth: false, stencil: false, premultipliedAlpha: true, preserveDrawingBuffer: false });
+    const bound = fxglStageBind;
+    const canvas = bound ? bound.canvas : document.createElement('canvas');
+    const gl = bound ? bound.gl
+        : canvas.getContext('webgl2', { alpha: true, antialias: false, depth: false, stencil: false, premultipliedAlpha: true, preserveDrawingBuffer: false });
     if (!gl) { fxgl.dead = 'no WebGL2'; return null; }
     fxgl.gl = gl;
     fxgl.canvas = canvas;
+    fxglShared = !!bound;
     fxgl.maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) | 0;
     // 可滤色的半浮点是这套算法最合适的落点:32F 还额外要 OES_texture_float_linear 才能做
     // dual-filtering 依赖的线性抽样,而 16F 在 WebGL2 里既可渲又可滤。都没有就退回 8 位。
@@ -236,8 +268,8 @@ function fxglResize(gl, w, h) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     fxgl.w = w;
     fxgl.h = h;
-    fxgl.canvas.width = w;
-    fxgl.canvas.height = h;
+    // 借来的显示面**不许动尺寸**（那是画布本身，改一下就等于清屏 + 换栅格）。
+    if (!fxglShared) { fxgl.canvas.width = w; fxgl.canvas.height = h; }
     return true;
 }
 
@@ -276,6 +308,56 @@ function fxglBindTex(prog, name, tex, unit) {
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.uniform1i(loc, unit);
+}
+
+// ---- 出口③：把一块渲染面抄成 2D 像素（单上下文之后的"抄回画布"那条路）------------------------
+// 以前这一趟是"present 到默认帧缓冲,再 drawImage(fxgl.canvas)"。现在默认帧缓冲就是显示面,
+// 往那儿画等于把屏幕糊掉,所以改成:渲进一块自己的 RGBA8 面 → readPixels → 还原成画布口径。
+// 两个必须对齐的细节：
+//   · **y 翻转**：FBO 的第 0 行是图像下边，画布 ImageData 的第 0 行是上边。
+//   · **反预乘**：present 出口写的是预乘 alpha（与"画布被浏览器按预乘解释"同口径），而 2D 画布
+//     存的是直通 alpha —— putImageData 不做这件事，得自己对回来（与 drawImage 那条老路同一个公式）。
+let fxglOut = null;
+function fxglOutFace(w, h) {
+    const gl = fxgl.gl;
+    if (!gl) return null;
+    if (fxglOut && fxglOut.w === w && fxglOut.h === h) return fxglOut;
+    if (fxglOut) { gl.deleteFramebuffer(fxglOut.fb); gl.deleteTexture(fxglOut.tex); fxglOut = null; }
+    const b = fxglMakeBuffer(gl, w, h, FX_PUB_FMT());
+    if (!b.ok) { fxgl.dead = 'framebuffer incomplete (canvas out)'; return null; }
+    fxglOut = b;
+    return b;
+}
+
+/** 一块渲染面 → ImageData（画布口径：第 0 行是图像上边、颜色是直通 alpha）。 */
+function fxglReadFace(buf, w, h) {
+    const gl = fxgl.gl;
+    if (!gl || !buf) return null;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, buf.fb);
+    const px = new Uint8Array(w * h * 4);
+    try { gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px); }
+    catch (e) { gl.bindFramebuffer(gl.FRAMEBUFFER, null); return null; }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const out = new Uint8ClampedArray(w * h * 4);
+    const row = w * 4;
+    for (let y = 0; y < h; y++) {
+        let s = (h - 1 - y) * row, d = y * row;
+        for (let x = 0; x < w; x++, s += 4, d += 4) {
+            const a = px[s + 3];
+            if (a === 255 || a === 0) {
+                out[d] = a === 255 ? px[s] : 0; out[d + 1] = a === 255 ? px[s + 1] : 0;
+                out[d + 2] = a === 255 ? px[s + 2] : 0; out[d + 3] = a;
+            } else {
+                // 反预乘：c = c_pm * 255 / a，四舍五入（与 drawImage 从预乘画布读数同一条公式）。
+                const inv = 255 / a;
+                out[d] = Math.min(255, Math.round(px[s] * inv));
+                out[d + 1] = Math.min(255, Math.round(px[s + 1] * inv));
+                out[d + 2] = Math.min(255, Math.round(px[s + 2] * inv));
+                out[d + 3] = a;
+            }
+        }
+    }
+    return new ImageData(out, w, h);
 }
 
 // uStart/uDelta 以 texel 计,着色器再乘 uTexel。phase 只决定抽样朝向从哪一路起(对角/轴向),
@@ -409,17 +491,22 @@ function fxglChainRun(l, surface, opts) {
 }
 
 // 出口①(P2 起就在用):把结果抄回 surface。链的像素一落地就成了"一张画布",所以它必须过一遍
-// present(直通 α → 预乘,canvas 被 drawImage 读走时按预乘解释)再画进去。
+// present(直通 α → 预乘)再还原成直通 alpha 才画得进去。
+// 单上下文(P3.7)之后这一趟不能画进默认帧缓冲（那是显示面）—— 渲进一块临时面,readPixels 抄回。
 // 返回 false = 整链没跑,surface 原样留着。
 function applyLayerEffects(l, surface, opts) {
     const r = fxglChainRun(l, surface, opts);
     if (!r) return false;
     const w = surface.width, h = surface.height;
-    fxglRunPass(null, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[r.slot].tex, 0));
+    const out = fxglOutFace(w, h);
+    if (!out) return false;
+    fxglRunPass(out, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[r.slot].tex, 0), { w, h });
+    const img = fxglReadFace(out, w, h);
+    if (!img) return false;
     const c2 = surface.getContext('2d');
     resetCtx(c2);
     c2.clearRect(0, 0, w, h);
-    c2.drawImage(fxgl.canvas, 0, 0, w, h);
+    c2.putImageData(img, 0, 0);
     fxgl.stats.readback++;
     return true;
 }
@@ -428,11 +515,15 @@ function applyLayerEffects(l, surface, opts) {
 // 交出去的那张面来自**发布区**(不是 off[]) —— off[] 是公共借用区,下一条链就把 0/1 覆盖了,而合成
 // 要按图层次序贴很多层,每层的结果得同时存在。发布区是预乘 8 位:与"抄回 canvas 再 texImage2D"那条
 // 老路逐位同口径(那两步省掉的正是这一步拷贝),所以合成结果不许因为换了出口而变。
+// `opts.slotKey`（图层 id）= 走**按 key 固定**的那一页：同一层每帧拿到的纹理是同一张，调用方才能
+// 按内容签名把上一帧的结果直接再用（显示面那条路，见 fxResolvedTexture）。
 // 返回 { gl, tex, w, h } 或 null(没跑 = 调用方照老路用 canvas)。
 function applyLayerEffectsTexture(l, surface, opts) {
     const r = fxglChainRun(l, surface, opts);
     if (!r) return null;
-    const pub = fxglPubTake(fxgl.w, fxgl.h);
+    const pub = (opts && opts.slotKey)
+        ? fxglPubSlot(opts.slotKey, fxgl.w, fxgl.h)
+        : fxglPubTake(fxgl.w, fxgl.h);
     if (!pub) return null;
     fxglRunPass(pub, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[r.slot].tex, 0));
     fxgl.stats.pub++;
@@ -441,7 +532,9 @@ function applyLayerEffectsTexture(l, surface, opts) {
 
 // 发布区:按需生长的纹理池,池里的面跨帧复用(每次合成开头 fxglPubReset 把 used 归零)。
 // 峰值条数 = 一帧里同时带着链结果的层数,不是历史总数 —— 这就是不设上限也安全的原因。
-const fxglPub = { list: [], used: 0 };
+// `byKey` 是**按图层固定**的那一路（显示面那条路用）：同一层每帧拿到的永远是同一页，
+// 所以"内容签名没变"时可以直接把上一帧那张纹理再交出去，一帧都不用重跑。
+const fxglPub = { list: [], used: 0, byKey: new Map() };
 const FX_PUB_FMT = () => ({ internal: fxgl.gl.RGBA8, type: fxgl.gl.UNSIGNED_BYTE });
 
 function fxglPubReset() { fxglPub.used = 0; }
@@ -464,9 +557,33 @@ function fxglPubTake(w, h) {
     return p;
 }
 
+/** 按 key（图层 id）固定的一页发布面：同一层每帧都拿到它，缓存才敢把纹理交出去。 */
+function fxglPubSlot(key, w, h) {
+    const gl = fxgl.gl;
+    const k = String(key);
+    let p = fxglPub.byKey.get(k);
+    if (p && (p.w !== w || p.h !== h)) {
+        gl.deleteFramebuffer(p.fb);
+        gl.deleteTexture(p.tex);
+        fxglPub.byKey.delete(k);
+        p = null;
+    }
+    if (!p) {
+        const b = fxglMakeBuffer(gl, w, h, FX_PUB_FMT());
+        if (!b.ok) { fxgl.dead = 'framebuffer incomplete (publish slot)'; return null; }
+        p = b;
+        fxglPub.byKey.set(k, p);
+    }
+    return p;
+}
+
 // 合成器往"这台 GL 的那块画布"出图之前先对这一句:让画布尺寸与它要画的网格一致,并把发布区开新一页。
 // 返回 { gl, canvas }(借出去的上下文),取不到 GL 就 null —— 调用方据此决定还能不能用纹理入口。
+// **共用显示面之后它一律回 null**（P3.7）：这条"借画布"的路是给 render-plan 那个离线合成器用的，
+// 它会在借来的画布上直接合成 —— 那块现在是屏幕本身，借出去就等于把离线合成画到屏幕上。回 null
+// 之后它走自己的离屏上下文（与没有 WebGL2 时同一条退路），像素结果不变。
 function fxglStageSize(w, h) {
+    if (fxglShared) return null;
     const gl = fxglInit();
     if (!gl) return null;
     if (fxgl.canvas.width !== w || fxgl.canvas.height !== h) {
@@ -498,10 +615,17 @@ const FX_CUT_ALL = () => true;
 // 这枚 attribute 会在折叠出来的那张面上留下像素吗:停用的步骤不算 (数据还在,只是这一趟不出墨),
 // 空面 = 没装 (attr/core.js 的规矩三),空链 / 全旁路 = 不跑,而 cut 说了算的那些蒙版这一趟只当
 // silhouette 喂给右边的链,不当剪刀。
+// 「绑了视频轨、但这一趟还没注入面」的贴片/蒙版**也算会出墨**：P3.7 之后显示那条路把整层直接交给
+// 视频纹理（不造 2D 画布），而 2D 折叠的读者（缩略图 / 生成 / 后端分流）要自己现取一帧
+// （见 fxDropStrip 里的 vidFrameFaceFor）。不这么认，这些层在 2D 那边会被判成"没东西"、出空图 ——
+// 用户看到的就是"贴片绑的那张图没跟着更新"。
 function attrInks(r, l, i, cut) {
     if (!attrEnabled(r)) return false;
     if (r.chain) return activeEffects(l, r).length > 0;
-    if (!r.surface || !r.surface.width || !r.surface.height) return false;
+    if (!r.surface || !r.surface.width || !r.surface.height) {
+        if (!r.frameTrack || typeof vidFrameFaceFor !== 'function') return false;
+        return cut(r, i);
+    }
     return cut(r, i);
 }
 
@@ -574,7 +698,12 @@ function fxDropStrip(l, surface, base, thru, cut) {
             fxgl.skip = prevSkip || fxgl.skip;
             continue;
         }
-        const s = r.surface;
+        // 这一枚的面这一趟还没注入（显示那条路把整层直接交给视频纹理、不造画布）：2D 这边现取一帧。
+        // 取不到（那条轨此刻没有可画的帧）= 这一枚这一趟什么都不出，与"停用一步"同一个结果。
+        let s = r.surface;
+        if ((!s || !s.width || !s.height) && r.frameTrack && typeof vidFrameFaceFor === 'function') {
+            s = vidFrameFaceFor(r, w, h);
+        }
         if (!s || !s.width || !s.height) continue;
         if (r.type === 'mask') {
             left.push(s);
@@ -823,17 +952,28 @@ function fxPaintTexture(l) {
     return { gl: fxgl.gl, tex: st.pub.tex, w: st.w, h: st.h, seq: st.seq };
 }
 
-// 显示用：把 composed 呈到 fxgl 那块默认画布上（预乘出口，与链的 present 同一条），
-// 调用方拿到 canvas 后按图层矩阵 drawImage。这里不改 fxgl.w/h —— 链条的离屏池不参与。
+// 显示用：把 composed 呈成一张**2D 画布**（预乘出口，与链的 present 同一条），调用方拿到后按图层
+// 矩阵 drawImage。单上下文之后不能画进默认帧缓冲（那是显示面），所以渲进临时面再抄进一块专用画布。
+// 这里不改 fxgl.w/h —— 链条的离屏池不参与。
+let fxPaintCanvas = null;
 function fxPaintPresent(l) {
     const st = fxPaintCache.get(l);
     if (!st || !st.live) return null;
-    if (fxgl.canvas.width !== st.w) fxgl.canvas.width = st.w;
-    if (fxgl.canvas.height !== st.h) fxgl.canvas.height = st.h;
-    fxglRunPass(null, fxgl.progs.present, p => fxglBindTex(p, 'uTex', st.composed.tex, 0),
+    const out = fxglOutFace(st.w, st.h);
+    if (!out) return null;
+    fxglRunPass(out, fxgl.progs.present, p => fxglBindTex(p, 'uTex', st.composed.tex, 0),
                 { w: st.w, h: st.h });
+    const img = fxglReadFace(out, st.w, st.h);
+    if (!img) return null;
+    if (!fxPaintCanvas) fxPaintCanvas = document.createElement('canvas');
+    if (fxPaintCanvas.width !== st.w) fxPaintCanvas.width = st.w;
+    if (fxPaintCanvas.height !== st.h) fxPaintCanvas.height = st.h;
+    const g = fxPaintCanvas.getContext('2d');
+    resetCtx(g);
+    g.clearRect(0, 0, st.w, st.h);
+    g.putImageData(img, 0, 0);
     fxgl.stats.paintPresent++;
-    return fxgl.canvas;
+    return fxPaintCanvas;
 }
 
 // 提交：2D 面已经由调用方写好，纹理从此刻起不再代表这一层（下一次 begin 会按新面重传）。

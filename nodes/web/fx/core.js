@@ -177,6 +177,10 @@ function fxExternalStamp(l) {
             if (spec && spec.stamp) s += spec.stamp(e, l) + '|';
         }
     }
+    // "绑了视频轨、这一趟没注入面"的贴片/蒙版：2D 折叠会按需现取一帧（见 blend_node 的
+    // vidFrameFaceFor），那一帧每帧都在变 —— 不让它进身份，折叠结果就会钉死在第一次那张上
+    // （贴片"绑的图不跟着更新"正是这条：显示那条路不造面，2D 那边于是看不出帧变了）。
+    if (typeof vidFrameFaceStamp === 'function') s += vidFrameFaceStamp(l);
     return s;
 }
 

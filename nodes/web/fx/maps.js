@@ -246,8 +246,10 @@ async function restoreFxMaps(list, blobs, mapKeys) {
 }
 
 // 贴图迟到/失效、旁路切换,都是「整条链不再可信」—— 两处共用同一套失效动作。
+// 两张缓存都要清：`fxCache` 是"折回 2D 画布"那份，`fxTexCache` 是"结果留在纹理上"那份（显示面那条路，
+// 见 blend_node 的 fxResolvedTexture）。只清一张 = 另一条路还贴着上一份结果。
 function invalidateAllFx() {
-    for (const l of layers) l.fxCache = null;
+    for (const l of layers) { l.fxCache = null; l.fxTexCache = null; }
     refreshLayerPanels();
     render();
 }

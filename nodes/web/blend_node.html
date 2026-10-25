@@ -759,6 +759,11 @@ const stageGL = (() => {
             stencil: false, premultipliedAlpha: true, preserveDrawingBuffer: true });
     } catch (e) { return false; }
 })();
+// P3.7：**全页只有一台 GL**。特效引擎（fx/gl.js）自己也用这台上下文 —— 于是链的结果直接就是
+// 合成器能绑的那张纹理，显示那条路上一趟"回读 + 二次上传"都不剩。这一步必须在任何特效调用之前。
+if (stageGL && typeof fxglBindStage === 'function') {
+    try { fxglBindStage(stageCanvas, stageCanvas.getContext('webgl2')); } catch (e) { /* 取不到就退回旧路 */ }
+}
 const stageCtx2d = stageGL ? null : stageCanvas.getContext('2d');
 const vidBaseVideo = document.getElementById('vidBaseVideo');
 const vidSrcStage = document.getElementById('vidSrcStage');
@@ -1281,7 +1286,11 @@ function stashLayerKey(l) {
     return l.id + ':' + (l.visible ? 1 : 0) + ':' + layerOpacity(l)
         + ':' + stashSurfId(l.img) + surf
         + ':' + (l.paintGen | 0) + attrPaintGens(l) + ':' + (l.fxResolveGen | 0)
-        + ':' + tr.cx + ',' + tr.cy + ',' + tr.w + ',' + tr.h + ',' + tr.rotation + ';';
+        + ':' + tr.cx + ',' + tr.cy + ',' + tr.w + ',' + tr.h + ',' + tr.rotation
+        // **帧戳**：绑了视频轨的面在显示那条路上不注入（整层贴片直接吃视频纹理），代次逐帧不变。
+        // 少了这一项，Stash 会认为"下面一直是同一张画面"、从此不再重抄 —— 而 Stash 压在所有层上面，
+        // 它一冻就等于**整屏冻住**（把 alpha 用关键帧归零之后画面卡死就是这一条）。
+        + ':' + vidLayerFrameStamp(l) + ';';
 }
 
 // 抄写。指纹没变就一个字都不动 —— 挪它**上面**的层绝不该让整条链重跑一遍。就地重写 img 之后按既有
@@ -4103,9 +4112,12 @@ function scratchFor(l, key, w, h) {
 
 /** 一张源面的**内容身份**：合成器拿它判断"这张画布的像素换过没有"，没换过就不再整幅上传纹理。
  *  口径与 fxResolved 的缓存键同源（图层自己的落笔代次 + 条带上每枚面的代次 + 链的重算代次）——
- *  这个仓库里"面就地改写了"这件事一向靠这几颗代次说，写表面的路径都会 +1（见 fx/gl.js 的注释）。 */
+ *  这个仓库里"面就地改写了"这件事一向靠这几颗代次说，写表面的路径都会 +1（见 fx/gl.js 的注释）。
+ *  **绑了视频轨的面还要带帧戳**：显示那条路为了省一趟拷贝不注入面（见 layerItem 的直通），
+ *  于是那些代次逐帧不变 —— 少了帧戳，这张"内容身份"会冻在第一帧上（合成器于是永远贴旧纹理）。 */
 function layerSurfaceGen(l) {
-    return (l.paintGen | 0) + ':' + attrPaintGens(l) + ':' + (l.fxResolveGen | 0) + ':' + stashSurfId(l.img);
+    return (l.paintGen | 0) + ':' + attrPaintGens(l) + ':' + (l.fxResolveGen | 0) + ':' + stashSurfId(l.img)
+        + ':' + vidLayerFrameStamp(l);
 }
 
 // ── 「整层就等于一枚 decal」的 GPU 直通 ─────────────────────────────────────────────────────
@@ -4192,6 +4204,48 @@ function composContain(tr, sx, sy) {
         rotation: t.rotation || 0 };
 }
 
+/** 这一层能不能"整条链在 GL 里跑完、结果留在纹理上"：条带上**只有一枚**会跑的特效容器、而且没有
+ *  任何要叠的面（decal / 蒙版 / 生成器）。这种层 = 自己的底图 + 一串特效，正好是
+ *  applyLayerEffectsTexture 那一口能接的形状：链跑完直接给一张纹理，合成器绑上就画 ——
+ *  回读与二次上传都省了。（两条链要串起来时，后一条的输入得是前一条的纹理，而链的入口只吃画布 ——
+ *  那种情形退回折叠那条路。） */
+function soloChainRecord(l) {
+    if (!l || !l.img || l.isMaskLayer) return null;
+    const recs = attrRecordsOf(l);
+    let hit = null;
+    for (const r of recs) {
+        if (!r || !attrEnabled(r)) continue;
+        const spec = ATTR_TYPES[r.type];
+        if (spec && spec.kind === 'generator') return null;   // 生成器的面要先 sync：走折叠那条
+        if (!r.chain) return null;                            // 有面要叠：折叠那条路才认得
+        if (!activeEffects(l, r).length) continue;            // 停用/旁路的容器不算
+        if (hit) return null;                                 // 两条链：要串，退回折叠
+        hit = r;
+    }
+    return hit;
+}
+
+/** 折叠这一层，但结果**留在纹理上**（不落 2D）。与 fxResolved 同一套缓存身份 ⇒ 内容没变就一帧都不跑。
+ *  Stash 层也走这条路：循环里 `stashResample` 已经把"以下所有层"抄进它的 img，链读的就是那份。 */
+function fxResolvedTexture(l) {
+    const rec = soloChainRecord(l);
+    if (!rec) return null;
+    const { w, h } = nativeSize(l.img);
+    if (!w || !h) return null;
+    const sig = fxSignature(l) + '|' + fxMapStamp(l) + '|' + fxExternalStamp(l) + '|' + stashSurfId(l.img);
+    const gen = (l.paintGen | 0) + ':' + attrPaintGens(l) + ':' + w + 'x' + h;
+    const c = l.fxTexCache;
+    if (c && c.sig === sig && c.gen === gen && c.face) return c.face;
+    l.fxTexCache = null;
+    // 与折叠那条路同口径：生成器的面先同步、镜面记录临时停用。
+    syncGeneratorFaces(l);
+    const face = fxMirrorHidden(l,
+        () => applyLayerEffectsTexture(l, fxSrcOf(l.img), { rec, slotKey: 'layer:' + l.id }));
+    if (!face) return null;
+    l.fxTexCache = { sig, gen, face };
+    return face;
+}
+
 /** 一层这一帧要盖上去的那张面 + 落点。这是 `drawLayer` 的 GL 版：同一个 src、同一套几何，
  *  只是把 drawImage 换成一条 item，交给 KCompositor 在唯一显示面上按预乘混合。 */
 function layerItem(l) {
@@ -4212,6 +4266,11 @@ function layerItem(l) {
         if (direct) return { src: direct.video, premul: true, transform: composContain(tr, direct.sx, direct.sy), opacity };
         const solo = soloDecalOf(l);
         if (solo) return { src: solo, transform: tr, opacity, gen: layerSurfaceGen(l) };
+        // 第三条：这一层是"自己的底图 + 一条特效链"（没有要叠的面）⇒ 链在 GL 里跑完**结果就是一张
+        // 纹理**（同一个上下文，合成器直接绑），中间不回读、不重新上传。缓存命中时连链都不跑。
+        // 栅格层的像素就是画布像素，照 drawLayer 的规矩按 1:1 贴（transform 不吃）。
+        const tex = fxResolvedTexture(l);
+        if (tex) return { tex: tex.tex, transform: isRasterLayer(l) ? null : tr, opacity };
     }
     let src = null;
     if (live) {
@@ -4364,7 +4423,6 @@ function render(opts) {
             // 还原之后，下一次折叠看见的就是图层自己的面）。
             if (kfRestore) kfRestore();
             if (vidRestore) vidRestore();
-            vidFrameSourcesNow = null;      // 直通只在折叠那一趟里有效
         }
         if (dirRef) dirRefDone();       // 纹理看这个版本号决定要不要重传, 拖动期间它一个字节都没变
     } else {
@@ -4464,7 +4522,11 @@ function drawVidFrameContain(ctx, src, w, h) {
 // drawImage(镜像视频) 就够了：解码是浏览器的事，帧一步都不离开这个进程。
 // 只有**被面 attribute 指名**的轨才解码（见 vidFrameNeedTracks）；没人吃帧的段一条都不开。
 const vidSrcVideos = new Map();     // trackId -> { v, src, ok, usedAt }
+// 池子的**软**下限。真正的上限跟着"这一刻真要几条轨"走（见 vidSrcVideoFor）：一个 Layer 段可以
+// 同时引用多条视频轨（每枚 decal / 蒙版各绑一条），再加上预热带进来的下一段那几条 —— 死守四条就会
+// 轮到**正要用**的让位，那一枚贴片于是每帧重建、重新 seek，看上去就是"只有一条轨是对的"。
 const VID_SRC_POOL_MAX = 4;
+let vidSrcNeedNow = new Set();      // 这一包真要吃的轨（vidSrcSync 每包重设）：谁在里面谁不许被挤掉
 
 function vidSrcVideoFor(trackId, src) {
     let e = vidSrcVideos.get(trackId);
@@ -4492,11 +4554,18 @@ function vidSrcVideoFor(trackId, src) {
     vidSrcStage.appendChild(v);
     try { v.load(); } catch (err) { /* noop */ }
     vidSrcVideos.set(trackId, e);
-    if (vidSrcVideos.size > VID_SRC_POOL_MAX) {
-        // 池子有界：最久没被用到的那条让位（解码器不白占着）。
+    // 池子有界：最久没被用到的那条让位（解码器不白占着）。但**这一刻还要吃帧的轨不许挤掉** ——
+    // 一个 Layer 段引用多条轨时，把正用的赶走就等于那一枚贴片/蒙版每帧都重新建、重新 seek
+    // （"只有一条轨是对的"那种现象）。上限也跟着"真要几条"走，再加上预热的两条余量。
+    const cap = Math.max(VID_SRC_POOL_MAX, vidSrcNeedNow.size + 4);
+    while (vidSrcVideos.size > cap) {
         let oldest = null, oldestAt = Infinity;
-        for (const [k, x] of vidSrcVideos) if (k !== trackId && x.usedAt < oldestAt) { oldest = k; oldestAt = x.usedAt; }
-        if (oldest) vidSrcDrop(oldest);
+        for (const [k, x] of vidSrcVideos) {
+            if (k === trackId || vidSrcNeedNow.has(k)) continue;
+            if (x.usedAt < oldestAt) { oldest = k; oldestAt = x.usedAt; }
+        }
+        if (!oldest) break;                    // 全是正用的：宁可多留一条，也不动它们
+        vidSrcDrop(oldest);
     }
     return e;
 }
@@ -4553,6 +4622,8 @@ function vidSrcSync(d) {
     const list = Array.isArray(d.tracks) ? d.tracks : null;
     if (!list) return out;
     const need = vidFrameNeedTracks(d.layerKey || '');
+    // 这一刻"正要用"的轨登记给池子：谁在里面，vidSrcVideoFor 就不许把它挤掉（多条轨的段靠这一条）。
+    vidSrcNeedNow = need;
     // 播/停从底片包读（vidBasePlaying）：合成包里没有播放位了 —— 编辑与播放走同一条路径，
     // 包的形状与"停在哪"无关。两个包由宿主同一次 tick 发出，最多差一包。
     const playing = vidBasePlaying;
@@ -4564,8 +4635,13 @@ function vidSrcSync(d) {
         const want = Math.max(0, +t.want || 0);
         // **借底片那只**：同一个源、又正好对在同一处（本工程里 decal 指的就是底轨）——
         // 直接拿它当这一轨的源帧：省一次加载、一个解码器，进段第一帧也不用等。
+        // 只在这条轨**自己还没有能用的镜像**时借：底片的时刻是 6Hz 量化的，借/不借会在边界上
+        // 来回跳，一跳就 pause/play 一次镜像（那一下 readyState 会掉到 1 = 这一枚贴片这一帧没帧）。
+        // 一旦自己的镜像热了就一直用自己的 —— 稳态不抖动比省一个解码器重要得多。
+        const own = vidSrcVideos.get(trackId);
         if (vidBaseOn && String(t.src) === vidBaseSrc && vidBaseVideo.readyState >= 2
-            && !vidBaseVideo.seeking && Math.abs(want - vidBaseWant) < 0.2) {
+            && !vidBaseVideo.seeking && Math.abs(want - vidBaseWant) < 0.2
+            && (!own || own.v.readyState < 2)) {
             out.set(trackId, vidBaseVideo);
             continue;
         }
@@ -4574,8 +4650,19 @@ function vidSrcSync(d) {
         e.want = want;
         if (v.readyState >= 2) {
             if (playing) {
-                if (Math.abs(v.currentTime - want) > 0.12) { try { v.currentTime = want; } catch (err) { /* 还不能 seek */ } }
-                if (v.paused) void v.play().catch(() => { /* autoplay 政策 */ });
+                // 播放中只做**纠偏**，而且带迟滞与节流：轻微落后（<0.35s）就让它自己追 —— 播放是 1×，
+                // 追得回来。一落后就 seek 的话会自锁：seek 一次十几到几十毫秒，落后更多、再 seek，
+                // 永远停在 readyState=1（那一枚贴片干脆没有帧）。多条轨绑在一段上时这个自锁最容易被
+                // 触发（解码器抢不过来），表现就是"绑两轨的段播起来又糊又卡"。
+                if (v.paused) {
+                    if (Math.abs(v.currentTime - want) > 0.3) {
+                        try { v.currentTime = want; vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
+                    }
+                    void v.play().catch(() => { /* autoplay 政策 */ });
+                } else if (!v.seeking && now - (e.seekAt || 0) > 600 && Math.abs(v.currentTime - want) > 0.35) {
+                    e.seekAt = now;
+                    try { v.currentTime = want; vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
+                }
             } else {
                 if (!v.paused) v.pause();
                 if (Math.abs(v.currentTime - want) > 1 / 240) {
@@ -4961,12 +5048,14 @@ function vidBaseSeek() {
     const ready = v.readyState >= 2;
     if (!vidBasePlaying) {
         if (!v.paused) v.pause();
-        if (ready && Math.abs(v.currentTime - vidBaseWant) > 0.02) {
+        if (ready && !v.seeking && Math.abs(v.currentTime - vidBaseWant) > 0.02) {
             try { v.currentTime = vidBaseWant; } catch (e) { /* 还不能 seek */ }
         }
         return;
     }
-    if (ready && Math.abs(v.currentTime - vidBaseWant) > 0.25) {
+    // `!v.seeking`：seek 在途时再发一次只会把这次作废重来（六赫兹的包足够把一只正在纠偏的
+    // 视频钉死在 readyState=1 上）。让它落地再说。
+    if (ready && !v.seeking && Math.abs(v.currentTime - vidBaseWant) > 0.25) {
         try { v.currentTime = vidBaseWant; } catch (e) { /* 还不能 seek */ }
     }
     if (v.paused) void v.play().catch(() => { /* autoplay 政策 */ });
@@ -5020,6 +5109,68 @@ function vidFrameSurfaceFor(rec, w, h) {
     return cv;
 }
 
+/** 一枚面这一趟的帧 → 一张画布（contain 进它自己的网格；蒙版把亮度搬进 alpha）。
+ *  注入（vidFrameInject）与 2D 折叠的按需取帧（vidFrameFaceFor）共用这一份画法。 */
+function drawVidFrameFace(rec, src, w, h) {
+    const cv = vidFrameSurfaceFor(rec, w, h);
+    const g = cv.getContext('2d');
+    resetCtx(g);
+    g.clearRect(0, 0, cv.width, cv.height);
+    if (rec.type === 'mask') g.filter = VID_FRAME_LUMA_FILTER;
+    drawVidFrameContain(g, src, cv.width, cv.height);
+    if (rec.type === 'mask') g.filter = 'none';
+    return cv;
+}
+
+/** **2D 折叠按需取帧**：这一枚面绑了一条视频轨，而它的 `surface` 这一趟没注入 —— 显示那条路为了省
+ *  一趟全幅拷贝，把"整层就是这一枚 decal"的层直接交给视频纹理（见 layerItem 的 solo 分支），于是
+ *  2D 的读者（缩略图 / 生成 / 后端分流 / 底片态预览）得自己现取一帧。
+ *  少了这一句，那些层在 2D 那边就是空的 —— 用户看到的就是"贴片绑的那张图不跟着更新"。
+ *  `w/h` = 折叠面（图层网格）的尺寸；记录自己那条网格不同时按记录自己的网格画（折叠会铺满）。 */
+function vidFrameFaceFor(rec, w, h) {
+    if (!rec || !rec.frameTrack || !vidFrameSourcesNow) return null;
+    const src = vidFrameSource(vidFrameSourcesNow, rec.frameTrack);
+    if (!src) return null;
+    const gw = (w | 0) || (rec.surface && rec.surface.width) || canvasW;
+    const gh = (h | 0) || (rec.surface && rec.surface.height) || canvasH;
+    if (!gw || !gh) return null;
+    return drawVidFrameFace(rec, src, gw, gh);
+}
+
+/** 这一层**绑了视频轨的那些面**此刻是第几帧的戳（进各种内容签名用）：逐记录报它那条镜像的
+ *  `currentTime`（还没帧给 `-`，位图给 `bmp`）。
+ *  **必须进签名**：显示那条路为了省一趟拷贝，整层贴片直接用视频纹理、不注入面（见 layerItem 的
+ *  直通），于是 `attrPaintGens` 不再逐帧变 —— 签名一冻住，所有靠它判定"下面是新画面"的地方都停在
+ *  第一帧上（Stash 的重抄、合成器的纹理缓存）。症状就是：拿关键帧把 alpha 归零之后画面整个卡住
+ *  （归零前 alpha 自己在变、签名跟着变，把这事盖住了）。 */
+function vidLayerFrameStamp(l) {
+    if (!l || !vidFrameSourcesNow) return '';
+    let s = '';
+    for (const r of attrRecordsOf(l)) {
+        if (!r || !r.frameTrack) continue;
+        const v = vidFrameSource(vidFrameSourcesNow, r.frameTrack);
+        s += r.id + '=' + (!v ? '-'
+            : ((typeof HTMLVideoElement !== 'undefined' && v instanceof HTMLVideoElement)
+                ? v.currentTime.toFixed(4) : 'bmp')) + '|';
+    }
+    return s;
+}
+
+/** 这一层"按需取帧"那几枚面的**帧戳**（折叠缓存用，见 fxExternalStamp）。
+ *  与 vidLayerFrameStamp 同一口径，只报**还没注入面**的那几枚 —— 注入了的由 surface 代次说话。 */
+function vidFrameFaceStamp(l) {
+    if (!vidFrameSourcesNow || !l) return '';
+    let s = '';
+    for (const r of attrRecordsOf(l)) {
+        if (!r || !r.frameTrack || (r.surface && r.surface.width)) continue;
+        const v = vidFrameSource(vidFrameSourcesNow, r.frameTrack);
+        s += '|' + r.id + '='
+            + (!v ? '-' : ((typeof HTMLVideoElement !== 'undefined' && v instanceof HTMLVideoElement)
+                ? v.currentTime.toFixed(4) : 'bmp'));
+    }
+    return s;
+}
+
 // 把这一包的源帧临时换进面 attribute：命中的记录换上该轨当前帧（decal 按 contain 铺满自己的
 // 网格；mask 把亮度搬进 alpha）。`stack` 是要折的那一套（活画布那一趟传当前图层集；监视器那一趟
 // 传这一包说的那一段自己那套）。返回一个还原函数 —— 折叠缓存的身份靠 markAttrPainted 记账，
@@ -5039,28 +5190,21 @@ function vidFrameInject(packet, stack, directOk) {
             if (!r || r.chain || !r.frameTrack || !attrEnabled(r)) continue;
             const spec = ATTR_TYPES[r.type];
             if (!spec || spec.kind !== 'surface') continue;
-            if (used.has(r.id)) continue;
-            used.add(r.id);
             const src = vidFrameSource(packet.sources, r.frameTrack);
             // 这一轨**还没有能画的帧**（镜像刚换源 / 还在 seek）：记一笔，合成完立刻安排重试。
             // 不记的话，暂停态下这一帧就永远停在"没有帧"的版本上（播放时下一包会自愈，暂停不会）。
             if (!src) packet.frameMissing = true;
             // 直通（见 layerItem 的 solo 分支）：这一枚面这一趟根本不落 CPU —— 画面那边直接把
             // 视频纹理贴上去。省掉的是"画进一张 2D 画布"这一趟拷贝（832×1216 每帧每层一次）。
+            // **先判直通再看 `used`**：同一枚记录可能被两层共用，而只有一层走直通 —— 先记 used 的话
+            // 另一层这一趟就再也拿不到面了（那层直接变空）。
             if (src && directOk && directOk(l, r, src)) { usedTracks.add(String(r.frameTrack)); continue; }
+            if (used.has(r.id)) continue;          // 这一枚的面这一趟已经造过了（共享记录只换一次）
+            used.add(r.id);
             const gw = (r.surface && r.surface.width) ? r.surface.width : nat.w;
             const gh = (r.surface && r.surface.height) ? r.surface.height : nat.h;
-            const cv = vidFrameSurfaceFor(r, gw, gh);
-            const g = cv.getContext('2d');
-            resetCtx(g);
-            g.clearRect(0, 0, cv.width, cv.height);
-            if (src) {
-                if (r.type === 'mask') g.filter = VID_FRAME_LUMA_FILTER;
-                drawVidFrameContain(g, src, cv.width, cv.height);
-                if (r.type === 'mask') g.filter = 'none';
-            }
             touched.push({ r, had: Object.prototype.hasOwnProperty.call(r, 'surface'), was: r.surface });
-            r.surface = src ? cv : null;
+            r.surface = src ? drawVidFrameFace(r, src, gw, gh) : null;
             if (src) usedTracks.add(String(r.frameTrack));
         }
     }
@@ -5460,6 +5604,9 @@ function handleVidFrameMessage(d) {
         frameMissing: false,
         retries: 0,
     };
+    // 源帧表跟着包走，而且**跨帧留着**：2D 的读者（缩略图 / 生成 / 后端分流）在 render 之外也要
+    // 按需取"这条轨此刻这一帧"（见 vidFrameFaceFor）。撤包时（vidFrameOff）清空。
+    vidFrameSourcesNow = sources;
     // 源帧收进 packet 就该画了，分两条走：这一包说的正是用户手上这套（选中了它）⇒ 重画活画布
     // （源帧折在上面，收尾会顺手抄一份回给监视器）；否则用户手上这套一个像素都不动，只单独折一张
     // 临时画布回给监视器（旧口径：监视器看的始终是游标底下那一段）。
@@ -5501,6 +5648,7 @@ function handleVidFrameMessage(d) {
 function vidFrameOff() {
     const prev = vidFramePacket;
     vidFramePacket = null;
+    vidFrameSourcesNow = null;
     if (vidFrameRetryTimer) { clearTimeout(vidFrameRetryTimer); vidFrameRetryTimer = 0; }
     if (vidFrameRaf) { cancelAnimationFrame(vidFrameRaf); vidFrameRaf = 0; }
     if (prev) for (const b of prev.bitmaps) { try { b.close(); } catch (e) { /* gone */ } }
