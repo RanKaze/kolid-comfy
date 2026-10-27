@@ -16,7 +16,7 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
@@ -1820,6 +1820,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const local = Math.round((t - clip.start) * 1000) / 1000;
     // 播放头在这段之外 = 这一刻在段里没有意义,什么都不记。
     if (local < 0 || local > clip.duration) return;
+    // 段上的时刻是**归一化**的（0…1，见 model 的 kfU）：段被拉伸/裁短，动画按比例重排、逻辑不变。
+    const u = kfU(clip, local);
     const snap = await layerKfParams(clip.layerKey || clip.id);
     if (!snap || !getKfArmed()) return;
     // 通道键与所有者名字都走 model 那两份公共口径 —— 手动加帧(Keyframes 窗)与录制不能再各写一套。
@@ -1832,10 +1834,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // 与上一趟不同的通道。
     const changed = prev
       ? kfChangedValues(prev, values)
-      : kfFirstPassValues(clip.keyframes, local, values, snap);
+      : kfFirstPassValues(clip.keyframes, u, values, snap);
     kfRecLast.current.set(recKey, values);
     if (!Object.keys(changed).length) return;
-    vidUpdate(proj2 => kfRecord(proj2, clip.id, local, changed, kfSnapshotMeta(snap)), 'Record keyframes');
+    vidUpdate(proj2 => kfRecord(proj2, clip.id, u, changed, kfSnapshotMeta(snap)), 'Record keyframes');
   }, [layerKfParams, vidUpdate, vidTransport]);
   const kfTimer = useRef(0);
   /** 录制节奏的唯一入口:挪播放头、点亮 ●、以及图层上刚提交的一步(见 blend-edited)都走它。

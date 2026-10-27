@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSy
 import { createPortal } from 'react-dom';
 import {
   type VidClip, type VidClipClipboard, type VidController, type VidPasteResult, type VidTrack, type VidMergeProbe,
-  addLayerClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfRemapLayerIds, kfTimes, mergeVidClips, moveClip, moveTrack, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
+  addLayerClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, moveClip, moveTrack, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
   vgenChainPrevOf, vgenSeamsOf, vgenWithDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
@@ -443,10 +443,13 @@ export const VidTimeline: React.FC<{
   // ── 对齐吸附 ── 拖动/裁剪时吸到：时间线 0、入/出点、播放头、其它片段的头与尾。
   // 阈值按**屏幕像素**给（缩放时手感一致）；按住 Ctrl/⌘ 临时关掉（见各拖动处的 ctrlNoSnap）。
   // 靶子带标签：吸住时在靶子上拉一条琥珀竖线并写明"吸的是谁"（见 showSnap）。
-  type SnapHit = { t: number; label: string };
+  type SnapHit = { t: number; label: string; /** 这条靶子是哪枚片段的（关键帧靶子用：拖它自己时它跟着走）。 */ owner?: string };
   const SNAP_PX = 6;
-  /** 靶子表。skipHead = 别把播放头自己列进去（正在拖播放头时，否则它一按下就吸在自己身上）。 */
-  const snapTargets = useCallback((exclude: ReadonlySet<string>, skipIo: boolean, skipHead = false): SnapHit[] => {
+  /** 靶子表。skipHead = 别把播放头自己列进去（正在拖播放头时，否则它一按下就吸在自己身上）。
+   *  `ownKeys`：把**正在拖的那枚片段自己的关键帧**也算进来 —— 裁剪时正是要把它裁到自己某一枚帧上；
+   *  整段拖动时不列（那些帧跟着片段一起走，列进来只会让它吸在原地）。 */
+  const snapTargets = useCallback((exclude: ReadonlySet<string>, skipIo: boolean, skipHead = false,
+    ownKeys = false): SnapHit[] => {
     const ts: SnapHit[] = [
       { t: 0, label: 'Timeline start' },
     ];
@@ -455,8 +458,14 @@ export const VidTimeline: React.FC<{
       ts.push({ t: p.inPoint, label: 'In point' }, { t: p.outPoint, label: 'Out point' });
     }
     for (const c of p.clips) {
-      if (exclude.has(c.id)) continue;
-      ts.push({ t: c.start, label: `${c.name} · head` }, { t: c.start + c.duration, label: `${c.name} · tail` });
+      const moving = exclude.has(c.id);
+      if (!moving) ts.push({ t: c.start, label: `${c.name} · head` }, { t: c.start + c.duration, label: `${c.name} · tail` });
+      // 段上的关键帧菱形也是靶子：段内秒 → 时间线坐标（关键帧存的是归一化，见 model 的 kfLocalTimes）。
+      if (c.kind === 'layer' && (!moving || ownKeys)) {
+        for (const t of kfLocalTimes(c, p.fps)) {
+          ts.push({ t: c.start + t, label: `${c.name} · key ${t.toFixed(2)}s`, owner: c.id });
+        }
+      }
     }
     return ts;
   }, [p, transport]);
@@ -483,11 +492,13 @@ export const VidTimeline: React.FC<{
     if (el) el.style.display = 'none';
   }, []);
   /** 单边吸附（裁剪 / 入出点 / 播放头 scrub）：把时刻 t 吸到最近的靶子上。
-   *  skipHead：拖播放头时它自己不能当靶子（否则一按下就吸在原地不动）。 */
-  const snapEdge = useCallback((t: number, exclude: ReadonlySet<string>, skipIo = false, skipHead = false): SnapHit | null => {
+   *  skipHead：拖播放头时它自己不能当靶子（否则一按下就吸在原地不动）。
+   *  `ownKeys`：裁剪时把被裁那枚片段自己的关键帧也当靶子（见 snapTargets）。 */
+  const snapEdge = useCallback((t: number, exclude: ReadonlySet<string>, skipIo = false, skipHead = false,
+    ownKeys = false): SnapHit | null => {
     const tol = SNAP_PX / vid.pps;
     let best: SnapHit | null = null, bestD = tol;
-    for (const s of snapTargets(exclude, skipIo, skipHead)) {
+    for (const s of snapTargets(exclude, skipIo, skipHead, ownKeys)) {
       const d = Math.abs(s.t - t);
       if (d < bestD) { bestD = d; best = s; }
     }
@@ -658,7 +669,8 @@ export const VidTimeline: React.FC<{
       const edge: 'l' | 'r' = d.mode;
       lastTrimAt = performance.now();
       const t = timeAt(e.clientX);
-      const hit = noSnap || !clip ? null : snapEdge(t, movingIds(clip, linked));
+      // 裁剪：带上被裁那枚片段自己的关键帧靶子 —— 把尾巴裁到某一枚帧上是常用动作。
+      const hit = noSnap || !clip ? null : snapEdge(t, movingIds(clip, linked), false, false, true);
       showSnap(hit);
       // 浮签跟着指针走；字数从本帧的 project 读（trim 之后下一帧就是新长度）。
       setTrimHint(h => (h && h.id === dragId ? { ...h, x: e.clientX, y: e.clientY } : h));
@@ -1499,13 +1511,6 @@ export const VidTimeline: React.FC<{
                       onStartDrag={startClipDrag} onPointerMove={onClipPointerMove} onPointerUp={endClipDrag}
                       onContextMenu={openMergeMenu}
                       onUnlink={() => { if (gid) vid.update(proj => unlinkGroup(proj, gid), 'Unlink'); }}
-                      onKfSeek={(id, t) => {
-                        // 菱形点下去：选中这一段（Keyframes 窗跟着选中走）+ 播放头跳到那一刻。
-                        const cc = p.clips.find(x => x.id === id);
-                        if (!cc) return;
-                        selectOnly(id);
-                        vid.seek(cc.start + t);
-                      }}
                       continueBlocked={continueBlocked}
                       queued={procQueue.queued.includes(c.id)}
                       onDequeue={id => vid.pauseProc?.(id)}
@@ -1536,6 +1541,35 @@ export const VidTimeline: React.FC<{
                       chainOut={chainOut} />
                   );
                 })}
+                {/* Layer 段上的关键帧菱形：画在**泳道坐标**里（不是片段内部）—— 片段是 overflow:hidden，
+                    贴着两头的菱形会被裁掉或被挤进来，位置就不准了。这里中心严格落在「段起点 + 段内秒」
+                    上：与 Tracks 的标尺、吸附靶子、Keyframes 窗用同一个时刻口径。 */}
+                {tr.kind === 'layer' && p.clips.filter(c => c.trackId === tr.id && c.keyframes && c.duration * pps >= 6).map(c => (
+                  <div key={'kfm' + c.id} data-vid-kf-lane={c.id}
+                    style={{ position: 'absolute', left: c.start * pps, top: 0, height: '100%',
+                      width: Math.max(8, c.duration * pps), pointerEvents: 'none', zIndex: 3 }}>
+                    {kfLocalTimes(c, p.fps).map(t => (
+                      <button key={t} data-vid-kf-mark="" type="button"
+                        title={`Keyframe ${t.toFixed(3)}s into this segment (timeline ${fmtTime(c.start + t)}) — click to put the playhead there. Edit keys in the Keyframes window.`}
+                        onPointerDown={e => e.stopPropagation()}
+                        onClick={e => {
+                          e.stopPropagation();
+                          selectOnly(c.id);
+                          vid.seek(c.start + t);
+                        }}
+                        style={{
+                          position: 'absolute', left: t * pps - 4.5, top: 2,
+                          width: 9, height: 9, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto',
+                        }}
+                      >
+                        <svg width="9" height="9" viewBox="0 0 11 11" aria-hidden>
+                          <path d="M5.5 1 10 5.5 5.5 10 1 5.5Z" fill="#ffd9a8" stroke="rgba(0,0,0,0.6)" strokeWidth="1" />
+                        </svg>
+                      </button>
+                    ))}
+                  </div>
+                ))}
                 {/* 生成器段的接缝：Ctrl+左键连接/断开。已连着的常驻一颗链标；没连的只在
                     Ctrl 按住时显形（平时这块地方属于两侧的裁剪把手）。z 在片段之上。 */}
                 {seams.filter(s => s.prev.trackId === tr.id).map(s => (
@@ -1840,8 +1874,7 @@ const Clip: React.FC<{
   /** 前一段已经跑出来的产物（末帧预览取它的最后一帧；没跑过 = null）。 */
   chainOut?: VidClip | null;
   /** Layer 段面上的关键帧菱形被点：把播放头送到那一刻（段内秒）。编辑都在 Keyframes 窗里做，这里只跳转。 */
-  onKfSeek?: (clipId: string, localT: number) => void;
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onVGenCudOpen, chainPrev, chainOut, onKfSeek }) => {
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onVGenCudOpen, chainPrev, chainOut }) => {
   const isAudio = c.kind === 'audio';
   // 缺失：只有"真有来源"的段才可能缺（Layer 段、占位段、生成器段都没有仓库来源）。
   const gone = !!missing && c.kind !== 'layer' && !c.pending && !c.vgen;
@@ -2010,24 +2043,8 @@ const Clip: React.FC<{
       {isLayer && !micro && (
         <span style={{ display: 'flex', alignItems: 'center', color: '#ffd9a8', flexShrink: 0, position: 'relative', pointerEvents: 'none' }}><IconLayers /></span>
       )}
-      {/* Layer 段面上的关键帧菱形：琥珀色 = 这一段在这些时刻有帧（与段左缘同一口径 = 段内秒）。
-          只当"有没有帧 / 帧在哪"的读数 + 跳转，按下不接管拖拽（stopPropagation），改帧去 Keyframes 窗。 */}
-      {isLayer && !micro && kfTimes(c.keyframes).map(t => (
-        <button key={t} data-vid-kf-mark="" type="button"
-          title={`Keyframe ${t.toFixed(3)}s into this segment (timeline ${fmtTime(c.start + t)}) — click to put the playhead there. Edit keys in the Keyframes window.`}
-          onPointerDown={e => e.stopPropagation()}
-          onClick={e => { e.stopPropagation(); onKfSeek?.(c.id, t); }}
-          style={{
-            position: 'absolute', left: Math.min(c.duration * pps - 10, Math.max(0, t * pps - 5)), top: 2,
-            width: 10, height: 10, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 3,
-          }}
-        >
-          <svg width="9" height="9" viewBox="0 0 11 11" aria-hidden>
-            <path d="M5.5 1 10 5.5 5.5 10 1 5.5Z" fill="#ffd9a8" stroke="rgba(0,0,0,0.6)" strokeWidth="1" />
-          </svg>
-        </button>
-      ))}
+      {/* 关键帧菱形已搬到**泳道坐标**里画（见 VidTimeline 里 data-vid-kf-lane 那段）：
+          片段是 overflow:hidden，贴着两头的菱形会被裁掉或被挤进来，位置就不准了。 */}
       {/* 缺失：整段盖一层红斜纹（画面/波形还在也压得住），右边挂一颗「!」。 */}
       {gone && (
         <span style={{ position: 'absolute', inset: 0, pointerEvents: 'none',

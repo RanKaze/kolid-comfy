@@ -714,6 +714,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
      所以与 golden 必须逐像素相同）；第二步换成 GL 预乘混合。它不认识编辑器/播放器 —— 见 docs/render_plan.md。 -->
 <script src="js/frame-source.js"></script>
 <script src="js/compositor.js"></script>
+<!-- 折图语义编译器（P3.x）：`layers → plan`，纯数据、只吃 env 里的查询。
+     与上面那份合成器是折图的两半 —— 这里出"条带长什么样"，compositor.foldLayer 出像素。
+     在此之前浏览器侧没有 plan 编译器，线上路径（render + layerItem）自己折一遍 ⇒ 两份语义。 -->
+<script src="js/layer-fold.js"></script>
 
 <!-- 3D 图层的引擎: three.js + FBX/glTF/OBJ 加载器 + TransformControls 打成的一个离线包,
      挂成 window.K3D。页面不碰 CDN, 静态文件走 /js/ 路由 (snapshot_sampler_node.py)。 -->
@@ -961,6 +965,12 @@ let vidBaseOn = false;
 let vidBaseSrc = '';           // #vidBaseVideo 上挂的源（哈希值，不是解析后的绝对 URL）
 let vidBaseWant = 0;           // 这一包要的源内时刻（秒）
 let vidBasePlaying = false;    // 宿主在不在播
+// 宿主要求"底片这一刻不上台"（游标正压在一条 Layer 段上）。底片照旧换源、对时、播放 —— 只是
+// **不许被铺到显示面上**：段界那一帧它还指着脚下那条视频轨，而那条轨在这一刻可能正好换成了
+// 下一段片（本工程 Layer 段左边缘 = Video 2 段左边缘，底片一换源就是 Video 2 的裸帧）。合成图
+// 还没画上来之前，它一旦上台就是"跳闪一下 Video 2 的视频"—— 关键帧把那一层 alpha 置 0 也拦不住，
+// 因为那压根不是合成的结果。见 stageWanted / stageShowBase。
+let vidBaseHidden = false;
 // P3.2：唯一显示面此刻装的是哪一样 —— 'live'（活画布这套）/ 'base'（底片帧）/ 'composite'
 // （别段的合成图副本）。空串 = 缓冲刚被清掉，下一次 stageSync 必须重铺。
 let stageMode = '';
@@ -1226,19 +1236,61 @@ function hasLayerImage(l) { return !!(l && l.img && l.src); }
 function sizeCanvasElement() {
     // The guidance overlay is the same doc-space bitmap as the composite: one size for both, so a
     // canvas resize can never leave the two out of register.
+    const wasMode = stageMode;          // 清空前台上是什么（补画时照它还回去）
+    let resized = false;
     for (const c of [stageCanvas, blendCanvas, guidanceCanvas]) {
+        if (c.width !== canvasW || c.height !== canvasH) resized = true;
         c.width = canvasW;
         c.height = canvasH;
         c.style.width = canvasW + 'px';
         c.style.height = canvasH + 'px';
     }
+    // 重设位图尺寸会清空内容 —— 记一笔：播放中屏幕上若闪一下透明而这颗数在涨，那就是这里清的空。
+    if (resized) __vidPerf.holds.canvasResize = (__vidPerf.holds.canvasResize | 0) + 1;
     // 底片那只 <video> 只是显示：文档尺寸铺满（object-fit: fill），位图尺寸由文件自己定。
     vidBaseVideo.style.width = canvasW + 'px';
     vidBaseVideo.style.height = canvasH + 'px';
     // 重设位图尺寸会清空内容：下一次 stageSync 必须重铺（底片那一趟直接重传当前帧）。
     stageMode = '';
     stageBaseStamp = '';
-    if (vidBaseOn) stageShowBase(true);
+    // 但"下一次"太晚了 —— 这是全页唯一一处不经 stagePresent 就改变屏幕内容的动作，
+    // 空画布必须**在同一个任务里**补上（见 restageAfterResize）。
+    if (resized) restageAfterResize(wasMode);
+}
+
+/** 位图换尺寸 = 内容被清空，必须就地补一张。清空之前台上是什么，现在就补什么，按"可信度"排：
+ *   ① 底片那只 `<video>` —— 它是元素、不受 resize 影响，永远是最新鲜的兜底；
+ *   ② 别段合成图副本 `vidFrameCanvas` —— 它不在三块显示画布之列，也没被清；
+ *   ③ 都没有（Image 模式 / 纯图层编辑）⇒ 同步重画一趟活画布。render 是同步的，
+ *      present 在同一任务里就落定，用户看不到中间态。
+ *  **不能沿用 stageSync 的 hold**：hold 的前提是"台上还留着上一帧"，而此刻台面已是空的 ——
+ *  继续保持"不动"就是把一片透明留给用户，而 `#stageCanvas` 是 alpha:true，下面宿主那层
+ *  `<video>` 会直接透上来（那正是"裸 video 一闪"）。
+ *  原先这里只写了 `if (vidBaseOn) stageShowBase(true)`，两个漏洞：vidBaseOn 为假（Image 模式）
+ *  没人补；vidBaseHidden 为真（游标压在 Layer 段上）时 stageShowBase 自己就 return 了 ——
+ *  播放中改一下画布尺寸，屏幕会停在透明上直到下一包（≤33ms，但闪得出来）。 */
+function restageAfterResize(wasMode) {
+    // `vidInFlush` 的声明在这一段之后（帧包那一节）。初始化早期调到这里时它还在 TDZ，
+    // 直接读会抛 ReferenceError —— 那就当"正在 flush"处理（什么都不抢，反正画布此时是 0×0）。
+    let inFlush = true;
+    try { inFlush = !!vidInFlush; } catch (e) { inFlush = true; }
+    const baseOk = vidBaseOn && !vidBaseHidden && vidBaseVideo.readyState >= 2
+        && !vidBaseVideo.seeking && vidBaseVideo.videoWidth && vidBaseVideo.videoHeight;
+    const cv = stageCompositeSrc;
+    const copyOk = !!(cv && cv.width && cv.height);
+    // 先照原样还：清空前是副本就还副本，是底片就还底片 —— 顺序不是随便排的，
+    // 换错会让人看见"切了一下"（底片换成副本或反过来）。
+    if (wasMode === 'composite' && copyOk) { stageBlit(cv); if (stageMode === 'composite') return true; }
+    if (baseOk) { stageShowBase(true); if (stageMode === 'base') return true; }
+    if (copyOk) { stageBlit(cv); if (stageMode === 'composite') return true; }
+    // 两样都搬不回来（Image 模式 / 纯图层编辑 / 底片被按住）：没有旧画面可还，同步重画一趟活画布。
+    // 正在一趟帧包 flush 里时不抢（那一趟的 render 马上就到，抢了会画两遍）。
+    if (!inFlush && typeof render === 'function' && canvasW > 0 && canvasH > 0) {
+        try { render(); } catch (e) { /* 画不出来就保持待补，下一趟 stageSync 接手 */ }
+        return stageMode === 'live';
+    }
+    __vidPerf.holds.resizeBlank = (__vidPerf.holds.resizeBlank | 0) + 1;
+    return false;
 }
 
 // ==================== 光栅图层 ====================
@@ -1295,8 +1347,9 @@ function stashLayerKey(l) {
 
 // 抄写。指纹没变就一个字都不动 —— 挪它**上面**的层绝不该让整条链重跑一遍。就地重写 img 之后按既有
 // 约定 +1 paintGen (「写表面的路径要 +1 paintGen」,见 fx/gl.js 的缓存注释),链的缓存才认这份新墨。
-// `src` 是"以下所有层"此刻的那张图：可以是显示面（stage，工作栈那一趟）也可以是 context image，
-// 两者装的是同一张。传画布而不是传 ctx —— 显示面没有 2D 上下文。
+// `src` 是"以下所有**图层**"此刻的那张图 —— **不含底片帧**（契约 §2.1 的「以下所有层的合成」按字面执行）。
+// 工作栈那一趟喂的是 render 自己攒的 `stashAcc`（只有图层），不是 stage/blendCtx（那两个永远垫着底片）；
+// guidance 栈那一趟喂的同样是 `stashAcc`，再叠上 guidanceCtx 里它以下那几层。传画布而不是传 ctx。
 function stashResample(l, src, key, over) {
     const same = l.stashKey === key && !!l.img && l.img.width === canvasW && l.img.height === canvasH;
     l.stashKey = key;
@@ -1312,6 +1365,25 @@ function stashResample(l, src, key, over) {
     // 它以下那几层 —— 次序就是画布上的叠放次序。
     if (over) { try { c.drawImage(over.canvas ? over.canvas : over, 0, 0); } catch (e) { /* 空 guidance */ } }
     l.paintGen = (l.paintGen | 0) + 1;
+}
+
+// ── Stash 的累积账：**只有图层**，没有底片帧 ───────────────────────────────────────────────
+// Video 模式下 stageCanvas 与 blendCanvas 永远垫着底片帧（底片不垫就是透明洞、透出宿主那层 <video>），
+// 所以它俩谁都当不了 `capture:'below'` 的输入 —— 拿它抄 = 把视频帧烘进快照，让它从上层的层里再冒
+// 一遍（监视器那一路不铺底片，冒出来就是一块不透明的方框）。契约 §2.1 说的是「以下所有**层**的
+// 合成」，这里就按字面执行：render 每趟从底往上把工作栈的 items 摊进这块独立画布（与 stage 同一份
+// 数学，见 presentItems2D），Stash 轮到自己那一刻抄的就是它。
+// 只在工程里真有可见 Stash 层时才建（一张 canvas + 每层一次 drawImage）—— 没有 Stash 一分不多花。
+let stashAcc = null, stashAccCtx = null;
+function stashAccReset(w, h) {
+    if (!w || !h) return null;
+    if (!stashAcc || stashAcc.width !== w || stashAcc.height !== h) {
+        stashAcc = makeBlankCanvas(w, h);
+        stashAccCtx = stashAcc.getContext('2d');
+    }
+    resetCtx(stashAccCtx);
+    stashAccCtx.clearRect(0, 0, w, h);
+    return stashAcc;
 }
 
 // ==================== 3D 图层 ====================
@@ -4120,6 +4192,232 @@ function layerSurfaceGen(l) {
         + ':' + vidLayerFrameStamp(l);
 }
 
+// ── 折图模块（js/layer-fold.js）的页面接线 ────────────────────────────────────────────────
+// 页面只交**查询**，不交状态：`KLayerFold` 不认识 layers / activeLayerSet / 帧包，它只调下面这几个
+// 函数拿"这一层的条带长什么样"。这是折图语义的唯一出口 —— 线上路径（render + layerItem）与探针、
+// 导出、Python 编译器都该从这里读同一份 plan，而不是各折一遍。
+//
+// **两种解析环境，同一份 schema**：存盘/后端那条路上的引用是内容哈希 `res:<md5>`（契约 §2.3）；
+// 而屏幕上这一趟的像素**还没落盘**——底图、贴片、蒙版都是内存里的 canvas。所以这里另开一张
+// 「活资源」表：对象换一个 `live:<n>` 的号，一次编译一张表，编译完作废。plan 里永远只有字符串，
+// 解析留在这里（`KCompositor.api.resource`）—— 这是"plan 可存盘"与"plan 能吃内存像素"能同时成立的
+// 唯一写法。
+const foldLive = new Map();          // 'live:<n>' → { src, role, w, h }
+let foldLiveSeq = 0;
+function foldLiveReset() { foldLive.clear(); foldLiveSeq = 0; }
+
+/** 一个内存像素对象 → 本趟的 `live:<n>` 号（同一对象同一趟拿同一个号）。给不出就 null。 */
+function foldLiveRef(v, role) {
+    if (!v || typeof v !== 'object') return null;
+    for (const [id, e] of foldLive) if (e.src === v) return id;
+    const id = 'live:' + (++foldLiveSeq);
+    foldLive.set(id, {
+        src: v, role: role || null,
+        w: (v.width || v.naturalWidth || v.videoWidth || 0) | 0,
+        h: (v.height || v.naturalHeight || v.videoHeight || 0) | 0,
+    });
+    return id;
+}
+
+function foldResOfPage(v, role) {
+    if (v === null || v === undefined || v === '') return null;
+    const live = foldLiveRef(v, role);
+    if (live) {
+        const e = foldLive.get(live);
+        return { id: live, kind: 'image', uri: null, w: e.w || null, h: e.h || null,
+                 role: role || null, assetId: null };
+    }
+    const hash = (typeof v === 'string') ? (v.indexOf('res:') === 0 ? v.slice(4) : v) : null;
+    if (!hash || !/^[0-9a-f]{16,64}$/i.test(hash)) return null;
+    return { id: 'res:' + hash, kind: 'image', uri: 'inline:' + hash,
+             w: null, h: null, role: role || null, assetId: null };
+}
+
+/** 折图编译器要的那几个查询（缺项一律退回"没有"，模块自己会兜）。 */
+function foldEnvPage() {
+    return {
+        records: (l) => attrRecordsOf(l),
+        res: foldResOfPage,
+        // 底像素：运行时口径就是 `l.img` 那张画布（不是 `l.buffer` 的哈希 —— 页面上根本没有
+        // hash→像素 的表，拿哈希只会解析成 null，白丢一层底图）。
+        base: (l) => (l && l.img) || null,
+        stack: (l) => (l && l.stack === GUIDANCE_STACK ? 'guidance' : 'work'),
+        transform: (l) => (l ? l.transform : null),
+        opacity: (l) => layerOpacity(l),
+        // Layer 段在时间线上的位置（start/duration/offset/srcDuration）是**宿主**的状态：页面只收
+        // 「这一包说的哪一段、源内第几秒」。所以它从帧包读（`blend-vid-frame` 的 `clip`），而且只在
+        // **帧包说的正是手上这套**时给 —— 与 `vidFrameInject` 同一条判据（别的段那套此刻不在折）。
+        // 折图本身不看 timeMap（取帧由帧包与 KFrameSource 负责），它是给导出/后端那条路用的。
+        timeMap: (l) => {
+            if (!vidFramePacket || !vidFramePacket.clip) return null;
+            if ((vidFramePacket.layerKey || '') !== (activeLayerSet || '')) return null;
+            return vidFramePacket.clip;
+        },
+    };
+}
+
+/** 把当前手上的图层栈编译成 plan（诊断 / 探针 / render 备选路径的入口）。不画画、不改状态。
+ *  grid/frame 由调用方补（模块不管顶层，见契约 §2.3.1）——这里补上，因为它描述的是"这一趟画多大、
+ *  是 layers 还是 source"，只有页面知道。 */
+function kolidFoldPlan() {
+    if (typeof KLayerFold === 'undefined') return null;
+    foldLiveReset();
+    const plan = KLayerFold.compile(layers, foldEnvPage());
+    plan.grid = { w: canvasW | 0, h: canvasH | 0 };
+    plan.frame = { mode: 'layers' };
+    plan.t = vidFramePacket ? +vidFramePacket.t || 0 : 0;
+    return plan;
+}
+
+// 合成器按 plan 折图时需要把 `live:<n>` / `res:<hash>` 换回像素。活资源这一趟就有；
+// 哈希那条要有"内容哈希 → 图像"的表才谈得上（页面没有，导出那条路走后端），所以只认活的。
+if (typeof KCompositor !== 'undefined' && KCompositor.api) {
+    KCompositor.api.resource = (id) => {
+        const e = foldLive.get(String(id));
+        return e ? e.src : null;
+    };
+    /** 兜底给面：plan 的 strip 与页面记录**同序**（`stepOf` 对每条有 type 的记录产一枚 step、
+     *  没有 type 的跳过），所以 `i` 直接索引"有 type 的那一串"。这里要复刻的正是 `fxDropStrip`
+     *  里那两句：`r.surface`（走资源表，已经命中）与它自己的 `vidFrameFaceFor` 兜底 ——
+     *  **蒙版的"亮度当 alpha"必须在这里做**，否则 plan 那条路会把蒙版当普通贴片 source-over
+     *  叠上去（画面整体变灰，而不是被裁掉一块）。 */
+    KCompositor.api.bind = (pl, i, st) => {
+        const l = (layers || []).find(x => x && !x.isMaskLayer && (x.id === pl.id || x.name === pl.name));
+        if (!l || !st) return null;
+        const recs = attrRecordsOf(l).filter(r => r && r.type);
+        const rec = recs[i];
+        if (!rec) return null;
+        if (rec.frameTrack) return vidFrameFaceFor(rec, canvasW, canvasH);
+        return rec.surface || null;
+    };
+}
+
+// 探针入口（与 __vidPerf 同一层用途）：`__kolidFold.plan()` 取当前 plan，`stats` 取一行摘要。
+window.__kolidFold = {
+    plan: kolidFoldPlan,
+    env: foldEnvPage,
+    stats: () => (typeof KLayerFold === 'undefined' ? null : KLayerFold.stats(kolidFoldPlan())),
+    describe: () => (typeof KLayerFold === 'undefined' ? null : KLayerFold.describe(kolidFoldPlan())),
+};
+
+// ── plan 这条路的尺子：两份**执行**并排折，逐像素比 ────────────────────────────────────────
+// 折图的语义已经只有一份（KLayerFold 造的 plan），但**执行**还有两份：
+//   ① 页面 `layerSource → fxResolved → fxDropStrip`（线上唯一在画的那份，原生尺寸）；
+//   ② 合成器 `foldLayer`（吃 plan 的那份，画布网格尺寸）。
+// "让 render() 吃 plan" 的前提是这两份逐像素等价。这个函数就是那把尺子：同一层、同一时刻各折一张，
+// 逐像素 diff。**不改显示、不改状态**（源帧注入与关键帧补丁都在 finally 里原样放回）。
+//
+// 已知的**结构性**差异（不是 bug，是要不要接受的取舍）：②按画布网格折，①按图层原生尺寸折。
+// 原生 ≠ 网格时（例如 1024² 图层在 832×1216 画布上）两者的重采样次序不同，链里的像素半径参数也
+// 就跟着不同 —— 这类层的 maxdiff 不会为 0，而它恰恰是"能不能直接切过去"的关键数字。
+const foldDiffCv = document.createElement('canvas');
+
+/** 两张面各自铺到 w×h 后逐像素比。返回 {max, over2, mean, px}，面 missing 时给 err。 */
+function foldPixelDiff(a, b, w, h) {
+    if (!a || !b) return { err: !a ? 'a-missing' : 'b-missing' };
+    if (!w || !h) return { err: 'no-grid' };
+    const c = foldDiffCv;
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    const g = c.getContext('2d', { willReadFrequently: true });
+    const grab = (src) => {
+        resetCtx(g);
+        g.clearRect(0, 0, w, h);
+        try { g.drawImage(src, 0, 0, w, h); } catch (e) { return null; }
+        return g.getImageData(0, 0, w, h).data;
+    };
+    const B = grab(b), A = grab(a);
+    if (!A || !B) return { err: 'draw-failed' };
+    let mx = 0, over2 = 0, sum = 0, an = 0, bn = 0;
+    for (let i = 0; i < A.length; i += 4) {
+        const d = Math.max(Math.abs(A[i] - B[i]), Math.abs(A[i + 1] - B[i + 1]),
+                           Math.abs(A[i + 2] - B[i + 2]), Math.abs(A[i + 3] - B[i + 3]));
+        if (d > mx) mx = d;
+        if (d > 2) over2++;
+        sum += d;
+        if (A[i + 3]) an++;
+        if (B[i + 3]) bn++;
+    }
+    const px = (w * h) || 1;
+    return { max: mx, over2: over2, px: px, mean: +(sum / px).toFixed(2), aOpaque: an, bOpaque: bn };
+}
+
+/** 逐层比：页面折（原生）vs 合成器折（网格）。返回一行一层的账，附原生尺寸与网格尺寸。 */
+function foldCompareLayers() {
+    const plan = kolidFoldPlan();
+    if (!plan || typeof KCompositor === 'undefined' || !KCompositor.foldLayer) {
+        return { err: 'no-plan-or-compositor' };
+    }
+    const w = canvasW | 0, h = canvasH | 0;
+    const t = plan.t || 0;
+    const rows = [];
+    for (const pl of plan.layers || []) {
+        const l = (layers || []).find(x => x && x.id === pl.id);
+        const base = { id: pl.id, name: pl.name };
+        if (!l) { rows.push(Object.assign(base, { skip: 'no-page-layer' })); continue; }
+        if (pl.stack !== 'work') { rows.push(Object.assign(base, { skip: 'guidance' })); continue; }
+        if (pl.visible === false) { rows.push(Object.assign(base, { skip: 'hidden' })); continue; }
+        const nat = nativeSize(l.img);
+        let a = null, b = null, got = null;
+        try { a = layerSource(l); } catch (e) { rows.push(Object.assign(base, { err: 'legacy: ' + (e && e.message || e) })); continue; }
+        try {
+            // Stash 的累积账页面自己有一份：`l.img` 就是「以下所有层的合成」（render 轮到它之前
+            // 刚抄过），两份实现拿的是**同一张**输入，所以这一层比得了。
+            const below = pl.capture === 'below' ? l.img : null;
+            got = KCompositor.foldLayer(pl, t, w, h, below, false);
+            b = got && got.src;
+        } catch (e) {
+            rows.push(Object.assign(base, { err: 'plan: ' + (e && e.message || e) })); continue;
+        }
+        const d = foldPixelDiff(a, b, w, h);
+        const recs = attrRecordsOf(l).filter(r => r && r.type);
+        rows.push(Object.assign(base, {
+            nat: nat.w + 'x' + nat.h, grid: w + 'x' + h,
+            steps: (pl.strip || []).length, same: nat.w === w && nat.h === h,
+            recs: recs.map(r => r.type + (r.surface ? '+surf' : '') + (r.frameTrack ? '+trk' : '')).join(' '),
+            legacyIsImg: a === l.img,
+            srcNow: !!vidFrameSourcesNow,
+        }, d));
+    }
+    const bad = rows.filter(r => !r.skip && !r.err && r.max > 2).length;
+    const errs = rows.filter(r => r.err).length;
+    return { grid: w + 'x' + h, layers: rows.length, diffLayers: bad, errors: errs, rows: rows };
+}
+
+/** 手动跑一趟：把源帧与关键帧补丁按 render 的同一套判据注入，比完原样放回。 */
+function foldCompareNow() {
+    const vidRestore = vidFramePacket
+        && (vidFramePacket.layerKey || '') === (activeLayerSet || '')
+        ? vidFrameInject(vidFramePacket, vidFrameWorkLayers(activeLayerSet), vidSoloDirect)
+        : null;
+    try { return foldCompareLayers(); } finally { if (vidRestore) vidRestore(); }
+}
+
+/** 整栈按 plan 折到 target（缺省离屏）。**显示还没走这条路** —— 它是给比对/导出试跑用的：
+ *  同一趟图层，②折出来是什么样。Stash 的累积账合成器自己会攒（`capture:'below'` ⇒ 边画边攒，
+ *  GL 那条另开 2D 累积面），剩下两件事挡着它换不掉 render()：**底片**（合成模式下那帧视频垫在
+ *  图层下面）与 **guidance 栈**（那是第二趟、还要叠到显示面上）。见 docs/render_plan.md §10.3.6。 */
+function foldRenderPlan(target, opts) {
+    const plan = kolidFoldPlan();
+    if (!plan || typeof KCompositor === 'undefined' || !KCompositor.render) return null;
+    const w = plan.grid.w, h = plan.grid.h;
+    if (!w || !h) return null;
+    let cv = target || null;
+    if (!cv) { cv = document.createElement('canvas'); cv.width = w; cv.height = h; }
+    const out = KCompositor.render(plan, plan.t || 0, cv, { backend: (opts && opts.backend) || '2d' });
+    return { plan: plan, cv: out, notes: (KCompositor.api && KCompositor.api.notes) ? KCompositor.api.notes.slice(0) : [] };
+}
+
+Object.assign(window.__kolidFold, {
+    compare: foldCompareNow, compareLayers: foldCompareLayers, renderPlan: foldRenderPlan,
+    // 诊断：整层都从 plan 折（不走 solo / 纹理捷径），用来验"捷径只是省一趟，不是另一张图"
+    forceAll: (v) => { foldForceAll = !!v; return foldForceAll; },
+    // 记账：foldPlan = 真折了几次，foldPlanHit = 缓存命中，foldPlanFallback = 退回老路几次
+    perf: () => ({
+        foldPlan: __vidPerf.foldPlan | 0, foldPlanHit: __vidPerf.foldPlanHit | 0,
+        foldPlanFallback: __vidPerf.foldPlanFallback | 0, forceAll: foldForceAll,
+    }),
+});
+
 // ── 「整层就等于一枚 decal」的 GPU 直通 ─────────────────────────────────────────────────────
 // 折叠（fxResolved → fxDropStrip）是给"条带上真有活"的层用的：它把 base + decal + 蒙版画进一张 2D
 // 画布、让链在 GL 里跑，再把结果**抄回 2D**，最后由合成器把那张 2D 画布**再上传成纹理**。一段普通
@@ -4248,6 +4546,11 @@ function fxResolvedTexture(l) {
 
 /** 一层这一帧要盖上去的那张面 + 落点。这是 `drawLayer` 的 GL 版：同一个 src、同一套几何，
  *  只是把 drawImage 换成一条 item，交给 KCompositor 在唯一显示面上按预乘混合。 */
+// 诊断：`__foldTrace` 存在时记一行"这一层走了哪条出口"（默认 null = 一个字节都不写）。
+function foldTrace(l, branch) {
+    const t = window.__foldTrace;
+    if (t && t.push) t.push({ n: (l && l.name) || '?', b: branch });
+}
 function layerItem(l) {
     if (!l || !l.visible || !l.img) return null;
     const opacity = layerOpacity(l);
@@ -4262,22 +4565,30 @@ function layerItem(l) {
     // 播放一层"视频贴片 + alpha/变换动画"的段，代价就与一段普通视频一样。
     if (!live) {
         const tr = (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
-        const direct = soloDecalVideo(l, vidFrameSourcesNow);
-        if (direct) return { src: direct.video, premul: true, transform: composContain(tr, direct.sx, direct.sy), opacity };
-        const solo = soloDecalOf(l);
-        if (solo) return { src: solo, transform: tr, opacity, gen: layerSurfaceGen(l) };
-        // 第三条：这一层是"自己的底图 + 一条特效链"（没有要叠的面）⇒ 链在 GL 里跑完**结果就是一张
-        // 纹理**（同一个上下文，合成器直接绑），中间不回读、不重新上传。缓存命中时连链都不跑。
-        // 栅格层的像素就是画布像素，照 drawLayer 的规矩按 1:1 贴（transform 不吃）。
-        const tex = fxResolvedTexture(l);
-        if (tex) return { tex: tex.tex, transform: isRasterLayer(l) ? null : tr, opacity };
+        if (!foldForceAll) {
+            const direct = soloDecalVideo(l, vidFrameSourcesNow);
+            if (direct) { foldTrace(l, 'solo-video'); return { src: direct.video, premul: true, transform: composContain(tr, direct.sx, direct.sy), opacity }; }
+            const solo = soloDecalOf(l);
+            if (solo) { foldTrace(l, 'solo-face'); return { src: solo, transform: tr, opacity, gen: layerSurfaceGen(l) }; }
+            // 第三条：这一层是"自己的底图 + 一条特效链"（没有要叠的面）⇒ 链在 GL 里跑完**结果就是一张
+            // 纹理**（同一个上下文，合成器直接绑），中间不回读、不重新上传。缓存命中时连链都不跑。
+            // 栅格层的像素就是画布像素，照 drawLayer 的规矩按 1:1 贴（transform 不吃）。
+            const tex = fxResolvedTexture(l);
+            if (tex) { foldTrace(l, 'tex'); return { tex: tex.tex, transform: isRasterLayer(l) ? null : tr, opacity }; }
+        }
     }
     let src = null;
     if (live) {
+        foldTrace(l, 'live');
         const s = scratchFor(l, 'paint', live.width, live.height);
         s.g.drawImage(live, 0, 0);
         src = s.c;
-    } else src = layerSource(l);
+    } else {
+        // 记账口径：真折（foldPlan）与命中（foldPlanHit）都算"走了 plan"，涨了才算。
+        const before = (__vidPerf.foldPlan | 0) + (__vidPerf.foldPlanHit | 0);
+        src = layerSourceViaPlan(l);
+        foldTrace(l, (((__vidPerf.foldPlan | 0) + (__vidPerf.foldPlanHit | 0)) > before) ? 'plan' : 'legacy');
+    }
     if (!src) return null;
     // 不动的那张面（播放一层只改了 alpha/变换的段时，三层里通常一张都不用重传纹理）带上身份；
     // 下面两条临时面（笔刷纹理/拖动 affine）每帧都是现画的，不给身份 = 老规矩每次上传。
@@ -4301,11 +4612,82 @@ function layerItem(l) {
     return { src, transform: tr, opacity, gen };
 }
 
+// ── 显示那一趟的折叠：改为走 plan + 合成器（同一份语义、同一份执行）────────────────────────
+// `layerSource(l)` 是页面自己那份折叠（fxResolved → fxDropStrip）；`KCompositor.foldLayer` 是吃 plan
+// 的那份。两者**逐层逐像素相同**（尺子是 `__kolidFold.compare()`，探针 `_probe_fold_diff.cjs`）。
+// 从这里开始，显示那条路的兜底折叠换成后者：**配方**只有一份（KLayerFold 造的 plan），**做法**也只有
+// 一份（foldLayer）。分辨率还是**图层原生**的 —— `foldLayer(pl, t, w, h)` 的 w/h 由调用方给，
+// 传 nativeSize 就与 fxResolved 同尺寸，于是"折在网格上"那套重采样差异在这里根本不发生。
+//
+// 两处**刻意不换**（它们不属于"折一层"，各有各的几何/语义）：
+//   · Raster 层：像素就是画布像素，1:1 贴（拖动时走 affine），没有"折"这回事；
+//   · 一枚出墨的记录都没有：折叠是恒等变换，`layerSource` 直接还 `l.img`，一个字节都不分配。
+// Stash 层**已经换过来**了：它的底像素不是 `l.base`，而是"以下所有层的合成"（plan 里就是
+// `capture:'below'`）。那份累积账不必在这儿重新攒 —— render 的循环在轮到这一层之前已经
+// `stashResample` 把它写进 `l.img` 了，所以这里把 `l.img` 当 `below` 交下去就是同一张图。
+// 另有两件事是"折这一层"的一部分，必须跟着搬（不搬就是换了语义）：
+//   · 生成器的面**先同步**（fxDropStrip 的头一句就是它）；
+//   · SSR 的镜面记录在折叠期间停用（`fxMirrorHidden`，否则倒影里会长出盘面记号）。
+const foldSrcCache = new WeakMap();      // layer → { key, cv }
+/** 诊断开关：连 solo / 纹理捷径也不走，整层都从 plan 折。用来证明"那两条捷径只是省一趟，
+ *  不是另一张图"（探针 `_probe_fold_switch.cjs` 拿它前后各取一次像素）。 */
+let foldForceAll = false;
+function layerSourceViaPlan(l) {
+    if (typeof KLayerFold === 'undefined' || typeof KCompositor === 'undefined' || !KCompositor.foldLayer) return layerSource(l);
+    // Stash 层也带 `raster`（几何焊死画布），但它的**像素**是真折出来的，所以这里要放过它。
+    if (!l || !l.img) return layerSource(l);
+    if (isRasterLayer(l) && !isStashLayer(l)) return layerSource(l);
+    syncGeneratorFaces(l);
+    const nat = nativeSize(l.img);
+    if (!nat.w || !nat.h) return layerSource(l);
+    const recs = attrRecordsOf(l);
+    if (!recs.some((r, i) => attrInks(r, l, i, FX_CUT_ALL))) return layerSource(l);
+    // 缓存钥匙：条带的参数戳 + 三颗落笔代次 + 源帧戳 + 这一层的原生尺寸。
+    // `fxResolveGen` 在这里**不会**变（这一趟没走 fxResolved），所以参数戳必须自己进钥匙 ——
+    // 少一项的症状就是"改了特效参数画面不动"。
+    const key = fxSignature(l) + '|' + fxMapStamp(l) + '|' + fxExternalStamp(l) + '|'
+        + (l.paintGen | 0) + '|' + attrPaintGens(l) + '|' + stashSurfId(l.img) + '|'
+        + vidLayerFrameStamp(l) + '|' + nat.w + 'x' + nat.h;
+    const hit = foldSrcCache.get(l);
+    if (hit && hit.key === key) { __vidPerf.foldPlanHit = (__vidPerf.foldPlanHit | 0) + 1; return hit.cv; }
+    let cv = null;
+    try {
+        const pl = KLayerFold.compile([l], foldEnvPage()).layers[0];
+        if (pl) {
+            // Stash 的底像素 =「以下所有层的合成」= 这一刻的 `l.img`（render 刚抄好）。
+            // 非 Stash 层传 null：它们的底像素在 plan 的 `base` 里，foldLayer 自己解析。
+            const below = (pl.capture === 'below' && isStashLayer(l)) ? l.img : null;
+            const got = fxMirrorHidden(l, () => KCompositor.foldLayer(pl, 0, nat.w, nat.h, below, false));
+            cv = got && got.src;
+        }
+    } catch (e) { cv = null; }
+    if (!cv) { __vidPerf.foldPlanFallback = (__vidPerf.foldPlanFallback | 0) + 1; return layerSource(l); }
+    __vidPerf.foldPlan = (__vidPerf.foldPlan | 0) + 1;
+    foldSrcCache.set(l, { key, cv });
+    return cv;
+}
+
+/** render 的**同步不变量**（P3.2 起，改动这一带的人必须知道）。
+ *  一趟 render 里会 present 多次：每遇到一个可见 Stash 层就 `flushWork()` 一次（台上此刻只有
+ *  "以下所有层"），循环末尾再 present 一次，guidance 有墨时再叠一次 —— 中间态都是**半截画面**。
+ *  它们现在不出问题，靠的**只是**"同一个 JS 任务里浏览器只在任务末尾提交一次 canvas"，
+ *  不是靠结构。所以：**render 内禁止出现 await / queueMicrotask / setTimeout 让出主线程** ——
+ *  一旦让出，用户就会看见"只有下半截"的那张。renderDepth 是这条不变量的探针
+ *  （嵌套也算违规：render 调 render 会把中间态推得更远）。 */
+let renderDepth = 0;
+
 // `opts.vidKf` = 这一趟是**帧包驱动**的（播放 / 拖游标 / 宿主改完帧值后的重发，见 vidFrameFlush），
 // 于是同一趟里连关键帧那批采样值一起折进活画布 —— 用户看到的画面才真的在动（见下面 kfRestore）。
 // 用户自己在图层上动手的那一趟（拖参数 / 拖图层 / 切显隐 / 撤销）不带这个开关：手上改的东西要立刻
 // 看得见，不能被他这一刻的采样值盖住；下一条帧包再把动画视图接回来。
 function render(opts) {
+    if (renderDepth > 0) __vidPerf.renderNested = (__vidPerf.renderNested | 0) + 1;   // 见上面那条不变量
+    renderDepth++;
+    __vidPerf.presentsThisRender = 0;
+    // 一趟一个"活资源"世代的起点（见 foldLiveRef）：这一趟里编出来的 plan 用到的 `live:<n>` 号
+    // 只在这一趟有效。放在这里是因为**帧包驱动的层每帧都是新的面**（缓存必然 miss），不清就会
+    // 一直往表里堆。跨趟还拿着旧 plan 用，请自己重新编译（`__kolidFold.plan()` 也会清）。
+    foldLiveReset();
     // P3.2: one picture, one surface. The working stack is composited straight onto #stageCanvas
     // (the only displayed canvas); #blendCanvas is the guidance-free **context image** that every
     // pixel-shipping consumer reads (run input, Tag regions, Layer Context, Export PNG, host
@@ -4348,39 +4730,103 @@ function render(opts) {
             : null;
         // 关键帧回放：与源帧同一趟、同一套图层。补丁同样只活在**折叠这一趟**里（vidKfInject 的
         // 返回值把每个被改过的字段原样放回），图层的真值 —— 存档、撤销栈、面板读数、录制快照 ——
-        // 一个字都不动。这里的开关只有一条：这一趟是不是帧包驱动的（见 render 头上那句）。
-        // 少了它，采样值只进得了「回给宿主监视器的那张临时图」，而 Video 模式的画面是这块**活画布**
-        // （画布的 iframe 就压在播放器上）—— 于是关键帧窗里曲线走得再好，屏幕上一个像素都不动。
-        const kfPacket = (opts && opts.vidKf && vidFramePacket
-            && (vidFramePacket.layerKey || '') === (activeLayerSet || '')) ? vidFramePacket : null;
+        // 一个字都不动。开关有两条：
+        //   ① 这一趟是帧包驱动的（见 render 头上那句）—— 用户正停着、手上在编辑时走这条，屏幕上
+        //      看到的是真值（改了滑杆立刻看得见，不被动画压回去）；
+        //   ② **播放中（帧还在流）就一律打补丁** —— 从普通视频段切进 Layer 段的那一瞬间，会有
+        //      别的东西（换图层集、底片对齐、面板刷新）顺手叫一次 render，它不带 vidKf；那一趟若按
+        //      真值折，屏幕上就会闪一下"段首那组关键帧没生效"的样子。播放中用户不可能同时在编辑，
+        //      所以这里按补丁折是安全且必须的。
+        const flowing = performance.now() - vidFramesFlowingAt < 300;
+        // **播放中一律按采样值折**：段界那一拍"帧还在流"未必成立（刚进段、上一段根本没有包），
+        // 而这段里任何一个不含 vidKf 的 render（换套、底片让位、面板刷新）只要按真值折，屏幕上
+        // 就是"这一层的真值"—— 本工程 Layer 段里 Video 2 的真值是 alpha 100%，而关键帧在段首
+        // 说 0 ⇒ 一闪。判据用宿主的播放位（底片包每秒都报），底片没上台时退回"帧还在流"。
+        const playingNow = vidBaseOn ? vidBasePlaying : vidFramesFlowing();
+        const kfPacket = ((opts && opts.vidKf) || flowing
+            || (playingNow && vidFramePacket && vidFramePacket.kf)) && vidFramePacket
+            && (vidFramePacket.layerKey || '') === (activeLayerSet || '') ? vidFramePacket : null;
         const kfRestore = kfPacket ? vidKfInject(kfPacket, vidFrameWorkLayers(activeLayerSet)) : null;
+        vidKfPatching = !!kfRestore;
         kfFold = !!kfPacket;
         if (kfFold) vidFramesFlowingAt = performance.now();
         // 记账：活画布上此刻折的是哪一份采样值（'' = 画布上是真值）。回包靠它决定"直接抄活画布"
         // 还是"另折一张临时图"（见 vidFrameFlush）—— 抄的时候别再白折第二遍整条链。
         vidKfOnLive = kfPacket ? vidKfSigOf(kfPacket.kf) : '';
+        // 画面归谁负责画，就只让它画 —— 其余情况一律**不接管显示面**（台上留着现画面）：
+        //   ① 帧包说的是**另一套**（页面还没切过去 / 宿主消息与包不一致）⇒ 这一趟折的是错的套，
+        //      通常是空画面。录像带抓到的正是这一种：{tag:"work", n:0, a:0, pkt:"14uafd", act:""}。
+        //   ② 手上**没有帧包**，而这套图层要靠帧包喂面（贴片/蒙版的像素只来自帧注入）⇒ 折出来是空面。
+        //   ③ 手上没有帧包，此刻显示面归**底片**（宿主正在那段视频上）⇒ 这一趟折的东西不该盖掉它。
+        //   ④ 这一趟**要的源帧没到齐**（有贴片/蒙版拿不到自己那一帧）⇒ 折出来会少一层，而那层正是
+        //      贴着视频的画面 —— 屏幕上就是"先出一瞬间裸底片，过几帧图层才叠上来"（用户看到的那一闪）。
+        //      等它到齐再画；等太久（同一条计划版本连续 hold 到上限）就照画，宁可少一层也不冻住。
+        // 编辑可见性不受影响：暂停态任何一次手改宿主都会补发一包（force），那一趟①②③都不成立。
+        const feedNeedsFrames = vidFrameNeedTracks(activeLayerSet).size > 0;
+        const setMismatch = !!vidFramePacket && (vidFramePacket.layerKey || '') !== (activeLayerSet || '');
+        const nothingToPaint = !vidFramePacket && (feedNeedsFrames || vidBaseOn);
+        // 4) 源帧齐不齐（按轨判，折叠之前就查得到）：缺哪条轨，先等它。
+        //    **宿主要明说"这条轨这一刻没有片"**（emptyTracks）—— 那是一种正常编辑状态（片没盖到
+        //    这一刻），等也等不到，不能算缺帧、更不能 hold（否则整段冻住）。
+        let framesIncomplete = false;
+        const emptyNow = new Set((vidFramePacket && vidFramePacket.emptyTracks) || []);
+        if (vidFramePacket && flowing && feedNeedsFrames) {
+            const need = vidFrameNeedTracks(activeLayerSet);
+            for (const tr of need) {
+                if (emptyNow.has(String(tr))) continue;
+                if (!vidFrameSource(vidFramePacket.sources, tr)) { framesIncomplete = true; break; }
+            }
+        }
+        const rev = vidFramePacket ? (vidFramePacket.planRev | 0) : -1;
+        if ((framesIncomplete || !stageBackdropItem()) && rev !== vidHoldRev) { vidHoldRev = rev; vidHoldCount = 0; }
+        // 同一条计划版本最多 hold 这么多次（≈ 6 帧 / 200ms）：轨道长期没片时不能一直等。
+        const HOLD_MAX = 6;
+        // 每趟先取的"底"：Video 模式下就是这一刻的视频帧。**拿不到底就不画**（hold）：
+        // 没有底的那一帧一定透明 —— 而画布下面就是宿主那层 <video>，透明就等于"裸 video 一闪"。
+        // 这正是"Layer 段左边对齐 Video 段左边"那一刻最容易发生的：底片刚好在换源。
+        const backdrop = stageBackdropItem();
+        // hold 只在**播放中**用：停着的时候（拖动 / seek 落定 / 截帧）没有下一包来补，等底片 =
+        // 画面不动，所以那儿照画；播放中才需要"没有底就不落这一帧"。
+        const noBackdrop = vidSurfaceVideo && !backdrop && flowing;
+        const holdIncomplete = (framesIncomplete || noBackdrop) && vidHoldCount < HOLD_MAX;
+        if (holdIncomplete) {
+            vidHoldCount++;
+            __vidPerf.held = (__vidPerf.held | 0) + 1;
+            if (noBackdrop) __vidPerf.heldBackdrop = (__vidPerf.heldBackdrop | 0) + 1;
+        }
+        const skipDisplay = setMismatch || nothingToPaint || holdIncomplete;
         try {
-            // ── 工作栈：攒 items。Stash 层要读「以下所有层」的合成，所以碰到它就先落地一次。
+            // ── 工作栈：攒 items。Stash 层要读「以下所有**图层**」的合成 —— 那份账由 stashAcc 单独攒
+            // （stage 上永远垫着底片，抄它就把底片烘进快照了）。没有可见 Stash 层时 stashAccLive 是
+            // null，这条路径与之前一个字节都不差（只是不再白白 present 一次中间态）。
             let work = [];
             let stageCleared = true;
+            const hasStash = layers.some(l => isStashLayer(l) && l.visible);
+            const stashAccLive = (hasStash && !skipDisplay) ? stashAccReset(canvasW, canvasH) : null;
             const flushWork = () => {
-                stagePresent(work, stageCleared);
+                if (!skipDisplay) {
+                    // 每趟 render present 几次 —— 中间态都是半截画面，靠"同一任务末尾才提交"兜着。
+                    // 这颗数在探针里应当 ≤2；涨上去就要看是不是有人把这趟拆开了。
+                    __vidPerf.presentsThisRender = (__vidPerf.presentsThisRender | 0) + 1;
+                    stagePresent(backdrop ? [backdrop].concat(work) : work, stageCleared, 'work');
+                }
                 work = [];
                 stageCleared = false;
             };
             for (let i = layers.length - 1; i >= 0; i--) {
                 const l = layers[i];
                 if (isGuidanceLayer(l)) continue;
-                if (isStashLayer(l) && l.visible) {
-                    // stage 上此刻就是「以下所有层」。Stash 要把它抄进自己的面 —— 那需要一份
-                    // **2D 像素**，所以这趟的 context image 抄写不能省（后面那份会因为"刚抄过"
-                    // 被节流跳过，两笔账合成一笔）。抄完直接取，别多绕一次。
-                    flushWork();
-                    syncBlendImage(0);
-                    stashResample(l, blendCtx, belowWork);
+                if (isStashLayer(l) && l.visible && stashAccLive) {
+                    // 累积账里此刻就是「以下所有图层」（底片不在其中）。抄它 —— 不需要再 present 一次、
+                    // 也不需要 context image 那份 GPU→2D 回读了：那两个都只是"顺带装着一张含底片的图"。
+                    stashResample(l, stashAccLive, belowWork);
                 }
                 const it = layerItem(l);
-                if (it) work.push(it);
+                if (it) {
+                    work.push(it);
+                    // 同一次摊平数学（presentItems2D）→ 与 stage 上那几层逐像素同，只少一张底片。
+                    if (stashAccLive) presentItems2D(stashAccCtx, [it], canvasW, canvasH, false);
+                }
                 // 参考图吃的是**同一趟**的循环顺序, 所以它必须在 Stash 重抄之后才画 (那份抄写读的是
                 // target 此刻的内容), 也不能吃进 guidance —— 它俩本来就不是一张图。
                 // 一条例外: Stash 若在"正在编辑的那一枚"之后才轮到自己 (它压着那一枚), 它的快照里就带着
@@ -4404,29 +4850,33 @@ function render(opts) {
             // 那是每帧最大的一笔固定开销，可真正的读者最多 12/s（预览）或人手按的（导出/生成）。
             // 所以帧包驱动的那趟按 CONTEXT_COPY_MS 节流：读者要精确的像素时自己 ensureBlendImage()；
             // 停下播放、任何一次手改的 render 都会立刻补一张（那条路径 minMs = 0，不节流）。
-            syncBlendImage(kfFold ? CONTEXT_COPY_MS : 0);
+            // **只在这一趟真画了的时候抄**：skipDisplay（缺帧 / 换套 / 无底）那一趟台上留的是
+            // 上一帧 —— 而在底片态那就是一张视频裸帧。抄它等于往 context image 里灌一张不该有的图，
+            // 而 stageShowLive 之后正好会把这张铺上台（用户看到"活画布"里是一帧底片）。
+            if (!skipDisplay) syncBlendImage(kfFold ? CONTEXT_COPY_MS : 0);
             // ── guidance 栈：照旧 2D 画进 guidanceCtx（卡片 / 合并 / 吸管都读它），再整张叠到显示面上。
             // 它是**显示层**，不进 context image —— #blendCanvas 里永远只有工作栈。
             for (let i = layers.length - 1; i >= 0; i--) {
                 const l = layers[i];
                 if (!isGuidanceLayer(l)) continue;
-                // guidance 栈里的 Stash 压在整条 Layers 合成之上:走到这里时 stage 上已画完全部工作层,
-                // guidanceCtx 里摆好的是它以下那几层。指纹也吃两条栈 —— 下面的工作层改了,它照样重抄。
-                if (isStashLayer(l) && l.visible) stashResample(l, stageCanvas, belowWork + belowGuide, guidanceCtx);
+                // guidance 栈里的 Stash 压在整条 Layers 合成之上：它的「以下」横跨两条栈 —— 工作栈那
+                // 一份只有图层（stashAcc），guidance 自己那几层在 guidanceCtx 里，按叠放次序再叠上去。
+                // 指纹也吃两条栈 —— 下面的工作层改了，它照样重抄。
+                if (isStashLayer(l) && l.visible && stashAccLive) stashResample(l, stashAccLive, belowWork + belowGuide, guidanceCtx);
                 if (l.visible && l.img) { drawLayer(l, guidanceCtx); guidanceHasInk = true; }
                 belowGuide += stashLayerKey(l);
             }
-            if (guidanceHasInk) stagePresent([{ src: guidanceCanvas, transform: null }], false);
-            stageMode = 'live';               // 显示面上此刻就是活画布这套
+            if (guidanceHasInk && !skipDisplay) stagePresent([{ src: guidanceCanvas, transform: null }], false, 'guidance');
+            if (!skipDisplay) stageMode = 'live';   // 显示面上此刻就是活画布这套（没接管就不改状态）
         } finally {
             // 先放回采样值再放回源帧：两块字段不重叠，但"值 → 像素"的次序读起来更顺（面上的帧
             // 还原之后，下一次折叠看见的就是图层自己的面）。
-            if (kfRestore) kfRestore();
+            if (kfRestore) { kfRestore(); vidKfPatching = false; }
             if (vidRestore) vidRestore();
         }
         if (dirRef) dirRefDone();       // 纹理看这个版本号决定要不要重传, 拖动期间它一个字节都没变
     } else {
-        stagePresent([], true);
+        stagePresent([], true, 'no-canvas');
         stageMode = 'live';
     }
     stageSync();                        // 模式不是 live 时（底片 / 合成图副本）把它换回来
@@ -4446,6 +4896,7 @@ function render(opts) {
     // 图层像素变了，监视器上那一帧也要跟着变 —— 宿主只有在播放头动的时候才会发新包，
     // 暂停着画图的时候（最常见）这里就是唯一的更新口。
     scheduleVidFrameReply();
+    renderDepth--;
 }
 
 // ==================== Video 逐帧合成 ====================
@@ -4870,23 +5321,29 @@ function ensureVidCanvas() {
 function stageWanted() {
     const p = vidFramePacket;
     // 没有合成包（正常段）：有底片就显示底片帧。
-    if (!p) return vidBaseOn ? 'base' : 'live';
+    if (!p) {
+        if (vidBaseOn && !vidBaseHidden) return 'base';
+        // 底片被按住（游标压在 Layer 段上）、合成包还没到 ⇒ **台上保持现画面**。
+        // 这里是最容易出错的一格：此刻 `vidBaseSrc` 已经跟着脚下那条轨换成新片段的源了，
+        // 把它铺上台 = 把新片段的裸帧（本工程就是 Video 2）闪一下。宁可定一拍（下一包就到），
+        // 也绝不让"还没合成的底片"顶上来。没有底片时（Image 模式等）照旧露活画布。
+        return vidBaseOn ? 'hold' : 'live';
+    }
     // 有包：这一包说的正是活画布上这套（用户手上就是在编辑它）⇒ 露活画布。
     return (p.layerKey || '') === (activeLayerSet || '') ? 'live' : 'composite';
 }
 
-/** 把一组 items 合成到唯一显示面。GL 不可用时同一块 canvas 退成 2D（items 逐张 drawImage）。 */
-function stagePresent(items, clear) {
-    if (!canvasW || !canvasH || !items) return false;
-    if (stageGL && typeof KCompositor !== 'undefined' && KCompositor.present) {
-        if (KCompositor.present(stageCanvas, items, canvasW, canvasH, { clear: clear !== false })) return true;
-    }
-    if (!stageCtx2d) return false;
-    if (clear !== false) {
-        stageCtx2d.setTransform(1, 0, 0, 1, 0, 0);
-        stageCtx2d.globalAlpha = 1;
-        stageCtx2d.globalCompositeOperation = 'source-over';
-        stageCtx2d.clearRect(0, 0, canvasW, canvasH);
+/** 把一组 items 按各自的变换摊到一张 2D 画布上（`clear` 为真时先清空）。
+ *  **只有两种调用者**：① `stagePresentRaw` 的 2D 兜底；② Stash 的累积账（见 render 里的 stashAcc）——
+ *  后者要的是"**只有图层**、没有底片"的那一份，而 stage 上永远垫着底片，所以它非得自己攒不可。
+ *  这一份数学与 `js/compositor.js` 的 `drawTransformed` 必须逐条同（否则两处折出来的图会差一像素）。 */
+function presentItems2D(ctx, items, w, h, clear) {
+    if (!ctx || !w || !h || !items) return false;
+    if (clear) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.clearRect(0, 0, w, h);
     }
     for (const it of items) {
         if (!it || !it.src) continue;
@@ -4894,22 +5351,382 @@ function stagePresent(items, clear) {
         if (itAlpha <= 0) continue;
         const tr = it.transform;
         if (!tr) {
-            stageCtx2d.save();
-            stageCtx2d.globalAlpha = itAlpha;
-            try { stageCtx2d.drawImage(it.src, 0, 0, canvasW, canvasH); } catch (e) { /* 这一张跳过 */ }
-            stageCtx2d.restore();
+            ctx.save();
+            ctx.globalAlpha = itAlpha;
+            try { ctx.drawImage(it.src, 0, 0, w, h); } catch (e) { /* 这一张跳过 */ }
+            ctx.restore();
             continue;
         }
-        const tw = (tr.w === undefined ? 1 : tr.w) * canvasW, th = (tr.h === undefined ? 1 : tr.h) * canvasH;
-        stageCtx2d.save();
-        stageCtx2d.globalAlpha = itAlpha;
-        stageCtx2d.translate((tr.cx === undefined ? 0.5 : tr.cx) * canvasW, (tr.cy === undefined ? 0.5 : tr.cy) * canvasH);
-        stageCtx2d.rotate(tr.rotation || 0);
-        try { stageCtx2d.drawImage(it.src, -tw / 2, -th / 2, tw, th); } catch (e) { /* 这一张跳过 */ }
-        stageCtx2d.restore();
+        const tw = (tr.w === undefined ? 1 : tr.w) * w, th = (tr.h === undefined ? 1 : tr.h) * h;
+        ctx.save();
+        ctx.globalAlpha = itAlpha;
+        ctx.translate((tr.cx === undefined ? 0.5 : tr.cx) * w, (tr.cy === undefined ? 0.5 : tr.cy) * h);
+        ctx.rotate(tr.rotation || 0);
+        try { ctx.drawImage(it.src, -tw / 2, -th / 2, tw, th); } catch (e) { /* 这一张跳过 */ }
+        ctx.restore();
     }
     return true;
 }
+
+/** 把一组 items 合成到唯一显示面。GL 不可用时同一块 canvas 退成 2D（items 逐张 drawImage）。
+ *  落地之后还要验一次"真有像素"（见下面的 stagePresent 包装）。 */
+function stagePresentRaw(items, clear) {
+    if (!canvasW || !canvasH || !items) return false;
+    if (stageGL && typeof KCompositor !== 'undefined' && KCompositor.present) {
+        if (KCompositor.present(stageCanvas, items, canvasW, canvasH, { clear: clear !== false })) return true;
+    }
+    if (!stageCtx2d) return false;
+    return presentItems2D(stageCtx2d, items, canvasW, canvasH, clear !== false);
+}
+
+/** 帧还在流（播放中）。多处判据共用这一个口径（300ms 内有新包）。 */
+function vidFramesFlowing() { return performance.now() - vidFramesFlowingAt < 300; }
+
+// ── 显示面的"底"：Video 模式下画布永远是一张**完整的画面**（视频帧打底 + 图层压上去）──
+// 这一条把"底片态 / 合成态"在**像素层面**并成了一种状态：
+//   · 视频段：底下只有视频帧，工作栈是空的 ⇒ 画出来就是视频帧；
+//   · 进 Layer 段：同一趟里先铺视频帧、再压图层 ⇒ 图层有洞的地方露出的是**同一时刻的视频帧**，
+//     而不是透明 —— 透明会让下面宿主那层 <video> 透上来，表现就是"半透明"，那块没帧时就是"黑一下"。
+// 于是任何中间态（缺帧、换套、包还没到）最多"晚一拍"，屏幕上永远不会有洞。
+// Image 模式（宿主明说不是视频）保持透明：棋盘格与导出语义都不能变。
+let vidSurfaceVideo = false;              // 宿主此刻是不是 Video 显示模式（blend-vid-surface）
+let vidKfPatching = false;                // 正处在"采样值已注入、还没还原"的窗口里（诊断用）
+// 台上**已经画上去**的计划版本（planRev）。比手上的包旧 ⇒ 台上还是上一份计划（= hold 状态），
+// 期间绝不把"新计划还没就绪"的那一帧画出来（见 vidFrameFlush 的 hold）。
+let vidPaintedRev = 0;
+// 源帧没到齐时的 hold 账：同一条计划版本连续 hold 了几次（上限见 render 里的 HOLD_MAX）。
+let vidHoldRev = -1;
+let vidHoldCount = 0;
+let vidOpaque1px = null;                  // 兜底底色：1×1 不透明黑，铺满整幅
+/** 上一次取的底片是**哪一支**供的（诊断）：'elem' = 页面自己那只底片元素；'packet' = 这一包的源帧
+ *  （镜像池，段前进段时就预热好了）；'none' = 两样都拿不到（于是这一帧不画）。 */
+let vidBackdropFrom = 'none';
+/** 这一刻能当"底"的那张画面；拿不到就返回 null（调用方据此**不画**，见 render 的 noBackdrop）。 */
+function stageBackdropItem() {
+    if (!vidSurfaceVideo) { vidBackdropFrom = 'image'; return null; }
+    const v = vidBaseVideo;
+    const wantBaseT = vidFramePacket ? vidFramePacket.baseT : null;
+    // 底片元素只有在"它手上那一帧就是这一帧要的那一帧"时才可信：换片段/seek 在途时它装的还是
+    // 上一段的那张，铺上去就是错帧（播放中看着像"先出上一段、再跳回来"）。
+    const timely = v && v.readyState >= 2 && v.videoWidth && v.videoHeight
+        && (wantBaseT == null || Math.abs((v.currentTime || 0) - wantBaseT) < 0.25);
+    if (timely) { vidBackdropFrom = 'elem'; return { src: v, transform: null, premul: true }; }
+    const p = vidFramePacket;
+    if (p && p.sources && p.sources.size) {
+        const b = vidFrameSource(p.sources, p.baseTrackId) || p.sources.values().next().value;
+        if (b) { vidBackdropFrom = 'packet'; return { src: b, transform: null }; }
+    }
+    vidBackdropFrom = 'none';
+    return null;
+}
+
+/** 把一组 items 合成到唯一显示面。GL 不可用时同一块 canvas 退成 2D（items 逐张 drawImage）。
+ *  这里**只落地、不补救** —— 落什么是什么。出了"该有画面却是空的"那一帧，由下面的录像带
+ *  （vidTrace）把现场记下来，交给人去判断。 */
+function stagePresent(items, clear, tag) {
+    // **不变量**：Video 模式下，凡是被允许落地的那一帧，第一张必须是"底"。
+    // 少了底 ⇒ 合成透明 ⇒ 下面宿主那层 <video> 透上来 = "裸 video 一闪"。这里只记账不修正：
+    // 真要修正的话说明上面 skipDisplay 有洞，得回去补，而不是在这儿盖。
+    if (vidSurfaceVideo && items && items.length && !skipPresentGuard() && tag !== 'base' && tag !== 'blit') {
+        const first = items[0];
+        const isBackdrop = first && (first.src === vidBaseVideo || (vidFramePacket && vidFramePacket.sources && vidFramePacket.sources.size
+            ? (first.src === vidFrameSource(vidFramePacket.sources, vidFramePacket.baseTrackId)
+                || [...vidFramePacket.sources.values()].indexOf(first.src) >= 0) : false));
+        if (!isBackdrop) {
+            __vidPerf.nakedPresent = (__vidPerf.nakedPresent | 0) + 1;
+            vidTrace.naked = (vidTrace.naked | 0) + 1;
+        }
+    }
+    const row = vidTraceBegin(tag, items);
+    const ok = stagePresentRaw(items, clear);
+    vidTraceEnd(row);
+    return ok;
+}
+/** 占位：给 stagePresent 里的不变量判据用（Image 模式 / 无画布时不判）。 */
+function skipPresentGuard() { return !canvasW || !canvasH; }
+
+// ── 透明帧取证（诊断，常开）──────────────────────────────────────────────────────────────────
+// "看不见的 bug"唯一靠得住的手段：每帧落地时把**决定这一帧的全部输入**记一行 —— 谁画的（tag）、
+// 几张、画的是什么（视频/画布/纹理）、当时是哪一段（帧包里的 layerKey 与页面 activeLayerSet 是否
+// 一致）、图层几张可见、关键帧补丁打没打、落完之后屏幕上还有没有像素（16×16 粗采样）。
+// 一旦出现"上一帧有、这一帧没有"，就把最近 160 行 + 那一包的摘要钉成 firstBad；
+// 之后任何时候都能取走（宿主工具栏 Trace 按钮 → `blend-vid-trace`），不需要开控制台。
+const VID_TRACE_MAX = 160;
+const vidTrace = { ring: [], firstBad: null, badCount: 0, drops: 0, kfBad: 0, lastInk: true, lastAlpha: -1, ink: null,
+    lastPresentAt: 0, rafOn: false, rafLast: null, domAt: 0, dom: null };
+function vidTraceInkProbe() {
+    try {
+        const c = vidTrace.ink || (vidTrace.ink = document.createElement('canvas'));
+        if (c.width !== 16) { c.width = 16; c.height = 16; }
+        const g = c.getContext('2d', { willReadFrequently: true });
+        g.clearRect(0, 0, 16, 16);
+        g.drawImage(stageCanvas, 0, 0, 16, 16);
+        const d = g.getImageData(0, 0, 16, 16).data;
+        let a = 0;
+        for (let i = 3; i < d.length; i += 4) a += d[i];
+        return a;
+    } catch (e) { return -1; }
+}
+function vidTraceKind(it) {
+    if (!it) return 'null';
+    if (it.tex) return 'tex';
+    const s = it.src;
+    if (!s) return 'none';
+    if (typeof HTMLVideoElement !== 'undefined' && s instanceof HTMLVideoElement) {
+        return 'video(' + (s.readyState | 0) + (s.seeking ? '/seek' : '') + ')';
+    }
+    if (s === blendCanvas) return 'ctx';
+    if (s === guidanceCanvas) return 'guid';
+    if (typeof HTMLCanvasElement !== 'undefined' && s instanceof HTMLCanvasElement) return 'canvas(' + s.width + 'x' + s.height + ')';
+    return 'other';
+}
+function vidTraceBegin(tag, items) {
+    const p = vidFramePacket;
+    return {
+        ms: +performance.now().toFixed(0),
+        tag: tag || '?',
+        n: (items || []).length,
+        kinds: (items || []).slice(0, 6).map(vidTraceKind).join(','),
+        op: (items || []).slice(0, 6).map(it => (it && it.opacity !== undefined && it.opacity !== null) ? +(+it.opacity).toFixed(2) : 1).join(','),
+        mode: stageMode,
+        pktKey: p ? (p.layerKey || '').slice(-6) : null,
+        actKey: (activeLayerSet || '').slice(-6),
+        pktT: p ? +(+p.t).toFixed(2) : null,
+        layers: (typeof layers !== 'undefined' && layers) ? layers.length : -1,
+        visible: (typeof layers !== 'undefined' && layers) ? layers.filter(l => l && l.visible).length : -1,
+        kf: p && p.kf ? Object.keys(p.kf).length : 0,
+        kfOnLive: !!vidKfOnLive,
+        // 逐帧对账：这一包要求的不透明度和**此刻图层对象上真正的值**。相等才说明这一帧按关键帧画。
+        // 只要有一行 want≠got，就是"关键帧没在这一帧生效"（跳变 100% 那种）。
+        kfLive: vidTraceKfCheck(p),
+        kfTruth: vidTraceTruthCheck(p),
+        need: p ? (p.framesNeed | 0) : null,
+        ok: p ? (p.framesOk | 0) : null,
+        miss: p ? !!p.frameMissing : null,
+        // 这一帧"该是哪一刻"（计划的 planT）。`lateMs` = 从宿主算出这一帧到它被画上台隔了多少毫秒
+        //（跨窗用 Date.now 对齐时钟；时间轴秒数与页面 uptime 比不出这个）。
+        planT: p ? +(+p.planT).toFixed(3) : null,
+        planRev: p ? (p.planRev | 0) : null,
+        sentAt: p ? p.sentAt : null,
+        lateMs: p && p.sentAt ? Date.now() - p.sentAt : null,
+        // 这一帧的底片是哪一支供的（elem = 页面自己的底片元素 / packet = 这一包的源帧镜像 /
+        // none = 都拿不到 ⇒ 播放中这一帧会被 hold）+ 包的底片轨是否就绪。段首出现 'none'
+        //（尤其 bdReady=false）就说明"底片正在换源"，那就是那一刻空/裸的根源。
+        bd: vidBackdropFrom,
+        bdReady: p && p.sources ? !!vidFrameSource(p.sources, p.baseTrackId) : null,
+        // 宿主此刻有没有把底片按住（游标在 Layer 段上）。段界那一帧如果 tag='base' 而 hid=true，
+        // 就是"底片顶掉了合成"—— 那正是跳闪一下新片段裸帧的那条路。
+        hid: vidBaseHidden,
+        inkBefore: vidTrace.lastInk,
+    };
+}
+/** 把这一包里的采样值逐通道对到图层上。**只在折叠那一趟里有效**（vidKfPatching）：折叠外面图层
+ *  上是真值，"对不上"是正常的，不能算错。 */
+function vidTraceKfCheck(p) {
+    if (!p || !p.kf || !layers || !vidKfPatching) return null;
+    const out = [];
+    for (const ch of Object.keys(p.kf)) {
+        const m = /^layer:([^:]+):(opacity|visible|x|y|w|h|rotation)$/.exec(ch);
+        if (!m) continue;
+        const want = +(+p.kf[ch]).toFixed(2);
+        const l = layers.find(x => x && String(x.id) === m[1]);
+        if (!l) { out.push({ id: m[1], k: m[2], want, got: 'no-layer' }); continue; }
+        const got = m[2] === 'opacity' ? +layerOpacity(l).toFixed(2)
+            : m[2] === 'visible' ? (l.visible ? 1 : 0)
+                : +(+l[m[2]] || 0).toFixed(2);
+        out.push({ id: m[1], k: m[2], want, got });
+        if (out.length >= 6) break;
+    }
+    return out.length ? out : null;
+}
+
+/** 反过来的那种错：**手上有关键帧采样值，可这一帧图层还是真值**（例如 100%），也就是"关键帧没在
+ *  这一帧触发"。只在折叠那一趟里有意义（vidKfPatching 里由 vidTraceKfCheck 负责），
+ *  折叠外面图层上是真值，"对不上"是正常的 —— 所以这里只覆盖 `live` 把**旧上下文图**铺上台的那条路。 */
+function vidTraceTruthCheck(p) {
+    return null;      // 折叠外不判（由 kfLive 在折叠内判）
+}
+function vidTraceEnd(row) {
+    vidTrace.lastPresentAt = performance.now();
+    // 画布还没立起来（页面刚加载 / 文档还没给出栅格）不算"该有画面"：这时候清屏是正常的。
+    if (!canvasW || !canvasH) { vidTrace.lastInk = false; vidTrace.lastAlpha = -1; return; }
+    row.ink = vidTraceInkProbe();
+    // `ink` 是 16×16 采样里 alpha 的和：满不透明 = 16*16*255 = 65280。百分比一眼就能看出"半透明"。
+    row.alphaPct = row.ink < 0 ? -1 : Math.round((row.ink / (16 * 16 * 255)) * 100);
+    vidTrace.ring.push(row);
+    if (vidTrace.ring.length > VID_TRACE_MAX) vidTrace.ring.shift();
+    vidTraceCheckDrop(row);
+    vidTrace.lastInk = row.ink !== 0;
+    vidTrace.lastAlpha = row.alphaPct;
+}
+
+/** 一次"画面掉下去了"的判定 + 现场固定。presented 那一趟和逐帧巡视图（vidTraceWatch）共用。 */
+function vidTraceCheckDrop(row) {
+    // ① 关键帧对账：这一帧有采样值，但图层上的值和它对不上 ⇒ 这一帧没按关键帧画（跳变 100% 那种）。
+    if (row.kfLive) {
+        const bad = row.kfLive.find(x => x.got !== 'no-layer' && Math.abs(Number(x.got) - Number(x.want)) > 0.02);
+        if (bad) {
+            vidTrace.kfBad = (vidTrace.kfBad | 0) + 1;
+            if (!vidTrace.firstBad) {
+                row.dom = vidTraceDom();
+                vidTrace.firstBad = {
+                    at: Date.now(),
+                    reason: `keyframe NOT applied on this frame: layer ${bad.id} ${bad.k} want ${bad.want} got ${bad.got}`,
+                    page: vidTraceReport(),
+                };
+                try { window.parent.postMessage({ type: 'blend-vid-trace-bad', at: vidTrace.firstBad.at, row }, '*'); } catch (e) { /* 单页 */ }
+            }
+        }
+    }
+    // ② 反过来的那种：手上有关键帧采样值要它"淡"，可这一帧图层还是真值（100%）—— 就是用户看到的
+    //    "关键帧在 0.000 却不立即生效、先跳一个 100%"。谁画的由 tag 指出（work / live / blit…）。
+    if (row.kfTruth) {
+        const bad = row.kfTruth[0];
+        vidTrace.kfBad = (vidTrace.kfBad | 0) + 1;
+        if (!vidTrace.firstBad) {
+            row.dom = vidTraceDom();
+            vidTrace.firstBad = {
+                at: Date.now(),
+                reason: `layer ${bad.id} drawn at ${bad.got} while the keyframe wants ${bad.want} (tag ${row.tag})`,
+                page: vidTraceReport(),
+            };
+            try { window.parent.postMessage({ type: 'blend-vid-trace-bad', at: vidTrace.firstBad.at, row }, '*'); } catch (e) { /* 单页 */ }
+        }
+    }
+    const prev = vidTrace.lastAlpha;
+    if (!(row.alphaPct >= 0) || !(prev >= 60)) return false;
+    if (!(row.alphaPct < Math.min(60, prev * 0.9))) return false;
+    vidTrace.badCount++;
+    vidTrace.drops = (vidTrace.drops | 0) + 1;
+    if (!vidTrace.firstBad) {
+        row.dom = vidTraceDom();
+        vidTrace.firstBad = {
+            at: Date.now(),
+            reason: row.tag === 'raf'
+                ? `canvas blanked with NO present: alpha ${prev}% → ${row.alphaPct}%`
+                : (row.alphaPct <= 0 ? `composite went transparent (${prev}% → 0%)` : `composite alpha ${prev}% → ${row.alphaPct}%`),
+            page: vidTraceReport(),
+        };
+        try { window.parent.postMessage({ type: 'blend-vid-trace-bad', at: vidTrace.firstBad.at, row }, '*'); } catch (e) { /* 单页 */ }
+    }
+    return true;
+}
+
+/** 屏幕上这一块 DOM 的实况：画布自己的框/可见性 + 宿主那层视频与 iframe 的可见性。
+ *  画布内容没变却看见黑/半透明，答案一定在这一格里（被隐藏、被盖住、还是被换成了别的元素）。 */
+function vidTraceDom() {
+    const now = performance.now();
+    if (vidTrace.dom && now - vidTrace.domAt < 250) return vidTrace.dom;
+    const out = { canvas: null, host: null };
+    try {
+        const cs = getComputedStyle(stageCanvas);
+        const r = stageCanvas.getBoundingClientRect();
+        out.canvas = { w: stageCanvas.width, h: stageCanvas.height, css: cs.width + 'x' + cs.height,
+            rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)].join(','),
+            viz: cs.visibility, op: cs.opacity, disp: cs.display, bg: cs.backgroundColor };
+    } catch (e) { out.canvas = String(e); }
+    try {
+        // 同一源（127.0.0.1:8700）：顺手看一眼宿主那一层——黑/半透明也可能是它露出来了。
+        const pd = window.parent && window.parent !== window ? window.parent.document : null;
+        if (pd) {
+            const vs = [...pd.querySelectorAll('video')].filter(v => {
+                const s = pd.defaultView.getComputedStyle(v);
+                const rr = v.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && +s.opacity > 0.01 && rr.width > 40 && rr.height > 40;
+            }).map(v => {
+                const s = pd.defaultView.getComputedStyle(v);
+                const rr = v.getBoundingClientRect();
+                return { op: s.opacity, vis: s.visibility, rect: [Math.round(rr.x), Math.round(rr.y), Math.round(rr.width), Math.round(rr.height)].join(','),
+                    paused: v.paused, ready: v.readyState, t: +(v.currentTime || 0).toFixed(2), z: s.zIndex };
+            });
+            const fr = [...pd.querySelectorAll('iframe')].map(f => {
+                const s = pd.defaultView.getComputedStyle(f);
+                const rr = f.getBoundingClientRect();
+                return { src: String(f.src || '').slice(-24), op: s.opacity, vis: s.visibility, rect: [Math.round(rr.x), Math.round(rr.y), Math.round(rr.width), Math.round(rr.height)].join(','), z: s.zIndex };
+            });
+            out.host = { videos: vs.slice(0, 4), iframes: fr.slice(0, 4) };
+        }
+    } catch (e) { out.host = String(e); }
+    vidTrace.dom = out;
+    vidTrace.domAt = now;
+    return out;
+}
+
+/** **逐帧巡视**：录像带原来只记"落地"那一趟 —— 可"屏幕上黑了一下"完全可能**没有任何落地**参与
+ *  （画布被重设尺寸清空、被隐藏、被别的元素盖住）。所以这里按帧补一条：画面百分比变了才记，
+ *  并且一旦掉下去就判定（reason 里会写 "NO present"）。 */
+function vidTraceWatch() {
+    if (vidTrace.rafOn) return;
+    vidTrace.rafOn = true;
+    const step = () => {
+        try {
+            if (canvasW && canvasH && performance.now() - vidTrace.lastPresentAt > 2) {
+                const ink = vidTraceInkProbe();
+                const pct = ink < 0 ? -1 : Math.round((ink / (16 * 16 * 255)) * 100);
+                if (pct >= 0 && (vidTrace.rafLast === null || Math.abs(pct - vidTrace.rafLast) >= 3)) {
+                    const row = { ms: +performance.now().toFixed(0), tag: 'raf', n: null, alphaPct: pct, ink,
+                        mode: stageMode, pktKey: vidFramePacket ? (vidFramePacket.layerKey || '').slice(-6) : null,
+                        actKey: (activeLayerSet || '').slice(-6), pktT: vidFramePacket ? +(+vidFramePacket.t).toFixed(2) : null,
+                        layers: (typeof layers !== 'undefined' && layers) ? layers.length : -1, visible: -1 };
+                    vidTrace.ring.push(row);
+                    if (vidTrace.ring.length > VID_TRACE_MAX) vidTrace.ring.shift();
+                    vidTrace.rafLast = pct;
+                    vidTraceCheckDrop(row);
+                    vidTrace.lastAlpha = pct;
+                } else if (pct >= 0) {
+                    vidTrace.rafLast = pct;
+                }
+            }
+        } catch (e) { /* 诊断不许影响画面 */ }
+        requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+}
+vidTraceWatch();
+/** 一份可以直接交给人的报告：环境 + 当前状态 + 最近 160 帧 + 第一现场。 */
+function vidTraceReport() {
+    let perf = {};
+    try { perf = JSON.parse(JSON.stringify(window.__vidPerf || {})); } catch (e) { perf = {}; }
+    return {
+        at: new Date().toISOString(),
+        canvas: canvasW + 'x' + canvasH,
+        stageMode,
+        want: (typeof stageWanted === 'function') ? stageWanted() : null,
+        activeLayerSet,
+        layerSets: [...layerSets.keys()].map(k => ({ key: k, layers: ((layerSets.get(k) || {}).layers || []).length })),
+        layers: (layers || []).map(l => ({
+            id: String(l.id), name: l.name, visible: !!l.visible, opacity: layerOpacity(l),
+            attrs: attrRecordsOf(l).map(r => ({ type: r.type, chain: !!r.chain, track: r.frameTrack || null, enabled: attrEnabled(r), surface: r.surface ? (r.surface.width + 'x' + r.surface.height) : null })),
+            img: l.img ? (l.img.width + 'x' + l.img.height) : null,
+        })),
+        packet: vidFramePacket ? {
+            t: vidFramePacket.t, layerKey: vidFramePacket.layerKey, kf: vidFramePacket.kf,
+            framesNeed: vidFramePacket.framesNeed | 0, framesOk: vidFramePacket.framesOk | 0,
+            missing: !!vidFramePacket.frameMissing, rendered: !!vidFramePacket.rendered,
+            retries: vidFramePacket.retries | 0,
+            sources: [...(vidFramePacket.sources ? vidFramePacket.sources.keys() : [])],
+        } : null,
+        mirrors: [...vidSrcVideos.entries()].map(([k, e]) => ({ track: k, ready: e.v.readyState, paused: e.v.paused, seeking: e.v.seeking, t: +(e.v.currentTime || 0).toFixed(2), want: +(e.want || 0).toFixed(2) })),
+        base: { on: vidBaseOn, playing: vidBasePlaying, ready: vidBaseVideo.readyState, t: +vidBaseVideo.currentTime.toFixed(2) },
+        perf,
+        dom: vidTraceDom(),
+        badCount: vidTrace.badCount,
+        drops: vidTrace.drops | 0,
+        kfBad: vidTrace.kfBad | 0,
+        trace: vidTrace.ring.slice(-VID_TRACE_MAX),
+        firstBad: vidTrace.firstBad ? { at: vidTrace.firstBad.at, reason: vidTrace.firstBad.reason,
+            trace: vidTrace.firstBad.page.trace, packet: vidTrace.firstBad.page.packet,
+            layers: vidTrace.firstBad.page.layers, mirrors: vidTrace.firstBad.page.mirrors } : null,
+    };
+}
+// 宿主按 Trace：把报告回过去（复制/落盘由宿主决定）。
+window.addEventListener('message', e => {
+    const d = e.data || {};
+    if (d.type !== 'blend-vid-trace') return;
+    let report = null;
+    try { report = vidTraceReport(); } catch (err) { report = { error: String(err) }; }
+    try { window.parent.postMessage({ type: 'blend-vid-trace-report', reqId: d.reqId | 0, report }, '*'); } catch (err) { /* 单页 */ }
+});
 
 /** context image = stage 上此刻这一张（不含 guidance）。抄一次给读像素的那些入口
  *  （生成/导出/存档/吸管/监视器）。两种情形都走这里：live 路径抄的是工作栈，底片态抄的是
@@ -4947,10 +5764,20 @@ function ensureBlendImage() {
 /** 活画布这套上台。render() 通常已经把它合成在 stage 上了（stageMode === 'live'）；
  *  从底片/副本切回来时才需要重铺一次。 */
 function stageShowLive() {
-    ensureBlendImage();
+    // **播放中不用上下文图去接管显示面**：那块画布是一份"读者用的副本"，最后一次抄写可能发生在
+    // 关键帧生效之前（比如暂停时在图层上动过手 = 画的是真值 100%）。播放中把它铺上台，就等于把
+    // 那一帧真值画面顶到屏幕上 —— 用户看到的是"关键帧在 0.000 却不立即生效，先跳一下 100%"。
+    // 播放中显示面只由**握着源帧与采样值的那一趟折叠**来画（下一包就到，最多晚一拍）。
+    if (vidFramesFlowing() && vidFramePacket) return;
+    // **脏就别上台**。本函数只在"从底片／副本切回活画布"时被调到，此刻 stage 上摆的是底片帧 ——
+    // 早先这里调 ensureBlendImage()，而它是"把 stage 抄进 context image"，于是抄进去的正是那帧底片，
+    // 再把这张铺上台：屏幕上明晃晃一帧视频，状态却标成 live。删掉那条抄写：
+    // context image 只能由真正画完一趟的 render 来写（见 render 里那句 if (!skipDisplay)）。
+    // 脏着就保持现画面 —— 帧包驱动的 render 30Hz 就到，最多晚一拍。
+    if (blendDirty) { __vidPerf.holds.liveStale = (__vidPerf.holds.liveStale | 0) + 1; return; }
     const items = [{ src: blendCanvas, transform: null }];
     if (guidanceHasInk) items.push({ src: guidanceCanvas, transform: null });
-    if (!stagePresent(items, true)) return;
+    if (!stagePresent(items, true, 'live')) return;
     stageMode = 'live';
 }
 
@@ -4982,12 +5809,18 @@ function vidBaseWatchFrames() {
 function stageShowBase(force) {
     const v = vidBaseVideo;
     if (!vidBaseOn || !vidBaseSrc || !v) return;
+    // 宿主按住底片（游标在 Layer 段上）：这一刻的画只能由合成图来画。见 vidBaseHidden。
+    if (vidBaseHidden) { __vidPerf.holds.baseHidden = (__vidPerf.holds.baseHidden | 0) + 1; return; }
     if (!canvasW || !canvasH || v.readyState < 2 || v.seeking) return;
     if (!v.videoWidth || !v.videoHeight) return;
     const fresh = !v.paused && vidBaseRvfcAt > 0 && performance.now() - vidBaseRvfcAt < 500;
     const stamp = vidBaseSrc + '@' + (fresh ? '#' + vidBaseSeq : v.currentTime.toFixed(3));
     if (!force && stageMode === 'base' && stamp === stageBaseStamp) return;
-    if (!stagePresent([{ src: v, transform: null, premul: true }], true)) return;
+    // **和合成走同一个画家**：底片态 = "这一帧没有图层"的那一帧，底色取自 stageBackdropItem（同一个
+    // "这张底片对不对得上这一帧"的判据，见那儿）。它说不可信就不画 —— 台上保留上一帧，绝不清屏。
+    const item = stageBackdropItem();
+    if (!item) return;
+    if (!stagePresent([item], true, 'base')) return;
     stageBaseStamp = stamp;
     stageMode = 'base';
     // P3.6：底片态里 **context image 就是这一帧**。P3.3 当时刻意不抄（底图只负责显示，blendCanvas
@@ -5004,7 +5837,7 @@ function stageShowBase(force) {
 function stageBlit(src) {
     if (!src || !src.width || !src.height) return;
     stageCompositeSrc = src;             // 先记下：模式切回 composite 时还要用它
-    if (!stagePresent([{ src, transform: null }], true)) return;
+    if (!stagePresent([{ src, transform: null }], true, 'blit')) return;
     stageMode = 'composite';
 }
 
@@ -5012,6 +5845,10 @@ function stageBlit(src) {
 function stageSync(force) {
     if (!canvasW || !canvasH) return;
     const want = stageWanted();
+    // 段界那一拍：画布归合成图，而合成图还没到（底片被按住，见 vidBaseHidden）⇒ **什么都不动**，
+    // 台上留着上一帧（上一段最后的那张底片帧），合成一画上来就接手。这里也不改 stageMode：
+    // 底片仍然"占着台"，只是没人把它换掉。
+    if (want === 'hold') return;
     if (!force && want === stageMode) {
         // 同一模式里内容自己会变：底片帧要跟着 <video> 走，副本由 vidFrameFlush 交上来。
         if (want === 'base') stageShowBase();
@@ -5055,18 +5892,23 @@ function vidBaseSeek() {
     }
     // `!v.seeking`：seek 在途时再发一次只会把这次作废重来（六赫兹的包足够把一只正在纠偏的
     // 视频钉死在 readyState=1 上）。让它落地再说。
-    if (ready && !v.seeking && Math.abs(v.currentTime - vidBaseWant) > 0.25) {
+    // 容差：被按住时（hidden，画面上看不见它）**贴紧**着对 —— seek 的代价这会儿是免费的，
+    // 换来的是一出段就有"正在那一帧"，不用再跳一下。没被按住时沿用原来的宽容差（跳一次要卡一下）。
+    const tol = vidBaseHidden ? 0.04 : 0.25;
+    if (ready && !v.seeking && Math.abs(v.currentTime - vidBaseWant) > tol) {
         try { v.currentTime = vidBaseWant; } catch (e) { /* 还不能 seek */ }
     }
     if (v.paused) void v.play().catch(() => { /* autoplay 政策 */ });
 }
 
-// 宿主的底片包：{src,start,offset,t,playing}。只做三件事：换源、对时、播/停。
+// 宿主的底片包：{src,start,offset,t,playing,hidden}。只做三件事：换源、对时、播/停 —— 外加
+// `hidden`：游标压在 Layer 段上时宿主仍让它跟着播（一出段就能立刻露出正在那一帧），但**不许上台**。
 function handleVidBaseSrcMessage(d) {
     const src = String(d.src || '');
     if (!src) { vidBaseOff(); return; }
     vidBaseWant = Math.max(0, (+d.offset || 0) + (+d.t || 0) - (+d.start || 0));
     vidBasePlaying = !!d.playing;
+    vidBaseHidden = d.hidden === true;
     vidBaseOn = true;
     if (src !== vidBaseSrc) {
         vidBaseSrc = src;
@@ -5089,13 +5931,15 @@ function handleVidBaseSrcMessage(d) {
 function vidBaseOff() {
     vidBasePause();
     stageBaseStamp = '';           // 再回来时第一帧要重传
+    vidBaseHidden = false;         // 底片都不要了，"按住"自然也不作数
     if (!vidBaseOn) return;
     vidBaseOn = false;
-    // 底片态里 blendCanvas 装的是**视频帧**（P3.6，见 stageShowBase）：离开底片态得把工作栈重折
-    // 回来，否则 stageShowLive() 会把那张视频帧当成"活画布"再铺一次，屏幕就停在最后一帧上。
-    // render() 收尾自己会 stageSync，所以这一支不再单独叫它。
-    if (stageMode === 'base') render();
-    else stageSync(true);
+    // 底片退场：台上这一帧仍是那段视频的最后一帧，**先留着不动**。
+    // 折工作栈这件事交给"这一段的第一个帧包"去做 —— 帧包处理器里的顺序已经钉死（先按包里的
+    // layerKey 切图层集、再注入源帧与采样值、最后折一次上屏），所以这一帧既不会空、也不会
+    // 折成上一套的样子。这里只在**没有包**的那种情况下把台面切回活画布（stageShowLive 铺的是
+    // context image = 台上这一帧，视觉上连续）。
+    if (!vidFramePacket) stageSync(true);
 }
 
 function vidFrameSurfaceFor(rec, w, h) {
@@ -5119,6 +5963,55 @@ function drawVidFrameFace(rec, src, w, h) {
     if (rec.type === 'mask') g.filter = VID_FRAME_LUMA_FILTER;
     drawVidFrameContain(g, src, cv.width, cv.height);
     if (rec.type === 'mask') g.filter = 'none';
+    return cv;
+}
+
+// ── 缺帧占位：紫色斜纹 ──────────────────────────────────────────────────────────────────────
+// 这一枚面**这一刻没有源帧**（镜像还在加载 / seek 在途）或者这条轨本来就没片（宿主用 emptyTracks
+// 明说过）时，面里画一张紫色占位。以前是 `surface = null`：面为空 ⇒ 这一层在画面上整个消失，
+// 看着像"图层丢了/编辑器算错了"，而不是"这一帧没拿到"。紫色占位让缺帧**可见**。
+// 只给画在画面上的面（decal / plane…）用；**蒙版面例外**：蒙版是把亮度当 alpha，紫色亮度的结果
+// 是按 74/255 把整层裁掉大半 —— 比"没有蒙版"错得更离谱，所以蒙版缺帧仍旧留空（= 不裁）。
+// 画布按 rec.id 复用（vidFrameSurfaceFor），缺帧期间每帧只是十几条 fill，比一整幅 drawImage 便宜。
+const VID_MISS_FILL = '#6E2BB8';
+const VID_MISS_STRIPE = '#8A46D8';
+const VID_MISS_EDGE = '#C9A6F2';
+// 画过几枚紫占位（单调递增）。回监视器那条路靠它认出"刚才发出去的是一张紫图"：
+// 紫图在**监视器**上不代表任何一版真内容，下一趟必须无条件重传一张干净的位图，否则
+// `replyVidFrameCached` 会把"内容没变"套在一张紫图上，监视器就永远停在紫色（见 vidFrameFlush）。
+let vidPlaceholderGen = 0;
+let vidPurpleDirty = false;
+function drawVidFramePlaceholder(rec, w, h) {
+    vidPlaceholderGen++;
+    __vidPerf.lastPlaceholder = { rec: String(rec.id), track: String(rec.frameTrack),
+        empty: !!(vidFramePacket && (vidFramePacket.emptyTracks || []).indexOf(String(rec.frameTrack)) >= 0) };
+    const cv = vidFrameSurfaceFor(rec, w, h);
+    const g = cv.getContext('2d');
+    resetCtx(g);
+    g.clearRect(0, 0, cv.width, cv.height);
+    g.fillStyle = VID_MISS_FILL;
+    g.fillRect(0, 0, cv.width, cv.height);
+    const step = Math.max(6, Math.round(Math.min(cv.width, cv.height) / 18));
+    g.save();
+    g.beginPath();
+    g.rect(0, 0, cv.width, cv.height);
+    g.clip();
+    g.fillStyle = VID_MISS_STRIPE;
+    for (let x = -cv.height; x < cv.width + cv.height; x += step * 2) {
+        g.beginPath();
+        g.moveTo(x, 0);
+        g.lineTo(x + cv.height, cv.height);
+        g.lineTo(x + cv.height + step, cv.height);
+        g.lineTo(x + step, 0);
+        g.closePath();
+        g.fill();
+    }
+    g.restore();
+    // 一圈内描边：一眼看出这枚面的网格边界（贴片被 contain/缩放时尤其有用）。
+    const lw = Math.max(1, Math.round(Math.min(cv.width, cv.height) / 160));
+    g.strokeStyle = VID_MISS_EDGE;
+    g.lineWidth = lw;
+    g.strokeRect(lw / 2, lw / 2, cv.width - lw, cv.height - lw);
     return cv;
 }
 
@@ -5180,6 +6073,8 @@ function vidFrameInject(packet, stack, directOk) {
     const touched = [];
     const used = new Set();
     packet.frameMissing = false;           // 每趟重算：这一趟到底还缺不缺帧
+    packet.framesNeed = 0;                 // 这一趟"要几枚面"（可见图层上启用的、绑了轨的 surface）
+    packet.framesOk = 0;                   // 其中真的拿到帧的几枚 —— 全缺 = 这一趟折出来只会是空面
     const usedTracks = new Set();          // 这一包**实际消费**了哪些轨的源帧(报给宿主:
                                            // 没被任何面 attribute 引用的轨不必抓不必传 ——
                                            // 精确 seek 一条轨是 100ms 级的买卖)
@@ -5191,9 +6086,16 @@ function vidFrameInject(packet, stack, directOk) {
             const spec = ATTR_TYPES[r.type];
             if (!spec || spec.kind !== 'surface') continue;
             const src = vidFrameSource(packet.sources, r.frameTrack);
+            // 宿主明说"这条轨这一刻没有片"⇒ 这一枚这一趟天然什么都不出，别把它记成缺帧
+            // （记了就会一直重试、一直 hold，屏幕上反而冻住）。它跟"帧还没到"必须分开。
+            const emptyHere = !src && packet.emptyTracks && packet.emptyTracks.indexOf(String(r.frameTrack)) >= 0;
+            if (!emptyHere) {
+                packet.framesNeed++;
+                if (src) packet.framesOk++;
+            }
             // 这一轨**还没有能画的帧**（镜像刚换源 / 还在 seek）：记一笔，合成完立刻安排重试。
             // 不记的话，暂停态下这一帧就永远停在"没有帧"的版本上（播放时下一包会自愈，暂停不会）。
-            if (!src) packet.frameMissing = true;
+            if (!src && !emptyHere) packet.frameMissing = true;
             // 直通（见 layerItem 的 solo 分支）：这一枚面这一趟根本不落 CPU —— 画面那边直接把
             // 视频纹理贴上去。省掉的是"画进一张 2D 画布"这一趟拷贝（832×1216 每帧每层一次）。
             // **先判直通再看 `used`**：同一枚记录可能被两层共用，而只有一层走直通 —— 先记 used 的话
@@ -5204,7 +6106,10 @@ function vidFrameInject(packet, stack, directOk) {
             const gw = (r.surface && r.surface.width) ? r.surface.width : nat.w;
             const gh = (r.surface && r.surface.height) ? r.surface.height : nat.h;
             touched.push({ r, had: Object.prototype.hasOwnProperty.call(r, 'surface'), was: r.surface });
-            r.surface = src ? drawVidFrameFace(r, src, gw, gh) : null;
+            // 拿不到源帧 ⇒ **紫色占位**（见 drawVidFramePlaceholder），不再把面置空：置空等于这一层
+            // 在画面上整个消失，看着像图层丢了。蒙版面照旧留空（紫色当 alpha 会裁掉大半，比不裁错）。
+            r.surface = src ? drawVidFrameFace(r, src, gw, gh)
+                : (r.type === 'mask' ? null : drawVidFramePlaceholder(r, gw, gh));
             if (src) usedTracks.add(String(r.frameTrack));
         }
     }
@@ -5423,21 +6328,24 @@ function vidFrameFlush() {
     vidFrameRaf = 0;
     const p = vidFramePacket;
     if (!p) return;
-    // **缺源帧的这一趟什么都不发**（也不画）：监视器与画布都先保留现画面。
-    // 发了就是一张缺面的合成图 —— 换段那一下的"闪"正是它：进 Layer 段时镜像视频还在加载/seek，
-    // 先回一张没有 decal 的图（多半是空的），几十毫秒后才补上真帧。旧的抓帧链路天然没这个洞
-    // （它抓到帧才回图）。一直缺（那条轨这段时间确实没有片）就别硬等：过 1 秒照原样发。
-    // **编辑**那一趟例外：暂停态没有后续包来补，等帧就是"编辑没反应"（见 vidFrameRedraw）。
-    const editing = !!p.editing;
+    // **缺源帧不再 hold**（旧行为：源帧没齐就整趟不画、屏幕上保留上一张已画好的帧）。
+    // 现在照样折：缺源帧的那几枚面由 vidFrameInject 画成**紫色占位**（drawVidFramePlaceholder），
+    // 于是"这一刻没拿到帧"是看得见的，而不是停在一张和播放头已经对不上的旧画面上。
+    // 代价是换段那一拍可能闪一下紫色（镜像视频还在加载 / seek 在途），这是刻意的取舍：
+    // 宁可让人知道"这一帧没到"，也不要让人以为"画面停在这里就是对的"。
+    // 重试照旧（见函数末尾）：帧一到就重画，紫色换回真画。`p.editing`（暂停态编辑触发的重折）
+    // 以前靠它绕过 hold，两条路现在合一，只需把标志清掉。
     p.editing = false;
-    if (!editing && !vidFrameSourcesReady(p) && (p.retries || 0) < 40) {
-        vidFrameRetryLater(true);
-        return;
+    if (!vidFrameSourcesReady(p)) {
+        // 计划换了（planRev 变了）而源帧还没齐的那几拍记进 __vidPerf.held，验收时看它。
+        if ((p.planRev | 0) !== (vidPaintedRev | 0)) __vidPerf.held = (__vidPerf.held | 0) + 1;
+        __vidPerf.placeholder = (__vidPerf.placeholder | 0) + 1;
     }
     // "活画布这一套" = 这一包说的正是用户手上那套 ⇒ 折在活画布上（收尾顺手抄一份回监视器）。
     // P3.4 起播放中也走这条路：编辑与播放不再分叉，画面就是活画布本身。
     const active = (p.layerKey || '') === (activeLayerSet || '');
     vidInFlush = true;
+    const purpleAtStart = vidPlaceholderGen;
     try {
         // 活画布这一套：这一包还没画过就先画。源帧与**关键帧采样值**同在一趟里折进去
         // （render 的 opts.vidKf / kfRestore）：Video 模式的画面就是这块活画布，采样值不进这一趟
@@ -5446,6 +6354,8 @@ function vidFrameFlush() {
             p.rendered = true;
             __vidPerf.renders++;
             render({ vidKf: true });
+            // 这一版计划真正画上台了：hold 的判据（planRev 对不上就说明台上还是旧计划）靠它。
+            vidPaintedRev = (p.planRev | 0);
         }
         // 回图这一刻的真实状态记进缓存:下一包状态没变(图层没编辑、源帧帧号没动)就回
         // cached 标记,零像素工作 —— 播放扫过一段"与时间无关"的图层集时,监视器那一趟
@@ -5466,8 +6376,16 @@ function vidFrameFlush() {
             // 全是白烧。省掉它，但**每秒留一张**做保底 —— 窗口一收、画布让位，监视器立刻有东西。
             const nowMs = performance.now();
             const keepalive = nowMs - vidShotAt > 1000;
-            if (kfCv || !(p.stageCovers && onLive) || keepalive) {
+            // 这一趟画进去过紫占位吗？（render 之前记的代数，见 drawVidFramePlaceholder）
+            const purpleNow = vidPlaceholderGen !== purpleAtStart;
+            // 紫占位那张位图不能进"内容没变"的捷径：它不代表任何一版真内容。所以
+            //   ① 画紫的这趟**必须**发（让监视器立刻看到"没帧"，而不是停在上一版）；
+            //   ② 紫之后的第一趟**干净**的也必须发（把紫换回真画），这一条由 vidPurpleDirty 记着 ——
+            //      少了它，监视器会在"内容没变 ⇒ cached"里永远停在紫色。台上（#stageCanvas）本来
+            //      就是对的，错只会错在监视器那一格。
+            if (kfCv || purpleNow || vidPurpleDirty || !(p.stageCovers && onLive) || keepalive) {
                 vidShotAt = nowMs;
+                vidPurpleDirty = purpleNow;          // 干净的一张发出去 = 监视器跟上了
                 replyVidFrame(p.reqId, kfCv || blendCanvas, frameless);
             } else {
                 replyVidFrameCached(p.reqId, frameless);      // 内容没变的那种回包：一张图都不传
@@ -5475,10 +6393,22 @@ function vidFrameFlush() {
             stageSync();             // 这一包说的正是活画布这套了：台上换成它（用户在编辑）
         } else {
             __vidPerf.repliesTemp++;
+            // 这一包说的不是手上这套（游标在别段，或者"切到这一套"那条消息还没到）。**只有在页面上
+            // 真有这一套时可折**：不认识的 key ⇒ 折出来是一张空图，贴到台上就是"闪一帧透明"
+            // （换段时帧包与切套是两条消息，先后不定 —— 这就是那个概率性透明帧）。
+            // 认不出来就什么都不动：台上保留上一帧，回包照旧走 cached（台上确实没变）。
+            const key = p.layerKey || '';
+            const known = !!(key && (key === (activeLayerSet || '') || layerSets.get(key)));
+            if (!known) {
+                __vidPerf.holds.unknownSet++;
+                replyVidFrameCached(p.reqId, frameless);
+                return;
+            }
             const cv = composeVidFrameCanvas(p);
             // 这一包说的不是手上这套（游标在别段）⇒ 台上放合成图副本；活画布一个像素都不动。
             stageBlit(cv);
             replyVidFrame(p.reqId, cv, frameless);
+            vidPurpleDirty = vidPlaceholderGen !== purpleAtStart;   // 同上：紫的那张不算"干净的一张"
         }
     } finally {
         vidInFlush = false;
@@ -5521,7 +6451,11 @@ function vidFrameRetryLater(force) {
 }
 
 // 性能探针(只读,诊断用):逐帧合成链路的次数与耗时。宿主侧 __compPerf 配对。
-window.__vidPerf = { packs: 0, hits: 0, misses: 0, renders: 0, sigMs: 0, repliesActive: 0, repliesTemp: 0, lastSig: '' };
+window.__vidPerf = { packs: 0, hits: 0, misses: 0, renders: 0, sigMs: 0, repliesActive: 0, repliesTemp: 0, lastSig: '',
+    // 缺帧占位（紫）出现过几趟。播放中若紫色闪得频繁，说明镜像视频跟不上（换段 / 池子太小）。
+    placeholder: 0,
+    // 「这一帧不敢落地」的计数（按原因分）：播放中若出现瞬时黑/透明，这四个数会指出是哪条路。
+    holds: { noFrames: 0, emptyStack: 0, unknownSet: 0, emptyCtx: 0 } };
 
 // ── 合成缓存的状态签名 ──────────────────────────────────────────────────────────────────────
 // "这一包的合成结果由什么决定":哪一段(layerKey)、它的图层集内容(活跃那套逐层算签名 —— 随时
@@ -5584,14 +6518,52 @@ function handleVidFrameMessage(d) {
     if (base) { const bs = vidFrameSizeOf(base); if (bs.w && bs.h) noteVidGrid(bs.w, bs.h); }
     // 上一包的源帧到这里就没用了（临时面已经把像素抄进自己的画布）。
     if (prev) for (const b of prev.bitmaps) { try { b.close(); } catch (e) { /* gone */ } }
+    // ── 每帧的执行顺序从这里开始钉死：**这一包说哪一段，画布就先切到哪一段**，然后再折、再上屏。
+    // 图层集一直住在页面内存里（读档时就装好、之后由页面自己增删），所以这一步是**同步**的 ——
+    // 不存在"等宿主那条切套消息/等图层载入"这回事，也就没有帧包先到、图层还是上一套的窗口。
+    // 宿主那条 `blend-vid-layer-set` 仍然照发（面板与图层编辑跟着它走），到这里就成了幂等的空操作。
+    {
+        const packKey = typeof d.layerKey === 'string' ? d.layerKey : '';
+        if (packKey && packKey !== (activeLayerSet || '')) {
+            if (layerSets.get(packKey) || !layerSets.size) switchLayerSet(packKey, true);   // true = 别现在画
+            else __vidPerf.holds.unknownSet++;
+        }
+    }
+    // ── "底片被按住"这件事由**帧包自己**说 ──
+    // 早先它只由 `blend-vid-base-src` 那条独立消息携带（见 vidBaseSetSrc），于是"进 Layer 段"
+    // 那一刻的正确性依赖宿主把 base-src 排在 frame 之前（同源 postMessage 有序，但那是宿主的
+    // 书写习惯，不是代码保证）。顺序一旦反过来，段界那一拍 stageWanted() 会返回 'base'，把脚下
+    // 新片段的裸帧顶上台 —— 正是 stageWanted 注释里反复警告的那一闪。
+    // 帧包到达本身就证明了"游标压在这一段上"，所以在这里置位：幂等，晚到的那条消息再置一次也无害。
+    if (typeof d.layerKey === 'string' && d.layerKey) vidBaseHidden = true;
     vidFramePacket = {
         reqId: d.reqId | 0,
         t: +d.t || 0,
+        // 这一包代表**时间轴上的哪一刻**（画面上这一帧的归属），以及计划版本号（换段/换底片就 +1）。
+        // 录像带据此把"画错了"和"来晚了"分开：paintMs - planT 就是这一帧晚到多少。
+        planT: Number.isFinite(+d.planT) ? +d.planT : (+d.t || 0),
+        planRev: (d.planRev | 0),
+        sentAt: Number.isFinite(+d.sentAt) ? +d.sentAt : 0,
+        // 这一段的图层**要**这条轨、而这条轨在这一刻**没有片**（那条视频轨的片段没盖到这一刻）。
+        // 与"帧还没到"是两回事：前者永远等不到（hold 也没用），所以它既不算缺帧、也不触发重试。
+        emptyTracks: Array.isArray(d.emptyTracks) ? d.emptyTracks.map(String) : [],
+        // 这一帧底片该在**源内**第几秒：页面据此挑"对的"那张底片（元素手上那张可能还是上一段的）。
+        baseT: Number.isFinite(+d.baseT) ? +d.baseT : null,
         layerKey: typeof d.layerKey === 'string' ? d.layerKey : '',
         baseTrackId: typeof d.baseTrackId === 'string' ? d.baseTrackId : null,
         // 关键帧回放的采样值（宿主按这一刻把各通道线性插值好送来）：通道键 → 数值。
         // 只在折叠那一趟里临时打进去（vidKfInject），图层的真值一个字不动。
         kf: (d.kf && typeof d.kf === 'object') ? d.kf : null,
+        // 这一段在**时间轴**上的位置（`{clipId,start,duration,offset,srcDuration}`，契约 §2.1 的
+        // timeMap）。段的位置只有宿主知道（页面只收"哪一段、源内第几秒"），所以它随包下来。
+        // 一段 = 一套图层，所以整包共用一个对象，折图时原样挂到每个图层的 `timeMap` 上。
+        clip: (d.clip && typeof d.clip === 'object' && typeof d.clip.clipId === 'string') ? {
+            clipId: d.clip.clipId,
+            start: Number.isFinite(+d.clip.start) ? +d.clip.start : 0,
+            duration: Number.isFinite(+d.clip.duration) ? +d.clip.duration : 0,
+            offset: Number.isFinite(+d.clip.offset) ? +d.clip.offset : 0,
+            srcDuration: Number.isFinite(+d.clip.srcDuration) ? +d.clip.srcDuration : null,
+        } : null,
         // 宿主报"工作台画布的 iframe 正压在这一格上面"：那样监视器那张位图没人看得见，
         // 这一帧就不必编码再跨窗传一张整幅图（见 vidFrameFlush 的活跃分支）。
         stageCovers: d.stageCovers === true,
@@ -5610,6 +6582,16 @@ function handleVidFrameMessage(d) {
     // 源帧收进 packet 就该画了，分两条走：这一包说的正是用户手上这套（选中了它）⇒ 重画活画布
     // （源帧折在上面，收尾会顺手抄一份回给监视器）；否则用户手上这套一个像素都不动，只单独折一张
     // 临时画布回给监视器（旧口径：监视器看的始终是游标底下那一段）。
+    // **换段那一帧（宿主标了 sync）**：在收到这一包的同一个任务里就画完，不排 rAF —— 段界与
+    // "底片换片段"常常落在同一刻（Layer 段对齐视频段开头就是这种），差一个 rAF 就是屏幕上
+    // "先出底片、再补图层"的那一帧。缓存也一并清掉：这一帧必须真画，不能被"内容没变"吞掉。
+    if (d.sync) {
+        __vidPerf.syncPaints = (__vidPerf.syncPaints | 0) + 1;
+        if (vidFrameRaf) { cancelAnimationFrame(vidFrameRaf); vidFrameRaf = 0; }
+        vidCompCache = null;
+        vidFrameFlush();
+        return;
+    }
     // 缓存命中(内容与上一张回图一致)⇒ 什么都不画,只回 cached 标记 —— 播放扫过一段没人动过的
     // 图层集时,这条路径把"每帧 render/折叠 + 整画布编码回传"全省掉。
     __vidPerf.packs++;
@@ -6297,7 +7279,7 @@ function replyVidLayerCopy(reqId, from, to) {
     window.parent.postMessage({ type: 'blend-vid-layer-copied', reqId, ok: !!ids, ids }, '*');
 }
 
-function switchLayerSet(key) {
+function switchLayerSet(key, noPaint) {
     const k = String(key || '');
     if (k === activeLayerSet) return;
     // 那个还在等栅格的 Add 属于上一段，不能落进新选中的这一套里。
@@ -6327,19 +7309,23 @@ function switchLayerSet(key) {
     }
     // 切套之后活画布重画一次：编辑与播放同一条路径（P3.4），画面永远就是活画布本身 ——
     // "播放中只换数据、不重画"那条分支没有了，所以也没有"停下那一刻再补一次"的欠账。
-    render();
+    // `noPaint`：调用方自己会紧接着画这一趟（帧包那条路 —— 它要一帧里只画一次、且带着源帧与
+    // 采样值画），别在这儿白折一张"还没注入源帧"的。
+    if (!noPaint) render();
     syncStackRows();
     syncHistoryUI();
     setStatus(k ? 'Layer segment — this segment owns its own layers' : 'Document layers');
     // 手上那一包现在能在**活画布**上折了（源帧也在手上）：立刻重折一次并回图。
     // 不催这一下的话，进段那一刻包里还没有"这一套"，走的是临时画布；要等下一个包
     // 才会切到活画布 —— 换段那一下托着的底片也就多顶一会儿。
-    if (vidFramePacket && (vidFramePacket.layerKey || '') === k) {
-        vidFramePacket.rendered = false;
-        vidCompCache = null;
-        vidFrameRedraw();
+    if (!noPaint) {
+        if (vidFramePacket && (vidFramePacket.layerKey || '') === k) {
+            vidFramePacket.rendered = false;
+            vidCompCache = null;
+            vidFrameRedraw();
+        }
+        stageSync(true);                 // 切过来这一套了：台上换成活画布（用户要编辑它）
     }
-    stageSync(true);                 // 切过来这一套了：台上换成活画布（用户要编辑它）
 }
 
 function resetHistory(label) {
@@ -15714,7 +16700,10 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
     if (d.type === 'blend-vid-base-src') { handleVidBaseSrcMessage(d); return; }
     if (d.type === 'blend-vid-base-off') { vidBaseOff(); return; }
-    if (d.type === 'blend-vid-grid') { noteVidGrid(d.width, d.height); return; }
+    if (d.type === 'blend-vid-grid') { noteVidGrid(d.width, d.height); vidSurfaceVideo = true; return; }
+    // 宿主明说"此刻是不是 Video 显示模式"。Video 模式下画布永远铺一层视频帧打底
+    // （见 stageBackdropItem），Image 模式保持透明。播放器挂上/卸下时各发一条，不靠推断。
+    if (d.type === 'blend-vid-surface') { vidSurfaceVideo = d.video === true; return; }
     if (d.type === 'blend-guidance-republish') {
         // 宿主说图池里那张 Guidance 卡不是我们的了（被别的实例顶掉，或整池换水时被清掉）：
         // 去重的记忆清掉，立刻重发一张自己的。

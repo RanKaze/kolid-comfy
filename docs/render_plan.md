@@ -153,6 +153,11 @@ Layer(l, t)    = Fold(l.strip, 输入 = l 的底像素)
 - **`layers` 在 plan 里自底向上**。现有 `layers[]` 是"首 = 最上"（`render()` 倒序画），
   所以 `.cud → plan` 那一步**必须反转**。写在这里，免得实现时对齐不上。
 - `stash` 层（`capture: "below"`）的输入是**当前已合成的画布**，不是自己的像素 —— 它抄的是下面的一切。
+  **"一切"= 图层，不含底片帧**。Video 模式下画布上还有一张垫在图层下面的视频帧（`backdrop`），它是
+  `frame` 不是 `layers`，所以不进这本账；没被图层盖住的地方在快照里是**透明**（`α=0`），不是视频画面。
+  这条必须在实现里照字面做：显示面（`stageCanvas` / `blendCanvas`）永远垫着底片，**不能**当快照的源，
+  否则视频帧会被烘进快照、再由上层重画一遍（监视器那一路不铺底片，冒出来就是一块多余的方框）。
+  后端导出同理：先把底片铺进目标，再折图层，`below` 只由图层累积（§3.1）。
 - `guidance` 栈单独折一张（`GuidanceFrame(plan,t)` = work 合成 + 所有可见 guidance）。
 
 ### 3.2 transform（与 canvas 2D 逐位一致）
@@ -653,3 +658,130 @@ P3.4 之后用户仍报"播放有卡顿"。实测（`_probe_vid_cadence.cjs --gp
     150ms 主线程（还挤在同一帧的合成回图前面）。现在读数**变了才发**，像素驱动的缩略图另走
     `queueBlendUiPixels()`（120ms 节流、带尾沿）；显式动作仍走不节流的 `queueBlendUi()`，回执照旧当帧到
     （实测点眼睛 7ms 落到当前段）。
+
+### 10.3.6 折图语义模块 `js/layer-fold.js`（KLayerFold，已落地）
+
+**一句话**：折图有两半 —— **语义**（一层 = base + 一串 step）与**执行**（把 step 刷成像素）。
+执行早就有模块（`js/compositor.js` 的 `foldLayer`，吃 plan 的 strip）；**语义这一半此前只有 Python 会写**
+（`nodes/workbench/render_plan.py`），浏览器侧一个都没有，于是线上路径（`render + layerItem`）自己折一遍，
+两份语义靠像素比对保鲜。这一步把缺的那一半补上了。
+
+| 位置 | 内容 |
+|---|---|
+| `nodes/web/js/layer-fold.js` | `KLayerFold.compile(layers, env) → { v, layers, resources }`（`layers` 自底向上）。附 `layer()/step()/stats()/describe()`。纯数据，不碰 DOM / 全局 / 像素。 |
+| `env` 契约 | `records(layer)`（条带记录，默认 `attrRecordsOf`）、`res(ref, role)`（资产 → `res:<hash>`，缺省不解析）、`timeMap(layer)`、`transform/stack/opacity`（都有默认）。**页面只交查询，不交状态。** |
+| 页面接线 | `foldEnvPage()` + `kolidFoldPlan()`，探针入口 `window.__kolidFold.{plan,stats,describe}`。`<script src="js/layer-fold.js">` 排在 `compositor.js` 之后。 |
+| 测试 | `node tests/layer_fold/fixture.cjs <out.cud>` 造夹具；`node tests/layer_fold/compare.cjs <doc.cud> [setKey]` 现算 Python oracle 后逐字段 diff（结构 diff，不是像素 diff）。 |
+
+**与 Python 编译器的两处有意差异**（都以契约为准）：
+
+1. **step 级 `enabled`**：`render_plan.py` 原来三处都写死 `True`，于是停用的 decal/mask/generator 在 plan
+   里仍是"出墨"的 —— 而 `foldLayer` 正是按 `enabled === false` 跳过。夹具把这条抓出来之后，Python 侧同步修成
+   `rec.get('enabled') is not False`。**停用的步骤照样进 plan**（参数还在，重新启用不必回档），只是标 false。
+2. **`opacity`**：`.cud` 不存图层不透明度，Python 写死 `1`；JS 侧取 `l.opacity` 真值（契约 §2.1 说它是滑杆值）。
+   只影响"页面此刻的 plan 与文件里的 plan 是否一致"，不影响折图 —— 条目上的 opacity 最终由合成器乘。
+
+**验收（2026-10-27）**：
+- 夹具（3 层 / 7 步 / 4 资源，覆盖 decal·mask·chain·text·crop、停用步骤、stash、guidance 栈、`baked` 面、
+  极端 transform）：与 Python 逐字段 **0 差异**。
+- 真实文档 `视频测试.cud`（3 层 / 3 步）：**0 差异**；指定图层段 `lclmvnhujut3d3` 也是 **0 差异**。
+- `tests/test_render_plan.py` 的 A 段改成**对着文件自身**验（层序/capture/strip 次序/资源表/transform），
+  不再写死文档快照 —— 旧版本因为文档改过已经失效（`KeyError: 'Stash 1'`），不是本次改动引起的。
+- 像素无变化：`_probe_vid_shot2.cjs` 产物与改动前基线**字节相同**（md5 `7f5d7350…`）；页面探针
+  `_probe_fold.cjs` 读到 `__kolidFold.plan()` 三层的 `capture:'below'` / `surface:decal` / `chain:effects` 都对。
+- `guards.py` 合计 50 处，与基线一致。
+
+**还没做（按顺序，别跳）** —— *这三条 2026-10-27 已全部落地，见 §10.3.7 / §10.3.8*：
+1. ~~`render()` 吃 plan（`foldLayer` 独占折图）~~ → `layerItem` 的兜底折叠已换成 `layerSourceViaPlan`。
+2. ~~`timeMap` 由宿主补~~ → `blend-vid-frame` 带 `clip`，见 §10.3.8。
+3. ~~两份执行合成一份~~ → 显示路径只剩 `foldLayer`；`fxDropStrip` 只服务"要一张 CPU 成品面"的那几处。
+
+### 10.3.7 显示那一趟的折叠走 plan（`foldLayer` 独占折图，已落地）
+
+上一步补的是**语义**（`layers → plan`）；这一步把**执行**收成一份：页面显示路径上"折一层"这件事，
+不再由 `layerSource → fxResolved → fxDropStrip` 做，而是 `KLayerFold` 出 plan、`KCompositor.foldLayer` 折。
+
+| 位置 | 内容 |
+|---|---|
+| `blend_node.html: layerSourceViaPlan(l)` | `layerItem` 的兜底折叠改成走 plan + 合成器。**尺寸仍传图层原生**（`foldLayer(pl, t, nat.w, nat.h)`）—— 于是"折在画布网格上"那套重采样差异在显示路径上根本不发生，与 `fxResolved` 逐像素相同。 |
+| `foldLive` / `foldLiveRef` | 页面的**活资源表**：还没落盘的内存像素（底图、贴片、蒙版）换一个 `live:<n>` 号进 plan，`KCompositor.api.resource` 换回像素。一次 `render` 一个世代（表在 `render()` 头里清）。**plan 里只有字符串**，这是"可存盘"与"能吃内存像素"同时成立的唯一写法。 |
+| `KCompositor.api.bind` | 兜底给面：`(pl, i, st)` → 页面的记录（strip 与"有 type 的记录"同序）。蒙版的"亮度当 alpha"在这里做 —— 少了它，plan 一侧会把蒙版当普通贴片 source-over 叠上去（整幅变灰而不是被裁）。 |
+| `compositor.js: foldLayer` 的 generator 分支 | 加 `api.bind` 兜底：文字/方向/3D 这些面在页面上**没有资源 id**，只有 `syncGeneratorFaces` 现算，光看 `st.baked` 会把它们整段漏掉。 |
+| `env.base` | 新增查询：底像素用什么引用。存档口径是 `l.buffer` 哈希，运行时口径是 `l.img` 那张画布。 |
+
+**刻意不换的两处**（它们不属于"折一层"）：Raster 层（像素就是画布像素，1:1 贴 + 拖动 affine）、
+一枚出墨记录都没有的层（折叠是恒等变换，`layerSource` 直接还 `l.img`，一个字节都不分配）。
+**Stash 层已接过来**（见下 §10.3.8）。**必须跟着搬的两件事**：`syncGeneratorFaces`（折叠前同步生成器面）
+与 `fxMirrorHidden`（SSR 镜面记录在折叠期间停用）。
+
+**验收（2026-10-27）**：
+- `__kolidFold.compare()`（新，探针 `_probe_fold_diff.cjs`）：同一层、同一刻，页面折 vs 合成器折逐像素比。
+  真实文档 3 层（含 `Stash 1`）`max 0 / mean 0`；只有 guidance 层按设计跳过（那是另一条栈、另一种叠加次序）。
+- `_probe_fold_switch.cjs`（新）：同页四趟 —— 正常 / `forceAll(true)` / 正常 / `forceAll(true)`，
+  四张 `stageCanvas` **像素摘要完全相同**（832×1216 全幅 FNV+sum = `1744975414`）。出口记账：正常 =
+  `solo-video×2 + tex×1`，强制 = `plan×3` —— 也就是**捷径与 plan 折出来是同一张图**，捷径只是省一趟。
+  `foldPlanFallback` 全程 0（没有静默退回老路）。
+- `_probe_vid_shot2.cjs` 产物与改动前基线**字节相同**（md5 `7f5d7350…`）；`guards.py` 50 处不变；
+  `tests/layer_fold/compare.cjs`、`tests/test_render_plan.py` 全绿。
+
+## 10.3.8 Stash 的 `capture:'below'` 接进显示路径（2026-10-27）
+
+Stash 层的底像素不是 `l.base`，而是"以下所有层的合成"。它**不必**让 `render()` 另攒一本账：
+`render()` 的循环在轮到这一层之前已经 `flushWork()` + `syncBlendImage()` + `stashResample()`，
+把那本账写进了 `l.img`。所以 `layerSourceViaPlan` 只要把 `l.img` 当 `below` 交下去：
+
+```js
+const below = (pl.capture === 'below' && isStashLayer(l)) ? l.img : null;
+KCompositor.foldLayer(pl, 0, nat.w, nat.h, below, false);
+```
+
+三件事必须记住：
+1. **`isRasterLayer` 对 Stash 也为真**（它带 `raster:true`，几何焊死画布），所以"排除 Raster"那条判据要
+   写成 `isRasterLayer(l) && !isStashLayer(l)`，否则第一步就被挡在门外。
+2. `below` 传 `l.img` 而不是 `l.base`：plan 里 `capture:'below'` 是**语义**，accumulation 的**内容**
+   只有页面知道（合成器的 `render(plan)` 在整栈那条路上自己攒，这里只有单层，攒不出来也不能攒）。
+3. 缓存钥匙已有 `stashSurfId(l.img)` + `l.paintGen`：`stashResample` 换内容时 `paintGen+1`，
+   换尺寸时换对象 —— 两条都在钥匙里，所以"下面那层改了、Stash 不重折"不会发生。
+   `layerSurfaceGen` 同样带这两项，纹理缓存那一层也对得上。
+
+**`timeMap` 已由宿主补（2026-10-27）**：`blend-vid-frame` 多带一个 `clip`
+（`{clipId,start,duration,offset,srcDuration}`，来自 `plan.layer` 这一段）。一段 = 一套图层 ⇒ 整包共用一个
+对象；页面把它原样挂到每个图层的 `timeMap` 上，判据与 `vidFrameInject` 同一条（帧包说的正是手上这套才给），
+撤包（`blend-vid-frame-off`）即回 null。探针 `_probe_fold_timemap.cjs` 验三件事：包里真有、plan 里每层都有、
+撤包变 null。
+
+**还没做**：
+1. **`fxDropStrip` 还剩两处调用**（Generate 出图、结算/后端分流）：那两条是"要一张 CPU 可读的成品面"，
+   与显示无关，合并与否看后面要不要统一成"plan → 离屏合成器"。另有一处是 `fxResolved` 自己（缩略图 /
+   历史 / 导出 / `__kolidFold.compare` 的尺子），它**故意**留着 —— 尺子必须与被量的一方独立。
+2. **整栈折到 plan 还没进 display**：`KCompositor.render(plan)` 已经能吃 `capture:'below'`，但显示那条路
+   仍是 `render()` 自己攒 items + `stagePresent`。挡着的是底片（合成模式下那帧视频垫在图层下面）与
+   guidance 栈（第二趟、还要叠上台）—— 这是 P3.2 的收尾，也是 P3.3 删显示机的前提。
+
+## 10.3.9 Stash 只吃图层（不含底片帧）—— 2026-10-27
+
+§2.1 那句「以下所有层的合成」按**字面**执行：快照只由图层构成，视频底片帧不进。原因是显示面上
+`#stageCanvas` 与 `blendCanvas` 永远垫着底片（不垫就是透明洞、透出宿主那层 `<video>`），拿它们当
+`capture:'below'` 的源，等于把视频帧烘进快照、再由 Stash 层自己重画一遍；监视器那一路（`composeVidFrameCanvas`
+逐层 `drawLayer`，不铺底片）读的正是同一个 `l.img`，于是一块多余的视频画面就冒出来了。
+
+**实现**：`render()` 里另攒一本账 —— `stashAcc`（`stashAccReset(w,h)` 每趟清零，`presentItems2D` 逐层摊进去，
+与 `stagePresentRaw` 的 2D 兜底**同一份数学**），Stash 轮到自己那一刻抄它。只在工程里真有可见 Stash 层时
+才建（`hasStash`），没有 Stash 一分不多花。顺带两笔开销一起没了：
+
+1. Stash 之前那次 `flushWork()`（中间态 present）—— 它原本的唯一理由就是"让 stage 上有下面所有层"；
+2. 那次 `syncBlendImage(0)`（整幅 GPU→2D 回读）—— 原本只是给快照供像素。
+
+所以 `presentsThisRender` 从 2 降到 1（探针 `_probe_vid_shot2` 里可见）。guidance 栈的 Stash 同口径：
+`stashAcc`（工作层）+ `guidanceCtx`（它以下的 guidance 层）按叠放次序叠。
+
+**像素后果（务必知道）**：本工程的测试文档里，`Stash 1` 是**最上面那层**、带一条启用的 `vector_blur`
+（`distance:122, angle:0`）。改完之后画面变了 98% —— 因为**那条模糊第一次真的上屏了**。证据链：
+`_probe_stash_blur.cjs` 同页三张图，把该链 `enabled=false` 后出来的图与改动前基线 **maxdelta = 1**
+（2D/GL 取整差），也就是说改动前"启用的模糊"没有生效（`foldLayer` 的 `applyLayerEffects` 静默失败时
+`inked=true` 但 `surf` 还是底像素，正好等于"没模糊"），改动后生效。
+⇒ 这不是语义回归，是一颗**旧 bug 被这次改动顺带修掉**；要回看旧观感就把那条链停用。
+
+**闸**：`_probe_monitor_fold.cjs` 4156474687（旧 2182940854）；`_probe_vid_shot2.cjs` md5
+`c74ab069…`（旧 `7f5d7350…`，差异全在上面那条模糊）；`_probe_fold_switch.cjs` 四趟仍全等、
+`__kolidFold.compare()` 三层 `max=0`；`guards.py` 50 处不变。

@@ -39,54 +39,66 @@ def main():
     fails = []
     rp = load_module()
 
-    # ── A. 结构断言 ──────────────────────────────────────────────────────────
+    # ── A. 结构断言（**对着文件自身**验，不写死任何快照值）──────────────────────
+    # 这一段的规矩：编译器必须"忠实于文件"—— 层序、capture、strip 次序、transform、资源表，
+    # 逐条都能从 .cud 的原始行推出来。写死名字/数值的旧版本会随文档改动失效（历史上就这么失效过），
+    # 所以这里一律从 doc 里取期望值。
     doc = rp.read_cud(CUD)
-    key = doc['head']['layerSets'][0]['key'] if isinstance(doc['head'].get('layerSets'), list) else None
+    sets = doc['head'].get('layerSets') or []
+    key = (sets[0].get('key') if isinstance(sets, list) and sets else None)
     plan = rp.compile_plan(doc, key=key)
 
     check(plan['v'] == 1, 'plan.v 应为 1', fails)
-    check(plan['grid'] == {'w': 832, 'h': 1216}, f"grid 不对：{plan['grid']}", fails)
+    gw = (doc['head'].get('canvas') or {}).get('w')
+    gh = (doc['head'].get('canvas') or {}).get('h')
+    check(plan['grid'] == {'w': gw, 'h': gh}, f"grid 与文件画布不一致：{plan['grid']} vs {gw}x{gh}", fails)
     check(plan['color']['out'] == 'srgb', 'color.out 应为 srgb', fails)
-    check(len(plan['layers']) == 2, f"层数应为 2，实为 {len(plan['layers'])}", fails)
 
-    names = [l['name'] for l in plan['layers']]
-    # .cud 里 layers[0] 是最上面那层；plan 必须自底向上
-    check(names == ['Layer 1', 'Stash 1'], f'layers 必须自底向上，实为 {names}', fails)
+    raw = (next((s.get('layers') for s in sets if s.get('key') == key), None)
+           if isinstance(sets, list) else None) or doc['head'].get('layers') or []
+    check(len(plan['layers']) == len(raw),
+          f"层数应与文件一致：plan {len(plan['layers'])} / raw {len(raw)}", fails)
+    # .cud 的 layers[0] 是最上面那层；plan 必须自底向上
+    check([l['name'] for l in plan['layers']] == [r.get('name') for r in reversed(raw)],
+          'layers 必须自底向上（plan 与反转后的 raw 对不上）', fails)
 
-    by = {l['name']: l for l in plan['layers']}
-    check(by['Stash 1']['capture'] == 'below', 'Stash 层的 capture 必须是 below', fails)
-    check(by['Layer 1']['capture'] is None, '普通层不该有 capture', fails)
+    table = rp._attrs_table(doc['head'])
+    by_id = {l['id']: l for l in plan['layers']}
+    for row in raw:
+        pl = by_id.get(row.get('id'))
+        check(pl is not None, f"图层 {row.get('id')} 没进 plan", fails)
+        if pl is None:
+            continue
+        # Stash 的输入是"以下所有层"，别的层没有 capture
+        check(pl['capture'] == ('below' if row.get('stash') else None),
+              f"{pl['name']}: capture 该是 {'below' if row.get('stash') else None}", fails)
+        check(pl['visible'] == (row.get('visible') is not False), f"{pl['name']}: visible 不对", fails)
+        check(pl['stack'] == ('guidance' if row.get('stack') == 'guidance' else 'work'),
+              f"{pl['name']}: stack 映射不对：{pl['stack']}", fails)
+        tr = row.get('transform') or {}
+        for f in ('cx', 'cy', 'w', 'h', 'rotation'):
+            check(abs(pl['transform'][f] - float(tr.get(f, {'cx': .5, 'cy': .5, 'w': 1, 'h': 1, 'rotation': 0}[f]))) < 1e-9,
+                  f"{pl['name']}: transform.{f} 不对", fails)
+        # strip 次序 = 属性的引用次序；停用的那一步 enabled 必须是 false
+        want = []
+        for a in row.get('attrs') or []:
+            rec = table.get(a) if isinstance(a, str) else a
+            if not rec or not rec.get('type'):
+                continue
+            want.append((rec['type'], rec.get('enabled') is not False))
+        got = [(s['type'], s.get('enabled') is not False) for s in pl['strip']]
+        check(want == got, f"{pl['name']}: strip 与文件属性不一致\n want={want}\n got={got}", fails)
+        for s in pl['strip']:
+            ref = (s.get('surface') or s.get('baked') or {}).get('resource')
+            if ref:
+                check(ref.startswith('res:'), f"{pl['name']}: 资源 id 该是 res:<hash>：{ref}", fails)
+                ids = {r['id']: r for r in plan['resources']}
+                check(ref in ids, f"{pl['name']}: {ref} 没进 resources 表", fails)
+                check(ids[ref]['uri'].startswith('inline:'), f"{pl['name']}: 内嵌资源应是 inline:", fails)
+        tm = pl['timeMap']
+        if tm:
+            check(tm['clipId'] == key, f"{pl['name']}: timeMap.clipId 应指向图层段自己", fails)
 
-    l1 = by['Layer 1']
-    check([s['type'] for s in l1['strip']] == ['decal'], f"Layer 1 的 strip 不对：{l1['strip']}", fails)
-    check(l1['strip'][0]['frameTrack'] == 'trkmvmi206h100', 'decal 的 frameTrack 丢了', fails)
-    check(l1['strip'][0]['surface'] is None, 'decal 靠 frameTrack 取帧，surface 应为 null', fails)
-
-    st = by['Stash 1']
-    check([s['type'] for s in st['strip']] == ['effects', 'mask'], f"Stash 1 的 strip 不对：{[s['type'] for s in st['strip']]}", fails)
-    eff = st['strip'][0]['chain'][0]
-    check(eff['type'] == 'vector_blur', 'vector_blur 丢了', fails)
-    check(eff['params'] == {'angle': 77, 'distance': 32, 'anchor': 'center'}, f"params 被动了：{eff['params']}", fails)
-    check(eff['enabled'] is True, 'enabled 该是 true', fails)
-    mask = st['strip'][1]
-    check(mask['kind'] == 'surface' and (mask['surface'] or {}).get('resource', '').startswith('res:'),
-          'mask 的 surface 必须编译成 res:<md5>', fails)
-
-    # 资源清单：mask 必须真的在里面，且 uri 是 inline（.cud 内嵌）
-    ids = {r['id']: r for r in plan['resources']}
-    check(mask['surface']['resource'] in ids, 'mask 的资源没进 resources 表', fails)
-    check(ids[mask['surface']['resource']]['uri'].startswith('inline:'), 'mask 资源应是 inline:', fails)
-
-    tm = l1['timeMap']
-    check(tm and abs(tm['start'] - 3.815829206924238) < 1e-6, f"timeMap.start 不对：{tm}", fails)
-    check(tm and tm['clipId'] == key, 'timeMap.clipId 应指向图层段自己', fails)
-
-    tracks = {t['id']: t for t in plan['tracks']}
-    check('trkmvmi206h100' in tracks, '视频轨没进 tracks', fails)
-    t2 = tracks['trkmvmi206h100']
-    check(t2['resource'] and t2['resource'].startswith('res:'), '视频轨缺资源 id', fails)
-    check(len(t2['clips']) == 1 and abs(t2['clips'][0]['start'] - 3.815829206924238) < 1e-6,
-          f"视频轨的 clip 时刻表不对：{t2['clips']}", fails)
     check(all(t['kind'] == 'video' for t in plan['tracks']), 'tracks 里只该有视频轨（音频 P1 不管）', fails)
 
     # ── B. 与 golden 的 raw 捕获交叉核对 ────────────────────────────────────

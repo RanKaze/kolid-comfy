@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExtern
 import { createPortal } from 'react-dom';
 import {
   KF_EPS, fmtTime, kfChannelInfo, kfMoveKey, kfRecord, kfRemoveChannel, kfRemoveKey, kfSample,
-  kfSnapshotMeta, kfSnapshotValues, kfTimes, rulerStep,
+  kfLocalTimes, kfSnapshotMeta, kfSnapshotValues, kfU, kfSec, rulerStep,
   type VidClip, type VidController, type VidKfChannelInfo, type VidKfMeta, type VidKfSnapshot, type VidKeyframe, type VidKeyframes as VidKfStore,
 } from './model';
 import { getVidSelection, subscribeVidSelection } from './selection';
@@ -77,9 +77,10 @@ const clampPps = (v: number): number => Math.max(PPS_MIN, Math.min(PPS_MAX, v));
 
 /** 一条属性在 t 的读数：按 keys 顺序找第一条真有帧的通道（主键没帧、旧别名有帧也算）。
  *  这是行内所有读数（值框、播放头菱形、插值）共用的口径。 */
-const sampleChannel = (kf: VidKfStore | undefined, ch: Channel, t: number): number | null => {
+const sampleChannel = (kf: VidKfStore | undefined, clip: VidClip | null, ch: Channel, local: number): number | null => {
+  const u = kfU(clip, local);                 // 通道里的时刻是归一化的（见 model 的 kfU）
   for (const key of ch.keys) {
-    const v = kfSample(kf, key, t);
+    const v = kfSample(kf, key, u);
     if (v !== null) return v;
   }
   return null;
@@ -260,8 +261,9 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
       }
       const ch = ensureChannel(ent, rest, key, { ...info, layerId: gid, layerName: ent.g.name, fxId, fxName });
       for (const f of frames) {
-        const hit = ch.frames.find(x => Math.abs(x.t - f.t) < KF_EPS);
-        if (!hit) ch.frames.push({ t: f.t, v: f.v, src: key });
+        const tl = kfSec(clip, f.t);          // 档里是归一化，界面按段内秒摊开
+        const hit = ch.frames.find(x => Math.abs(x.t - tl) < KF_EPS);
+        if (!hit) ch.frames.push({ t: tl, v: f.v, src: key });
         else if (hit.src !== ch.key && key === ch.key) { hit.v = f.v; hit.src = key; }
       }
     }
@@ -324,7 +326,7 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
     for (const r of rows) if (r.kind === 'channel') out.push(r.ch.key);
     return out;
   }, [rows]);
-  const times = useMemo(() => kfTimes(clip?.keyframes), [clip]);
+  const times = useMemo(() => kfLocalTimes(clip), [clip]);
 
   // ── refs：逐帧的直写与拖动都读这一份，不闭包在旧的渲染上 ──
   const vidRef = useRef(vid); vidRef.current = vid;
@@ -355,7 +357,9 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
     const t = transport.get();
     const local = c ? t - c.start : 0;
     const inRange = !!c && local >= 0 && local <= c.duration;
-    const px = local * ppsRef.current;
+    // 播放头画在**段自己的范围里**：越出去（播到下一段、或者外力 seek 到别处）就不画，而不是顺着
+    // 泳道一路画到内容区外面去 —— 那样看起来就像"播放头被拖到范围外了"。
+    const px = Math.max(0, Math.min(c ? c.duration : 0, local)) * ppsRef.current;
     const line = lineRef.current;
     if (line) {
       line.style.transform = `translateX(${LIST_W + px}px)`;
@@ -372,7 +376,7 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
       // 有帧的属性读插值（这条属性的全部原始键都算）；一条帧都没有的读**页面当下的值** ——
       // 空心那行也得让人看见它此刻是多少，不然"能出行不能看值"会让人以为这行是死的。
       const ch = channelsRef.current.get(key);
-      const v = c && inRange ? (ch ? (sampleChannel(kf, ch, local) ?? live?.[key] ?? null) : null) : null;
+      const v = c && inRange ? (ch ? (sampleChannel(kf, c, ch, local) ?? live?.[key] ?? null) : null) : null;
       if (document.activeElement !== el) {
         el.value = v === null ? '' : fmtVal(v);
         el.dataset.kfShown = el.value;      // 落账时认这份：点进去又点出来不算改值
@@ -389,7 +393,7 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
     });
     // 跟随：播放头走出视野就滚过去。拖着东西的时候不滚 —— 滚一下，按下点与命中框的坐标就错位了
     // （橡皮筋是按客户端坐标算命中的，内容跟着跑会框错地方）。
-    if (sc && inRange && !dragRef.current && !bandRef.current) {
+    if (sc && inRange && !dragRef.current && !bandRef.current && !scrubRef.current) {
       const laneW = Math.max(40, cw - LIST_W);
       if (px < sl || px > sl + laneW - 24) sc.scrollLeft = Math.max(0, px - laneW / 2);
     }
@@ -462,7 +466,7 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
     const cand: number[] = [0, c.duration];
     const head = transport.get() - c.start;
     if (head >= 0 && head <= c.duration) cand.push(head);
-    for (const t of kfTimes(c.keyframes)) {
+    for (const t of kfLocalTimes(c)) {
       if (mine.has(t)) continue;
       if (cand.every(x => Math.abs(x - t) >= KF_EPS)) cand.push(t);
     }
@@ -486,11 +490,11 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
     const live = snap ? kfSnapshotValues(snap) : (availRef.current?.values ?? {});
     const values: Record<string, number> = {};
     for (const key of keys) {
-      const val = live[key] ?? kfSample(c.keyframes, key, at);
+      const val = live[key] ?? kfSample(c.keyframes, key, kfU(c, at));
       if (typeof val === 'number' && Number.isFinite(val)) values[key] = val;
     }
     if (!Object.keys(values).length) return;
-    v.update(pp => kfRecord(pp, c.id, at, values, snap ? kfSnapshotMeta(snap) : availRef.current?.meta), label);
+    v.update(pp => kfRecord(pp, c.id, kfU(c, at), values, snap ? kfSnapshotMeta(snap) : availRef.current?.meta), label);
   }, []);
 
   /** 在播放头给这些参数各加一枚帧。 */
@@ -509,7 +513,7 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
     const local = v.transport.get() - c.start;
     if (local < 0 || local > c.duration) return;
     const at = frameAt(ch, local);
-    if (at) { v.update(pp => kfRemoveKey(pp, c.id, at.src, at.t), 'Remove keyframe'); return; }
+    if (at) { v.update(pp => kfRemoveKey(pp, c.id, at.src, kfU(c, at.t)), 'Remove keyframe'); return; }
     void addKeysAtPlayhead([ch.key]);
   };
 
@@ -527,7 +531,7 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
     if (!c || !addrs.length) return;
     const items = addrs.map(splitAddr).filter((x): x is { key: string; t: number } => !!x);
     if (!items.length) return;
-    v.update(pp => items.reduce((q, it) => kfRemoveKey(q, c.id, it.key, it.t), pp), 'Remove keyframes');
+    v.update(pp => items.reduce((q, it) => kfRemoveKey(q, c.id, it.key, kfU(c, it.t)), pp), 'Remove keyframes');
     kfPickKeys(c.id, []);   // 删掉的地址不能再当选中留着
   };
 
@@ -559,7 +563,7 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
     if (at && Math.abs(n - at.v) <= 1e-9) return;
     // 停在一枚旧键上就改那一枚（帧住哪条原始键就写回哪条）；不在键上 = 在主键上加一枚。
     const key = at ? at.src : ch.key;
-    v.update(pp => kfRecord(pp, c.id, local, { [key]: n }, availRef.current?.meta), at ? 'Edit keyframe' : 'Add keyframe');
+    v.update(pp => kfRecord(pp, c.id, kfU(c, local), { [key]: n }, availRef.current?.meta), at ? 'Edit keyframe' : 'Add keyframe');
   };
 
   // ── 拖帧 ── 按下落在哪枚菱形上：普通点击只选它，Shift/⌘ 加选/减选；已选中的一枚被按下去 = 整组一起拖。
@@ -602,7 +606,7 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
       it.cur = to;
     }
     if (!moves.length) return;
-    v.update(pp => moves.reduce((q, m) => kfMoveKey(q, c.id, m.key, m.from, m.to), pp), 'Move keyframe');
+    v.update(pp => moves.reduce((q, m) => kfMoveKey(q, c.id, m.key, kfU(c, m.from), kfU(c, m.to)), pp), 'Move keyframe');
   };
 
   const endDrag = (): void => {
@@ -702,10 +706,20 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
     };
   }, [clip !== null]);
   // ── 标尺 = 唯一的 scrub 入口（与 Tracks 同一读法：点哪拖哪，播放头跟到指针）────────────────
+  /** 把目标时刻吸附并**夹进这一段自己的帧范围**：第一帧到"起点仍在段内"的最后一帧。
+   *  拖到两头时，落在段边界上的时刻在宿主那边是"这段之外"（区间半开）—— 合成会当场退出这段、
+   *  线也消失，看起来就是"播放头被拖到范围外"。所以这里先吸附到帧、再夹进 [首帧, 末帧]。 */
+  const clampScrub = (c: VidClip, tTimeline: number): number => {
+    const f = Math.max(1, p.fps || 30);
+    const loF = Math.ceil(c.start * f - 1e-6);                        // 段的第一帧
+    const hiF = Math.max(loF, Math.ceil((c.start + c.duration) * f - 1e-6) - 1);   // 起点仍在段内的最后一帧
+    const want = Math.round(tTimeline * f);
+    return Math.min(hiF, Math.max(loF, want)) / f;
+  };
   const scrubTo = (clientX: number): void => {
     const c = clipRef.current, v = vidRef.current;
     if (!c) return;
-    v.seek(c.start + localFromX(clientX));
+    v.seek(clampScrub(c, c.start + localFromX(clientX)));
   };
   const onRulerDown = (e: React.PointerEvent): void => {
     if (e.button !== 0 || !clip) return;

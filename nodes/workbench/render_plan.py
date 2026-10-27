@@ -158,12 +158,16 @@ def compile_plan(doc, key=None, t=None):
             t = rec.get('type')
             if not t:
                 continue
+            # 停用的一步照样进 plan（参数还在，撤销/重新启用不必回档），但 `enabled` 必须是 false：
+            # 合成器 `foldLayer` 就是按 `enabled === false` 跳过它。写死 True 会让 plan 一侧照旧出墨，
+            # 与页面折叠（fxDropStrip 里 `attrEnabled` 跳过）不一致。
+            en = rec.get('enabled') is not False
             if t == 'effects':
                 chain = rec.get('chain') or []
-                out.append({'kind': 'chain', 'type': 'effects', 'enabled': True,
+                out.append({'kind': 'chain', 'type': 'effects', 'enabled': en,
                             'chain': _effects(chain)})
             elif t in ('decal', 'mask'):
-                out.append({'kind': 'surface', 'type': t, 'enabled': True,
+                out.append({'kind': 'surface', 'type': t, 'enabled': en,
                             'surface': res_ref(rec.get('surface'), role=t),
                             'frameTrack': rec.get('frameTrack') or ''})
             else:
@@ -172,7 +176,7 @@ def compile_plan(doc, key=None, t=None):
                 if desc is None:
                     desc = rec.get(t) or rec.get('text') or rec.get('dir') or rec.get('scene')
                 baked = res_ref(rec.get('baked') or rec.get('image'), role=t)
-                out.append({'kind': 'generator', 'type': t, 'enabled': True,
+                out.append({'kind': 'generator', 'type': t, 'enabled': en,
                             'desc': desc, 'box': rec.get('box') or None,
                             'ownsGrid': bool(rec.get('ownsGrid')),
                             'baked': baked, 'sceneUid': rec.get('sceneUid') or None})

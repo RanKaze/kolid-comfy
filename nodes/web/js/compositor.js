@@ -172,9 +172,11 @@ const KCompositor = (function () {
                 inked = true;
                 continue;
             }
-            // generator（文字/方向/3D/pose/几何）：P2 只认烘焙好的面，其余留到 P3
+            // generator（文字/方向/3D/pose/几何）：先认烘焙好的面；页面能现算（syncGeneratorFaces）
+            // 就给 bind 一张 —— 这类面在页面上根本没有"资源 id"，只有资源表会把它们漏掉。
             if (st.kind === 'generator') {
-                const baked = st.baked && st.baked.resource && api.resource ? api.resource(st.baked.resource) : null;
+                let baked = st.baked && st.baked.resource && api.resource ? api.resource(st.baked.resource) : null;
+                if (!baked && api.bind) baked = api.bind(pl, i, st);
                 if (!baked) { api.notes.push('generator not baked: ' + st.type); continue; }
                 const cv = flatten(baked, w, h);
                 if (!cv) continue;

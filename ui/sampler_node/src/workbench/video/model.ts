@@ -114,12 +114,21 @@ export type VidClip = {
 // 值眼下只有数值(fx 的 range 参数、transform 各维都是数);string/boolean 留给之后的参数源。
 
 export type VidKfValue = number;
-/** 一枚关键帧:t = **段内秒**(相对段头 —— 段挪动,关键帧跟着走),v = 该通道此刻的值。 */
+/** 一枚关键帧：`t` = **归一化时刻**（0…1，相对段长），`v` = 该通道此刻的值。
+ *  用归一化而不是段内秒，是为了"这一段被拉伸 / 裁短之后动画仍然逻辑稳定"：所有帧按比例重排，
+ *  半个段上的那枚帧永远在半个段上。段内秒只在**界面按秒摊开**的地方出现（Keyframes 泳道、
+ *  Tracks 上的菱形），换算见 kfU / kfSec。 */
 export type VidKeyframe = { t: number; v: VidKfValue };
 /** 通道键里各所有者的**名字快照**,录制时一并落档:层名会改、特效会被删,Keyframes 窗要能
  *  照旧说出"这一条是谁的什么"——不追着页面实时问,档里带的就是答案。effects 的 key 是特效 id。 */
 export type VidKfMeta = { layers: Record<string, { name: string; effects: Record<string, string> }> };
-export type VidKeyframes = { channels: Record<string, VidKeyframe[]>; meta?: VidKfMeta };
+export type VidKeyframes = {
+  /** 时刻口径。`'norm'` = 0…1（现在写出去的都是这个）；**缺席** = 老档的"段内秒"，
+   *  读档时由 kfMigrate 一次性换过来。 */
+  unit?: 'norm';
+  channels: Record<string, VidKeyframe[]>;
+  meta?: VidKfMeta;
+};
 
 /** 工作台回的参数快照(blend-vid-kf):当前图层集里每层的 transform 与特效链参数。
  *  值保持 JSON 原样 —— 宿主只挑数值的进关键帧,复杂值(颜色/曲线)之后再说。 */
@@ -136,22 +145,71 @@ export type VidKfSnapshot = {
   }[];
 };
 
-/** 同刻判定:两枚关键帧的时刻差小于它算同一枚(覆盖,不并存)。 */
+/** 同刻判定:两枚关键帧的时刻差小于它算同一枚(覆盖,不并存)。
+ *  **注意这是"秒"的容差**：模型里的时刻是归一化的，按段长换算见 kfEpsFor；这里留着给界面上
+ *  按段内秒比较的地方用（播放头压没压着一枚帧）。 */
 export const KF_EPS = 0.005;
 
-/** 落帧:往一枚段的关键帧系统里 upsert 一批通道值。● 录制 = 整套参数一起落;Keyframes 窗的手动
- *  加帧/改值 = 其中一条或几条 —— 两条路共用这一颗,同刻判定与 meta 合并只此一份规矩。
+/** 段长 = 关键帧的时间基。0 长的段当成一个极小值：除法不炸，0…1 仍然只有一个点。 */
+export const kfSpan = (clip: { duration?: number } | null | undefined): number =>
+  Math.max(Number(clip?.duration) || 0, 1e-6);
+
+/** 段内秒 → 归一化时刻（夹在 0…1）。写入（录制/加帧/拖帧/删帧）与采样都吃归一化。 */
+export const kfU = (clip: { duration?: number } | null | undefined, local: number): number => {
+  const u = (Number(local) || 0) / kfSpan(clip);
+  return u < 0 ? 0 : u > 1 ? 1 : u;
+};
+
+/** 归一化时刻 → 段内秒。界面按秒摊开的地方（Keyframes 泳道、Tracks 菱形、提示文字）用它。 */
+export const kfSec = (clip: { duration?: number } | null | undefined, u: number): number => {
+  const s = kfSpan(clip);
+  const v = (Number(u) || 0) * s;
+  return v < 0 ? 0 : v > s ? s : v;
+};
+
+/** 同刻判定（归一化口径）= **半帧**。段越长，同样的半帧占的比例越小，所以不能是个常数。 */
+export const kfEpsFor = (clip: { duration?: number } | null | undefined, fps = 30): number =>
+  Math.max(1e-7, 0.5 / Math.max(fps || 30, 1) / kfSpan(clip));
+
+/** 老档迁移：`t` 还是段内秒的通道，按段长换成归一化。已经带 unit:'norm' 的原样返回。
+ *  段长为 0（还没定长 / 占位）的段整串塌到 0：没有时间基，只有第一颗帧有意义。 */
+export const kfMigrate = (kf: VidKeyframes | undefined, duration: number): VidKeyframes | undefined => {
+  if (!kf || kf.unit === 'norm') return kf;
+  const span = Math.max(Number(duration) || 0, 1e-6);
+  const channels: Record<string, VidKeyframe[]> = {};
+  for (const [key, list] of Object.entries(kf.channels ?? {})) {
+    const frames = (list ?? [])
+      .filter(k => k && Number.isFinite(k.t) && Number.isFinite(k.v))
+      .map(k => ({ t: Math.max(0, Math.min(1, k.t / span)), v: k.v }))
+      .sort((a, b) => a.t - b.t);
+    // 归一化之后有可能会撞在一起（段很短、帧挤在末尾）：同刻只留后写的最后一枚。
+    const keep: VidKeyframe[] = [];
+    for (const f of frames) {
+      const prev = keep[keep.length - 1];
+      if (prev && Math.abs(prev.t - f.t) < 1e-9) keep[keep.length - 1] = f;
+      else keep.push(f);
+    }
+    if (keep.length) channels[key] = keep;
+  }
+  return { unit: 'norm', channels, meta: kf.meta };
+};
+
+/** 落帧:往一枚段的关键帧系统里 upsert 一批通道值。`u` = **归一化时刻**(0…1，见 kfU)。
+ *  ● 录制 = 整套参数一起落;Keyframes 窗的手动加帧/改值 = 其中一条或几条 —— 两条路共用这一颗,
+ *  同刻判定与 meta 合并只此一份规矩。
  *  每个通道各自:摘掉同刻旧帧 → 按时间序插回。通道**惰性建**:段上还没有这条通道就新开一条
  *  (一枚参数的第一帧因此出得来,不必先靠录制把整套装进来);channels 里不留空数组。
  *  meta(所有者名字快照)浅合并进段 —— 带上来就存,新通道才报得出层名与特效名。 */
-export const kfRecord = (p: VidProject, clipId: string, t: number, values: Record<string, VidKfValue>,
+export const kfRecord = (p: VidProject, clipId: string, u: number, values: Record<string, VidKfValue>,
   meta?: VidKfMeta): VidProject => ({
   ...p,
   clips: p.clips.map(c => {
     if (c.id !== clipId) return c;
+    const eps = kfEpsFor(c, p.fps);
+    const t = u < 0 ? 0 : u > 1 ? 1 : u;
     const channels = { ...(c.keyframes?.channels ?? {}) };
     for (const [key, v] of Object.entries(values)) {
-      const list = (channels[key] ?? []).filter(k => Math.abs(k.t - t) >= KF_EPS);
+      const list = (channels[key] ?? []).filter(k => Math.abs(k.t - t) >= eps);
       const next = [...list, { t, v }].sort((a, b) => a.t - b.t);
       channels[key] = next;
     }
@@ -159,34 +217,37 @@ export const kfRecord = (p: VidProject, clipId: string, t: number, values: Recor
     const nextMeta: VidKfMeta | undefined = meta
       ? { layers: { ...(prevMeta?.layers ?? {}), ...meta.layers } }
       : prevMeta;
-    return { ...c, keyframes: { channels, meta: nextMeta } };
+    return { ...c, keyframes: { unit: 'norm' as const, channels, meta: nextMeta } };
   }),
 });
 
 /** 挪一枚关键帧的时刻(拖菱形)。值不变;`to` 撞上同刻的旧帧按同一把尺覆盖 ——
- *  拖动落点永远只留一枚帧,不会出现两枚挤在同一时刻。 */
-export const kfMoveKey = (p: VidProject, clipId: string, key: string, t: number, to: number): VidProject => ({
+ *  拖动落点永远只留一枚帧,不会出现两枚挤在同一时刻。`from`/`to` 都是**归一化时刻**。 */
+export const kfMoveKey = (p: VidProject, clipId: string, key: string, from: number, to: number): VidProject => ({
   ...p,
   clips: p.clips.map(c => {
     if (c.id !== clipId || !c.keyframes?.channels[key]) return c;
-    const from = c.keyframes.channels[key].find(k => Math.abs(k.t - t) < KF_EPS);
-    if (!from) return c;
-    const list = c.keyframes.channels[key].filter(k => Math.abs(k.t - t) >= KF_EPS && Math.abs(k.t - to) >= KF_EPS);
-    const channels = { ...c.keyframes.channels, [key]: [...list, { t: to, v: from.v }].sort((a, b) => a.t - b.t) };
-    return { ...c, keyframes: { ...c.keyframes, channels } };
+    const eps = kfEpsFor(c, p.fps);
+    const t = c.keyframes.channels[key].find(k => Math.abs(k.t - from) < eps);
+    if (!t) return c;
+    const to2 = to < 0 ? 0 : to > 1 ? 1 : to;
+    const list = c.keyframes.channels[key].filter(k => Math.abs(k.t - from) >= eps && Math.abs(k.t - to2) >= eps);
+    const channels = { ...c.keyframes.channels, [key]: [...list, { t: to2, v: t.v }].sort((a, b) => a.t - b.t) };
+    return { ...c, keyframes: { ...c.keyframes, unit: 'norm' as const, channels } };
   }),
 });
 
-/** 删一枚关键帧(按时刻)。通道空了就整条摘掉 —— channels 里不留空数组。 */
-export const kfRemoveKey = (p: VidProject, clipId: string, key: string, t: number): VidProject => ({
+/** 删一枚关键帧(按归一化时刻)。通道空了就整条摘掉 —— channels 里不留空数组。 */
+export const kfRemoveKey = (p: VidProject, clipId: string, key: string, u: number): VidProject => ({
   ...p,
   clips: p.clips.map(c => {
     if (c.id !== clipId || !c.keyframes?.channels[key]) return c;
-    const kept = c.keyframes.channels[key].filter(k => Math.abs(k.t - t) >= KF_EPS);
+    const eps = kfEpsFor(c, p.fps);
+    const kept = c.keyframes.channels[key].filter(k => Math.abs(k.t - u) >= eps);
     const channels = { ...c.keyframes.channels };
     if (kept.length) channels[key] = kept;
     else delete channels[key];
-    return { ...c, keyframes: { ...c.keyframes, channels } };
+    return { ...c, keyframes: { ...c.keyframes, unit: 'norm' as const, channels } };
   }),
 });
 
@@ -291,13 +352,14 @@ export const kfIsDefaultValue = (key: string, v: number, snap?: VidKfSnapshot | 
  *    就凭空长出一整排帧；
  *  · 段上**一枚帧都没有**（全新的一段）：整套落一遍，那本来就是它的起始姿态。
  *  少了这一条，一枚已经有 fx 曲线的段永远开不出 alpha / 变换的曲线：第一趟只建基准，后面每一趟
- *  又都是"没变化"，滑杆拖出来的结果被静默吞掉 —— 用户看到的就是"● 录制亮着，alpha 却记不进去"。 */
-export const kfFirstPassValues = (kf: VidKeyframes | undefined, t: number,
+ *  又都是"没变化"，滑杆拖出来的结果被静默吞掉 —— 用户看到的就是"● 录制亮着，alpha 却记不进去"。
+ *  `u` = 归一化时刻（见 kfU）。 */
+export const kfFirstPassValues = (kf: VidKeyframes | undefined, u: number,
   next: Record<string, number>, snap?: VidKfSnapshot | null): Record<string, number> => {
   const started = !!kf && Object.keys(kf.channels).length > 0;
   const out: Record<string, number> = {};
   for (const [key, v] of Object.entries(next)) {
-    if (kfSample(kf, key, t) !== null) continue;                 // 已经在动 = 只建基准
+    if (kfSample(kf, key, u) !== null) continue;                 // 已经在动 = 只建基准
     if (!started || !kfIsDefaultValue(key, v, snap)) out[key] = v;
   }
   return out;
@@ -339,35 +401,71 @@ export const kfSnapshotMeta = (snap: VidKfSnapshot): VidKfMeta => {
   return { layers };
 };
 
-/** 采样:一个通道在某时刻的值(线性插值;头尾夹取;空通道 = null)。
- *  这是回放引擎要用的那一半 —— 录制先落数据,回放接上来就用同一口。 */
-export const kfSample = (kf: VidKeyframes | undefined, key: string, t: number): VidKfValue | null => {
+/** 剪开一枚段时按切点把关键帧也切开：`[u0,u1]`（归一化）这一截重新归一化到 0…1。
+ *  两半各自只留自己那一截的帧，切点上补一枚（取该刻的插值）—— 不补的话，剪开之后两半会
+ *  各自从头播一遍整段动画。剪完单位仍是归一化，之后各自拉伸都互不影响。 */
+export const kfSlice = (kf: VidKeyframes | undefined, u0: number, u1: number): VidKeyframes | undefined => {
+  if (!kf) return kf;
+  const a = Math.max(0, Math.min(1, u0));
+  const b = Math.max(0, Math.min(1, u1));
+  const span = b - a;
+  if (!(span > 1e-6)) return undefined;
+  const channels: Record<string, VidKeyframe[]> = {};
+  for (const [key, list] of Object.entries(kf.channels ?? {})) {
+    if (!list || !list.length) continue;
+    const at = (u: number, fallback: number): VidKfValue => kfSample(kf, key, u) ?? fallback;
+    const frames: VidKeyframe[] = [
+      { t: 0, v: at(a, list[0].v) },
+      ...list.filter(k => k.t > a + 1e-9 && k.t < b - 1e-9)
+        .map(k => ({ t: (k.t - a) / span, v: k.v })),
+      { t: 1, v: at(b, list[list.length - 1].v) },
+    ].sort((x, y) => x.t - y.t);
+    const keep: VidKeyframe[] = [];
+    for (const f of frames) {
+      const prev = keep[keep.length - 1];
+      const tt = f.t < 0 ? 0 : f.t > 1 ? 1 : f.t;
+      if (prev && Math.abs(prev.t - tt) < 1e-9) keep[keep.length - 1] = { t: prev.t, v: tt >= 1 ? f.v : prev.v };
+      else keep.push({ t: tt, v: f.v });
+    }
+    if (keep.length) channels[key] = keep;
+  }
+  return { unit: 'norm', channels, meta: kf.meta };
+};
+
+/** 采样:一个通道在某**归一化**时刻的值(线性插值;头尾夹取;空通道 = null)。
+ *  这是回放引擎要用的那一半 —— 录制先落数据,回放接上来就用同一口。
+ *  段内秒进来先过 kfU(clip, local)：归一化之后"段被拉伸/裁短"不需要动任何一枚帧。 */
+export const kfSample = (kf: VidKeyframes | undefined, key: string, u: number): VidKfValue | null => {
   const list = kf?.channels[key];
   if (!list || !list.length) return null;
-  if (t <= list[0].t) return list[0].v;
+  if (u <= list[0].t) return list[0].v;
   const last = list[list.length - 1];
-  if (t >= last.t) return last.v;
+  if (u >= last.t) return last.v;
   for (let i = 1; i < list.length; i++) {
-    if (t <= list[i].t) {
+    if (u <= list[i].t) {
       const a = list[i - 1];
       const b = list[i];
-      const k = (t - a.t) / Math.max(b.t - a.t, 1e-6);
+      const k = (u - a.t) / Math.max(b.t - a.t, 1e-6);
       return typeof a.v === 'number' && typeof b.v === 'number' ? a.v + (b.v - a.v) * k : b.v;
     }
   }
   return last.v;
 };
 
-/** 一枚段的关键帧**时刻表**(段内秒,升序,同刻合一):Tracks 段条上的菱形、Keyframes 窗拖帧的
- *  吸附目标都读它 —— 时刻在通道之间对齐成一列,才是"这一帧动过"的那个意思。 */
-export const kfTimes = (kf: VidKeyframes | undefined): number[] => {
+/** 一枚段的**归一化**时刻表(升序,同刻合一)。Tracks 段条上的菱形、Keyframes 窗的吸附目标
+ *  读的是它的"段内秒"版本 kfLocalTimes —— 界面按秒摊开，模型存归一化。 */
+export const kfTimes = (kf: VidKeyframes | undefined, eps = KF_EPS): number[] => {
   const all: number[] = [];
   for (const list of Object.values(kf?.channels ?? {})) for (const k of list ?? []) all.push(k.t);
   all.sort((a, b) => a - b);
   const out: number[] = [];
-  for (const t of all) if (!out.length || Math.abs(t - out[out.length - 1]) >= KF_EPS) out.push(t);
+  for (const t of all) if (!out.length || Math.abs(t - out[out.length - 1]) >= eps) out.push(t);
   return out;
 };
+
+/** 这一枚段的关键帧时刻表，**段内秒**（界面口径）。半帧容差按段长换算，与写入那边同一把尺。 */
+export const kfLocalTimes = (clip: VidClip | null | undefined, fps = 30): number[] =>
+  clip?.keyframes ? kfTimes(clip.keyframes, kfEpsFor(clip, fps)).map(u => kfSec(clip, u)) : [];
 
 /** Processor 占位段里的**执行快照**：Run 确认的当下就在轨上摆好的坑（每段一个、预分配
  *  空间），等对应段跑完把成品放到**上层输出轨**的对应位置 —— 占位段自己留在原地不替换，
@@ -839,10 +937,15 @@ export const splitClip = (p: VidProject, id: string, t: number, linked = true): 
     const cut = t - c.start;
     if (cut < MIN_CLIP || c.duration - cut < MIN_CLIP) { clips.push(c); continue; }   // 这一员切不了，原样留下
     changed = true;
-    clips.push({ ...c, groupId: gLeft, duration: cut });
+    // 关键帧按切点切开、各自重新归一化（见 kfSlice）：不切的话两半会各从头播一遍整段动画。
+    const uCut = kfU(c, cut);
+    const kfL = c.keyframes ? kfSlice(c.keyframes, 0, uCut) : undefined;
+    const kfR = c.keyframes ? kfSlice(c.keyframes, uCut, 1) : undefined;
+    clips.push({ ...c, groupId: gLeft, duration: cut, ...(c.keyframes ? { keyframes: kfL } : {}) });
     // 占位段切开后右半丢掉 pending：两半都揣着同一段的快照，各点各的 ▶ 会把这一段跑两遍。
     const { pending: _dropR, ...right } = c;
-    clips.push({ ...right, id: newVidId('clip'), groupId: gRight, start: c.start + cut, duration: c.duration - cut, offset: c.offset + cut });
+    clips.push({ ...right, id: newVidId('clip'), groupId: gRight, start: c.start + cut, duration: c.duration - cut, offset: c.offset + cut,
+      ...(c.keyframes ? { keyframes: kfR } : {}) });
   }
   return changed ? { ...p, clips } : p;
 };
@@ -1834,7 +1937,12 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
         const maskInputs = migrateWindows(c.pending.maskInputs, fps);
         return { ...c, pending: { ...c.pending, inputs, ...(maskInputs ? { maskInputs } : { maskInputs: undefined }) } };
       }
-      if (c.kind === 'layer') return { ...c, src: '', layerKey: c.layerKey || c.id };
+      if (c.kind === 'layer') {
+        // 关键帧口径迁移：老档里 t 是**段内秒**，这里按段长换成归一化（见 kfMigrate）。
+        // 换过之后 unit='norm'，再读原样放过 —— 只做一次。
+        const keyframes = kfMigrate(c.keyframes, c.duration);
+        return { ...c, src: '', layerKey: c.layerKey || c.id, ...(keyframes ? { keyframes } : {}) };
+      }
       const src = recover(c);
       return src === c.src ? c : { ...c, src };
     });
