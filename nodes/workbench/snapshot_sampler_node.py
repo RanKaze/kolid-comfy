@@ -622,7 +622,7 @@ def _workbench_file(name):
 # 布局档案（Layout 那一格）：用户存下来的几种**摆法**，外加一份「默认」。
 #
 # 它落盘，不能只活在浏览器的 localStorage 里：这个页面的宿主是
-# `http://localhost:<8700..8799>/sampler_node.html`，端口是 `start_servers` 一个一个试出来的
+# `http://127.0.0.1:<8700..8799>/sampler_node.html`，端口是 `start_servers` 一个一个试出来的
 # （8700 被占就 8701，以此类推）。换一个端口就是换一个 origin，浏览器里那份存档当场看不见 ——
 # 用户看到的就是"我存的布局下次打开就没了"。盘上的文件跟端口无关，端口怎么变都是同一份。
 _LAYOUTS_LOCK = threading.Lock()
@@ -2398,7 +2398,10 @@ class SnapshotDetailerSamplerServer:
         if not self.started:
             raise RuntimeError("[SnapshotDetailerSampler] Main server startup failed")
 
-        self.browser_url = f"http://localhost:{self.main_port}/sampler_node.html"
+        # 页面一律走 127.0.0.1:Agent dock 的 DSH 窗 iframe 的是 127.0.0.1:<dsh_port>,而 dsh 的鉴权
+        # cookie 是 SameSite=Strict + 绑定 authority=127.0.0.1:<port>。页面若在 localhost,它就成了
+        # 跨站祖先 —— 浏览器不发 Strict cookie,iframe 只会显示 401。同站是嵌入的前置条件。
+        self.browser_url = f"http://127.0.0.1:{self.main_port}/sampler_node.html"
         self.MainHandler.server_instance = self
 
         print(f"[SnapshotDetailerSampler] Main server on {self.main_port}")
@@ -3402,6 +3405,17 @@ class SnapshotDetailerSamplerServer:
             # 命门,这条路由偏偏漏了:页面不带验证器(无 ETag/Last-Modified),一旦被缓存就只能等它自己过期。
             # 路径按 urlparse 取:URL 上挂 `?v=` 这类缓存参数不该把这条精确匹配顶成 404。
             page = urlparse(self.path).path
+            # 旧页签/书签/文档站的链接可能还带 localhost。页面 origin 必须是 127.0.0.1
+            # （见 browser_url 处的注释：DSH 嵌入要求同站），所以在三条页面路由上把它们重定向过去。
+            if page in ('/', '/sampler_node.html', '/blend_node.html'):
+                host = (self.headers.get('Host') or '').rsplit(':', 1)[0].strip('[]').lower()
+                if host == 'localhost':
+                    self.send_response(302)
+                    self.send_header('Location', 'http://127.0.0.1:%d%s'
+                                     % (self.server.server_address[1], self.path))
+                    self.send_header('Cache-Control', 'no-store')
+                    self.end_headers()
+                    return
             if page in ('/', '/sampler_node.html', '/blend_node.html'):
                 name = 'blend_node.html' if page == '/blend_node.html' else 'sampler_node.html'
                 file_path = web_file(name)
@@ -3471,7 +3485,14 @@ class SnapshotDetailerSamplerServer:
 
             # Agent dock 窗:/api/agent/* 整族交给 agent_backend(LLM 会话循环 + 设置存储)。
             # 工具本体在浏览器侧执行 —— 后端只编排与转发,协议见 agent_backend.py 模块注释。
-            if agent_backend is not None and urlparse(self.path).path.startswith('/api/agent'):
+            # 导入失败的兜底**必须回 JSON**:跌进静态 404 的 HTML 页,前端就只能报"应答不是 JSON",
+            # 分不清"进程还是旧代码"和"agent_backend 导入失败"这两回事。
+            if urlparse(self.path).path.startswith('/api/agent'):
+                if agent_backend is None:
+                    self._send_json({'ok': False, 'error': 'agent backend failed to import — check the '
+                        'ComfyUI console for "[SnapshotDetailerSampler] Warning: cannot import agent_backend" '
+                        '(usually a missing dependency, e.g. pip install requests into this python)'}, 503)
+                    return
                 agent_backend.handle(self)
                 return
 
@@ -4113,7 +4134,12 @@ class SnapshotDetailerSamplerServer:
                 return
 
             # 同上:POST 侧的 /api/agent/*(send/tool/cancel/config)。
-            if agent_backend is not None and urlparse(self.path).path.startswith('/api/agent'):
+            if urlparse(self.path).path.startswith('/api/agent'):
+                if agent_backend is None:
+                    self._send_json({'ok': False, 'error': 'agent backend failed to import — check the '
+                        'ComfyUI console for "[SnapshotDetailerSampler] Warning: cannot import agent_backend" '
+                        '(usually a missing dependency, e.g. pip install requests into this python)'}, 503)
+                    return
                 agent_backend.handle(self)
                 return
 

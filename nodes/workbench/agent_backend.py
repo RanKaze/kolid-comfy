@@ -37,6 +37,11 @@ DEFAULT_SETTINGS = {
     'max_steps': 24,
     # 追加到系统提示尾部的用户自定义段落(工作流习惯、项目背景……)。
     'system_extra': '',
+    # ---- DeepSeek Harness sidecar(见 agent_dsh.py;Agent 窗的 DSH 模式)----
+    'dsh_port': 3080,
+    'dsh_command': 'npx -y @deepseek-ai/dsh web --no-open',
+    'dsh_api_key': '',
+    'dsh_autostart': False,
 }
 
 _SYSTEM_PROMPT = (
@@ -348,6 +353,17 @@ def _prune_runs() -> None:
 def handle(h) -> None:
     path = h.path.split('?', 1)[0]
 
+    # /api/agent_dsh/*(DeepSeek Harness sidecar)同住一个前缀;懒加载避免循环导入
+    # (agent_dsh 要读这里的设置)。dsh 模块自身出错时回 JSON 人话,不许把请求摔成连接重置 ——
+    # 否则前端只能报"unreachable",分不清是失联还是 dsh 坏了。
+    if path.startswith('/api/agent_dsh'):
+        try:
+            from . import agent_dsh
+            agent_dsh.handle(h)
+        except Exception as e:  # noqa: BLE001 — 边界上把一切翻成 JSON
+            h._send_json({'ok': False, 'error': 'agent_dsh failed: %r' % e}, 500)
+        return
+
     def body() -> dict:
         n = int(h.headers.get('Content-Length', 0) or 0)
         try:
@@ -443,6 +459,35 @@ def handle(h) -> None:
         if run:
             run.cancel()
         h._send_json({'ok': True})
+        return
+
+    # ── 工具桥(给 DeepSeek Harness / 任何终端侧 agent 用)─────────────────────────────────────
+    # 终端 agent(dsh)在 sidecar 里跑,够不到浏览器的工具执行体。这条把一次工具调用经
+    # /api/ui_probe/eval 的既有回路送进页面:页面上的 window.__wbAgentTool(AgentPanel 挂的)
+    # 真正执行并回 JSON。eval 通道是 async IIFE(live.ts runExpr),Promise 会等到值。
+    if h.command == 'POST' and path == '/api/agent/direct_tool':
+        data = body()
+        name = str(data.get('name') or '')
+        args = data.get('args') if isinstance(data.get('args'), dict) else {}
+        if not name:
+            h._send_json({'ok': False, 'error': 'missing tool name'}, 400)
+            return
+        # 三元是 JS 侧的(eval 表达式跑在浏览器里);页面没挂桥就抛一句人话。
+        expr = ('window.__wbAgentTool ? await window.__wbAgentTool(%s, %s)'
+                % (json.dumps(name), json.dumps(args))
+                + ' : (() => { throw new Error("workbench page not loaded - open the workbench UI once"); })()')
+        port = h.server.server_address[1]
+        try:
+            r = requests.post('http://127.0.0.1:%d/api/ui_probe/eval' % port,
+                              json={'expr': expr, 'timeout': 55}, timeout=65)
+            d = r.json()
+        except Exception as e:
+            h._send_json({'ok': False, 'error': 'probe eval self-call failed: %s' % e})
+            return
+        if d.get('error') or d.get('ok') is not True:
+            h._send_json({'ok': False, 'error': d.get('error') or 'eval failed'})
+            return
+        h._send_json({'ok': True, 'value': d.get('value')})
         return
 
     h._send_json({'ok': False, 'error': 'unknown agent route: %s %s' % (h.command, path)}, 404)

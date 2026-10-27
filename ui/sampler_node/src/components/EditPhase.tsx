@@ -3366,7 +3366,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   ? <span style={styles.activeDot} title="Active — the workflows run on this canvas" />
                   : null,
                 hint: (id: UnitId) => WORKBENCH_HINTS[id],
-                popSize: (id: UnitId) => docUidOf(id) ? { w: DOC_POP_W, h: DOC_POP_H } : null,
+                // 小窗按内容自适应,但内容自己撑不出高度的那几格要把盒子报出来(iframe 没有内在高度)。
+                popSize: (id: UnitId) => docUidOf(id) ? { w: DOC_POP_W, h: DOC_POP_H }
+                  : id === 'agent' ? { w: 560, h: 520 } : null,
                 bodyRef: (id: UnitId, el: HTMLDivElement | null) => {
                   if (el) frameBodyEls.current.set(id, el); else frameBodyEls.current.delete(id);
                 },
@@ -4562,6 +4564,37 @@ const AgentConfigRows: React.FC = () => {
           Save
         </button>
         {note && <span style={{ fontSize: 12.5, color: note.ok ? '#30d158' : '#ff453a' }}>{note.text}</span>}
+      </div>
+      <div style={styles.iosGroupTitle}>DeepSeek Harness<em style={styles.iosGroupHint}>sidecar — the Agent window's DSH mode</em></div>
+      <div style={styles.iosCard}>
+        <div style={styles.iosRow} title="Port the dsh web UI listens on">
+          <span style={styles.iosLabel}>Port</span>
+          <input style={{ ...styles.iosPattern, width: 84, flex: '0 0 auto', textAlign: 'right' }} type="number"
+            min="1024" max="65535" value={cfg.dsh_port}
+            onChange={e => set({ dsh_port: parseInt(e.target.value, 10) || 3080 })} />
+        </div>
+        <div style={styles.iosSep} />
+        <div style={styles.iosRow} title="Shell command that spawns the harness (Node.js; npm package @deepseek-ai/dsh)">
+          <span style={styles.iosLabel}>Start Command</span>
+          <input style={styles.iosPattern} type="text" placeholder="npx -y @deepseek-ai/dsh web --no-open"
+            value={cfg.dsh_command} onChange={e => set({ dsh_command: e.target.value })} />
+        </div>
+        <div style={styles.iosSep} />
+        <div style={styles.iosRow} title="Passed to the sidecar as DEEPSEEK_API_KEY (leave empty if dsh configures its own auth)">
+          <span style={styles.iosLabel}>API Key</span>
+          <input style={styles.iosPattern} type="password" placeholder="optional"
+            value={cfg.dsh_api_key} onChange={e => set({ dsh_api_key: e.target.value })} />
+        </div>
+        <div style={styles.iosSep} />
+        <div style={styles.iosRow} title="Start the sidecar automatically when the Agent window opens">
+          <span style={styles.iosLabel}>Auto Start</span>
+          <IOSToggle checked={cfg.dsh_autostart} onChange={v => set({ dsh_autostart: v })} />
+        </div>
+      </div>
+      <div style={styles.iosFooter}>
+        Runs `dsh web` with its workspace at data/sampler/dsh_workspace — an AGENTS.md there teaches the
+        harness the `wb` bridge (tools/wb_agent.py) it uses to operate the workbench. The Agent window
+        frames the harness UI; the workbench page must stay open for tool calls to land.
       </div>
     </>
   );

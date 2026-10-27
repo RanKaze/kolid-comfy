@@ -560,7 +560,10 @@ const ToolbarStrip: React.FC<{
         <>
           <div data-dock-tb-pop={open} ref={popRef} style={{
             ...dockStyles.tbPop, left: pop.x, top: pop.y,
-            width: 'max-content', height: 'max-content',
+            // 内容自己量不出高度的那几格(页面用 popSize 报了盒子,比如内嵌 iframe)按报出来的尺寸开,
+            // 否则 max-content 会把它们压成一条标题加 0px 正文。
+            ...(ctx.popSize?.(open) ? { width: ctx.popSize(open)!.w, height: ctx.popSize(open)!.h }
+              : { width: 'max-content', height: 'max-content' }),
             minWidth: TB_POP_MIN_W, minHeight: TB_POP_MIN_H,
             // 宽度再封 560:一行长文本的 max-content 会把小窗顶到全屏宽,没有意义。
             maxWidth: 'min(calc(100vw - 12px), 560px)', maxHeight: 'calc(100vh - 12px)',

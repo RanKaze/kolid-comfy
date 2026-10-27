@@ -1,19 +1,35 @@
 # Agent dock 窗
 
-工作台右侧新的一扇 dock 窗(panel id `agent`,代理绿 #30d158):一条对话栏,AI 通过工具调用直接
-操作应用 —— 时间线、图层、生成、画布、资产全在射程内。
+工作台右侧新的一扇 dock 窗(panel id `agent`,代理绿 #30d158)。两种形态,头部 DSH/Chat 分段切换
+(记忆在 `sampler.agentMode`):**DSH 模式** = 内嵌 DeepSeek Harness(官方开源 coding agent,sidecar
++ iframe 它的 Web UI);**Chat 模式** = 内建轻量对话 agent。两者共享同一条工具面与设置。
 
-## 用法
+## DSH 模式(默认)
 
-1. 打开工作台 → 右栏(或 tab)找到 **Agent** 窗。
-2. 先到 **Settings 页 ▸ Agent 屏**(分段控件第三格)填 LLM 端点(OpenAI 兼容):Base URL
-   (默认 `https://api.z.ai/api/paas/v4`)、API key、Model(默认 `glm-4.6`)、Temperature /
-   Max Steps / Extra Prompt。保存到 `data/sampler/agent_settings.json`。Agent 窗的状态行会提示
-   "no API key (Settings ▸ Agent)"。
-3. 直接说需求:它会先 `get_app_state` 看现场,再调工具动手,每一步在聊天里以工具行呈现
-   (点开看参数与结果)。
+- **启动**:窗内 Start(或 Settings ▸ Agent 的 Auto Start)→ Python 拉起 `npx -y @deepseek-ai/dsh
+  web --no-open --port <dsh_port>`(Node.js;首跑 npx 要下载包),workspace =
+  `data/sampler/dsh_workspace`,每次启动刷新那里的 **AGENTS.md**(告诉 harness 这是什么应用、怎么用
+  `wb` 桥)。端口由 `start()` 显式追加 —— 状态机(`_port_alive`)与 cookie 的 authority 都按它走。
+- **同站是嵌入的前置条件(踩过)**:dsh web 带 token 鉴权(`?token=…` → 303 +
+  `Set-Cookie: dsh-auth-*; HttpOnly; SameSite=Strict`,JWT 里还绑死 `authority=127.0.0.1:<port>`)。
+  Strict cookie 只在同站请求里发;祖先链上只要有一层跨站(页面在 `localhost`、iframe 在
+  `127.0.0.1`),整条就按跨站算 —— 实测表现是 iframe 里一句 `dsh web authentication required`。
+  所以页面一律走 `127.0.0.1`(`browser_url`;旧 `localhost` 页签在那三条页面路由上 302 过去),
+  iframe 直连 `127.0.0.1:<port>`,**不要**换 `localhost`、也不要改 Host 试探 —— 两种都只会 401。
+- **工具桥**:dsh 的 agent 在终端里跑 `tools/wb_agent.py`(stdlib-only CLI:ping/state/call)→
+  `POST /api/agent/direct_tool` → 后端自呼 `/api/ui_probe/eval`(探针回路是 async IIFE)→ 页面上的
+  `window.__wbAgentTool`(AgentPanel 挂载,包住 runAgentTool)执行并回 JSON。**工作台页面必须开着**
+  工具调用才能落;Chat 模式那 38 个工具 + get_app_state 在 DSH 模式下原样可用。
+- sidecar 管理:`nodes/workbench/agent_dsh.py`(start/stop/status;status 每次真探端口;进程自己
+  死了就把输出尾巴当 `error` 交给面板,用户主动 stop 的则清空日志免得误报;stop 在 Windows 上
+  `taskkill /T` 连根拔 shell=True 的进程树)。路由经 agent_backend 委派
+  (`/api/agent_dsh/*` 与 `/api/agent/*` 同前缀族)。Settings ▸ Agent 有第二张卡:Port / Start
+  Command / API Key(以 DEEPSEEK_API_KEY 注入)/ Auto Start。
+- **小窗尺寸**:Harness 是 iframe,自己撑不出内容高度 —— dock 小窗按 `max-content` 会把它压成一条
+  标题。页面在 `DockCtx.popSize` 里给 `agent` 报了 560×520 的盒子(DockView 拿它当固定尺寸),
+  AgentPanel 的根节点也带 `flex:1 1 auto`。
 
-## 架构
+## Chat 模式
 
 **LLM 循环住在后端,工具住在浏览器。** 没有 websocket,与工作台同一条 HTTP 轮询口径:
 

@@ -17,10 +17,12 @@ export type AgentVgenEntry = {
 };
 
 /** Agent 的 LLM 端点配置(data/sampler/agent_settings.json 的镜像)。设置住在 Settings 页
- *  ▸ Agent 屏,Agent 窗只消费(状态行显示模型名/缺 key 提示)。 */
+ *  ▸ Agent 屏,Agent 窗只消费(状态行显示模型名/缺 key 提示)。dsh_* 四项是 DeepSeek
+ *  Harness sidecar(agent_dsh.py)的启动参数。 */
 export type AgentConfig = {
   base_url: string; api_key: string; model: string;
   temperature: number; max_steps: number; system_extra: string;
+  dsh_port: number; dsh_command: string; dsh_api_key: string; dsh_autostart: boolean;
 };
 
 export type AgentCtx = {
