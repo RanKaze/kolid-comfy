@@ -259,7 +259,10 @@ export const VidPlayer: React.FC<{
     // （逐层 16×16 采样读回），30 包/秒就是白烧。
     // 随帧变的那条链：量化到 COMP_FPS（= 30，与工程帧率同格）—— 页面按 rAF 合成，落地的节拍
     // 由它决定，发多发少都不会积压。
-    const COMP_FPS = 30;
+    // 随帧变的那条链：量化到**工程帧栅格**（与 kf 采样、镜像对时同一把尺）—— 24fps 的工程不再为
+    // 30 包/秒白付 6 趟重复折（页面按 t 去重,省的是包与镜像纠偏）；60fps 的工程也就地提到 60。
+    const pf = projectRef.current.fps;
+    const COMP_FPS = pf > 0 ? Math.min(60, Math.max(1, Math.round(pf))) : 30;
     const q = Math.max(0, Math.floor(t * COMP_FPS + 1e-6) / COMP_FPS);
     // 计划的身份 = 这一段 + 这一刻的底片片段。换了就 +1：页面把版本号记进录像带，
     // "这一帧是上一份计划画的"立刻看得出来。

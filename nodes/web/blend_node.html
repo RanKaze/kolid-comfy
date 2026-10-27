@@ -4563,9 +4563,9 @@ function layerItem(l) {
     // 播放一层"视频贴片 + alpha/变换动画"的段，代价就与一段普通视频一样。
     if (!live) {
         const tr = (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
-        if (!foldForceAll) {
-            const direct = soloDecalVideo(l, vidFrameSourcesNow);
-            if (direct) { foldTrace(l, 'solo-video'); return { src: direct.video, premul: true, transform: composContain(tr, direct.sx, direct.sy), opacity }; }
+            if (!foldForceAll) {
+                const direct = soloDecalVideo(l, vidFrameSourcesNow);
+                if (direct) { foldTrace(l, 'solo-video'); return { src: direct.video, premul: true, gen: videoFrameGen(direct.video), transform: composContain(tr, direct.sx, direct.sy), opacity }; }
             const solo = soloDecalOf(l);
             if (solo) { foldTrace(l, 'solo-face'); return { src: solo, transform: tr, opacity, gen: layerSurfaceGen(l) }; }
             // 第三条：这一层是"自己的底图 + 一条特效链"（没有要叠的面）⇒ 链在 GL 里跑完**结果就是一张
@@ -5405,6 +5405,27 @@ let vidPaintedRev = 0;
 /** 上一次取的底片是**哪一支**供的（诊断）：'elem' = 页面自己那只底片元素；'packet' = 这一包的源帧
  *  （镜像池，段前进段时就预热好了）；'none' = 两样都拿不到（这一帧按"没底"如实落画）。 */
 let vidBackdropFrom = 'none';
+// ── 每只 <video> 的"已呈现帧"身份（rVFC 驱动）──────────────────────────────────────────────
+// 合成器的纹理缓存按 (源对象 + gen + pre) 命中：视频源不给 gen 就每 present 全幅重传（1080p 一两毫秒，
+// 底片+借用贴片是同一只元素时更是同一条帧传两遍）。rVFC 的回调节奏就是"哪条视频帧被呈现了"——
+// 比 currentTime 准（媒体时钟在帧间也在走）。底片已有一条这样的链（vidBaseWatchFrames/vidBaseSeq），直读；
+// 其余（镜像池里的贴片源）惰性各挂一条。暂停/seek 后 rVFC 也会因"新帧被呈现"回调一次，序号随之前进。
+const videoFrameSeqMap = new WeakMap();
+function videoFrameGen(v) {
+    if (!v) return null;
+    if (v === vidBaseVideo) return vidBaseSrc + '#' + vidBaseSeq;
+    let e = videoFrameSeqMap.get(v);
+    if (!e) {
+        e = { seq: 0 };
+        videoFrameSeqMap.set(v, e);
+        if (typeof v.requestVideoFrameCallback === 'function') {
+            const tick = () => { e.seq++; v.requestVideoFrameCallback(tick); };
+            v.requestVideoFrameCallback(tick);
+        }
+    }
+    return e.seq;
+}
+
 /** 这一刻能当"底"的那张画面；拿不到就返回 null —— 没有兜底、没有 hold，调用方照画
  *  （缺底的那一帧就是透明的，镜像/底片就绪后的重画立刻补上）。 */
 function stageBackdropItem() {
@@ -5415,14 +5436,14 @@ function stageBackdropItem() {
     // 上一段的那张，铺上去就是错帧（播放中看着像"先出上一段、再跳回来"）。
     const timely = v && v.readyState >= 2 && v.videoWidth && v.videoHeight
         && (wantBaseT == null || Math.abs((v.currentTime || 0) - wantBaseT) < 0.25);
-    if (timely) { vidBackdropFrom = 'elem'; return { src: v, transform: null, premul: true }; }
+    if (timely) { vidBackdropFrom = 'elem'; return { src: v, transform: null, premul: true, gen: videoFrameGen(v) }; }
     const p = vidFramePacket;
     if (p && p.sources && p.sources.size) {
         // 兜底也走就绪判据（vidFrameSource）：没就绪的 <video> 交上去同样画不出来（上传抛错被跳过
         // = 照样透明），还把 vidBackdropFrom 记成 'packet' 骗了诊断 —— 不如明说没有，按"这一帧没底"落画。
         const key = (p.baseTrackId && p.sources.has(p.baseTrackId)) ? p.baseTrackId : p.sources.keys().next().value;
         const b = vidFrameSource(p.sources, key);
-        if (b) { vidBackdropFrom = 'packet'; return { src: b, transform: null }; }
+        if (b) { vidBackdropFrom = 'packet'; return { src: b, transform: null, gen: videoFrameGen(b) }; }
     }
     vidBackdropFrom = 'none';
     return null;
@@ -5451,7 +5472,9 @@ function stageReadbackToBlend() {
 // 推 30 次 —— 播放时那是每帧最大的一笔固定开销，可真正的读者最多 12/s（预览）或人手按的
 // （导出 / 生成 / 存档 / 吸管）。所以帧包驱动的那一趟按这个间隔抄；读的人要精确像素时
 // 自己 ensureBlendImage()，而停播、或者任何一次手改的 render 都立刻补一张（那条路径不节流）。
-const CONTEXT_COPY_MS = 90;
+const CONTEXT_COPY_MS = 250;   // 播放中 context image 的抄写节奏 = 预览的读数(PREVIEW_INTERVAL_FLOW_MS):
+                               // 真正的读者最勤也就是它,抄得再勤只是多付几次全幅 GPU→2D 回读
+                               //（一次约 5ms,是播放里最尖的那根刺）。手改的 render 仍走 minMs=0 不节流。
 let blendCopiedAt = 0;
 let blendDirty = false;
 

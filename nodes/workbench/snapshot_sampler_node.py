@@ -35,9 +35,17 @@ except ImportError as e:
     SnapshotPromptServer = None
     SnapshotPromptNode = None
 
+# Agent dock 窗的后端(LLM 会话编排)。requests 缺失也不许拖死整个节点 —— 只少这扇窗的路由。
+try:
+    from . import agent_backend
+except ImportError as e:
+    print(f"[SnapshotDetailerSampler] Warning: cannot import agent_backend: {e}")
+    agent_backend = None
+
 from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl, merge_mask_alpha, recover_scale_image, _geo_info_at
 from ...libs.mask_utils import expand_mask
 from ...libs.video_utils import get_video_metadata
+from ...libs import av_media
 from ...libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from ..pipeline.sampler_node import get_loras_from_string, ConditioningCacheStore
@@ -913,7 +921,17 @@ def _ff_bin(name):
 
 
 def _vid_ffprobe(path):
-    """ffprobe -show_format -show_streams 的瘦封装。attached_pic（专辑封面）不算视频流。"""
+    """ffprobe -show_format -show_streams 的瘦封装。attached_pic（专辑封面）不算视频流。
+
+    PyAV 直读优先（libs/av_media）：解码器在进程内，省掉一次 ffprobe 子进程，字段与下面
+    ffprobe 这条分支严格同构（已逐字段比对过）。PyAV 不在 / 打不开这个文件才回退。
+    """
+    try:
+        p = av_media.probe(path)
+    except Exception:
+        p = None
+    if p:
+        return p
     fp = _ff_bin('ffprobe')
     if not fp:
         return None
@@ -978,9 +996,18 @@ def _vid_previews(path, probe, d):
     base = os.path.splitext(os.path.basename(path))[0]
     wave = os.path.join(d, base + '_wave.png')
     if not os.path.exists(wave):
-        subprocess.run([ff, '-y', '-i', path, '-filter_complex',
-                        'aformat=channel_layouts=mono,showwavespic=s=1600x128:colors=#30d158',
-                        '-frames:v', '1', wave], capture_output=True, timeout=180)
+        # PyAV 直读优先（libs/av_media）：解码 + 重采样都在进程内，且按真实峰值包络画。
+        # 旧的 showwavespic 滤镜画出来只有 ±4px（几乎是条平线），新路与 ffmpeg 解出的
+        # 原始 PCM 逐列一致（实测相关系数 1.0000）。拿不到才回退滤镜。
+        ok_w = False
+        try:
+            ok_w = av_media.wave_png(path, wave, width=1600, height=128, color='#30d158')
+        except Exception:
+            ok_w = False
+        if not ok_w:
+            subprocess.run([ff, '-y', '-i', path, '-filter_complex',
+                            'aformat=channel_layouts=mono,showwavespic=s=1600x128:colors=#30d158',
+                            '-frames:v', '1', wave], capture_output=True, timeout=180)
     if os.path.exists(wave):
         out['waveform'] = '/api/vid_media/' + os.path.basename(wave)
     return out
@@ -999,13 +1026,26 @@ def _vid_frame(path, t):
     base = os.path.splitext(os.path.basename(path))[0]
     out = os.path.join(_vid_media_dir(), f'{base}_f{t:.2f}.jpg')
     if not os.path.exists(out):
-        r = subprocess.run([ff, '-y', '-ss', f'{t:.2f}', '-i', path, '-vf', 'scale=160:-2',
-                            '-frames:v', '1', '-update', '1', out], capture_output=True, timeout=60)
-        if r.returncode != 0 or not os.path.exists(out):
-            r = subprocess.run([ff, '-y', '-sseof', '-0.3', '-i', path, '-vf', 'scale=160:-2',
+        # PyAV 直读优先（libs/av_media）：一次 seek + 按 PTS 定位就拿到确定答案，比 spawn
+        # 一个 ffmpeg 快，也不用下面的 -sseof 兜片尾。拿不到才回退 ffmpeg。
+        img = None
+        try:
+            img = av_media.frame_at(path, t, width=160)
+        except Exception:
+            img = None
+        if img is not None:
+            try:
+                img.save(out, 'JPEG', quality=85)
+            except Exception:
+                pass
+        if not os.path.exists(out):
+            r = subprocess.run([ff, '-y', '-ss', f'{t:.2f}', '-i', path, '-vf', 'scale=160:-2',
                                 '-frames:v', '1', '-update', '1', out], capture_output=True, timeout=60)
             if r.returncode != 0 or not os.path.exists(out):
-                return None
+                r = subprocess.run([ff, '-y', '-sseof', '-0.3', '-i', path, '-vf', 'scale=160:-2',
+                                    '-frames:v', '1', '-update', '1', out], capture_output=True, timeout=60)
+                if r.returncode != 0 or not os.path.exists(out):
+                    return None
     return out
 
 
@@ -1026,16 +1066,31 @@ def _vid_strip(path, n):
     d = _vid_media_dir()
     outs = [os.path.join(d, f'{stem}_s{i:03d}.jpg') for i in range(n)]
     if not all(os.path.exists(p) for p in outs):
-        probe = _vid_ffprobe(path) or {}
-        total = probe.get('duration') or 0
-        # fps = n/时长：让 ffmpeg 自己把 n 张铺到整片上（首尾都给到）。
-        fps = (n / total) if total > 0 else 1
-        # -start_number 0：image2 默认从 1 开始编号，而上面的文件名是 _s000 起算的。
-        # scale 288：监视器替身图要放大到整窗，160 太糊；288 宽的 jpeg 仍在几 KB 量级。
-        subprocess.run([ff, '-y', '-i', path, '-vf', f'fps={fps:.4f},scale=288:-2',
-                           '-frames:v', str(n), '-start_number', '0',
-                           os.path.join(d, f'{stem}_s%03d.jpg')],
-                       capture_output=True, timeout=300)
+        # PyAV 直读优先（libs/av_media）：按**帧号**均匀取，正好 n 张，落在真实帧边界上；
+        # 而且逐段 seek 只解每个目标所在的半个 GOP，比全片顺序解快一个量级（实测 n=16：
+        # 0.5s vs ffmpeg fps 滤镜的 3.6s）。拿不到才回退 ffmpeg。
+        imgs: list = []
+        try:
+            imgs = av_media.strip(path, n, width=288)
+        except Exception:
+            imgs = []
+        if len(imgs) == n:
+            for img, p in zip(imgs, outs):
+                try:
+                    img.save(p, 'JPEG', quality=85)
+                except Exception:
+                    pass
+        if not all(os.path.exists(p) for p in outs):
+            probe = _vid_ffprobe(path) or {}
+            total = probe.get('duration') or 0
+            # fps = n/时长：让 ffmpeg 自己把 n 张铺到整片上（首尾都给到）。
+            fps = (n / total) if total > 0 else 1
+            # -start_number 0：image2 默认从 1 开始编号，而上面的文件名是 _s000 起算的。
+            # scale 288：监视器替身图要放大到整窗，160 太糊；288 宽的 jpeg 仍在几 KB 量级。
+            subprocess.run([ff, '-y', '-i', path, '-vf', f'fps={fps:.4f},scale=288:-2',
+                               '-frames:v', str(n), '-start_number', '0',
+                               os.path.join(d, f'{stem}_s%03d.jpg')],
+                           capture_output=True, timeout=300)
     # 抽不满时（片子太短 / 尾帧被 GOP 吞掉）缺的那几格用前一格顶上 —— 缩略条宁可重复，
     # 也不能有洞：拖动扫过空洞会闪黑。
     made: list[str] = []
@@ -3414,6 +3469,12 @@ class SnapshotDetailerSamplerServer:
                     self.wfile.write(f.read())
                 return
 
+            # Agent dock 窗:/api/agent/* 整族交给 agent_backend(LLM 会话循环 + 设置存储)。
+            # 工具本体在浏览器侧执行 —— 后端只编排与转发,协议见 agent_backend.py 模块注释。
+            if agent_backend is not None and urlparse(self.path).path.startswith('/api/agent'):
+                agent_backend.handle(self)
+                return
+
             if self.path == '/api/config':
                 self._send_json({
                     'prompt_url': inst.prompt_url if inst else '',
@@ -4049,6 +4110,11 @@ class SnapshotDetailerSamplerServer:
                 except Exception as e:
                     print('[UIProbe] rejected snapshot: %s' % e)
                     self._send_json({'ok': False, 'error': str(e)}, 400)
+                return
+
+            # 同上:POST 侧的 /api/agent/*(send/tool/cancel/config)。
+            if agent_backend is not None and urlparse(self.path).path.startswith('/api/agent'):
+                agent_backend.handle(self)
                 return
 
             if self.path == '/api/update_config':

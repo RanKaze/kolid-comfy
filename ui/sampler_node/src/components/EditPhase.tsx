@@ -36,6 +36,8 @@ import { VidInspector, type InspectSel } from '../workbench/video/Inspector';
 import { VidAudioMonitor } from '../workbench/video/AudioMonitor';
 import { VidKeyframes } from '../workbench/video/Keyframes';
 import { VidPlayer } from '../workbench/video/Player';
+import { AgentPanel } from '../agent/AgentPanel';
+import type { AgentCtx, AgentConfig } from '../agent/tools';
 
 // The rename field of a preset row.
 const tabInputStyle: React.CSSProperties = {
@@ -65,20 +67,21 @@ const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', '
 // 轨道与资产属于文档，不该只在 Video 模式下才看得见。播放器不单独占窗：
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
 // 标题条上有一颗 Image/Video 切换（见 heads）。
-const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe'];
+const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'];
 // 工具窗的标识色:Log / Debug / Probe 三扇"看现场"的窗,图标与 tab 名同穿一件颜色的衣服,
 // 与内容窗(素色)一眼分开。icon 的着色与 titleColor 都从这里来 —— 一处定色,两处生效。
 const UNIT_COLORS: Partial<Record<string, string>> = {
   log: '#64d2ff',    // 信息青:一条流水账
   debug: '#ff9f0a',  // 警示橙:快照与过程数据
   probe: '#bf5af2',  // 探针紫:布局巡检
+  agent: '#30d158',  // 代理绿:替你动手的那扇窗
 };
 const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'presets', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
   toolbar: 'File', context: 'Context', pipeline: 'Pipeline', presets: 'Pipeline Presets',
   blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets', vinspector: 'Inspector', vkf: 'Keyframes',
   vaudio: 'Audio Monitor',
-  log: 'Log', debug: 'Debug', probe: 'Probe',
+  log: 'Log', debug: 'Debug', probe: 'Probe', agent: 'Agent',
   ...WORKBENCH_TITLES,
 };
 const COLUMN_W = 340;
@@ -158,13 +161,13 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDocUnit(id),
-    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'context' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vkf' || id === 'vaudio' || id === 'log' || id === 'debug' || id === 'probe' || id === 'blocks',
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'context' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vkf' || id === 'vaudio' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent' || id === 'blocks',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
     // 时间线与资产库同理：两份会一直长的列表。
     // Context 也进 grows:预览图要吃满窗的余量(图片 fit dock window),左列里它是那个"看图"的窗,
     // 与 Inspector 同一待遇;Pipeline/Presets 照旧按内容定高。
-    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vkf' || id === 'context' || id === 'log' || id === 'debug' || id === 'probe',
+    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vkf' || id === 'context' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent',
     top: 'toolbar',
     // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
     // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
@@ -173,7 +176,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     columnW: COLUMN_W,
     // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里，Assets / Tracks 是普通成员
     // （默认窗，不靠任何切换逻辑出现）。
-    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe'],
+    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'],
     rightW: RIGHT_W,
     // The size a NEW block opens at — asked per unit and per axis, because which axis the block will be
     // measured on is decided by the side it was dropped on (under a block it is a height, beside one it
@@ -189,6 +192,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
       if (id === 'log') return axis === 'v' ? 240 : 320;
       if (id === 'debug') return axis === 'v' ? 380 : 460;
       if (id === 'probe') return axis === 'v' ? 420 : 540;
+      if (id === 'agent') return axis === 'v' ? 480 : 640;
       return axis === 'v' ? PANEL_BLOCK_H : PANEL_BLOCK_W;
     },
   };
@@ -2522,6 +2526,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     },
   }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock,
     vidMode, vidProject.fps, vidProject.maskTrackId, setVidFps, vidTrackList, vidAssetList, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment, vidUpdate]);
+  // Agent 窗的 ctx:工具执行体(runAgentTool)要碰的宿主事实与写口捆成一份。AgentPanel 经 ref
+  // 永远取最新一份用,所以这份对象只影响它自身重渲的频率,不影响工具执行的正确性。
+  const agentCtx: AgentCtx = useMemo(() => ({
+    uiSend, vid: vidCtl, docOpen: blendDocs.activeUid !== null, vidMode,
+    blockSets, activeBlockSetId,
+    runPreset: id => {
+      const set = blockSets.find(s => s.id === id);
+      if (set) runPresetFromRow(set);
+    },
+    cancelRun: cancelActiveRun,
+    docCommand: onDocCommand,
+    setFps: setVidFps,
+    vgen: { list: videoGenList, add: addVideoGenSegment, cont: continueSel, addContinue: addContinueVgenSegment },
+  }), [uiSend, vidCtl, blendDocs.activeUid, vidMode, blockSets, activeBlockSetId, runPresetFromRow,
+    cancelActiveRun, onDocCommand, setVidFps, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
   // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
   // 所以：**空列表在启动期是歧义的**，要等它至少说过一次"我有文档"，此后再说空才算关闭。
@@ -3416,6 +3435,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               log: <LogPanel entries={actionLog} />,
               debug: <DebugPanel />,
               probe: <ProbePanelBody />,
+              // Agent:聊天栏 + 会调工具替你动手的 AI(时间线/图层/生成全在它射程内)。
+              // 不设文档闸 —— 没开工程时聊天照常,工具自己会回报"no document"。
+              agent: <AgentPanel ctx={agentCtx} />,
               context: (
                 // 无边框卡片(fullBleed + grows:预览吃满窗)。Mask Tint 不再常驻一行 ——
                 // 指针停在预览图上才浮出滑块(浮层是悬停区的子节点,挪上去不会中途消失)。
@@ -4355,7 +4377,7 @@ const VideoGenFrameModal: React.FC<{
 // pipeline that actually runs — replacing some of those nine for the runs it catches. The numbers
 // stay the host's either way: this page only edits what the Draw panel edited, so a value can
 // never exist twice.
-type SettingsScreen = 'default' | 'arch';
+type SettingsScreen = 'default' | 'arch' | 'agent';
 // Which screen is showing and which rule cards are open belong to the user, not to the program, so
 // they are remembered per browser — same policy as the section folds and the panel width, and ONE
 // key for both because they are one page's view state. An unreadable store just opens on Default.
@@ -4446,6 +4468,105 @@ const NumField: React.FC<{
   );
 };
 
+// ── Settings ▸ Agent ── Agent 窗的 LLM 端点配置(/api/agent/config 的读写口)。设置住 Settings 页
+// (与 Default Setting / Application 同一套 iOS 卡),Agent 窗本体只消费。后端没起/没重启时整卡
+// 降级成一句 unavailable —— 与 AgentPanel 的 readJson 同一句人话。
+const AgentConfigRows: React.FC = () => {
+  const [cfg, setCfg] = useState<AgentConfig | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let dead = false;
+    void (async () => {
+      try {
+        const r = await fetch('/api/agent/config');
+        const d = JSON.parse(await r.text());
+        if (!dead && d.ok) setCfg(d.config as AgentConfig);
+      } catch { /* 保持 null:卡里显示 unavailable */ }
+    })();
+    return () => { dead = true; };
+  }, []);
+  const save = async () => {
+    if (!cfg || busy) return;
+    setBusy(true); setNote(null);
+    try {
+      const r = await fetch('/api/agent/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
+      });
+      const d = JSON.parse(await r.text());
+      if (d.ok) { setCfg(d.config); setNote({ ok: true, text: 'Saved.' }); }
+      else setNote({ ok: false, text: d.error || 'Save failed.' });
+    } catch {
+      setNote({ ok: false, text: 'Agent backend did not answer with JSON — restart ComfyUI so the /api/agent routes load.' });
+    } finally { setBusy(false); }
+  };
+  if (!cfg) {
+    return (
+      <>
+        <div style={styles.iosGroupTitle}>Agent</div>
+        <div style={styles.iosCard}>
+          <div style={styles.iosRow}>
+            <span style={{ ...styles.iosLabel, color: '#8e8e93', whiteSpace: 'normal' }}>
+              Not available — the agent backend did not answer. Restart ComfyUI so the /api/agent routes load.
+            </span>
+          </div>
+        </div>
+        <div style={styles.iosFooter}>The Agent dock window's LLM endpoint lives here once the backend is up.</div>
+      </>
+    );
+  }
+  const set = (patch: Partial<AgentConfig>) => { setCfg({ ...cfg, ...patch }); setNote(null); };
+  const textRows: { label: string; key: keyof AgentConfig; ph: string; secret?: boolean }[] = [
+    { label: 'Base URL', key: 'base_url', ph: 'https://api.z.ai/api/paas/v4' },
+    { label: 'API Key', key: 'api_key', ph: 'sk-…', secret: true },
+    { label: 'Model', key: 'model', ph: 'glm-4.6' },
+    { label: 'Extra Prompt', key: 'system_extra', ph: 'appended to the agent system prompt' },
+  ];
+  return (
+    <>
+      <div style={styles.iosGroupTitle}>Agent<em style={styles.iosGroupHint}>LLM endpoint</em></div>
+      <div style={styles.iosCard}>
+        {textRows.map(({ label, key, ph, secret }, i) => (
+          <React.Fragment key={key}>
+            {i > 0 && <div style={styles.iosSep} />}
+            <div style={styles.iosRow}>
+              <span style={styles.iosLabel}>{label}</span>
+              <input style={styles.iosPattern} type={secret ? 'password' : 'text'} placeholder={ph}
+                value={cfg[key] as string} onChange={e => set({ [key]: e.target.value } as Partial<AgentConfig>)} />
+            </div>
+          </React.Fragment>
+        ))}
+        <div style={styles.iosSep} />
+        <div style={styles.iosRow} title="Sampling temperature (0 = deterministic)">
+          <span style={styles.iosLabel}>Temperature</span>
+          <input style={{ ...styles.iosPattern, width: 84, flex: '0 0 auto', textAlign: 'right' }} type="number"
+            step="0.1" min="0" max="2" value={cfg.temperature}
+            onChange={e => set({ temperature: parseFloat(e.target.value) || 0 })} />
+        </div>
+        <div style={styles.iosSep} />
+        <div style={styles.iosRow} title="Max LLM round-trips per request (loop guard)">
+          <span style={styles.iosLabel}>Max Steps</span>
+          <input style={{ ...styles.iosPattern, width: 84, flex: '0 0 auto', textAlign: 'right' }} type="number"
+            min="1" max="64" value={cfg.max_steps}
+            onChange={e => set({ max_steps: parseInt(e.target.value, 10) || 24 })} />
+        </div>
+      </div>
+      <div style={styles.iosFooter}>
+        OpenAI-compatible /chat/completions endpoint the Agent dock window talks to. Extra Prompt is appended
+        to the agent's system prompt — your project background and house rules go there.
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 16px' }}>
+        <button disabled={busy} onClick={() => { void save(); }}
+          style={{ background: busy ? 'rgba(10,132,255,0.4)' : 'rgba(10,132,255,0.9)', color: '#fff', border: 'none',
+            borderRadius: 8, padding: '7px 18px', fontSize: 13, fontWeight: 600, cursor: busy ? 'default' : 'pointer' }}>
+          Save
+        </button>
+        {note && <span style={{ fontSize: 12.5, color: note.ok ? '#30d158' : '#ff453a' }}>{note.text}</span>}
+      </div>
+    </>
+  );
+};
+
 const SettingsTab: React.FC<{
   values: Record<OverrideKey, number>;
   onDefaultParamChange: (key: OverrideKey, value: number) => void;
@@ -4523,6 +4644,8 @@ const SettingsTab: React.FC<{
             title="The nine values every run falls back to">Default Setting</button>
           <button style={segBtnStyle(ui.screen === 'arch')} onClick={() => pickScreen('arch')}
             title="Regex rules that replace some of those values for the runs they catch">Architecture</button>
+          <button style={segBtnStyle(ui.screen === 'agent')} onClick={() => pickScreen('agent')}
+            title="The LLM endpoint the Agent dock window talks to">Agent</button>
         </div>
 
         {/* DEFAULT SETTING — 三张卡：输出前处理 / 工作分辨率 / 输入封顶，每张卡下面跟一句 footer
@@ -4664,6 +4787,10 @@ const SettingsTab: React.FC<{
             ]} />;
           })()}
         </>)}
+
+        {/* AGENT — Agent 窗的 LLM 端点(第三屏,segmented control 最后一格)。配置读写都在
+            AgentConfigRows 里自洽,/api/agent/config 是它与 AgentPanel 共享的唯一真源。 */}
+        {ui.screen === 'agent' && <AgentConfigRows />}
       </div>
     </div>
   );

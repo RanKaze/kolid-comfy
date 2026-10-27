@@ -167,6 +167,13 @@ const PProbe: UnitIcon = p => <Svg {...p}>
   <circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none" />
   <path d="M8 .9v3M8 12.1v3M.9 8h3M12.1 8h3" strokeWidth={1.4} />
 </Svg>;
+// Agent:一枚四角星(AI 的通用记号)。这扇窗与其它工具窗同一待遇 —— currentColor,
+// 着色交给 UNIT_COLORS(代理绿)。
+const Agent: UnitIcon = p => <Svg {...p}>
+  <path d="M8 2.2l1.35 3.85L13.2 7.4l-3.85 1.35L8 12.6l-1.35-3.85L2.8 7.4l3.85-1.35z"
+    fill="currentColor" stroke="none" />
+  <circle cx="12.6" cy="12.6" r="1.05" fill="currentColor" stroke="none" opacity="0.75" />
+</Svg>;
 // Video Generator：一条片子（竖着的胶片，两侧齿孔）加右上角一枚"生成"的星 —— 与 VPlayer 那一块
 // 幕布分开：这一格是**造**片子的，不是放片子的。
 const VideoGen: UnitIcon = p => <Svg {...p}>
@@ -240,7 +247,7 @@ export const UNIT_ICONS: Record<string, UnitIcon> = {
   // Video 模式
   vplayer: VPlayer, vtracks: VTracks, vassets: VAssets, vinspector: VInspector, vkf: VKf, vaudio: VAudio,
   // 工具窗(彩色,见 UNIT_COLORS)
-  log: PLog, debug: PDebug, probe: PProbe,
+  log: PLog, debug: PDebug, probe: PProbe, agent: Agent,
   // 宿主
   toolbar: File, context: Context, pipeline: Pipeline, presets: Presets, blocks: Blocks,
 };

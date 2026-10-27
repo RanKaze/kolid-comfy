@@ -328,7 +328,10 @@ void main() {
             api.stats.upload++;
             return st.tex;
         }
-        const w = src.width | 0, h = src.height | 0;
+        // <video> 的 width/height 是 HTML 属性（未设置即 0），画面尺寸在 videoWidth/Height ——
+        // 与 vidFrameSizeOf 同一条读法。gen 缓存的验证键必须用**真画面尺寸**：用属性尺寸会把
+        // 视频源当空（!w）整条跳过 —— 台上那一帧直接没了。
+        const w = (src.videoWidth || src.width) | 0, h = (src.videoHeight || src.height) | 0;
         if (!w || !h) return null;
         const pre = it.premul ? 1 : 0;
         let ent = st.srcTex.get(src);
