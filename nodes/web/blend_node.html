@@ -982,7 +982,6 @@ let stageBaseStamp = '';       // 底片帧上台时用的时间戳（没变就�
 let vidBaseSeq = 0;            // 呈现过的帧数（rVFC 驱动）
 let vidBaseRvfcAt = 0;         // 最近一次 rVFC 的时刻（判断这条链还活着没有）
 let vidBaseRvfcPending = false; // 已挂、还没回调 —— rVFC 是一次性的，靠它防重复挂链
-let stageCompositeSrc = null;  // 合成图副本（vidFrameFlush 交给 stage 的那张面）
 let guidanceHasInk = false;    // 这一趟 guidance 栈里有没有真的落下像素（没有就不往 stage 上叠）
 let overlayDpr = 1;
 let viewDrag = null;           // {kind:'zoom'|'rotate'|'pan', sign, startX, startY, startView, anchorDoc, centerDoc, moved}
@@ -1260,7 +1259,7 @@ function sizeCanvasElement() {
 
 /** 位图换尺寸 = 内容被清空，必须就地补一张。清空之前台上是什么，现在就补什么，按"可信度"排：
  *   ① 底片那只 `<video>` —— 它是元素、不受 resize 影响，永远是最新鲜的兜底；
- *   ② 别段合成图副本 `vidFrameCanvas` —— 它不在三块显示画布之列，也没被清；
+ *   ② 别段合成图 —— 由 stagePresentComposite 从当下的帧包现折（同一个画家），画布清没清都无所谓；
  *   ③ 都没有（Image 模式 / 纯图层编辑）⇒ 同步重画一趟活画布。render 是同步的，
  *      present 在同一任务里就落定，用户看不到中间态。
  *  **不能沿用 stageSync 的 hold**：hold 的前提是"台上还留着上一帧"，而此刻台面已是空的 ——
@@ -1276,13 +1275,12 @@ function restageAfterResize(wasMode) {
     try { inFlush = !!vidInFlush; } catch (e) { inFlush = true; }
     const baseOk = vidBaseOn && !vidBaseHidden && vidBaseVideo.readyState >= 2
         && !vidBaseVideo.seeking && vidBaseVideo.videoWidth && vidBaseVideo.videoHeight;
-    const cv = stageCompositeSrc;
-    const copyOk = !!(cv && cv.width && cv.height);
     // 先照原样还：清空前是副本就还副本，是底片就还底片 —— 顺序不是随便排的，
-    // 换错会让人看见"切了一下"（底片换成副本或反过来）。
-    if (wasMode === 'composite' && copyOk) { stageBlit(cv); if (stageMode === 'composite') return true; }
+    // 换错会让人看见"切了一下"（底片换成副本或反过来）。副本由 stagePresentComposite
+    // 从当下的帧包现折（同一个画家），不再依赖某张存下来的画布。
+    if (wasMode === 'composite' && stagePresentComposite()) return true;
     if (baseOk) { stageShowBase(true); if (stageMode === 'base') return true; }
-    if (copyOk) { stageBlit(cv); if (stageMode === 'composite') return true; }
+    if (stagePresentComposite()) return true;
     // 两样都搬不回来（Image 模式 / 纯图层编辑 / 底片被按住）：没有旧画面可还，同步重画一趟活画布。
     // 正在一趟帧包 flush 里时不抢（那一趟的 render 马上就到，抢了会画两遍）。
     if (!inFlush && typeof render === 'function' && canvasW > 0 && canvasH > 0) {
@@ -4827,7 +4825,13 @@ function render(opts) {
             // **只在这一趟真画了的时候抄**：skipDisplay（缺帧 / 换套 / 无底）那一趟台上留的是
             // 上一帧 —— 而在底片态那就是一张视频裸帧。抄它等于往 context image 里灌一张不该有的图，
             // 而 stageShowLive 之后正好会把这张铺上台（用户看到"活画布"里是一帧底片）。
-            if (!skipDisplay) syncBlendImage(kfFold ? CONTEXT_COPY_MS : 0);
+            // **编辑目标≠播放头段**（setMismatch）的这一趟不读：活画布折完马上会被 stageSync 换回
+            // 播放头那张合成图，中途读回去的是"这边的层 + 那边的底"的半截。记一笔脏，真要读像素的
+            // 入口走 ensureBlendImage() —— 那时台上已经是合成图，读到的就是显示面上的真相。
+            if (!skipDisplay) {
+                if (setMismatch) blendDirty = true;
+                else syncBlendImage(kfFold ? CONTEXT_COPY_MS : 0);
+            }
             // ── guidance 栈：照旧 2D 画进 guidanceCtx（卡片 / 合并 / 吸管都读它），再整张叠到显示面上。
             // 它是**显示层**，不进 context image —— #blendCanvas 里永远只有工作栈。
             for (let i = layers.length - 1; i >= 0; i--) {
@@ -5537,12 +5541,50 @@ function stageShowBase(force) {
     schedulePreview();
 }
 
-/** 合成图副本上台（播放中 / 游标不在活画布这套上）。 */
-function stageBlit(src) {
-    if (!src || !src.width || !src.height) return;
-    stageCompositeSrc = src;             // 先记下：模式切回 composite 时还要用它
-    if (!stagePresent([{ src, transform: null }], true, 'blit')) return;
-    stageMode = 'composite';
+let inStageComposite = false;       // 换入渲染期间的自省旗:render 尾部的 stageSync 不许再进来
+let displayDecalCache = new Map();  // layerKey -> 空白蒙版面（段自己没画过蒙版时的替身,按尺寸复用）
+
+/** **后台维护播放头那一段的渲染**（2026-10-28 第二版）：把这一套**短暂换入**工作栈,跑一趟
+ *  **完整的 render({vidKf})**（源帧注入 + 关键帧采样 + 特效链 + 直通纹理 + 折缓存世代,与活画布
+ *  路径一字不差）,再把编辑态原样换出。第一版用 layerItem 在临时画布上自拼 items —— 特效链的
+ *  活资源世代（foldLive）与折缓存全按 render 的每趟节奏走,自拼版本缺了这些不变量,挂链即冻。
+ *  换入是同步的、面板/撤销/选中这些编辑态在换出时原样回来,没有任何 UI 会观察中间态;唯一的
+ *  产物就是台上的那一帧。编辑目标（跟选中）与显示（跟播放头）由此真正各走各的。 */
+function stagePresentComposite() {
+    try {
+        const p = vidFramePacket;
+        if (!p || !canvasW || !canvasH || inStageComposite) return false;
+        const key = p.layerKey || '';
+        const s = key ? layerSets.get(key) : null;
+        if (!s || !Array.isArray(s.layers)) return false;    // 不认识的套：没得可放
+        const saveLayers = layers, saveActive = activeLayerSet;
+        const saveDecal = maskLayer.decal, saveDecalCtx = maskLayer.decalCtx;
+        let painted = false;
+        inStageComposite = true;
+        try {
+            layers = s.layers;
+            activeLayerSet = key;                            // render 的注入/kf/timeMap 闸全认它
+            if (!maskLayer.decal || maskLayer.decal.width !== canvasW || maskLayer.decal.height !== canvasH) {
+                let blank = displayDecalCache.get(key);
+                if (!blank || blank.width !== canvasW || blank.height !== canvasH) {
+                    blank = surfaceAtCanvasSize(null, canvasW, canvasH);
+                    displayDecalCache.set(key, blank);
+                }
+                maskLayer.decal = blank;
+                maskLayer.decalCtx = blank ? blank.getContext('2d') : null;
+            }
+            render({ vidKf: true });
+            painted = true;
+        } finally {
+            layers = saveLayers;
+            activeLayerSet = saveActive;
+            maskLayer.decal = saveDecal;
+            maskLayer.decalCtx = saveDecalCtx;
+            inStageComposite = false;
+        }
+        stageMode = 'composite';         // render 把 stageMode 写成 'live':台上装的其实是显示套的合成
+        return painted;
+    } catch (e) { return false; }        // 初始化早期（TDZ）等:当"没得可放"
 }
 
 /** 显示跟模式对账：只在真的不一致时才动（每帧都会调，别白干）。 */
@@ -5560,8 +5602,7 @@ function stageSync(force) {
     }
     if (want === 'live') stageShowLive();
     else if (want === 'base') stageShowBase(true);
-    else if (stageCompositeSrc) stageBlit(stageCompositeSrc);
-    else stageMode = '';               // 还没有副本可放：下一趟再来
+    else if (!stagePresentComposite()) stageMode = '';   // 还没有可放的：下一趟再来
 }
 
 // 出帧循环：底片模式下把"这一帧"铺上台。**新帧由 rVFC 计数**（vidBaseWatchFrames），
@@ -6097,10 +6138,8 @@ function vidFrameFlush() {
             stageSync();             // 这一包说的正是活画布这套了：台上换成它（用户在编辑）
         } else {
             __vidPerf.repliesTemp++;
-            // 这一包说的不是手上这套（游标在别段，或者"切到这一套"那条消息还没到）。**只有在页面上
-            // 真有这一套时可折**：不认识的 key ⇒ 折出来是一张空图，贴到台上就是"闪一帧透明"
-            // （换段时帧包与切套是两条消息，先后不定 —— 这就是那个概率性透明帧）。
-            // 认不出来就什么都不动：台上保留上一帧，回包照旧走 cached（台上确实没变）。
+            // 这一包说的不是手上这套（播放头在别段）。**只有在页面上真有这一套时可折**：不认识的
+            // key ⇒ 折出来是一张空图 —— 认不出来就什么都不动：台上保留上一帧，回包走 cached。
             const key = p.layerKey || '';
             const known = !!(key && (key === (activeLayerSet || '') || layerSets.get(key)));
             if (!known) {
@@ -6108,11 +6147,22 @@ function vidFrameFlush() {
                 replyVidFrameCached(p.reqId, frameless);
                 return;
             }
-            const cv = composeVidFrameCanvas(p);
-            // 这一包说的不是手上这套（游标在别段）⇒ 台上放合成图副本；活画布一个像素都不动。
-            stageBlit(cv);
-            replyVidFrame(p.reqId, cv, frameless);
-            vidPurpleDirty = vidPlaceholderGen !== purpleAtStart;   // 同上：紫的那张不算"干净的一张"
+            // **后台维护这一段的渲染**（stagePresentComposite）：与活画布同一管线，绑帧的贴片
+            // 直通视频纹理逐帧刷新。监视器那张位图（只有图层的 vidFrameCanvas）只剩三个读者：
+            // iframe 没盖住监视器 / 每秒保底 / 紫后第一张 —— 都不沾就回 cached，连 2D 折都省掉。
+            const painted = stagePresentComposite();
+            vidFramesFlowingAt = performance.now();
+            const nowMs = performance.now();
+            const keepalive = nowMs - vidShotAt > 1000;
+            const purpleNow = vidPlaceholderGen !== purpleAtStart;
+            if (purpleNow || vidPurpleDirty || !p.stageCovers || keepalive || !painted) {
+                vidShotAt = nowMs;
+                vidPurpleDirty = purpleNow;      // 干净的一张发出去 = 监视器跟上了
+                const cv = composeVidFrameCanvas(p);
+                replyVidFrame(p.reqId, cv, frameless);
+            } else {
+                replyVidFrameCached(p.reqId, frameless);
+            }
         }
     } finally {
         vidInFlush = false;
@@ -6222,17 +6272,11 @@ function handleVidFrameMessage(d) {
     if (base) { const bs = vidFrameSizeOf(base); if (bs.w && bs.h) noteVidGrid(bs.w, bs.h); }
     // 上一包的源帧到这里就没用了（临时面已经把像素抄进自己的画布）。
     if (prev) for (const b of prev.bitmaps) { try { b.close(); } catch (e) { /* gone */ } }
-    // ── 每帧的执行顺序从这里开始钉死：**这一包说哪一段，画布就先切到哪一段**，然后再折、再上屏。
-    // 图层集一直住在页面内存里（读档时就装好、之后由页面自己增删），所以这一步是**同步**的 ——
-    // 不存在"等宿主那条切套消息/等图层载入"这回事，也就没有帧包先到、图层还是上一套的窗口。
-    // 宿主那条 `blend-vid-layer-set` 仍然照发（面板与图层编辑跟着它走），到这里就成了幂等的空操作。
-    {
-        const packKey = typeof d.layerKey === 'string' ? d.layerKey : '';
-        if (packKey && packKey !== (activeLayerSet || '')) {
-            if (layerSets.get(packKey) || !layerSets.size) switchLayerSet(packKey, true);   // true = 别现在画
-            else __vidPerf.holds.unknownSet++;
-        }
-    }
+    // ── 帧包**不再切图层集**（2026-10-28）────────────────────────────────────────────────────
+    // Layers/Guidances 的编辑目标只跟**选中的 Layer 段**走（宿主 blend-vid-layer-set），与播放头
+    // 无关。这一包说的那套若不是活画布上这套，由 vidFrameFlush 的非活跃分支折进临时画布再上台：
+    // 显示跟着播放头、编辑目标跟着选中，两边互不打架。不认识的 key 照旧由那道 known 闸拦住
+    // （台上保留上一帧、回 cached），不会折出一张空图。
     // ── "底片被按住"这件事由**帧包自己**说 ──
     // 早先它只由 `blend-vid-base-src` 那条独立消息携带（见 vidBaseSetSrc），于是"进 Layer 段"
     // 那一刻的正确性依赖宿主把 base-src 排在 frame 之前（同源 postMessage 有序，但那是宿主的

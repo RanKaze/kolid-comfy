@@ -1056,6 +1056,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           setVidProject(proj);
           // 文件里带的模式跟着落地：打开这份 .cud 就显示它自己的设置。
           syncVidMode(proj.mode === 'video' ? 'video' : 'image');
+          // 图层编辑目标跟着复位：面板只跟**本会话的选中**走，载入的文档没有选中 → 回文档主
+          // 图层集。留在手上的 key 属于上一份文档，指过去会把编辑写进错的那一套。
+          setVidLayerKey('');
+          onBlendUiCommand('layer-set', { key: '' });
         }
       } else if (d.type === 'blend-saved') {
         // 工作台把 .cud 落盘了 —— Video 工程就在这份文件里，这一桶可以清脏了。
@@ -2357,18 +2361,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, [blendIframeRef]);
   // 播放器报"游标底下是哪一段 Layer 段"：画布内容、Layers 面板的作用对象、Transform 的开工条件
   // 全跟着游标走 —— 离开段就回到主图层集（画布转成视频底片，见页面 vidBaseOn）。
-  // 播放中**也照常切套**：切套本身只是换一份数据（layers / selectedId / decal / 历史），真正的
-  // 开销是切完那次整画布重渲染 —— 那一笔由页面在播放中跳过（见 blend_node.html 的 switchLayerSet），
-  // 画面由临时合成那条链负责。反过来，如果不切套，Layers 面板与页面里的工作栈就不是同一套：
-  // 播放中在面板上做的任何事（显隐、参数、添加、拖动）都会落在"上一段"上 —— 画面上毫无反应，
-  // 看上去就是"图层渲染失效了"。
-  const showPlayLayer = useCallback((key: string | null) => {
-    const next = key || '';
-    setVidLayerKey(prev => (prev === next ? prev : next));
-    // 只报"哪一段"：切套之后页面照常重画活画布（P3.4 —— 编辑与播放同一条路径，
-    // 不再有"播放中只换数据不重画"的分支，所以也不需要播放位）。
-    onBlendUiCommand('layer-set', { key: next });
-  }, [onBlendUiCommand]);
   // ── 缺失 / relink（A5）：工程引用的每个哈希，仓库里还有没有 ────────────────────────────────
   // 什么时候问：工程变了（去抖 250ms），以及删除/入库之后（`recheckMissing` 手动，绕过去重）。
   // 请求失败（宿主没起）⇒ 保持上一次的结论：宁可不画，也别把一条能播的时间线整片标红。
@@ -2430,13 +2422,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     project: vidProject, transport: vidTransport, playing: vidPlaying, pps: vidPps,
     staging, update: vidUpdate, seek: vidSeek, setPlaying: setVidPlaying, setPps: setVidPps,
     missing: vidMissing, relink: vidRelink, recheckMissing: () => { void recheckMissing(); },
-    // 点 Layer 段 = 把游标带进这一段：画布只在游标压着它时折这一套图层（见 vidCanvasRef）。
-    // 这里不写 vidLayerKey / 不发 layer-set —— 那一份由播放器按游标底下**实际命中**的段来报
-    // （见 showPlayLayer），否则点一下段、游标却留在段外，两边说的就不是同一段了。
+    // 选中即目标（2026-10-28）：Layers/Guidances 只跟**选中的 Layer 段**走，与播放头无关 ——
+    // 点一段就直接切到它那套图层，不再把游标挪进段里（旧模型：画布只折游标压着的那套，选中只能
+    // 靠搬播放头）。显示（stage 上的合成）仍跟着播放头：页面帧包走非活跃折图路径，两边不打架。
+    // 点非 Layer 段不动目标（那不是在改图层编辑对象）；取消选择（空点时间线）回文档主图层集，
+    // 动作条随之变灰（见 layerEditBlocked）。
     focusClip: clip => {
-      if (!clip || clip.kind !== 'layer') return;
-      const t = vidTransport.get();
-      if (t < clip.start || t >= clip.start + clip.duration) vidSeek(clip.start);
+      if (clip && clip.kind !== 'layer') return;
+      const key = clip ? (clip.layerKey || clip.id) : '';
+      setVidLayerKey(prev => (prev === key ? prev : key));
+      onBlendUiCommand('layer-set', { key });
     },
     blendPost, blendWindow,
     solo: { audio: soloAudio, video: soloVideo }, toggleSolo,
@@ -2750,7 +2745,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const active = d.uid === blendDocs.activeUid;
     const still = active ? null : docStills[d.uid];
     docBodies[docUnit(d.uid)] = active && vidMode === 'video'
-      ? <VidPlayer vid={vidCtl} visible={tab === 'draw'} onCompLayer={showPlayLayer}
+      ? <VidPlayer vid={vidCtl} visible={tab === 'draw'}
           stageCovers={!!frameRect && vidMode === 'video'} />
       : still
         ? <img src={still} alt={d.name} style={styles.docStill} />
