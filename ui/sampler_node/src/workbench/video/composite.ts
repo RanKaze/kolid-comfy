@@ -89,10 +89,14 @@ export const sourceTime = (clip: VidClip, frameT: number): number => {
 // vidSrcSync）：这里只把"这一条轨的源内第几秒"报过去。原先那套"主 <video> 抄一帧 / 其余轨用
 // 隐藏 <video> 精确 seek"的路子成本全在跨窗搬像素与 seek 上，播放时每帧都要付一次。
 
-// ── 预热（换段不顿的关键）────────────────────────────────────────────────────────────────────
-// 进 Layer 段那一刻如果要现做这些事：建源帧镜像 <video> + 等它 loadeddata + seek + 切图层集 +
-// 整画布重渲染 + 首帧合成 —— 主线程上是一整坨，播放里就是一次可感的顿/闪。能提前做的都提前：
-// **提前 look 秒算出"下一段要什么"，先把镜像视频挂上加载好、对到那一刻**，进段只剩"折一张图"。
+// ── 预热（扫过即热）──────────────────────────────────────────────────────────────────────────
+// 播放头扫过时间线，**每一段都要提前备好** —— 不管它此刻在不在播：
+//   · 普通视频段：它的 (轨,源) 镜像先挂上、解出来（blend-vid-warm-src，裸预热）——这段源多半
+//     会在别处被引用（别段 Layer 的 Frame source 绑的就是轨），等真要用时只剩一次便宜的 seek；
+//   · Layer 段：镜像对到段起点，再"先折一张丢掉"（blend-vid-warm，特效链第一次跑的编译/分配
+//     挪到进段之前付）。
+// 镜像按 (轨,源) 复合建键（见 blend_node 的 vidSrcVideos），所以"扫过就忘"不存在：同一条轨上的
+// 多段素材各留各的热镜像，回跳/跨段引用都不再冷启动。池子 LRU 有界（下限 6 + 正用数 + 余量）。
 export type VidWarm = {
   /** 下一段 Layer 段的 key 与它开始的时刻。 */
   layerKey: string;
@@ -101,29 +105,71 @@ export type VidWarm = {
   tracks: { trackId: string; src: string; want: number }[];
 };
 
-/** `look` 秒之内会不会走到一个 Layer 段？会就返回它那一刻的源帧清单（没有就 null）。
- *  只认"起点落在 (t, t+look]"的那一段 —— 已经在段里不算（那是现在的活，不是预热）。
- *  **不会合成的段不预热**（静音的 Layer 轨、Frame source 引用了静音视频轨的段，见 compositePlanAt）。 */
-export const warmAheadOf = (
-  p: VidProject, t: number, muted: ReadonlySet<string>, look = 1.5, need?: VidFrameNeed,
-): VidWarm | null => {
-  let best: VidClip | null = null;
+export type VidSweep = {
+  /** 此刻覆盖播放头的视频段（每条视频轨至多一条）——裸预热，不折图。 */
+  srcs: { trackId: string; src: string; want: number }[];
+  /** look 秒内开始的所有 Layer 段（同 layerKey 取最早起点），按 start 升序。 */
+  segs: VidWarm[];
+};
+
+/** 播放头此刻的预热清单。**按引用关系精确定靶**：
+ *  一条视频段需要热镜像，当且仅当**有 Layer 段会吃它的帧** —— 某套图层集的 Frame source 指着
+ *  它所在的轨，且那套的某个 Layer 段与它在时间线上重叠（段内每一刻吃的都是盖着它的那条素材）。
+ *  没有任何 Layer 段引用的轨，它的画面只经 #vidBaseVideo 出画，永远不需要镜像 —— 一个解码器都不占。
+ *  静音的 Layer 轨、Frame source 引用了静音视频轨的段不会合成（与 compositePlanAt 同口径），
+ *  它们的引用是死引用，不算数。引用表（frameNeed）由工作台页面随编辑实时上报，改了贴片下一拍
+ *  预热集自动跟着变。 */
+export const warmSweepAt = (
+  p: VidProject, t: number, muted: ReadonlySet<string>, look = 4, need?: VidFrameNeed,
+): VidSweep => {
+  const buckets = clipsByTrack(p);     // 一次分桶,下面每轨只扫自家桶
+  // 这段素材的帧会不会被某个 Layer 段吃掉（见函数头注释）。
+  const consumed = (clip: VidClip, trackId: string): boolean => {
+    for (const c of p.clips) {
+      if (c.kind !== 'layer' || c.pending) continue;
+      if (!(c.start < clip.start + clip.duration && clip.start < c.start + c.duration)) continue;
+      const list = (need && c.layerKey ? need[c.layerKey] : null) || null;
+      if (!list || !list.length || !list.includes(trackId)) continue;
+      const tr = p.tracks.find(x => x.id === c.trackId);
+      if (!tr || muted.has(tr.id)) continue;                          // 静音的 Layer 轨：不合成，引用是死的
+      if (layerRefMuted(c.layerKey || c.id, muted, need)) continue;   // 引用了静音视频轨：同样出不了画面
+      return true;
+    }
+    return false;
+  };
+  const srcs: VidSweep['srcs'] = [];
+  for (const tr of p.tracks) {
+    if (tr.kind !== 'video') continue;
+    const hit = (buckets.get(tr.id) || []).find(c => !c.pending && t >= c.start && t < c.start + c.duration);
+    if (hit && hit.src && consumed(hit, tr.id)) srcs.push({ trackId: tr.id, src: hit.src, want: sourceTime(hit, t) });
+  }
+  // 窗口内开始的所有 Layer 段；同 layerKey（同一套图层集铺了好几段）取最早的那条 —— 镜像与
+  // 特效链都是按 layerKey 备的，一份就够。轨清单按 frameNeed 过滤：只送真会被吃的那几条
+  // （引用表还没到时不过滤，页面那边照旧按自己的 need 兜底）。
+  const best = new Map<string, VidClip>();
   for (const c of p.clips) {
     if (c.kind !== 'layer' || c.pending) continue;
     if (c.start <= t || c.start > t + look) continue;
     const tr = p.tracks.find(x => x.id === c.trackId);
     if (!tr || muted.has(tr.id)) continue;                 // 静音的 Layer 轨不合成，也不用预热
     if (layerRefMuted(c.layerKey || c.id, muted, need)) continue;   // 引用失效的段不会合成，别白等
-    if (!best || c.start < best.start) best = c;
+    const key = c.layerKey || c.id;
+    const prev = best.get(key);
+    if (!prev || c.start < prev.start) best.set(key, c);
   }
-  if (!best) return null;
-  const at = best.start;
-  const buckets = clipsByTrack(p);
-  const tracks: VidWarm['tracks'] = [];
-  for (const tr of p.tracks) {
-    if (tr.kind !== 'video') continue;
-    const hit = (buckets.get(tr.id) || []).find(c => !c.pending && at >= c.start && at < c.start + c.duration);
-    if (hit) tracks.push({ trackId: tr.id, src: hit.src, want: sourceTime(hit, at) });
+  const segs: VidWarm[] = [];
+  for (const c of [...best.values()].sort((a, b) => a.start - b.start)) {
+    const key = c.layerKey || c.id;
+    const wantTracks = new Set((need && need[key]) || []);
+    const at = c.start;
+    const tracks: VidWarm['tracks'] = [];
+    for (const tr of p.tracks) {
+      if (tr.kind !== 'video') continue;
+      if (wantTracks.size && !wantTracks.has(tr.id)) continue;      // 没人吃这条轨：不必随段预热
+      const hit = (buckets.get(tr.id) || []).find(cc => !cc.pending && at >= cc.start && at < cc.start + cc.duration);
+      if (hit) tracks.push({ trackId: tr.id, src: hit.src, want: sourceTime(hit, at) });
+    }
+    segs.push({ layerKey: key, at, tracks });
   }
-  return { layerKey: best.layerKey || best.id, at, tracks };
+  return { srcs, segs };
 };

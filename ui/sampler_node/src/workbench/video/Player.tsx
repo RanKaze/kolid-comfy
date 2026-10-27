@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type VidController, type VidClip, audioAudible, clipAt, clipAtSolo, fmtTime, kfSample, kfU, vidDuration,
 } from './model';
-import { compositePlanAt, sourceTime, warmAheadOf, type VidCompositePlan } from './composite';
+import { compositePlanAt, sourceTime, warmSweepAt, type VidCompositePlan } from './composite';
 import { decodeAudio, vidAudio } from './audio';
 import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame } from './previews';
 import { acquireAudioSlot, buildStereoProbe, releaseAudioSlot, type AudioProbe } from './audioFocus';
@@ -442,14 +442,21 @@ export const VidPlayer: React.FC<{
       // 底片态：solo 时整个退场（requestBaseOff）；Layer 段压着时**不退**，只报 hidden ——
       // 页面那颗镜像继续跟着播，一出段就能立刻露出正在那一帧（退掉再重开 = 先露旧帧再 seek
       // 跳一下，那就是"出 Layer 段闪一下"）。
-      // **预热**：还没进 Layer 段时，提前 1.5 秒把下一段的源帧镜像挂好、对到那一刻。
+      // **预热 = 扫过即热**：此刻每条视频轨的段（裸镜像，blend-vid-warm-src）+ 4 秒窗口内开始的
+      // 所有 Layer 段（镜像 + 特效链"折一张丢掉"，blend-vid-warm）。键 = 段集 + 轨源集，变了才发
+      // —— 播放中一段只发一次；页面对已存在的镜像一律幂等（不重复 seek、不重复折）。
       // 不预热的话，"建镜像 + 等 loadeddata + seek + 切图层集 + 整画布重渲染 + 首帧合成"
       // 全挤在边界那一帧里 —— 播放中就是一次可感的顿（画面上像闪一下）。
-      const warm = soloActive ? null : warmAheadOf(proj, t, muted, 4, frameNeed.current);   // 4 秒的提前量：够它把文件加载完
-      const warmKey = warm ? `${warm.layerKey}@${warm.at.toFixed(2)}` : '';
+      const warm = soloActive ? null : warmSweepAt(proj, t, muted, 4, frameNeed.current);   // 4 秒的提前量：够它把文件加载完
+      const warmKey = warm
+        ? warm.segs.map(s => `${s.layerKey}@${s.at.toFixed(2)}`).join(',') + '|' + warm.srcs.map(s => `${s.trackId}@${s.src}`).join(',')
+        : '';
       if (warmKey !== warmSent.current) {
         warmSent.current = warmKey;
-        if (warm) vid.blendPost({ type: 'blend-vid-warm', layerKey: warm.layerKey, t: warm.at, tracks: warm.tracks });
+        if (warm) {
+          for (const seg of warm.segs) vid.blendPost({ type: 'blend-vid-warm', layerKey: seg.layerKey, t: seg.at, tracks: seg.tracks });
+          if (warm.srcs.length) vid.blendPost({ type: 'blend-vid-warm-src', items: warm.srcs });
+        }
       }
       // `hidden` = 游标压在 Layer 段上：底片照旧跟着换源/对时/播放（出段零 seek），但**不许上台**。
       // 段界那一刻它已经换成脚下那条新片段的源（本工程 = Video 2），铺到显示面上就是"跳闪一下
@@ -576,47 +583,6 @@ export const VidPlayer: React.FC<{
     return () => window.removeEventListener('message', onMsg);
   }, [vid]);
 
-  // ── 透明帧取证：工具栏那颗 Trace ─────────────────────────────────────────────────────────
-  // 页面（blend_node）常开一条 160 帧的录像带：每帧落地时记下"谁画的、几张、画的是什么、折的是
-  // 哪一段、关键帧打没打、落完之后屏幕上还有没有像素"。第一现场（上一帧有→这一帧没有）会被钉住。
-  // 这里只做两件事：① 收到 blend-vid-trace-bad 就亮一颗红点（"抓到过一次，点 Trace 取走"）；
-  // ② 点 Trace 就向页面要报告，复制到剪贴板 —— 不用开控制台，也不用复现第二次。
-  const [traceHit, setTraceHit] = useState(false);
-  const [traceMsg, setTraceMsg] = useState('');
-  const traceReq = useRef(0);
-  const askTrace = useCallback(() => {
-    setTraceMsg('Asking the canvas page…');
-    vid.blendPost({ type: 'blend-vid-trace', reqId: ++traceReq.current });
-  }, [vid]);
-  useEffect(() => {
-    const onMsg = (event: MessageEvent) => {
-      if (event.source !== vid.blendWindow()) return;
-      const d = event.data as { type?: string } | null;
-      if (!d) return;
-      if (d.type === 'blend-vid-trace-bad') setTraceHit(true);
-      if (d.type !== 'blend-vid-trace-report') return;
-      const rep = (d as { report?: unknown }).report;
-      let text = '';
-      try { text = JSON.stringify(rep, null, 1); } catch { text = String(rep); }
-      const kb = (text.length / 1024).toFixed(1);
-      // 宿主这一半的逐帧记录一起交出去：两边用 Date.now 对齐，能看到"那一瞬间宿主在做什么"。
-      const host = hostRing.current.slice(-120);
-      const full = JSON.stringify({ host, page: rep });
-      const kbAll = (full.length / 1024).toFixed(1);
-      const firstBad = (rep as { firstBad?: { trace?: unknown[]; packet?: { t?: number } } } | null)?.firstBad;
-      const where = firstBad && firstBad.packet ? ` at t=${firstBad.packet.t}` : '';
-      const okMsg = `Trace ${kb} KB page + ${host.length} host frames copied${firstBad ? ' · caught a bad frame' + where : ' · no bad frame in the ring'}`;
-      setTraceHit(false);
-      if (navigator.clipboard?.writeText) {
-        navigator.clipboard.writeText(full).then(() => setTraceMsg(okMsg), () => setTraceMsg(`Trace ${kbAll} KB — clipboard blocked`));
-      } else setTraceMsg(`Trace ${kbAll} KB — no clipboard`);
-      // 台面上也留一份：万一剪贴板被拒，用户还能从 window.__lastVidTrace 里取。
-      try { (window as unknown as { __lastVidTrace?: unknown }).__lastVidTrace = rep; } catch { /* ignore */ }
-    };
-    window.addEventListener('message', onMsg);
-    return () => window.removeEventListener('message', onMsg);
-  }, [vid]);
-
   // 进出合成模式：**只在这一格彻底退场时**把合成图藏起来（主 <video> 重新露脸）。
   // 从一个 Layer 段走到下一个 Layer 段时**别清**：那一下新合成还没回来，清了就等于先把旧合成
   // 换成一帧裸视频、再被新合成盖住 —— 又是一次"闪"。（进段时 hasComp 本来就是 false。）
@@ -703,49 +669,6 @@ export const VidPlayer: React.FC<{
   }, [activeId, compMode, hasComp, vidHoldTick]);
   useEffect(() => () => { if (vidHoldTimer.current) window.clearTimeout(vidHoldTimer.current); }, []);
 
-  // ── 显示面取证（宿主这一半）────────────────────────────────────────────────────────────────
-  // 页面那一侧的录像带只看得到"画布内容"。可"一闪"也可能来自这一侧：画布 iframe 被挪/被盖、
-  // 主 <video> 换源而露出黑、合成模式开关……所以这里按 rAF 记一条**宿主在这几帧干了什么**，
-  // 与页面那些行用 Date.now 对齐（两边 performance.now 原点不同，秒数比不了）。
-  // 点 Trace 时它跟着页面报告一起进剪贴板，于是"那一瞬间屏幕上到底是什么"两边都看得到。
-  const hostRing = useRef<Array<Record<string, unknown>>>([]);
-  useEffect(() => {
-    let on = true;
-    const step = () => {
-      if (!on) return;
-      try {
-        // 画布 iframe 由工作台挂在别的子树里（这一层拿不到它的 ref），按 DOM 找一次即可。
-        const fr = document.querySelector('iframe[src*="blend_node"]') as HTMLIFrameElement | null;
-        const v = videoRef.current;
-        const row: Record<string, unknown> = {
-          ms: Date.now(), t: +transport.get().toFixed(3),
-          cover: stageCoversRef.current, comp: compModeRef.current ? compModeRef.current.name : null,
-          playing: playingRef.current, active: activeIdRef.current,
-          iframe: null, video: null,
-        };
-        if (fr) {
-          const cs = window.getComputedStyle(fr);
-          const r = fr.getBoundingClientRect();
-          row.iframe = { rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
-            vis: cs.visibility, op: cs.opacity, disp: cs.display };
-        }
-        if (v) {
-          const cs = window.getComputedStyle(v);
-          row.video = { ready: v.readyState, seeking: v.seeking, paused: v.paused, ct: +v.currentTime.toFixed(3),
-            vis: cs.visibility, op: cs.opacity, disp: cs.display, src: String(v.currentSrc || '').slice(-24) };
-        }
-        const ring = hostRing.current;
-        const prev = ring[ring.length - 1];
-        // 只记"有变化"的行（逐帧全记会淹掉真正的那一帧）：几何/可见性/视频状态任一变了就记。
-        const sig = JSON.stringify([row.iframe, row.video && (row.video as Record<string, unknown>).ready,
-          row.video && (row.video as Record<string, unknown>).seeking, row.cover, row.comp, row.active]);
-        if (!prev || prev.sig !== sig) { row.sig = sig; ring.push(row); if (ring.length > 240) ring.shift(); }
-      } catch { /* 诊断不许影响播放 */ }
-      requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-    return () => { on = false; };
-  }, [transport]);
   // 页面据此决定画布要不要铺一层视频帧打底（Video 模式永远铺 ⇒ 底片与合成在像素层面是同一种状态；
   // Image 模式保持透明 ⇒ 棋盘格与导出语义不变）。明确告知，不靠推断。
   useEffect(() => {
@@ -1028,14 +951,6 @@ export const VidPlayer: React.FC<{
           {playing ? '⏸' : '▶'}
         </button>
         <button style={tCtrl} title="Stop — pause and return to the In point" onClick={() => { seek(inSet ? p.inPoint : 0); vid.setPlaying(false); }}>⏹</button>
-        {/* 取证：画布那一页常开一条 160 帧的录像带，抓到"该有画面却是空的"那一帧就亮红点。
-            点一下把报告（含第一现场）复制到剪贴板 —— 不需要开控制台，也不需要复现第二次。 */}
-        <button style={{ ...tCtrl, color: traceHit ? '#ff6b5a' : tCtrl.color, borderColor: traceHit ? 'rgba(255,107,90,0.6)' : tCtrl.borderColor }}
-          title={traceHit ? 'A frame landed empty — click to copy the trace (last 160 frames + the moment it happened)' : 'Copy the canvas trace (last 160 frames: who painted what, which segment, whether keyframes applied)'}
-          onClick={askTrace}>{traceHit ? '●' : 'ⓘ'} Trace</button>
-        {traceMsg && (
-          <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.55)', maxWidth: 320, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{traceMsg}</span>
-        )}
         {/* 读数靠右：右边原来那条进度条撤掉了 —— 拖游标在时间线的标尺上做（那里才是它的家），
             监视器下面再放一条重复的进度条只会让人以为它是另一个控件。 */}
         <span style={{ marginLeft: 'auto', fontSize: 11, color: 'rgba(255,255,255,0.65)', fontVariantNumeric: 'tabular-nums' }}>

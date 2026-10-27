@@ -276,6 +276,11 @@ export type CardItem = {
   drag?: Record<string, string>;
   /** 名字右边那颗动作按钮。 */
   actions?: React.ReactNode;
+  /** 双击名字 = 原地改名（不给 = 名字不可改）。改名输入框的提交/放弃走下面三个字段。 */
+  onNameDoubleClick?: () => void;
+  renaming?: boolean;
+  onRenameCommit?: (next: string) => void;
+  onRenameCancel?: () => void;
 };
 
 const BYTE_BADGE = {
@@ -291,11 +296,6 @@ const Chip: React.FC<{ color: string; title: string; children?: React.ReactNode 
   }}>{children}</span>
 );
 
-const CrossIcon = () => (
-  <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
-    <path d="M3 3l6 6M9 3l-6 6" />
-  </svg>
-);
 const PlusIcon = () => (
   <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
     <path d="M6 2.5v7M2.5 6h7" />
@@ -308,16 +308,51 @@ const ClipIcon = () => (
   </svg>
 );
 
+/** 原地改名输入框:Enter/失焦落(空值或没改 = 放弃),Esc 弃。`done` 守卫挡住
+ *  "Enter 提交后组件卸载引发的那次 blur"造成的双发。 */
+const RenameInput: React.FC<{ initial: string; commit: (next: string) => void; cancel: () => void }> = ({ initial, commit, cancel }) => {
+  const done = useRef(false);
+  const finish = (v: string) => {
+    if (done.current) return;
+    done.current = true;
+    const next = v.trim();
+    if (next && next !== initial) commit(next); else cancel();
+  };
+  return (
+    <input
+      autoFocus
+      defaultValue={initial}
+      spellCheck={false}
+      onPointerDown={e => e.stopPropagation()}
+      onClick={e => e.stopPropagation()}
+      onDoubleClick={e => e.stopPropagation()}
+      onKeyDown={e => {
+        e.stopPropagation();          // 别让 Del/Esc 冒泡到网格的快捷键那层
+        if (e.key === 'Enter') finish(e.currentTarget.value);
+        else if (e.key === 'Escape') { done.current = true; cancel(); }
+      }}
+      onBlur={e => finish(e.currentTarget.value)}
+      onFocus={e => e.currentTarget.select()}
+      style={{
+        flex: 1, minWidth: 0, height: 14, fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.92)',
+        background: '#1b1b1e', border: '0.5px solid rgba(10,132,255,0.55)', borderRadius: 3,
+        padding: '0 3px', outline: 'none',
+      }}
+    />
+  );
+};
+
 /** 资产卡片的唯一长相（Assets 窗在用；绑帧弹窗等挑选场景也复用它 —— 选中态用 selected，
- *  整卡可点用 onClick,双击用 onDoubleClick,都不给就是窗里那张默认卡）。 */
-export const Card: React.FC<{ it: CardItem; selected?: boolean; onClick?: () => void; onDoubleClick?: () => void }> = ({ it, selected, onClick, onDoubleClick }) => {
+ *  整卡可点用 onClick（收一个鼠标事件,多选要读 Ctrl/Shift）,双击用 onDoubleClick,
+ *  都不给就是窗里那张默认卡）。 */
+export const Card: React.FC<{ it: CardItem; selected?: boolean; onClick?: (e: React.MouseEvent) => void; onDoubleClick?: () => void }> = ({ it, selected, onClick, onDoubleClick }) => {
   const poster = useCardThumb(it.kind, it.src, it.poster);
   const [over, setOver] = useState(false);
   const badge = it.byteFrom ? BYTE_BADGE[it.byteFrom] : null;
   return (
     <div
       draggable={!!it.drag}
-      onClick={onClick}
+      onClick={e => onClick?.(e)}
       onDoubleClick={onDoubleClick}
       onDragStart={e => {
         if (!it.drag) return;
@@ -350,7 +385,14 @@ export const Card: React.FC<{ it: CardItem; selected?: boolean; onClick?: () => 
         )}
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 6px 0', minWidth: 0 }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.82)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.name}</span>
+        {it.renaming && it.onRenameCommit ? (
+          <RenameInput initial={it.name} commit={it.onRenameCommit} cancel={() => it.onRenameCancel?.()} />
+        ) : (
+          <span
+            onDoubleClick={e => { e.stopPropagation(); it.onNameDoubleClick?.(); }}
+            style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.82)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: it.onNameDoubleClick ? 'text' : undefined }}
+          >{it.name}</span>
+        )}
         {it.kind !== 'image' && it.duration > 0 && (
           <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.42)', flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>{fmtTime(it.duration)}</span>
         )}
@@ -404,6 +446,15 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
   useEffect(() => subscribeAssets(() => setExtTick(assetsTick())), []);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
+  // ── 多选(本窗本地的选择集;Inspector 仍只吃主选那一份载荷)──
+  // 点 = 只选这张(照旧报 Inspector);Ctrl/Cmd+点 = 增减;Shift+点 = 从锚点连选到这张;
+  // Del = 删掉选中的(工程资产出工程 / 仓库条目出仓库,各走各的路);Ctrl+A 全选;Esc 清空。
+  // 选择集是**窗内**的事实:换作用域即清(两档 population 不同),搜索/类型过滤不动它。
+  const [multiSel, setMultiSel] = useState<Set<string>>(new Set());
+  const anchorRef = useRef<string | null>(null);       // Shift 连选的起点(最后一次普通点的那张)
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const gridRef = useRef<HTMLDivElement | null>(null); // Del/Ctrl+A 只在网格握焦点时接手,不抢全局
+
   // ── 选中态 → Inspector ── 点卡片选中(再点同一张不切换),Inspector 窗照这份载荷放大看。
   // 选中的卡被删掉/仓库条目消失 → 撤选。判**全量**两份列表(工程资产 + 仓库),与 scope/类型
   // 过滤无关:过滤只是"这档里看不见",不是"不在了"。
@@ -415,6 +466,19 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
     ]);
     if (!keys.has(sel)) onSel?.(null);
   }, [sel, p.assets, store, onSel]);
+
+  // 多选集里指向已消失条目(删除 / 仓库清单刷新)的键,静默清掉 —— 与上面主选的守卫同一口径。
+  useEffect(() => {
+    setMultiSel(prev => {
+      if (!prev.size) return prev;
+      const alive = new Set<string>([
+        ...p.assets.map(a => 'p:' + a.id),
+        ...(store ?? []).map(s => 's:' + (s.hash || s.name)),
+      ]);
+      const next = new Set([...prev].filter(k => alive.has(k)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [p.assets, store]);
 
   // ── 缺失 / relink（A5）─────────────────────────────────────────────────────────────────────
   // `vid.missing` 是宿主问过仓库的结论（工程引用的哈希里没字节的那些）。卡片挂 MISSING，
@@ -508,12 +572,92 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
     }), 'Add library asset');
   };
 
-  const renameStore = async (s: StoreAsset) => {
-    const id = s.hash;
-    if (!id) return;
-    const cur = s.displayName || s.name;
-    const next = window.prompt('Rename asset', cur);
-    if (!next || next === cur) return;
+  // 渲染序的全量键表(Shift 连选按它取范围)。工程档只有工程资产 + 孤儿缺失;其余档只有仓库条目。
+  const visibleKeys = [
+    ...projectItems.map(a => 'p:' + a.id),
+    ...orphanMissing.map(h => 'm:' + h),
+    ...storeItems.map(s => 's:' + (s.hash || s.name)),
+  ];
+
+  const cardClick = (e: React.MouseEvent, key: string, payload: InspectSel) => {
+    gridRef.current?.focus();        // Del/Ctrl+A 的落点跟着"最后点过的窗"走
+    if (e.shiftKey && anchorRef.current && anchorRef.current !== key) {
+      const a = visibleKeys.indexOf(anchorRef.current), b = visibleKeys.indexOf(key);
+      if (a >= 0 && b >= 0) {
+        setMultiSel(new Set(visibleKeys.slice(Math.min(a, b), Math.max(a, b) + 1)));
+        onSel?.(payload);
+        return;
+      }
+    }
+    if (e.ctrlKey || e.metaKey) {
+      setMultiSel(prev => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n; });
+    } else {
+      setMultiSel(new Set([key]));
+    }
+    anchorRef.current = key;
+    onSel?.(payload);
+  };
+
+  // Del:两类键各走各的删除路。工程资产 = 出工程(一次可撤销的工程改动,不弹确认);
+  // 仓库条目 = 出仓库(字节真删,整批一次确认)。孤儿缺失键不可选,天然走不到。
+  const deleteSelected = async () => {
+    const keys = [...multiSel];
+    const pIds = keys.filter(k => k.startsWith('p:')).map(k => k.slice(2));
+    const sKeys = keys.filter(k => k.startsWith('s:')).map(k => k.slice(2));
+    if (pIds.length) {
+      vid.update(proj => {
+        let n = proj;
+        for (const id of pIds) n = removeAsset(n, id);
+        return n;
+      }, pIds.length > 1 ? `Remove ${pIds.length} assets` : 'Remove asset');
+    }
+    if (sKeys.length) {
+      const items = sKeys
+        .map(id => (store || []).find(s => (s.hash || s.name) === id))
+        .filter((s): s is StoreAsset => !!s && !!s.hash);
+      if (items.length) {
+        const ok = window.confirm(items.length === 1
+          ? `Delete「${items[0].displayName || items[0].name}」from the asset store?\n\nThe file and its record are removed. ` +
+            `Timeline clips that reference it are marked MISSING until you relink the original file.`
+          : `Delete ${items.length} assets from the asset store?\n\nThe files and their records are removed. ` +
+            `Timeline clips that reference them are marked MISSING until you relink the originals.`);
+        if (ok) {
+          for (const s of items) {
+            const r = await fetch('/api/asset_delete', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: s.hash }),
+            }).then(x => x.json()).catch(() => null);
+            if (!r?.ok) setErr(r?.error || 'delete failed');
+          }
+          // 删完整批重问一次缺失:时间线该当场标红,不该等下一次工程改动。
+          vid.recheckMissing();
+        }
+      }
+    }
+    setMultiSel(new Set());
+    anchorRef.current = null;
+    bump();
+  };
+
+  // 网格自己的快捷键:焦点在网格上才接手(改名输入框会拦住自己的键,冒不上来)。
+  const gridKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Delete' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      if (!multiSel.size) return;
+      e.preventDefault();
+      void deleteSelected();
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+      e.preventDefault();
+      setMultiSel(new Set(visibleKeys.filter(k => !k.startsWith('m:'))));   // 孤儿缺失卡不可选
+      anchorRef.current = null;
+    } else if (e.key === 'Escape') {
+      setMultiSel(new Set());
+    }
+  };
+
+  // 双击名字 → 原地改名。仓库条目走 /api/asset_update(名字在库表里,跨文档共享);
+  // 工程资产改工程表(VidAsset.name)—— 时间线上已有片段的名字是落位时抄走的,不受影响。
+  const commitStoreRename = async (id: string, next: string) => {
+    setRenaming(null);
     const r = await fetch('/api/asset_update', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, name: next }),
@@ -521,23 +665,9 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
     if (!r?.ok) setErr(r?.error || 'rename failed');
     bump();
   };
-
-  const deleteStore = async (s: StoreAsset) => {
-    const id = s.hash;
-    if (!id) return;
-    const label = s.displayName || s.name;
-    const ok = window.confirm(
-      `Delete「${label}」from the asset store?\n\nThe file and its record are removed. ` +
-      `Timeline clips that reference it are marked MISSING until you relink the original file.`);
-    if (!ok) return;
-    const r = await fetch('/api/asset_delete', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    }).then(x => x.json()).catch(() => null);
-    if (!r?.ok) setErr(r?.error || 'delete failed');
-    // 删完立刻重问缺失：时间线该当场标红，不该等下一次工程改动。
-    vid.recheckMissing();
-    bump();
+  const commitProjectRename = (id: string, next: string) => {
+    setRenaming(null);
+    vid.update(proj => ({ ...proj, assets: proj.assets.map(a => a.id === id ? { ...a, name: next } : a) }), 'Rename asset');
   };
 
   // 导入图片进库（POST /api/asset_import）。视频/音频不走这条路：它们要 ffmpeg 入库 + 探测，
@@ -623,7 +753,7 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
           <button
             key={s.id}
             title={s.title}
-            onClick={() => setScope(s.id)}
+            onClick={() => { setScope(s.id); setMultiSel(new Set()); setRenaming(null); anchorRef.current = null; }}
             style={{
               display: 'flex', alignItems: 'center', gap: 3, height: 18, padding: '0 5px',
               fontSize: 9.5, fontWeight: 600, letterSpacing: 0.2, whiteSpace: 'nowrap',
@@ -711,13 +841,20 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
         </div>
       )}
 
-      {/* 卡片网格：可拖（application/x-asset），名字右边是动作。 */}
-      <div style={{
-        flex: 1, minHeight: 0, overflow: 'auto', scrollbarWidth: 'thin',
-        padding: 8, display: 'grid', gap: 6, alignContent: 'start',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))',
-        background: over ? 'rgba(10,132,255,0.06)' : 'transparent',
-      }}>
+      {/* 卡片网格：可拖（application/x-asset）。网格握焦点接 Del / Ctrl+A / Esc ——
+          点卡片那一下就把焦点带进来（onPointerDownCapture），不抢全局快捷键。 */}
+      <div
+        ref={gridRef}
+        tabIndex={0}
+        onKeyDown={gridKeyDown}
+        onPointerDownCapture={() => gridRef.current?.focus()}
+        style={{
+          flex: 1, minHeight: 0, overflow: 'auto', scrollbarWidth: 'thin', outline: 'none',
+          padding: 8, display: 'grid', gap: 6, alignContent: 'start',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))',
+          background: over ? 'rgba(10,132,255,0.06)' : 'transparent',
+        }}
+      >
         {total === 0 && (
           <div style={{ gridColumn: '1 / -1', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8 }}>
             {busy ? 'Loading…'
@@ -731,18 +868,20 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
           const img = isImageAsset(a);
           const k = img ? 'image' : a.kind;
           const miss = gone(a);
+          const key = 'p:' + a.id;
+          const payload: InspectSel = {
+            key, name: a.name, kind: k,
+            // 播放优先仓库地址(同一份字节,比 src 里的 objectURL 靠得住);缺字节退回 src。
+            src: a.asset && !miss ? '/api/asset_media/' + encodeURIComponent(a.asset) : a.src,
+            duration: a.duration, hasAudio: img ? null : a.hasAudio,
+            origin: a.origin, hash: a.asset,
+          };
           return (
             <Card
-              key={'p:' + a.id}
-              selected={sel === 'p:' + a.id}
+              key={key}
+              selected={multiSel.has(key) || (multiSel.size === 0 && sel === key)}
               onDoubleClick={onActivate}
-              onClick={onSel ? () => onSel({
-                key: 'p:' + a.id, name: a.name, kind: k,
-                // 播放优先仓库地址(同一份字节,比 src 里的 objectURL 靠得住);缺字节退回 src。
-                src: a.asset && !miss ? '/api/asset_media/' + encodeURIComponent(a.asset) : a.src,
-                duration: a.duration, hasAudio: img ? null : a.hasAudio,
-                origin: a.origin, hash: a.asset,
-              }) : undefined}
+              onClick={e => cardClick(e, key, payload)}
               it={{
                 name: a.name, kind: k, src: a.src, duration: a.duration, hasAudio: img ? null : a.hasAudio,
                 byteFrom: miss ? 'missing' : 'store', origin: a.origin, usedBy: usedBy(a.src),
@@ -759,26 +898,19 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
                   if (!img) out['application/x-vid-asset'] = a.id;
                   return out;
                 })(),
-                actions: (
-                  <>
-                    {miss && (
-                      <button
-                        title={'Relink「' + a.name + '」— pick the original file; its bytes must hash to ' + (a.asset || a.play || '').slice(0, 8) + '…'}
-                        onClick={() => startRelink(a.asset || a.play)}
-                        style={{ ...rowBtn, color: '#ff6b60' }}
-                      >
-                        <ClipIcon />
-                      </button>
-                    )}
-                    <button
-                      title={'Remove「' + a.name + '」from this project (clips already on the timeline keep playing)'}
-                      onClick={() => vid.update(proj => removeAsset(proj, a.id))}
-                      style={rowBtn}
-                    >
-                      <CrossIcon />
-                    </button>
-                  </>
-                ),
+                renaming: renaming === key,
+                onNameDoubleClick: () => setRenaming(key),
+                onRenameCommit: next => commitProjectRename(a.id, next),
+                onRenameCancel: () => setRenaming(null),
+                actions: miss ? (
+                  <button
+                    title={'Relink「' + a.name + '」— pick the original file; its bytes must hash to ' + (a.asset || a.play || '').slice(0, 8) + '…'}
+                    onClick={() => startRelink(a.asset || a.play)}
+                    style={{ ...rowBtn, color: '#ff6b60' }}
+                  >
+                    <ClipIcon />
+                  </button>
+                ) : undefined,
               }}
             />
           );
@@ -805,21 +937,22 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
 
         {storeItems.map(s => {
           const id = s.hash || s.name;
+          const key = 's:' + id;
           const label = s.displayName || s.name;
           const play = playUrlOf(s);
-          const payload = { id, url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash };
+          const payload: InspectSel = {
+            key, name: label, kind: s.kind,
+            src: s.kind === 'image' ? s.url : play,
+            duration: s.duration, hasAudio: s.hasAudio,
+            origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
+            hash: s.hash, size: s.size,
+          };
           return (
             <Card
-              key={'s:' + id}
-              selected={sel === 's:' + id}
+              key={key}
+              selected={multiSel.has(key) || (multiSel.size === 0 && sel === key)}
               onDoubleClick={onActivate}
-              onClick={onSel ? () => onSel({
-                key: 's:' + id, name: label, kind: s.kind,
-                src: s.kind === 'image' ? s.url : play,
-                duration: s.duration, hasAudio: s.hasAudio,
-                origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
-                hash: s.hash, size: s.size,
-              }) : undefined}
+              onClick={e => cardClick(e, key, payload)}
               it={{
                 name: label, kind: s.kind, src: s.kind === 'image' ? s.url : play, duration: s.duration, hasAudio: s.hasAudio,
                 poster: s.kind === 'image' ? (s.thumb || s.url) : null,
@@ -827,34 +960,26 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
                 origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
                 usedBy: usedBy(play),
                 drag: (() => {
-                  const out: Record<string, string> = { [ASSET_ITEM_TYPE]: JSON.stringify(payload) };
+                  const out: Record<string, string> = {
+                    [ASSET_ITEM_TYPE]: JSON.stringify({ id, url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash }),
+                  };
                   // 老载荷只给音视频：图片落到时间线上没有片段可落，发出去只会让落点白忙一趟。
                   if (s.kind !== 'image') {
                     out[GLOBAL_ITEM_TYPE] = JSON.stringify({ url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash });
                   }
                   return out;
                 })(),
-                actions: (
+                renaming: renaming === key,
+                onNameDoubleClick: s.hash ? () => setRenaming(key) : undefined,
+                onRenameCommit: next => { if (s.hash) void commitStoreRename(s.hash, next); },
+                onRenameCancel: () => setRenaming(null),
+                actions: s.kind !== 'image' ? (
                   <span style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
-                    {s.kind !== 'image' && (
-                      <button title={'Claim「' + label + '」into this project'} onClick={() => claimStore(s)} style={rowBtn}>
-                        <PlusIcon />
-                      </button>
-                    )}
-                    {s.hash && (
-                      <>
-                        <button title="Rename this asset" onClick={() => void renameStore(s)} style={rowBtn}>
-                          <svg width="8" height="8" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                            <path d="M8 2l2 2-6 6H2V8z" />
-                          </svg>
-                        </button>
-                        <button title={'Delete「' + label + '」from the store'} onClick={() => void deleteStore(s)} style={rowBtn}>
-                          <CrossIcon />
-                        </button>
-                      </>
-                    )}
+                    <button title={'Claim「' + label + '」into this project'} onClick={() => claimStore(s)} style={rowBtn}>
+                      <PlusIcon />
+                    </button>
                   </span>
-                ),
+                ) : undefined,
               }}
             />
           );
@@ -874,6 +999,11 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
           }}>
           {busy ? 'loading…' : err ? err : listErr ? listErr : `${total} ${total === 1 ? 'asset' : 'assets'} · ${scope}`}
         </span>
+        {multiSel.size > 0 && (
+          <span style={{ fontSize: 9, color: '#3b9dff', flexShrink: 0, whiteSpace: 'nowrap' }}>
+            {multiSel.size} selected · Del to {scope === 'project' ? 'remove' : 'delete'}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         {store && (
           <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.26)', flexShrink: 0 }}>
