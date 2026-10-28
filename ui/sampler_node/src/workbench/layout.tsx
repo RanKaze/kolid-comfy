@@ -93,6 +93,7 @@ const LayoutBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
       default: store.default,
       items: [{ name: label, at: Date.now(), dock }, ...store.items.filter(i => i.name !== label)]
         .slice(0, LAYOUT_MAX),
+      current: store.current,
     };
     commit(next);           // 先画出来：按钮按下去要立刻有反应，盘上那一趟在后台走
     setName('');
@@ -128,6 +129,7 @@ const LayoutBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
     const next: LayoutStore = {
       default: store.default === item.name ? null : store.default,
       items: store.items.filter(i => i.name !== item.name),
+      current: store.current,
     };
     commit(next);
     setFlash({ text: `Deleted “${item.name}”` });
@@ -135,13 +137,14 @@ const LayoutBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
     if (remote) commit(remote);
   };
 
-  // 「设为默认」：默认那一份是页面**每次打开**的起手式（EditPhase 在文档播报到位之后按它摆，
-  // 见那边的 bootLayouts）。它不是"停在这个布局" —— 打开之后照样可以随便挪、随便存。
+  // 「设为默认」：★ 是**一片空白页面**的起手式 —— 页面打开时用的是"上一次的摆法"（实时存在盘上的
+  // `current`），只有在还没有任何"上一次"的时候才退到这颗星。它不是"停在这个布局"，也不覆盖
+  // 你已经摆好的样子；想让页面从这一份开始（而不是从上次那样子），按 Load。
   const makeDefault = async (item: SavedLayout | null) => {
     const target = item ? item.name : '';
-    const next: LayoutStore = { default: target || null, items: store.items };
+    const next: LayoutStore = { default: target || null, items: store.items, current: store.current };
     commit(next);
-    setFlash({ text: item ? `“${item.name}” is the layout the page now opens with.` : 'Default layout cleared.' });
+    setFlash({ text: item ? `“${item.name}” is the layout a fresh page starts from.` : 'Default layout cleared.' });
     const remote = await layoutsAction('default', { name: target });
     if (remote) commit(remote);
   };
@@ -163,14 +166,21 @@ const LayoutBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
           Save
         </button>
       </div>
-      {/* 默认那一份在最上面说一句：用户下次打开页面看到的就是它，这件事得写在能看见的地方。 */}
+      {/* 两句话，两件事，别混：页面**打开时**用的是上一段的摆法（实时存盘，读档就在第一帧，
+          不闪）；★ 只负责"还没有上一次"的那一片空白页面。 */}
+      <div style={{ ...wbStyles.readout, display: 'flex', alignItems: 'center', gap: 5 }}
+        data-layout-last="1" title="Every change you make to the windows is written to disk as you go — closing the page and opening it again puts you back here.">
+        <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          Opens where you left it — saved as you arrange
+        </span>
+      </div>
       {def ? (
         <div style={{ ...wbStyles.readout, display: 'flex', alignItems: 'center', gap: 4 }} data-layout-default-note={def}>
           <Star on />
           <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Opens with “{def}”
+            A fresh page starts from “{def}”
           </span>
-          <button style={wbStyles.iconBtn} data-layout-default-clear title="Clear the default layout"
+          <button style={wbStyles.iconBtn} data-layout-default-clear title="Clear the fallback layout"
             onClick={() => makeDefault(null)}><Cross /></button>
         </div>
       ) : null}
@@ -197,8 +207,9 @@ const LayoutBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
                 <button style={{ ...wbStyles.iconBtn, color: on ? '#ffd60a' : undefined }}
                   data-layout-default={it.name} data-layout-is-default={on ? '1' : '0'}
                   onClick={() => makeDefault(on ? null : it)}
-                  title={on ? `“${it.name}” is the default — click to stop opening the page with it`
-                    : `Make “${it.name}” the default: every time the page opens, the windows start out like this.`}>
+                  title={on ? `“${it.name}” is the fallback — click to clear it`
+                    : `Make “${it.name}” the fallback: a page with no history of its own (fresh browser, `
+                      + `cleared storage) starts out like this. A page that has been used opens where you left it.`}>
                   <Star on={on} />
                 </button>
                 <button style={wbStyles.btn} data-layout-load={it.name} onClick={() => load(it)}
@@ -256,6 +267,7 @@ export const layoutUnit: WorkbenchUnit = {
   id: 'layout',
   title: 'Layout',
   hint: 'Named copies of the window arrangement, kept on disk (so they survive a restart and a new port). '
-    + 'Save the one on screen; the ★ marks the default — the arrangement every visit starts from.',
+    + 'The arrangement on screen is saved by itself — the page opens where you left it. Save a named copy to '
+    + 'come back to it later; the ★ is only what a page with no history of its own starts from.',
   Body: LayoutBody,
 };

@@ -13,6 +13,7 @@
 
 import type { StagingItem, VideoGenPorts } from '../../types';
 import type { MediaInfo } from './audio';
+import type { Ingested } from './ingest';
 
 // 四种轨：
 //  * video / audio —— 素材轨，帧与声直接来自源文件；
@@ -61,6 +62,10 @@ export type VidAsset = {
   /** 整段源的波形 PNG（/api/vid_media/...，入库时 ffmpeg 生成）。片段按 offset/duration 裁窗。 */
   waveform?: string;
 };
+
+/** 一件货的身份：三个地址面（原件哈希 / 代理哈希 / 持久 URL）**任一命中**即算同一件 ——
+ *  判据就是 `sameAsset`。认货、去重、"这一条引用该改指谁"全都按它，别处不另立一套。 */
+export type AssetIdentity = { asset?: string; play?: string; src?: string };
 
 export type VidClip = {
   id: string;
@@ -712,6 +717,10 @@ export type VidFrameNeed = Readonly<Record<string, readonly string[]>>;
 
 export type VidController = {
   project: VidProject;
+  /** 这份工程属于哪个文档（uid）。逐帧合成的取帧包与底片包都盖着它：工作台显示面只有一块，
+   *  换 tab 那一瞬还在飞的旧包必须能被认出来（别人的源帧不许折进自己的面、别人的片段不许当
+   *  自己的底）。null = 没有文档（不盖章，工作台照旧按 layerKey 判）。 */
+  docUid?: number | null;
   /** 播放头（外置，不进 React 渲染图 —— 见 VidTransport）。 */
   transport: VidTransport;
   playing: boolean;
@@ -766,8 +775,11 @@ export type VidController = {
   /** 仓库里已经找不到的哈希（工程引用了，但字节不在了）。打开工程与每次改动后刷新：
    *  时间线画红线、Assets 卡挂 MISSING、relink 按它挑目标。 */
   missing: ReadonlySet<string>;
-  /** 把 `hash` 这件货换成本地文件（重新入库）。哈希对不上默认拒绝 —— `force` 才改绑到新字节。 */
-  relink: (hash: string, file: File, force?: boolean) => Promise<{ ok: boolean; error?: string; hash?: string }>;
+  /** 链接 / 换绑：把"是 `from` 这件货"的引用改指到 `ing`（已入库的那一件）上。`from` 是它
+   *  **现在的身份** —— 卡上那件货的 asset / play / src，按身份认（`sameAsset`）。
+   *  哈希一致 = 接回同一份字节；不一致 = 换绑（"我当初链错了"）—— 问不问那一句归界面，
+   *  这里只管改，因为一次入库才知道新字节是什么。 */
+  relink: (from: AssetIdentity, ing: Ingested) => Promise<{ ok: boolean; error?: string }>;
   /** 重新问一遍缺失（删除/relink/入库之后调用；工程变化会自动问）。 */
   recheckMissing: () => void;
 };
@@ -788,19 +800,39 @@ export const vidAssetRefs = (p: VidProject): string[] => {
   return [...out];
 };
 
-/** 换绑：把工程里对 `from` 的引用改指 `to`；`playHash` = 可播字节（转码代理），缺省用 `to`。
- *  只动引用了 `from` 的行 —— src 也一起换成仓库地址，否则换了哈希还在播旧 URL。 */
-export const relinkAsset = (p: VidProject, from: string, to: string, playHash?: string): VidProject => {
-  const play = playHash || to;
+/** 链接 / 换绑：把工程里"是 `from` 这件货"的行**整件**改指 `to`（资产表与片段一起动）。
+ *
+ *  **两个哈希一起换**（原件 + 代理）：只换一个就会造出"新原件 + 旧代理"的混合体 —— 卡上写着
+ *  新文件、播的还是旧片子，比不换更难查。`src` 也一起换，换了哈希却还在播旧 URL 等于没换。
+ *
+ *  `from` 按**身份**认（`sameAsset`：asset / play / src 任一命中），不是按某一个哈希 ——
+ *  老存档里"只有 src、没有哈希"的段因此也换得动；转过码的片子两个哈希对得上任一个就算它。
+ *  只动引用了它的行：别的货不受影响。Layer 段不装素材，跳过。 */
+export const rebindAsset = (
+  p: VidProject,
+  from: AssetIdentity,
+  to: AssetIdentity & { asset: string; duration?: number; hasAudio?: boolean },
+): VidProject => {
+  const play = to.play || to.asset;
   const url = '/api/asset_media/' + encodeURIComponent(play);
-  const fix = <T extends { asset?: string; play?: string; src: string }>(row: T): T => {
-    if (row.asset !== from && row.play !== from) return row;
-    return { ...row, asset: row.asset === from ? to : row.asset, play: row.play === from ? play : row.play, src: url };
+  // 片段只换身份：它的 `duration` 是"在时间线上占多久"（用户裁出来的），不是源长 ——
+  // 换了源就把它改掉，等于顺手毁掉一遍剪辑。
+  const fixClip = <T extends AssetIdentity & { src: string }>(row: T): T =>
+    sameAsset(row, from) ? { ...row, asset: to.asset, play, src: url } : row;
+  // 资产行多带两样：`duration` / `hasAudio` 说的是**源文件本身**（导入时探测一次记下的）。
+  // 换了源还留着旧的那两个数，卡上就写着旧片子的时长 —— 那是一句谎话。
+  const fixAsset = (a: VidAsset): VidAsset => {
+    if (!sameAsset(a, from)) return a;
+    return {
+      ...a, asset: to.asset, play, src: url,
+      duration: Number.isFinite(to.duration) ? Math.max(0, Number(to.duration)) : a.duration,
+      hasAudio: typeof to.hasAudio === 'boolean' ? to.hasAudio : a.hasAudio,
+    };
   };
   return {
     ...p,
-    assets: p.assets.map(fix),
-    clips: p.clips.map(c => (c.kind === 'layer' ? c : fix(c))),
+    assets: p.assets.map(fixAsset),
+    clips: p.clips.map(c => (c.kind === 'layer' ? c : fixClip(c))),
   };
 };
 
@@ -1085,15 +1117,55 @@ export const pasteVidClips = (p: VidProject, cb: VidClipClipboard, at: number): 
 };
 
 // ── 资产库 ────────────────────────────────────────────────────────────────────────────────
-/** 收一件资产：同一个 src 只留一份（重复拖进来 = 认领已有的那件）。 */
+/** 两行资产是不是**同一件货**：认三样身份里的任意一样 —— 原件哈希（asset）、可播哈希（play）、
+ *  地址（src）。只比 src 是不够的：同一份字节在仓库里有两个地址面
+ *  （`/api/vid_media/<file>` 与 `/api/asset_media/<hash>`），同一段片子因此会记成两行 ——
+ *  窗里就是「同一段视频两张卡、各算各的 N clips」，而且从哪张卡拖下去的还会再长一行。 */
+export const sameAsset = (
+  a: { src?: string; asset?: string; play?: string },
+  b: { src?: string; asset?: string; play?: string },
+): boolean =>
+  (!!a.asset && a.asset === b.asset)
+  || (!!a.play && a.play === b.play)
+  || (!!a.src && a.src === b.src);
+
+/** 收一件资产：同一件货只留一份（重复拖进来 = 认领已有的那件）。 */
 export const addAsset = (p: VidProject, a: VidAsset): VidProject =>
-  p.assets.some(x => x.src === a.src)
+  p.assets.some(x => sameAsset(x, a))
     ? p
     : { ...p, assets: [...p.assets, a] };
 
 /** 扔掉一件资产：已经落进时间线的片段不受影响（它们自己揣着 src），只是不能再用它拖新的。 */
 export const removeAsset = (p: VidProject, id: string): VidProject =>
   ({ ...p, assets: p.assets.filter(a => a.id !== id) });
+
+/** 「谁在用它」的索引：一件货的每一样身份（asset / play / src）→ 用它的片段 id 集合。
+ *
+ *  为什么不是只按 src 计数：一件货在盘上有两个地址面（见 `sameAsset`），片段自己揣着三样身份，
+ *  只比 src 的后果是"明明在用，卡上写 0 clips"，而且拖法一变结论就变。这里把三样都记进索引，
+ *  查询时取并集（一段同时命中两样也只算一段）。放模型里而不是窗里，是因为这条判据是**数据**
+ *  的事（谁引用谁），窗只是把它画成一行字。 */
+export const clipUseIndex = (clips: VidClip[]): Map<string, Set<string>> => {
+  const m = new Map<string, Set<string>>();
+  const put = (k: string | undefined, id: string) => {
+    if (!k) return;
+    const set = m.get(k);
+    if (set) set.add(id); else m.set(k, new Set([id]));
+  };
+  for (const c of clips) { put(c.asset, c.id); put(c.play, c.id); put(c.src, c.id); }
+  return m;
+};
+
+/** 索引查询：`keys` = 一件货的全部身份，返回去重后的引用段数。 */
+export const usedByCount = (idx: Map<string, Set<string>>, ...keys: (string | null | undefined)[]): number => {
+  const ids = new Set<string>();
+  for (const k of keys) {
+    if (!k) continue;
+    const set = idx.get(k);
+    if (set) for (const id of set) ids.add(id);
+  }
+  return ids.size;
+};
 
 export const addTrack = (p: VidProject, kind: VidTrackKind): VidProject => {
   const n = p.tracks.filter(t => t.kind === kind).length + 1;
@@ -1239,9 +1311,24 @@ export const importToTrack = (
   trackId: string | null,
   at: number,
 ): VidProject => {
-  let asset = p.assets.find(a => a.src === src.src);
+  let asset = p.assets.find(a => sameAsset(a, src));
   let next = p;
-  if (!asset) {
+  if (asset) {
+    // 认到的这一行：把这次带来、它还缺的身份补上（`asset` / `play` —— relink 与"能播的那份"
+    // 都靠它们）；地址只在老那条活不过刷新（blob:/data:）时换掉 —— 一条货只留一个地址面。
+    const dead = /^(blob|data):/.test(asset.src || '');
+    const live = /^(\/|https?:)/.test(src.src || '');
+    const better: VidAsset = {
+      ...asset,
+      asset: asset.asset || src.asset,
+      play: asset.play || src.play,
+      src: dead && live ? src.src : asset.src,
+    };
+    if (better.asset !== asset.asset || better.play !== asset.play || better.src !== asset.src) {
+      next = { ...next, assets: next.assets.map(a => (a.id === asset!.id ? better : a)) };
+      asset = better;
+    }
+  } else {
     asset = {
       id: newVidId('as'), name: src.name, src: src.src, origin: src.origin,
       asset: src.asset, play: src.play,
@@ -1903,6 +1990,35 @@ const migrateWindows = (
 
 /** 任何来源（localStorage / .cud 的 header.video / 宿主消息）的工程数据都过这里：
  *  形状不对的部分当场剪掉 —— 一份坏数据不该把时间线整个掀了。 */
+/** 读档时把**同一件货的多行**并成一行。
+
+ *  老工程里同一段片子会被记两次：一次是入库那条（src = `/api/vid_media/<file>`），一次是从
+ *  库卡拖进时间线时那条（src = `/api/asset_media/<hash>`）—— 它们哈希相同、字节相同，只因为
+ *  "地址面"不同就成了两行。窗里表现就是同一段视频两张卡，一张写着 N clips，另一张写 0。
+ *
+ *  并的时候：认第一行的名字，缺的身份互相补（`asset` / `play` 谁有给谁），地址不拿 blob: 去
+ *  盖掉可持久的那条。片段**不引用资产行 id**（它们自己揣着 src/asset/play），所以并掉行不会
+ *  让任何一段失去引用。 */
+const mergeAssetRows = (rows: VidAsset[]): VidAsset[] => {
+  const out: VidAsset[] = [];
+  for (const a of rows) {
+    const at = out.findIndex(x => sameAsset(x, a));
+    if (at < 0) { out.push(a); continue; }
+    const cur = out[at];
+    const dead = (s: string | undefined) => /^(blob|data):/.test(s || '');
+    out[at] = {
+      ...cur,
+      asset: cur.asset || a.asset,
+      play: cur.play || a.play,
+      src: dead(cur.src) && !dead(a.src) ? a.src : cur.src,
+      hasAudio: cur.hasAudio || a.hasAudio,
+      duration: cur.duration || a.duration,
+      waveform: cur.waveform || a.waveform,
+    };
+  }
+  return out;
+};
+
 export const normalizeVidProject = (raw: unknown): VidProject => {
   const base = defaultVidProject();
   // 仓库里的可播 URL（A5）：`play` = 转码代理优先，其次原件。两样都没有 = 没有哈希可依。
@@ -1946,9 +2062,9 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       const src = recover(c);
       return src === c.src ? c : { ...c, src };
     });
-    const assets = (Array.isArray(p.assets) ? p.assets : [])
+    const assets = mergeAssetRows((Array.isArray(p.assets) ? p.assets : [])
       .filter(a => a && recover(a) && Number.isFinite(a.duration) && a.duration > 0)
-      .map(a => { const src = recover(a); return src === a.src ? a : { ...a, src }; });
+      .map(a => { const src = recover(a); return src === a.src ? a : { ...a, src }; }));
     // mute / solo 的轨道 id：只留还活着的轨（删轨后重开不该把悬空 id 带回来）。
     const pickIds = (v: unknown): string[] => Array.isArray(v)
       ? [...new Set(v.filter((x): x is string => typeof x === 'string' && trackIds.has(x)))]

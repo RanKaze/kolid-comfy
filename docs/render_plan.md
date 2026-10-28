@@ -785,3 +785,38 @@ KCompositor.foldLayer(pl, 0, nat.w, nat.h, below, false);
 **闸**：`_probe_monitor_fold.cjs` 4156474687（旧 2182940854）；`_probe_vid_shot2.cjs` md5
 `c74ab069…`（旧 `7f5d7350…`，差异全在上面那条模糊）；`_probe_fold_switch.cjs` 四趟仍全等、
 `__kolidFold.compare()` 三层 `max=0`；`guards.py` 50 处不变。
+
+## 10.3.10 空串被当成资源号：底像素整张丢失（2026-10-29）
+
+**症状**：打开一份 25 层的 image 模式 .cud（`F:\Pathes\Pictures\RanKaze\AI修改\测试.cud`），只有"带 decal 的
+那一层"和走 solo/tex 捷径的几层画出东西，其余图层（带 `mask`、带特效链的）**整层全黑**，整幅只剩边缘
+一点内容（91.6% 像素与文档里烘的 `composite` 不同）。
+
+**根因**（一行判据）：`js/layer-fold.js: refOf()` 原本写成
+
+```js
+if (typeof v === 'object' && (typeof v.resource === 'string' || typeof v.id === 'string')) {
+    note(ctx, v); return { resource: v.resource || v.id };
+}
+```
+
+页面上 `env.base(l)` 交出来的是 `l.img`，也就是 `<img>` / `<canvas>` 对象 —— 而**每个 HTML 元素天生带
+`id: ''`**，`typeof '' === 'string'`。于是每一层都被当成"已经是资源记录"，从未走到 `env.res`
+（活资源表 `live:<n>`），plan 里 `base` 变成 `{ resource: '' }`。合成器那句
+`pl.base && pl.base.resource && api.resource(...)` 因为空串为假 ⇒ `base = null` ⇒ 折出来只有条带
+（decal/mask/链）画在**空白**上。贴片与蒙版同一条判据，`surface` 也全是 `{ resource: '' }`
+（它们恰好被 `api.bind` 兜住，所以只有底像素的丢失肉眼可见）。
+
+**修法**：判据收成两条 —— 不是 DOM 节点（`typeof v.nodeType !== 'number'`）**且** `resource`/`id` 是
+非空字符串。落不下去的一律交给 `env.res`（活资源那一趟在那里登记 `live:<n>`）。见 `refOf` 的注释。
+
+**为什么从前没暴露**：`tests/layer_fold/*` 的 fixture 全用**字符串**引用（`res:<hash>` / 记录对象），
+从来没有一份 fixture 把 DOM 对象塞进 `env.base`；而显示路径上大多数层还能走 `solo-face` / `tex`
+两条捷径（它们压根不编 base 引用），于是只有"有 mask/链且不走捷径"的层会黑 —— 正好是这个文档的
+大多数层。**闸**：`temporary/_test_layer_fold_refs.mjs`（11 项，旧实现上错 6 项 = 负控）、
+`temporary/_probe_fold_cmp.cjs`（同层 legacy vs plan 逐字段/像素比）、
+`temporary/_probe_render_diff.cjs`（活画布 vs 文档 `composite`：`>2` 0.4%、`>8` 0%、平均差 0.2）。
+
+**教训**：plan 里的"引用"永远是**非空字符串**。任何"这个对象是不是资源记录"的判据都不能只看类型 ——
+DOM 元素有一堆 `''` 字段，专治那种宽松判断。
+

@@ -257,6 +257,11 @@ export function AppShell() {
   const selectedPrefabsRef = useRef(selectedPrefabs); selectedPrefabsRef.current = selectedPrefabs;
   const customPromptsRef = useRef(customPrompts); customPromptsRef.current = customPrompts;
   const selectedProgramsRef = useRef(selectedPrograms); selectedProgramsRef.current = selectedPrograms;
+  // Agent 桥需要的“最新值”引用（与上面同一套做法：监听只注册一次,读最新状态用 ref）。
+  const allPromptsRef = useRef(allPrompts); allPromptsRef.current = allPrompts;
+  const loraDataRef = useRef(loraData); loraDataRef.current = loraData;
+  const loraSliderConfigsRef = useRef(loraSliderConfigs); loraSliderConfigsRef.current = loraSliderConfigs;
+  const allProgramsRef = useRef(allPrograms); allProgramsRef.current = allPrograms;
   // Assigned just after the program memo below. The tab-switch flush must send the filters the
   // programs produced, never an empty list — /select_prompt overwrites unconditionally.
   const programFilterRef = useRef({ filter_tag_groups: [] as any[], filter_loras: [] as any[], filter_prefabs: [] as any[] });
@@ -856,6 +861,518 @@ export function AppShell() {
     try { window.parent?.postMessage({ type: 'kolid-prompt-ready' }, '*'); } catch {}
     return () => { window.removeEventListener('message', reloadHandler); window.removeEventListener('message', syncHandler); };
   }, [loadData, loadLoraData, apiLoadData]);
+
+  // ── Agent 桥：工作台 agent 经 postMessage 读写 Prompt tab ───────────────────────────────
+  // 工作台父页(window.__wbAgentTool)在 agent 工具里把调用转成 postMessage 发到这里,这里照做后把
+  // 结果原路 postMessage 回父页。所有写操作都复用页面自己的选择 / 落盘逻辑,保持显示与 prompt_server
+  // （生成真正读取的那份）一致。agentRequestRef 每帧刷新拿最新闭包,监听只注册一次。
+  const agentRequestRef = useRef<(type: string, reqId: string, payload: any) => void>(() => {});
+  agentRequestRef.current = (type: string, reqId: string, payload: any) => {
+    const reply = (value: any) => {
+      try { window.parent.postMessage({ type: 'agent-prompt-result', reqId, value }, '*'); } catch { /* ignore */ }
+    };
+    const replyErr = (error: string) => reply({ ok: false, error });
+
+    const programName = (id: string): string => {
+      for (const cd of Object.values(allProgramsRef.current)) {
+        const a = (cd.programs || []).find(x => x.id === id);
+        if (a) return a.name || '';
+      }
+      return '';
+    };
+    const findProgramById = (id: string) => {
+      for (const cd of Object.values(allProgramsRef.current)) {
+        const a = (cd.programs || []).find(x => x.id === id);
+        if (a) return a;
+      }
+      return null;
+    };
+    const flatLoras = (): LoraItemData[] => {
+      const out: LoraItemData[] = [];
+      for (const fld of Object.values(loraDataRef.current || {})) {
+        if (Array.isArray(fld)) for (const l of fld) out.push(l);
+      }
+      return out;
+    };
+    // 按 guid 在 allLibraries 里定位一条 prefab，返回 { library, index, prefab }。
+    // 后端 prefab 端点用 (library + prefab_index) 定位，而 agent/前端用 guid，这里做桥接解析。
+    const findPrefabByGuidLoc = (guid: string): { library: string; index: number; prefab: any } | null => {
+      for (const [libName, libData] of Object.entries(allLibraries || {})) {
+        const prefabs = ((libData as any)?.prefabs) || [];
+        const idx = prefabs.findIndex((p: any) => p && p.guid === guid);
+        if (idx >= 0) return { library: libName, index: idx, prefab: prefabs[idx] };
+      }
+      return null;
+    };
+    // 把一条提示卡描述解析成一个 TagGroup：{id} 认卡；{category,name}|{category,prompt} 文本命中卡；
+    // {text} 走自由文本解析(自由文本也能加,当自由文本出词,但不点亮任何卡)。
+    const resolvePromptItem = (it: any): TagGroup | null => {
+      if (!it || typeof it !== 'object') return null;
+      if (it.id) {
+        const pd = findPromptDataById(String(it.id), allPromptsRef.current);
+        if (pd) return { tags: [createCardTag({ ...pd, category: pd.category || '' })], strength: 1.0, source: 'normal' as const };
+      }
+      if (it.category || it.name || it.prompt) {
+        let pd: (PromptData & { category: string }) | null = null;
+        if (it.prompt) pd = findPromptData(String(it.prompt), allPromptsRef.current);
+        if (!pd && it.name) {
+          const cats = it.category ? [String(it.category)] : Object.keys(allPromptsRef.current);
+          for (const c of cats) for (const p of (allPromptsRef.current[c]?.prompts || [])) {
+            if (p.name === it.name) { pd = { ...p, category: c }; break; }
+          }
+        }
+        if (pd) return { tags: [createCardTag({ ...pd, category: pd.category || '' })], strength: 1.0, source: 'normal' as const };
+      }
+      if (it.text) return parseStringToTags(String(it.text), allPromptsRef.current);
+      return null;
+    };
+    const sameCard = (g: TagGroup, group: TagGroup): boolean => {
+      const gb = g.tags[g.tags.length - 1];
+      const nb = group.tags[group.tags.length - 1];
+      if (gb?.base_id && nb?.base_id) return gb.base_id === nb.base_id;
+      return tagsToDisplayString(g) === tagsToDisplayString(group);
+    };
+
+    if (type === 'agent-prompt-get') {
+      const prompts = selectedTagsRef.current.map(g => {
+        const bt = g.tags[g.tags.length - 1];
+        return { id: bt?.base_id || null, text: tagsToDisplayString(g), source: g.source || 'normal' };
+      });
+      const loras = selectedLorasRef.current.map(l => {
+        const sel = loraSelectionsRef.current[l.file_path];
+        return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active: sel?.active ?? true };
+      });
+      const prefabs = selectedPrefabsRef.current.map(p => ({ guid: p.guid, name: findPrefabByGuid(p.guid)?.name || '', active: p.active }));
+      const programs = selectedProgramsRef.current.map(a => ({ id: a.id, name: programName(a.id), active: a.active }));
+      return reply({ ok: true, value: { custom_prompt: customPromptsRef.current, prompts, loras, prefabs, programs } });
+    }
+
+    if (type === 'agent-prompt-library') {
+      const cat = payload && payload.category ? String(payload.category) : null;
+      const cats = cat ? { [cat]: allPromptsRef.current[cat] } : allPromptsRef.current;
+      const categories: Record<string, any[]> = {};
+      for (const [c, cd] of Object.entries(cats)) {
+        categories[c] = ((cd?.prompts) || []).map(p => ({ id: p.id, name: p.name, prompt: p.prompt, natural: !!p.natural }));
+      }
+      return reply({ ok: true, value: { categories } });
+    }
+
+    // ── LoRA 库列举(供 set_prompt 引用 file_path / name)──
+    if (type === 'agent-prompt-lora-library') {
+      const loras = flatLoras().map(l => ({
+        file_path: l.file_path,
+        name: l.name,
+        tags: l.tags || [],
+        preview_url: l.preview_url || '',
+        source: l.source || 'normal',
+      }));
+      return reply({ ok: true, value: { loras } });
+    }
+
+    // ── Prefab 库列举(供 set_prompt 引用 guid；也暴露 library 名供 prefab_add 使用)──
+    if (type === 'agent-prompt-prefab-library') {
+      const prefabs: any[] = [];
+      for (const [libName, libData] of Object.entries(allLibraries || {})) {
+        for (const pf of (libData?.prefabs || [])) {
+          if (!pf || !pf.guid) continue;
+          prefabs.push({
+            guid: pf.guid,
+            library: libName,
+            name: pf.name || '',
+            preview: pf.preview || '',
+            tag_groups: pf.tag_groups || [],
+            loras: pf.loras || [],
+            custom_prompts: pf.custom_prompts || '',
+          });
+        }
+      }
+      return reply({ ok: true, value: { libraries: Object.keys(allLibraries || {}), prefabs } });
+    }
+
+    // ── Program 库列举(供 set_prompt 引用 id)──
+    if (type === 'agent-prompt-program-library') {
+      const programs: any[] = [];
+      for (const cd of Object.values(allProgramsRef.current)) {
+        for (const a of (cd?.programs || [])) programs.push({ id: a.id, name: a.name || '' });
+      }
+      return reply({ ok: true, value: { programs } });
+    }
+
+    if (type === 'agent-prompt-set') {
+      const patch = payload || {};
+      const warnings: string[] = [];
+      if (typeof patch.custom_prompt === 'string') setCustomPrompts(patch.custom_prompt);
+      // ── 提示卡选择 ──
+      let nextTags = selectedTagsRef.current.slice();
+      if (Array.isArray(patch.prompts)) {
+        const mode = patch.prompt_mode === 'add' || patch.prompt_mode === 'remove' ? patch.prompt_mode : 'replace';
+        if (mode === 'replace') nextTags = [];
+        for (const it of patch.prompts) {
+          const group = resolvePromptItem(it);
+          if (!group) { warnings.push('prompt item unresolved: ' + JSON.stringify(it)); continue; }
+          nextTags = nextTags.filter(g => !sameCard(g, group));
+          if (mode !== 'remove') nextTags.push(group);
+        }
+        setSelectedTags(nextTags);
+      }
+      // ── LoRA 选择 ──
+      let nextLoras = selectedLorasRef.current.slice();
+      const nextLoraSel: Record<string, any> = { ...loraSelectionsRef.current };
+      if (Array.isArray(patch.loras)) {
+        nextLoras = [];
+        const flat = flatLoras();
+        for (const item of patch.loras) {
+          let fp = item && item.file_path ? String(item.file_path) : '';
+          if (!fp && item && item.name) {
+            const nm = String(item.name);
+            const found = flat.find(l => l.name === nm || l.file_path === nm || l.file_path.endsWith('/' + nm) || l.file_path.endsWith('\\' + nm));
+            fp = found?.file_path || '';
+          }
+          if (!fp) { warnings.push('lora not found: ' + (item?.name || item?.file_path || '?')); continue; }
+          const item0 = flat.find(l => l.file_path === fp) || ({
+            file_path: fp,
+            file_name: fp.split(/[/\\]/).pop() || fp,
+            name: item?.name || fp,
+            tags: [],
+            preview_url: '',
+            metadata: {},
+            source: 'normal' as const,
+          } as LoraItemData);
+          const prev = loraSelectionsRef.current[fp] || {};
+          nextLoraSel[fp] = {
+            activeTags: Array.isArray(item?.active_tags) ? item.active_tags : (prev.activeTags || item0.tags || []),
+            strength: typeof item?.strength === 'number' ? item.strength : (prev.strength ?? 1.0),
+            active: item?.active !== false,
+            split_mode: prev.split_mode,
+            slider_config: loraSliderConfigsRef.current[fp] || prev.slider_config,
+          };
+          nextLoras.push(item0);
+        }
+        setSelectedLoras(nextLoras);
+        setLoraSelections(nextLoraSel);
+      }
+      // ── Prefab 选择 ──
+      let nextPrefabs = selectedPrefabsRef.current.slice();
+      if (Array.isArray(patch.prefabs)) {
+        const np: SelectedPrefabItem[] = [];
+        for (const item of patch.prefabs) {
+          if (!item || !item.guid) continue;
+          const tree = buildPrefabItemTree(String(item.guid));
+          if (!tree) { warnings.push('prefab not found: ' + item.guid); continue; }
+          np.push({ ...tree, active: item.active !== false });
+        }
+        nextPrefabs = np;
+        setSelectedPrefabs(np);
+      }
+      // ── Program 选择 ──
+      let nextPrograms = selectedProgramsRef.current.slice();
+      if (Array.isArray(patch.programs)) {
+        const np: SelectedProgramItem[] = [];
+        for (const item of patch.programs) {
+          if (!item || !item.id) continue;
+          const prog = findProgramById(String(item.id));
+          if (!prog) { warnings.push('program not found: ' + item.id); continue; }
+          np.push({ id: String(item.id), active: item.active !== false });
+        }
+        nextPrograms = np;
+        setSelectedPrograms(np);
+      }
+      // ── 落盘到 prompt_server（生成真正读取的那份）──
+      const persistedCustom = typeof patch.custom_prompt === 'string' ? patch.custom_prompt : customPromptsRef.current;
+      const persistedPrompts = nextTags.map(g => ({ text: tagsToDisplayString(g), source: g.source || 'normal' }));
+      const persistedLoras = nextLoras.map(l => {
+        const s = nextLoraSel[l.file_path] || loraSelectionsRef.current[l.file_path] || {};
+        return { file_path: l.file_path, name: l.name, strength: s.strength ?? 1.0, active_tags: s.activeTags || [], active: s.active ?? true, split_mode: s.split_mode, slider_config: s.slider_config };
+      });
+      const f = programFilterRef.current;
+      syncSelection(
+        persistedPrompts, persistedCustom, persistedLoras, nextPrefabs, nextPrograms,
+        f.filter_tag_groups, f.filter_loras, f.filter_prefabs,
+      ).then(() => reply({ ok: true, value: { changed: {
+        custom_prompt: typeof patch.custom_prompt === 'string',
+        prompts: Array.isArray(patch.prompts), loras: Array.isArray(patch.loras),
+        prefabs: Array.isArray(patch.prefabs), programs: Array.isArray(patch.programs),
+      }, warnings } }))
+        .catch((err: any) => reply({ ok: false, error: 'sync failed: ' + String(err), warnings }));
+      return;
+    }
+
+    if (type === 'agent-prompt-card-add') {
+      const { category, name, prompt, tags, natural } = payload || {};
+      if (!category || !name || !prompt) return replyErr('category, name, prompt are required');
+      fetch('/add_prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ category, name, prompt, tags: tags || [], natural: !!natural }) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(result => {
+          const newPrompt: PromptData = { id: result.id || String(Date.now()), name, prompt, preview: result.preview || '', natural: !!natural, tags: tags || [] };
+          setAllPrompts(prev => {
+            const cd = prev[category];
+            return { ...prev, [category]: { ...(cd || { prompts: [] } as CategoryData), prompts: [...((cd as CategoryData)?.prompts || []), newPrompt] } };
+          });
+          reply({ ok: true, value: { id: newPrompt.id } });
+        })
+        .catch(err => replyErr('add_prompt failed: ' + String(err)));
+      return;
+    }
+
+    if (type === 'agent-prompt-card-update') {
+      const { id, name, prompt, category, tags, natural } = payload || {};
+      if (!id) return replyErr('id is required');
+      const body: any = { id };
+      if (name !== undefined) body.name = name;
+      if (prompt !== undefined) body.prompt = prompt;
+      if (category !== undefined) body.category = category;
+      if (tags !== undefined) body.tags = tags;
+      if (natural !== undefined) body.natural = !!natural;
+      fetch('/update_prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(result => {
+          setAllPrompts(prev => {
+            const next: AllPrompts = {};
+            for (const [c, cd] of Object.entries(prev)) {
+              const prompts = ((cd as CategoryData).prompts || []).map(p => p.id === id
+                ? { ...p, ...(name !== undefined ? { name } : {}), ...(prompt !== undefined ? { prompt } : {}), ...(category !== undefined ? { category } : {}), ...(tags !== undefined ? { tags } : {}), ...(natural !== undefined ? { natural } : {}), preview: result.preview || p.preview }
+                : p);
+              next[c] = { ...(cd as CategoryData), prompts };
+            }
+            return next;
+          });
+          if (name !== undefined || prompt !== undefined) {
+            setSelectedTags(prev => prev.map(g => retextCardTag(g, id, prompt ?? (g.tags[g.tags.length - 1]?.prompt ?? ''), name ?? (g.tags[g.tags.length - 1]?.name ?? ''))));
+          }
+          reply({ ok: true, value: {} });
+        })
+        .catch(err => replyErr('update_prompt failed: ' + String(err)));
+      return;
+    }
+
+    if (type === 'agent-prompt-card-delete') {
+      const { id } = payload || {};
+      if (!id) return replyErr('id is required');
+      fetch('/delete_prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(() => {
+          setAllPrompts(prev => {
+            const next: AllPrompts = {};
+            for (const [c, cd] of Object.entries(prev)) {
+              const prompts = ((cd as CategoryData).prompts || []).filter(p => p.id !== id);
+              next[c] = { ...(cd as CategoryData), prompts };
+            }
+            return next;
+          });
+          reply({ ok: true, value: {} });
+        })
+        .catch(err => replyErr('delete_prompt failed: ' + String(err)));
+      return;
+    }
+
+    // ── Prefab 库增删改（后端按 library + prefab_index 定位；这里用 guid 桥接）──
+    if (type === 'agent-prompt-prefab-add') {
+      const { library, name, tag_groups, loras, custom_prompts, selected_prefabs, image } = payload || {};
+      if (!library || !name) return replyErr('library and name are required');
+      if (!(allLibraries as any)?.[library]) return replyErr('library not found: ' + library);
+      const body: any = {
+        library,
+        prefab_name: name,
+        prefab_tags: tag_groups || [],
+        custom_prompts: custom_prompts || '',
+        loras: loras || [],
+        selected_prefabs: selected_prefabs || [],
+        image: image || '',
+      };
+      fetch('/add_library_prefab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(result => {
+          const guid = result.guid || String(Date.now());
+          setAllLibraries((prev: any) => {
+            const lib = prev[library] || { prefabs: [] };
+            const prefabs = (lib.prefabs || []).slice();
+            prefabs.push({ guid, name, tag_groups: tag_groups || [], custom_prompts: custom_prompts || '', loras: loras || [], selected_prefabs: selected_prefabs || [], preview: result.preview || '' });
+            return { ...prev, [library]: { ...lib, prefabs } };
+          });
+          reply({ ok: true, value: { guid } });
+        })
+        .catch(err => replyErr('add_library_prefab failed: ' + String(err)));
+      return;
+    }
+
+    if (type === 'agent-prompt-prefab-update') {
+      const { guid, name, tag_groups, loras, custom_prompts, selected_prefabs, image } = payload || {};
+      if (!guid) return replyErr('guid is required');
+      const loc = findPrefabByGuidLoc(guid);
+      if (!loc) return replyErr('prefab not found: ' + guid);
+      const body: any = { library: loc.library, prefab_index: loc.index, prefab_name: name !== undefined ? name : (loc.prefab.name || '') };
+      if (tag_groups !== undefined) body.prefab_tags = tag_groups;
+      if (loras !== undefined) body.loras = loras;
+      if (custom_prompts !== undefined) body.custom_prompts = custom_prompts;
+      if (selected_prefabs !== undefined) body.selected_prefabs = selected_prefabs;
+      if (image !== undefined) body.image = image;
+      fetch('/update_library_prefab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(result => {
+          setAllLibraries((prev: any) => {
+            const lib = prev[loc.library];
+            if (!lib) return prev;
+            const prefabs = (lib.prefabs || []).map((p: any, i: number) => i === loc.index ? {
+              ...p,
+              ...(name !== undefined ? { name } : {}),
+              ...(tag_groups !== undefined ? { tag_groups } : {}),
+              ...(loras !== undefined ? { loras } : {}),
+              ...(custom_prompts !== undefined ? { custom_prompts } : {}),
+              ...(selected_prefabs !== undefined ? { selected_prefabs } : {}),
+              ...(result.preview ? { preview: result.preview } : {}),
+            } : p);
+            return { ...prev, [loc.library]: { ...lib, prefabs } };
+          });
+          reply({ ok: true, value: {} });
+        })
+        .catch(err => replyErr('update_library_prefab failed: ' + String(err)));
+      return;
+    }
+
+    if (type === 'agent-prompt-prefab-delete') {
+      const { guid } = payload || {};
+      if (!guid) return replyErr('guid is required');
+      const loc = findPrefabByGuidLoc(guid);
+      if (!loc) return replyErr('prefab not found: ' + guid);
+      fetch('/delete_library_prefab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ library: loc.library, prefab_index: loc.index }) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(() => {
+          setAllLibraries((prev: any) => {
+            const lib = prev[loc.library];
+            if (!lib) return prev;
+            const prefabs = (lib.prefabs || []).filter((_: any, i: number) => i !== loc.index);
+            return { ...prev, [loc.library]: { ...lib, prefabs } };
+          });
+          reply({ ok: true, value: {} });
+        })
+        .catch(err => replyErr('delete_library_prefab failed: ' + String(err)));
+      return;
+    }
+
+    // ── Program 库增删改（后端按 id 定位）──
+    const PROGRAM_KEYS = [
+      'name', 'code', 'category', 'image', 'video', 'selected_programs',
+      'enable_prefab_context', 'enable_lora_context', 'enable_tag_context',
+      'context_prefab_guids', 'context_lora_paths', 'context_tag_texts', 'multi_program',
+      'prefab_builtin_guids', 'lora_builtin_paths', 'tag_group_builtin_texts',
+      'prefab_builtin_inactive', 'lora_builtin_inactive', 'tag_group_builtin_inactive',
+      'prefab_builtin_display', 'lora_builtin_display', 'tag_group_builtin_display',
+    ];
+    if (type === 'agent-prompt-program-add') {
+      const p = payload || {};
+      if (!p.name) return replyErr('name is required');
+      const body: any = { name: p.name };
+      for (const k of PROGRAM_KEYS) if (k !== 'name' && p[k] !== undefined) body[k] = p[k];
+      fetch('/add_program', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(result => {
+          const id = result.id || String(Date.now());
+          const cat = p.category || 'Applications';
+          setAllPrograms((prev: any) => {
+            const cd = prev[cat] || { programs: [] };
+            const programs = (cd.programs || []).slice();
+            const prog: any = { id, name: p.name, code: p.code || '', preview: result.preview || '' };
+            for (const k of PROGRAM_KEYS) if (k !== 'name' && p[k] !== undefined) prog[k] = p[k];
+            programs.push(prog);
+            return { ...prev, [cat]: { ...cd, programs } };
+          });
+          reply({ ok: true, value: { id } });
+        })
+        .catch(err => replyErr('add_program failed: ' + String(err)));
+      return;
+    }
+
+    if (type === 'agent-prompt-program-update') {
+      const p = payload || {};
+      if (!p.id) return replyErr('id is required');
+      const body: any = { id: p.id };
+      for (const k of PROGRAM_KEYS) if (k !== 'name' && p[k] !== undefined) body[k] = p[k];
+      if (p.name !== undefined) body.name = p.name;
+      fetch('/update_program', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(() => {
+          setAllPrograms((prev: any) => {
+            const next: any = {};
+            for (const [cat, cd] of Object.entries(prev)) {
+              const programs = ((cd as any).programs || []).map((a: any) => a.id === p.id ? {
+                ...a,
+                ...(p.name !== undefined ? { name: p.name } : {}),
+                ...(p.code !== undefined ? { code: p.code } : {}),
+                ...(p.image !== undefined ? { preview: p.image } : {}),
+                ...Object.fromEntries(PROGRAM_KEYS.filter(k => k !== 'name' && p[k] !== undefined).map(k => [k, p[k]])),
+              } : a);
+              next[cat] = { ...(cd as any), programs };
+            }
+            return next;
+          });
+          reply({ ok: true, value: {} });
+        })
+        .catch(err => replyErr('update_program failed: ' + String(err)));
+      return;
+    }
+
+    if (type === 'agent-prompt-program-delete') {
+      const { id } = payload || {};
+      if (!id) return replyErr('id is required');
+      fetch('/delete_program', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(() => {
+          setAllPrograms((prev: any) => {
+            const next: any = {};
+            for (const [cat, cd] of Object.entries(prev)) {
+              const programs = ((cd as any).programs || []).filter((a: any) => a.id !== id);
+              next[cat] = { ...(cd as any), programs };
+            }
+            return next;
+          });
+          reply({ ok: true, value: {} });
+        })
+        .catch(err => replyErr('delete_program failed: ' + String(err)));
+      return;
+    }
+
+    // ── LoRA：刷新（重扫目录，让新丢入的文件出现）──
+    if (type === 'agent-prompt-lora-refresh') {
+      fetch('/refresh_loras', { method: 'POST' })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(async (res: any) => {
+          try { await loadLoraData(); } catch { /* ignore */ }
+          reply({ ok: true, value: { lora_count: res?.lora_count ?? null } });
+        })
+        .catch(err => replyErr('refresh_loras failed: ' + String(err)));
+      return;
+    }
+
+    // ── LoRA：编辑滑块配置（目前主要是 model_only）──
+    if (type === 'agent-prompt-lora-update') {
+      const { file_path, fingerprint, model_only } = payload || {};
+      const key = file_path || fingerprint;
+      if (!key) return replyErr('file_path or fingerprint is required');
+      if (typeof model_only !== 'boolean') return replyErr('model_only (boolean) is required');
+      const configs: any = { [key]: { model_only } };
+      fetch('/update_lora_slider_configs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ configs }) })
+        .then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+        .then(() => {
+          setLoraSliderConfigs((prev: any) => ({ ...(prev || {}), [key]: { model_only } }));
+          reply({ ok: true, value: {} });
+        })
+        .catch(err => replyErr('update_lora_slider_configs failed: ' + String(err)));
+      return;
+    }
+
+    return replyErr('unknown agent prompt request: ' + type);
+  };
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      const d = e.data;
+      if (!d || typeof d.type !== 'string') return;
+      if (d.type.startsWith('agent-prompt-') && d.type.endsWith('-req') && e.source === window.parent) {
+        agentRequestRef.current(d.type.slice(0, -4), d.reqId, d.payload);
+      }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
 
   // Live context push: whenever selections change, notify parent immediately
   // Skip while reloading to avoid overwriting saved context with cleared state

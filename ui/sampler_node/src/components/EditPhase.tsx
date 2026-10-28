@@ -5,8 +5,8 @@ import { DebugPanel } from './DebugModal';
 import { LogPanel } from './LogModal';
 import RunStatusSeg from './RunStatusSeg';
 import VidSegModal from './VidSegModal';
-import { type DockMode, type DockRules, type UnitId, type Dock, docUnit, docUidOf, dockUnits, fitLayout, loadDock, revealDoc, setBlockMode, setToolbarDock, setToolbarDirDock, syncDocUnits } from '../dock/model';
-import { fetchLayouts } from '../dock/layoutStore';
+import { type DockMode, type DockRules, type UnitId, type Dock, defaultDock, docUnit, docUidOf, dockUnits, fitLayout, loadDock, revealDoc, setBlockMode, setToolbarDock, setToolbarDirDock, syncDocUnits } from '../dock/model';
+import { fetchLayouts, queueCurrentLayout, readBootLayout } from '../dock/layoutStore';
 import { type DockDrag, type DockOver, DockPanel } from '../dock/DockView';
 import { registerProbe, note } from '../debug/probe';
 import { ProbePanelBody } from '../debug/ProbePanel';
@@ -16,16 +16,17 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, relinkAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
 import { setLayerEditBlocked } from '../workbench/editGate';
 import { getBlendUi, setBlendUi, getActiveBlendUid } from '../workbench/store';
+import { pruneCudState, runCudSwitch, useCudScope, useCudState } from '../workbench/cudScope';
 import { resetRowInteraction } from '../workbench/layerRow';
-import { ingestFile } from '../workbench/video/ingest';
+import { type Ingested, ingestFile } from '../workbench/video/ingest';
 import { grabFrameFull } from '../workbench/video/previews';
-import { getVidSelection, subscribeVidSelection } from '../workbench/video/selection';
+import { getVidSelection, setVidSelection, subscribeVidSelection } from '../workbench/video/selection';
 import { getKfArmed, subscribeKfArmed } from '../workbench/video/kfArmed';
 import { bumpAssets } from '../workbench/video/assetsTick';
 import { markRender } from '../workbench/video/perf';
@@ -567,7 +568,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   // Log / Debug 曾是这里两颗 useState 开关的 Modal;现在各自是一扇 dock 窗(见 bodies)。
   // Live thumbnail of the workbench composite — that composite *is* the Context Image.
-  const [blendPreview, setBlendPreview] = useState<{ image: string; size: string } | null>(null);
+  // **按文档存**：只有一个槽的时候，切 tab 的那两帧、以及"新文档还在等帧包"的那一段里，这块
+  // 面板显示的是上一份工程的合成图（Context 卡与节点预览一起串）。现在每一份留自己那一张。
+  const [docPreviews, setDocPreviews] = useState<Record<number, { image: string; size: string }>>({});
+  const blendPreview = blendDocs.activeUid != null ? docPreviews[blendDocs.activeUid] ?? null : null;
+  // 换 tab 那一刻，显示面还挂在上一份手上。工作台把这一份的**第一帧真画面**画上台之后才回
+  // `blend-doc-painted`；在那之前活画布不许盖到那扇窗上（盖上去看到的就是上一份的画面 =
+  // 用户报的串图像），那扇窗先显示它自己那张静帧。
+  const [paintedUid, setPaintedUid] = useState<number | null>(null);
+  const activeDocUidRef = useRef<number | null>(blendDocs.activeUid);
+  activeDocUidRef.current = blendDocs.activeUid;
   // Guidances 那张总卡的本客户端副本（与 blendPreview 同一条消息通道来）。图池里的
   // staging_guidance 是**全局一格**：别的实例（另开的浏览器标签页、第二只壳）一写就会顶掉它，
   // 而 iframe 端只在「自己算出来的图变了」时才重发 —— 所以池里那条只当 run 的取图用，
@@ -637,14 +647,52 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const dockRules = useMemo(
     () => dockRulesFor(blendDocs.docs, vidDirty.current), [blendDocs, vidDirtyTick],
   );
-  const [dock, setDockState] = useState<Dock>(() => loadDock(dockRulesFor([])));
+  // ── 开机那一份摆法：**第一帧就在手上** ────────────────────────────────────────────────
+  // ① 后端随 HTML 送下来的 `__DOCK_BOOT__`（`current` = 上一次的样子；没有就退到 ★）；
+  // ② 没有注入的地方（vite dev、探针自带的静态服务器）→ 浏览器里那份镜像（也是上一次的样子）；
+  // ③ 都没有 → 内置默认（这一页第一次被打开）。
+  //
+  // 老写法是"先按 ②/③ 摆一遍，等 `/api/layouts` 回来再把 ★ 那份套上去"：一次刷新要跳两下，
+  // 用户看到的就是"打开时闪一下默认布局"。现在这一步没有了 —— 答案在脚本解析时就在手上，
+  // 第一帧画的就是终局。★ 也从"每次打开都盖一次"退回它本来的意思：**空白页面的起手式**。
+  const bootPick = useRef<{ dock: Dock; from: 'current' | 'default'; at: number } | null>(null);
+  const bootSettled = useRef(false);
+  // 这份布局"知道从哪来"，才允许把改动写回盘上。一次读不到盘上的开机（后端不在、档案坏了）
+  // 不该拿内置默认把用户真正的布局盖掉 —— 那比"这次没记住"糟得多。
+  const dockArmed = useRef(false);
+  const noBootLayout = useRef(new URLSearchParams(location.search).has('nolayout'));
+  if (!bootSettled.current) {
+    bootSettled.current = true;
+    if (!noBootLayout.current) {
+      const boot = readBootLayout();
+      const pick = boot ? (boot.current ?? boot.default) : null;
+      const fit = pick ? fitLayout(dockRulesFor([]), pick) : null;
+      // `keepSlots`：此刻页面还没有工程，存档里的画布格是"待会儿要接文档的那个位置"，
+      // 不是"关掉了的"（剪掉它，真开工程时画布只能落到工作区末尾）。
+      if (boot && fit) bootPick.current = {
+        dock: syncDocUnits(fit.dock, [], true),
+        from: boot.current ? 'current' : 'default', at: boot.currentAt,
+      };
+    }
+    dockArmed.current = !!bootPick.current;
+  }
+  const [dock, setDockState] = useState<Dock>(() =>
+    bootPick.current ? bootPick.current.dock
+      // 探针那一条：**内置默认**，不看盘上那份，也不看镜像 —— 它要的是"代码摆出来的样子"。
+      : noBootLayout.current ? defaultDock(dockRulesFor([]))
+        : loadDock(dockRulesFor([])));
   // 「此刻的布局」的 ref：开机那一次写档要用它（见下面 `?nolayout` 那一支），而它不该成为那个
   // effect 的依赖 —— 那会让它每次动一下布局就跑一遍。
   const dockRef = useRef(dock);
   dockRef.current = dock;
-  const applyDock = useCallback((next: Dock, persist = true) => {
+  const applyDock = useCallback((next: Dock, persist = true, sync = false) => {
     setDockState(next);
-    if (persist) { try { localStorage.setItem(DOCK_STORE, JSON.stringify(next)); } catch { /* in-memory only */ } }
+    if (!persist) return;
+    try { localStorage.setItem(DOCK_STORE, JSON.stringify(next)); } catch { /* in-memory only */ }
+    // 盘上那一份（实时）：用户动的每一次都排进写队列（去抖 600ms，手停下来才算数）。
+    // **文档来去**那种内部整理只在 `dockArmed` 之后才写 —— 见上面那段注释。
+    if (!sync) dockArmed.current = true;
+    if (!sync || dockArmed.current) queueCurrentLayout(next);
   }, []);
   // 把一扇面板**切到前台**:折叠的开回来(sections),tab 组/块选中项拨到它(revealDoc 对任意
   // 单元通用,浮窗原样 —— 已经看得见)。Assets 卡片双击"自动切出 Inspector"走这条。
@@ -722,10 +770,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   vidPlayingRef.current = vidPlaying;
   const [vidPps, setVidPps] = useState(60);
   // ── Inspector 的选中 ── Assets 窗点卡片产生,Inspector 窗照它放大看(图/音/视频都收,
-  // 视频与音频用自己那条独立播放头,与主 transport 互不相识)。切换/关闭文档时清空:
-  // 选中指向的是**那一份工程/那一次清单**里的卡,文档换了它就什么也不是了。
-  const [vidInspect, setVidInspect] = useState<InspectSel | null>(null);
-  useEffect(() => { setVidInspect(null); }, [blendDocs.activeUid]);
+  // 视频与音频用自己那条独立播放头,与主 transport 互不相识)。选中指向的是**那一份工程/那一次
+  // 清单**里的卡,所以它按文档分桶（useCudState）：换文档就是换一桶，切回来原样还在，
+  // 而新文档永远不会一上来就"选中"着别人那张 —— 老写法是切换时清空，清空本身没错，但它让
+  // "切走再切回来"丢了上下文，而且清空那一下是靠 effect 补的，中间那一帧仍读得到旧值。
+  const [vidInspect, setVidInspect] = useCudState<InspectSel | null>(() => null);
   // ── solo / mute ── 正身在**工程**里（VidProject.soloAudioIds / soloVideoIds / muteIds），
   // 这里只是包成 Set 给两扇窗用：切换时写回工程、随 .cud 落盘，刷新 / 重开文档后还亮着。
   // solo 音频/视频分开（一边亮不影响另一边）；mute 所有轨类型共用一套。删轨时 removeTrack
@@ -747,13 +796,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 文档写，没绑的它自己返回（不弹目录框）。
   const metaSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveVidSoon = useCallback((uid: number) => {
+    // **先把账记到页面那边**：这条去抖在换文档之后会自己放弃（那时的 autoSaveCud 写的已经是新
+    // 文档），而页面只能在那份还活跃时写得进它自己的文件 —— 于是由它在换人之前补这一笔
+    // （blend-vid-owe → flushVidSave）。账是幂等的，写成功才销，见页面 announceSaved。
+    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-vid-owe', uid }, '*');
     if (metaSaveTimer.current) clearTimeout(metaSaveTimer.current);
     metaSaveTimer.current = setTimeout(() => {
       metaSaveTimer.current = null;
-      if (activeUidRef.current !== uid) return;   // 已经切走别的文档：这一发不是它的了
+      if (activeUidRef.current !== uid) return;   // 已经切走：页面会在离开那份之前补上这一笔
       autoSaveCud();
     }, 700);
-  }, [autoSaveCud]);
+  }, [autoSaveCud, blendIframeRef]);
   // mute / solo 写回工程。**不进撤销摞**：它们是监视开关，不是编辑动作；但工程确实变了 ——
   // 置脏（tab 上的 ● / 关前询问）并落盘，否则刷新 / 重开 .cud 就回到旧的开关状态。
   const updateVidMeta = useCallback((fn: (p: VidProject) => VidProject) => {
@@ -899,35 +952,64 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       if (next.inPoint !== prev.inPoint || next.outPoint !== prev.outPoint) saveVidSoon(uid);
     }
   }, [pushVidHist, markVidDirty, saveVidSoon]);
+  // ── 换 .cud 的唯一入口 ────────────────────────────────────────────────────────────────
+  // 从前每一扇窗各自 `useEffect(..., [activeUid])`：谁漏一手，谁就把上一份的读数带到下一份上
+  // （时间线选中了不存在的段、Inspector 对着别人的资产说话、预览桶里还挂着上一份的图……）。
+  // 现在**只有这一处**在听 activeUid，它把"换文档"当一次事务派给每一扇登记过的窗
+  // （workbench/cudScope.ts）：先 leave（旧文档还在：能收尾、能把它那一桶写回去），
+  // 再 enter（新文档已就位、Video 工程已装回）。一扇窗抛错不拦别人。
+  // `from` 走 ref：这个值要在 activeUid 翻过去之前记住 —— React 重渲之后 useEffect 里
+  // 再去读，"上一位是谁"就已经没了。
+  const cudFromRef = useRef<number | null>(null);
+  useEffect(() => {
+    const to = blendDocs.activeUid;
+    const from = cudFromRef.current;
+    cudFromRef.current = to;
+    if (from === to) return;                     // 文档集重播一次（activeUid 没换人）不必喊人
+    const found = to == null ? null : blendDocs.docs.find(d => d.uid === to) ?? null;
+    runCudSwitch({
+      from, to,
+      doc: found ? { uid: found.uid, name: found.name, path: found.path } : null,
+    });
+  }, [blendDocs.activeUid, blendDocs.docs]);
+  // 时间线上"选中了哪几段"是跨窗的（Video Generator 的 Add continue segment 读它），住在
+  // selection.ts 那口外部 store 里，**不按文档分桶**。换文档那一刻先按空集发一次：Timeline
+  // 自己的选中是 useCudState（按文档分桶），它紧接着会把新文档那一桶重新播出来；但在它重渲
+  // 之前读 store 的窗（同一个 commit 里的）不该还拿到上一份的段 id。
+  useCudScope('video:selection', { leave: () => setVidSelection(new Set()) });
   // 文档切换 = 换一份 Video 工程。**工程的正身就在 .cud 里**（读档那趟由 blend-vid-restore 送回来），
   // 所以这里只做三件事：
   //   · 桶里已有 ⇒ 装回它那一份；
   //   · 没见过，且这是这次开机的**第一份**文档 ⇒ 用页面存档当起手（刷新后的落脚点）；
   //   · 其余 ⇒ 空白（等文件自己那份送来）。
   // 页面存档只喂一次：之后再打开/新建的文档都不继承它，否则时间线会从上一份凭空长过来。
-  useEffect(() => {
-    const uid = blendDocs.activeUid;
-    if (uid == null) return;
-    const map = vidByDoc.current;
-    // 页面存档只属于**开机见到的第一份文档**，喂完就摘 —— 不管那一份此刻桶里有没有工程。
-    // 老写法是"第一份**桶里还没有**的文档"才摘：开机那份要是先收到了文件里的工程
-    // （blend-vid-restore 比文档播报先到，刷新恢复文档时就是这样），seed 就一直挂在手上，
-    // 之后**跳到任何一份自己没有工程的 tab**（.cud 里没带 video 段的那种）都会被它灌上一份
-    // 别人的时间线 —— 用户报的"切 cud tab 时 Tracks 的内容跟着搬过去"就是这个。
-    const seed = vidSeedRef.current;
-    if (seed) {
-      vidSeedRef.current = null;
-      if (!map.has(uid)) map.set(uid, seed.p);
-    }
-    if (!map.has(uid)) map.set(uid, defaultVidProject());
-    const proj = map.get(uid)!;
-    // 屏幕换了人：归属与 ref 当场钉住，别等 React 重渲那一帧（见 vidProjectOwner 的注释）。
-    vidProjectOwner.current = uid;
-    vidProjectRef.current = proj;
-    setVidProject(proj);
-    // 模式跟着工程走：打开哪份文档就落回它自己的 Image / Video 设置。
-    syncVidMode(proj.mode === 'video' ? 'video' : 'image');
-  }, [blendDocs.activeUid, syncVidMode]);
+  // 挂成一条 `cud` 窗（见 workbench/cudScope.ts）：换文档由宿主统一驱动，和其它窗的 leave/enter
+  // 排在同一次事务里，不再是"每扇窗自己 useEffect(activeUid)"的散装写法。
+  useCudScope('video:project', {
+    enter: s => {
+      const uid = s.to;
+      if (uid == null) return;
+      const map = vidByDoc.current;
+      // 页面存档只属于**开机见到的第一份文档**，喂完就摘 —— 不管那一份此刻桶里有没有工程。
+      // 老写法是"第一份**桶里还没有**的文档"才摘：开机那份要是先收到了文件里的工程
+      // （blend-vid-restore 比文档播报先到，刷新恢复文档时就是这样），seed 就一直挂在手上，
+      // 之后**跳到任何一份自己没有工程的 tab**（.cud 里没带 video 段的那种）都会被它灌上一份
+      // 别人的时间线 —— 用户报的"切 cud tab 时 Tracks 的内容跟着搬过去"就是这个。
+      const seed = vidSeedRef.current;
+      if (seed) {
+        vidSeedRef.current = null;
+        if (!map.has(uid)) map.set(uid, seed.p);
+      }
+      if (!map.has(uid)) map.set(uid, defaultVidProject());
+      const proj = map.get(uid)!;
+      // 屏幕换了人：归属与 ref 当场钉住，别等 React 重渲那一帧（见 vidProjectOwner 的注释）。
+      vidProjectOwner.current = uid;
+      vidProjectRef.current = proj;
+      setVidProject(proj);
+      // 模式跟着工程走：打开哪份文档就落回它自己的 Image / Video 设置。
+      syncVidMode(proj.mode === 'video' ? 'video' : 'image');
+    },
+  });
   // 文档关掉了 → 它那一桶（工程 + 脏标记）跟着走。uid 是工作台**每次开机从 1 重新发**的，
   // 留着旧的会在下一次复用同一个 uid 时串台（新文档凭空多出上一位的片段）。
   // 关掉的是**最后一份**时，屏幕上那份工程也必须一起走：Tracks / Assets 读的就是 vidProject，
@@ -937,6 +1019,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   useEffect(() => {
     if (!blendDocs.announced) return;
     const live = new Set(blendDocs.docs.map(d => d.uid));
+    // 关掉的那几份在**每一扇窗**里按文档分的那一桶也一起收走（useCudState 的桶挂在模块上，
+    // 不随窗卸载；uid 每次开机从 1 重发，旧桶留着会撞号复活）。
+    pruneCudState([...live]);
     for (const uid of [...vidByDoc.current.keys()]) {
       if (!live.has(uid)) {
         vidByDoc.current.delete(uid);
@@ -2408,22 +2493,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
   }, [recheckMissing]);
-  // relink：把用户挑的文件重新入库。**哈希必须对得上**（这是"同一件货"的判据），对不上默认拒绝。
-  const vidRelink = useCallback(async (hash: string, file: File, force?: boolean) => {
-    const ing = await ingestFile(file);
-    if (!ing || !ing.asset) return { ok: false, error: 'This file could not be read (ingest failed)' };
-    // 认两种命中：挑的是原件（哈希 = 缺失的原件），或者缺的其实是它的转码代理（哈希 = 新算出的 play）。
-    if (ing.asset !== hash && ing.play !== hash && !force) {
-      return { ok: false, error: `Different bytes — expected ${hash.slice(0, 8)}…, got ${ing.asset.slice(0, 8)}…`, hash: ing.asset };
-    }
-    // 精确命中也要改 src：老工程指的多半是 `/api/vid_media/<旧文件名>`（缓存被清掉了），而重新
-    // 入库后的地址是 `<md5>`。relinkAsset 顺手把它换成仓库地址（P1 的 play 也一起换）。
-    vidUpdate(p => relinkAsset(p, hash, ing.asset!, ing.play), 'Relink media');
+  // 链接资产：把这条引用绑到用户挑的那份字节上。入库在调用方（Assets 窗）已经做过一次 ——
+  // 先知道新字节的哈希，才能问那一句"这不是同一份字节，要换吗？"，也免得一个大文件传两趟。
+  // 哈希一致 = 接回同一份（顺手把 src 换成仓库地址）；不一致 = 换绑，整件货两个哈希一起换。
+  const vidRelink = useCallback(async (from: AssetIdentity, ing: Ingested) => {
+    if (!ing?.asset) return { ok: false, error: 'This file could not be read (ingest failed)' };
+    vidUpdate(p => rebindAsset(p, from, {
+      asset: ing.asset!, play: ing.play, duration: ing.duration, hasAudio: ing.hasAudio,
+    }), 'Link asset');
     await recheckMissing();
-    return { ok: true, hash: ing.asset };
+    return { ok: true };
   }, [vidUpdate, recheckMissing]);
   const vidCtl: VidController = useMemo(() => ({
     project: vidProject, transport: vidTransport, playing: vidPlaying, pps: vidPps,
+    // 这份工程属于哪份文档：取帧包 / 底片包都盖这个章，工作台据此丢掉换 tab 那一瞬在飞的旧包。
+    docUid: blendDocs.activeUid,
     staging, update: vidUpdate, seek: vidSeek, setPlaying: setVidPlaying, setPps: setVidPps,
     missing: vidMissing, relink: vidRelink, recheckMissing: () => { void recheckMissing(); },
     // 选中即目标（2026-10-28）：Layers/Guidances 只跟**选中的 Layer 段**走，与播放头无关 ——
@@ -2453,7 +2537,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     layerCopy,
     // Keyframes 窗手动加帧的"当下的值"：与录制同一条 blend-vid-kf-get（见 layerKfParams）。
     kfSnapshot: layerKfParams,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs, layerCopy, layerKfParams, vidMissing, vidRelink, recheckMissing]);
+  }), [vidProject, vidTransport, vidPlaying, vidPps, blendDocs.activeUid, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs, layerCopy, layerKfParams, vidMissing, vidRelink, recheckMissing]);
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。
@@ -2538,7 +2622,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     return cut > 0 ? p.slice(0, cut) : '';
   }, [blendDocs.announced, blendDocs.docs, blendDocs.activeUid]);
   const agentCtx: AgentCtx = useMemo(() => ({
-    uiSend, vid: vidCtl, docOpen: blendDocs.activeUid !== null, vidMode, cudDir: agentCudDir,
+    uiSend, vid: vidCtl, docOpen: blendDocs.activeUid !== null, docUid: blendDocs.activeUid,
+    vidMode, cudDir: agentCudDir,
     blockSets, activeBlockSetId,
     runPreset: id => {
       const set = blockSets.find(s => s.id === id);
@@ -2548,6 +2633,30 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     docCommand: onDocCommand,
     setFps: setVidFps,
     vgen: { list: videoGenList, add: addVideoGenSegment, cont: continueSel, addContinue: addContinueVgenSegment },
+    promptBridge: (type: string, payload?: unknown) =>
+      new Promise<{ ok: boolean; value?: unknown; error?: string }>((resolve) => {
+        const win = promptIframeRef.current?.contentWindow;
+        if (!win) {
+          resolve({ ok: false, error: 'Prompt tab iframe not available — open the Prompt tab once (it hides but stays mounted) then retry' });
+          return;
+        }
+        const reqId = 'agent-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        const onMsg = (e: MessageEvent) => {
+          const d = e.data;
+          if (e.source === win && d && d.type === 'agent-prompt-result' && d.reqId === reqId) {
+            window.removeEventListener('message', onMsg);
+            clearTimeout(timer);
+            const v = d.value || {};
+            resolve({ ok: v.ok !== false, value: v, error: v.error });
+          }
+        };
+        const timer = setTimeout(() => {
+          window.removeEventListener('message', onMsg);
+          resolve({ ok: false, error: 'Prompt tab did not respond (timeout) — is it loaded?' });
+        }, 20000);
+        window.addEventListener('message', onMsg);
+        win.postMessage({ type: type + '-req', reqId, payload }, '*');
+      }),
   }), [uiSend, vidCtl, blendDocs.activeUid, vidMode, agentCudDir, blockSets, activeBlockSetId, runPresetFromRow,
     cancelActiveRun, onDocCommand, setVidFps, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
@@ -2595,50 +2704,44 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       if (openDocUnits.includes(u) && !fresh.includes(u)) next = revealDoc(next, u);
     }
     prevActiveUid.current = au;
-    if (next !== dock) applyDock(next);
+    if (next !== dock) applyDock(next, true, true);
   }, [dock, openDocUnits, applyDock, blendDocs.announced, blendDocs.activeUid]);
-  // 默认布局：Layout 那一格标了 ★ 的那一份，是页面**每次打开**的起手式。它住在盘上（`/api/layouts`），
-  // 不在浏览器里 —— 宿主端口是 8700..8799 里试出来的，换个端口就是换个 origin，localStorage 里那份
-  // 当场看不见（这正是"我存的布局下次打开就没了"的由来）。
+  // 开机那份摆法已经在 `useState` 里定完了（见上面 bootPick 那段）—— 这里只剩两件收尾的事：
   //
-  // 时机：等文档播报到位再摆。布局里的画布格要按"现在开着的文档"收一遍，摆早了就会把画布剪掉，
-  // 等播报来了只能按新文档安放 —— 那还不如不摆。工作台一直不播报（iframe 起不来）就 4 秒后照样摆。
+  //   · `?nolayout=1`：探针要一个**已知、可复现**的起点（内置默认），绝不是用户私人的布局。
+  //     顺手把这一份写进浏览器镜像：平时这一笔是用户动布局时留下的，跳过它之后读档的一侧
+  //     读到的就是 null —— "页面此刻的布局"应当一直有答案。
+  //   · **没有注入**的地方（vite dev、探针自带的静态服务器）：开机只拿到了镜像，盘上那份得问
+  //     一次接口。只有在这种"手上什么都不知道"的情形里才会晚一步套上去，正式页面走不到这里。
   const bootLayoutDone = useRef(false);
   const bootRef = useRef({ rules: dockRules, docs: openDocUnits });
   bootRef.current = { rules: dockRules, docs: openDocUnits };
   useEffect(() => {
     if (bootLayoutDone.current) return;
-    const run = () => {
-      if (bootLayoutDone.current) return;
-      bootLayoutDone.current = true;
-      // `?nolayout=1`：这一次打开**不**按默认布局摆。默认布局是用户私人的起手式（他标了 ★ 的那一份），
-      // 而探针要的是一个已知的、可复现的起点（`defaultDock`）—— 否则用户随手存一份默认，整套界面
-      // 探针都会跟着变形状，测的就不再是代码而是他的页面。
-      //
-      // 顺手把这一份写进 `sampler.drawDock`：平时这一笔是 boot 那次 `applyDock` 顺手留下的，跳过
-      // 它之后探针（和其它读档的一侧）读到的就是 null —— "页面此刻的布局"应当一直有答案。
-      if (new URLSearchParams(location.search).has('nolayout')) {
-        try { localStorage.setItem(DOCK_STORE, JSON.stringify(dockRef.current)); } catch { /* in-memory only */ }
-        return;
-      }
-      fetchLayouts().then(store => {
-        if (!store || !store.default) return;
-        const item = store.items.find(i => i.name === store.default);
-        if (!item) return;
-        const fit = fitLayout(bootRef.current.rules, item.dock);
-        if (!fit) return;
-        // 第三个参数是 `keepSlots`：**现在还没有工程打开**（页面不自带 Untitled，工作台也没有自动
-        // 恢复什么），这份布局里的画布格此刻无人认领 —— 而"无人认领"不等于"关掉了"。按空表剪一遍，
-        // 画布格连同它所在的那条横排一起塌掉，用户真开工程时它只能落到工作区末尾：表现就是
-        // "关掉 ComfyUI 再打开，画布那扇窗莫名其妙跑到别处去了"。先留着，等播报说有文档了再对账。
-        applyDock(syncDocUnits(fit.dock, bootRef.current.docs, true));
-        note('boot-layout', { name: item.name, dropped: fit.dropped.length, added: fit.added.length });
-      }).catch(() => { /* 没有后端：就用存档里记着的那份摆法 */ });
-    };
-    if (blendDocs.announced) { run(); return; }
-    const t = setTimeout(run, 4000);
-    return () => clearTimeout(t);
-  }, [blendDocs.announced, applyDock]);
+    bootLayoutDone.current = true;
+    if (noBootLayout.current) {
+      try { localStorage.setItem(DOCK_STORE, JSON.stringify(dockRef.current)); } catch { /* in-memory only */ }
+      return;
+    }
+    if (bootPick.current) {
+      note('boot-layout', { from: bootPick.current.from, at: bootPick.current.at });
+      return;
+    }
+    // 走到这里 = 这一趟开机没有任何"上一次的样子"可用（也就没有跳变可言）。盘上要还有一份，
+    // 就把它装上，并把写回盘上的闸门打开 —— 从这一刻起这个页面知道自己在摆谁。
+    fetchLayouts().then(store => {
+      const cur = store && store.current ? store.current.dock : null;
+      const def = cur || !store || !store.default ? null
+        : (store.items.find(i => i.name === store.default)?.dock ?? null);
+      const source = cur ?? def;
+      if (!source) return;
+      const fit = fitLayout(bootRef.current.rules, source);
+      if (!fit) return;
+      dockArmed.current = true;
+      applyDock(syncDocUnits(fit.dock, bootRef.current.docs, true), true, true);
+      note('boot-layout', { from: cur ? 'current' : 'default', late: true });
+    }).catch(() => { /* 没有后端：就用手上这份 */ });
+  }, [applyDock]);
   // dataTransfer payloads are not readable during dragover, so the unit being dragged and the box
   // being hovered are mirrored in state — that is what the landing bands and the iframe shield key off.
   const [dockDrag, setDockDrag] = useState<DockDrag | null>(null);
@@ -2769,9 +2872,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 其余文档窗照旧显示各自的静帧。工作台画布常驻在播放器之上、只盖画面那一块（见 measureFrame /
   // vidCanvasRef）—— 底下那条走带仍归播放器，按钮留在原位；段外时画布内容就是当前视频帧。
   const docBodies: Record<UnitId, React.ReactNode> = {};
+  // 活跃那一份"画好了没有"：只有工作台说它把第一帧真画面画上台了，活画布才有资格盖在这扇窗上。
+  // 没画好之前这一格显示它**自己**那张静帧（不是上一份的画面，也不是一块黑）。
+  const liveReady = blendDocs.activeUid !== null && paintedUid === blendDocs.activeUid;
   for (const d of blendDocs.docs) {
     const active = d.uid === blendDocs.activeUid;
-    const still = active ? null : docStills[d.uid];
+    const still = active && liveReady ? null : docStills[d.uid];
     docBodies[docUnit(d.uid)] = active && vidMode === 'video'
       ? <VidPlayer vid={vidCtl} visible={tab === 'draw'}
           stageCovers={!!frameRect && vidMode === 'video'} />
@@ -3001,14 +3107,62 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   useEffect(() => {
     const onPreview = (event: MessageEvent) => {
       if (event.data?.type !== 'blend-preview') return;
+      // 这一张属于哪份文档：消息自带（页面盖的章）；老版本不带就落到当下的活跃文档上。
+      const uid = typeof event.data.uid === 'number' && Number.isFinite(event.data.uid)
+        ? event.data.uid : activeDocUidRef.current;
+      if (uid == null) return;
       const image = event.data.image as string | null;
-      if (!image) { setBlendPreview(null); return; }
       const w = Number(event.data.width) || 0, h = Number(event.data.height) || 0;
-      setBlendPreview({ image, size: w && h ? `${w}×${h}` : '' });
+      setDocPreviews(prev => {
+        if (!image) {
+          if (!(uid in prev)) return prev;
+          const next = { ...prev };
+          delete next[uid];
+          return next;
+        }
+        const size = w && h ? `${w}×${h}` : '';
+        const cur = prev[uid];
+        // 同一张图（同尺寸同图）不换对象：这条消息按节拍来，别让整页跟着重绘。
+        if (cur && cur.image === image && cur.size === size) return prev;
+        return { ...prev, [uid]: { image, size } };
+      });
     };
     window.addEventListener('message', onPreview);
     return () => window.removeEventListener('message', onPreview);
   }, []);
+  // 工作台说"这一份的第一帧真画面已经在台上了"。只有它等于当下的活跃文档才算数 —— 迟到的
+  // ack（这两帧之间又切走了）说的是别人。
+  useEffect(() => {
+    const onPainted = (event: MessageEvent) => {
+      if (event.data?.type !== 'blend-doc-painted') return;
+      const uid = Number(event.data.uid);
+      if (!Number.isFinite(uid) || uid !== activeDocUidRef.current) return;
+      setPaintedUid(prev => (prev === uid ? prev : uid));
+    };
+    window.addEventListener('message', onPainted);
+    return () => window.removeEventListener('message', onPainted);
+  }, []);
+  // 换人就把"已画出"作废：新文档得自己挣这一次。（挂在统一入口上，与其它窗处在同一次切换里。）
+  useCudScope('doc:painted', { enter: () => setPaintedUid(null) });
+  // 兜底：ack 丢了（iframe 重载 / 两份版本不齐）不许把活画布永久藏起来 —— 逾时就认它画好了。
+  // 宁可露一张可能还空着的画布，也不能让用户对着一张静帧却改不了图。
+  useEffect(() => {
+    const uid = blendDocs.activeUid;
+    if (uid == null) return;
+    const t = window.setTimeout(() => setPaintedUid(prev => (prev === uid ? prev : uid)), 1200);
+    return () => window.clearTimeout(t);
+  }, [blendDocs.activeUid]);
+  // 关掉的那几份连预览桶一起收走（不留一条永远没人读的旧图）。
+  useEffect(() => {
+    const open = new Set(blendDocs.docs.map(d => d.uid));
+    setDocPreviews(prev => {
+      const keys = Object.keys(prev).map(Number);
+      if (!keys.some(k => !open.has(k))) return prev;
+      const next: Record<number, { image: string; size: string }> = {};
+      for (const k of keys) if (open.has(k)) next[k] = prev[k];
+      return next;
+    });
+  }, [blendDocs.docs]);
 
   // Guidances 那张总卡：iframe 合成好就发一张（空栈 / 全隐藏时 image 为空 = 撤回那张卡）。
   // 显示只认这一份，不再从图池读 —— 池子那格会被别的实例覆盖，也不会自己修回来。
@@ -3681,7 +3835,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             // toolbar 小窗里那一格要是活的那份文档，画布这一层就得压在小窗之上：小窗是 75，
             // 画布这一层因此提到 76 —— 否则小窗里只能看见一块深色底（活的工作台被盖在下面）。
             zIndex: tbPopover && tbPopover === activeUnit ? 76 : activeIsWindow ? 61 : 5,
-            opacity: frameRect && !dockDrag ? 1 : 0,
+            // 活画布显不显：这一份画好了没有（见 liveReady）。没画好时它停在屏外/透明 ——
+            // 否则从旧位置挪到这扇窗上的那两帧里，用户看到的是上一份的画面。
+            opacity: frameRect && !dockDrag && liveReady ? 1 : 0,
             pointerEvents: dockDrag ? 'none' : undefined,
           }}>
             <iframe
@@ -4357,7 +4513,7 @@ const VideoGenFrameModal: React.FC<{
                   name: s.displayName || s.name,
                   kind: 'image', src: s.url || '', duration: 0, hasAudio: null,
                   poster: s.thumb || s.url || null,
-                  byteFrom: 'store', origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
+                  byteFrom: 'store', origin: s.origin || 'library',
                 }}
                 selected={on}
                 onClick={() => onPick({ kind: 'asset', hash: id, name: s.displayName || s.name })}

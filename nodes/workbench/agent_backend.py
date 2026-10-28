@@ -10,7 +10,8 @@
 事件序列号 = events 数组下标;poll 带 cursor 增量取,wait=1 时最多挂 25s 长轮询。
 
 注:内建 Chat 的界面已撤掉(Agent 窗只用 dsh),这段 LLM run 循环与 LLM 设置保留为后端能力,
-目前没有前端入口;/api/agent/direct_tool 与 AGENT_TOOLS 仍被两个 MCP 和 tools/wb_agent.py 使用。
+目前没有前端入口;/api/agent/direct_tool 与工具表仍被两个 MCP 和 tools/wb_agent.py 使用。
+工具表的 schema 真源在前端(见下方 load_agent_tools),这里只热读构建产物。
 """
 import json
 import os
@@ -56,6 +57,23 @@ _SYSTEM_PROMPT = (
     "selection, presets). State changes after every mutation — never act on ids you remember from "
     "an older snapshot if the user edited since.\n"
     "- Timeline times are seconds (floats). Clip/track ids are strings; layer ids are numbers.\n"
+    "- The Prompt tab has TWO SEPARATE concepts that MUST NOT be confused:\n"
+    "  (1) the LIBRARY = stored assets that persist on disk: prompt cards, prefabs, programs, and LoRAs (files). "
+    "Editing the library changes what EXISTS, NOT what is currently used.\n"
+    "  (2) the SELECTION = the specific items currently chosen for the positive prompt the detailer reads "
+    "(custom_prompt text + selected cards/LoRAs/prefabs/programs). Choosing items never saves them to the library.\n"
+    "- LIBRARY tools (mutate stored assets, NEVER the selection): prompt_card_add / prompt_card_update / "
+    "prompt_card_delete, prefab_add / prefab_update / prefab_delete, program_add / program_update / program_delete, "
+    "lora_refresh (rescan disk to pick up new .safetensors), lora_update (edit a lora's model_only slider). "
+    "Use these ONLY to create/modify/remove a stored asset.\n"
+    "- SELECTION tools (mutate the current composition, NEVER the library): set_prompt (compose the active "
+    "selection from EXISTING library items via their ids/guids/file_paths; prompt_mode=replace|add|remove) and "
+    "get_prompt_state (read the current selection).\n"
+    "- DISCOVERY tools (read-only, change nothing): prompt_library / lora_library / prefab_library / "
+    "program_library list the ids/guids/file_paths you reference in set_prompt or in the *_add/*_update tools.\n"
+    "- HARD RULE: to make a NEW asset actually USED, first persist it with a library tool (e.g. prefab_add to "
+    "create it), THEN select it with set_prompt. Never use set_prompt to create a card/prefab/program, and never "
+    "use a *_add/*_update/*_delete tool to make a selection. Discovery tools neither create nor select.\n"
     "- In video mode the Layers/Guidances edit target follows the selected Layer segment: use "
     "select_clips with focus=true to switch the layer set you are editing.\n"
     "- run_pipeline starts a generation on the active document; it can take minutes. Do not poll "
@@ -89,130 +107,47 @@ def _save_settings(s: dict) -> None:
     os.replace(tmp, SETTINGS_FILE)
 
 
-# ── 工具表 ── schema 的唯一真源;执行体全在前端(ui/sampler_node/src/agent/tools.ts),这里只转发。
-def _fn(name, desc, props=None, req=None):
-    return {'type': 'function', 'function': {
-        'name': name, 'description': desc,
-        'parameters': {'type': 'object', 'properties': props or {}, 'required': req or []},
-    }}
+# ── 工具表 ─────────────────────────────────────────────────────────────────────────────────────
+# schema 的唯一真源在前端 `ui/sampler_node/src/agent/toolSchemas.ts`(与执行体同目录,靠类型咬合);
+# 构建时 `tools/gen_agent_tools.cjs` 把它转成同目录的 `agent_tools.json`,这里**热读**。
+#
+# 为什么不 import 成模块级常量:那样只在 ComfyUI 启动时求值一次,改一句 description 都要重启
+# 整个后端(dsh 的 MCP 还要跟着重启才看得见)。按 mtime 读文件之后,改工具 = 重新构建前端。
+_TOOLS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent_tools.json')
+_TOOLS_LOCK = threading.Lock()
+_TOOLS_CACHE = {'key': None, 'tools': [], 'names': frozenset(), 'sha': ''}
 
 
-AGENT_TOOLS = [
-    _fn('get_app_state',
-        'Snapshot of everything you can operate: mode (image/video), whether a document is open, '
-        'canvas size, fps, transport (playhead seconds, playing), tracks, clips, assets, current '
-        'selection, layer/guidance stacks, staging items, pipeline presets, video-generator '
-        'interfaces, mask track binding.'),
-    _fn('seek', 'Move the timeline playhead to `time` seconds.',
-        {'time': {'type': 'number', 'description': 'seconds from 0'}}, ['time']),
-    _fn('play', 'Start playback.'), _fn('pause', 'Pause playback.'),
-    _fn('select_clips',
-        'Set the timeline selection to these clip ids (empty array = clear selection). With a '
-        'single Layer-kind clip and focus=true, also makes it the layer editing target '
-        '(Layers/Guidances panels switch to its layer set).',
-        {'ids': {'type': 'array', 'items': {'type': 'string'}},
-         'focus': {'type': 'boolean', 'description': 'switch the layer edit target (default true)'}},
-        ['ids']),
-    _fn('add_track', 'Add a timeline track: video | audio | layer | process.',
-        {'kind': {'type': 'string', 'enum': ['video', 'audio', 'layer', 'process']}}, ['kind']),
-    _fn('remove_track', 'Remove a track and everything on it.', {'track_id': {'type': 'string'}}, ['track_id']),
-    _fn('rename_track', 'Rename a track.', {'track_id': {'type': 'string'}, 'name': {'type': 'string'}},
-        ['track_id', 'name']),
-    _fn('place_asset', 'Place an asset from the project asset table onto the timeline.',
-        {'asset_id': {'type': 'string'}, 'track_id': {'type': 'string'},
-         'time': {'type': 'number', 'description': 'default = current playhead'}},
-        ['asset_id']),
-    _fn('move_clip', 'Move a clip to a new start time (and optionally another track). Linked '
-        'audio/video twins move together unless only_self.',
-        {'clip_id': {'type': 'string'}, 'start': {'type': 'number'},
-         'track_id': {'type': 'string'}, 'only_self': {'type': 'boolean'}},
-        ['clip_id', 'start']),
-    _fn('trim_clip', 'Trim a clip edge: edge=in moves the head, edge=out the tail; `time` is the '
-        'new edge position on the timeline (seconds).',
-        {'clip_id': {'type': 'string'}, 'edge': {'type': 'string', 'enum': ['in', 'out']},
-         'time': {'type': 'number'}}, ['clip_id', 'edge', 'time']),
-    _fn('split_clip', 'Split a clip at `time` (timeline seconds) into two.',
-        {'clip_id': {'type': 'string'}, 'time': {'type': 'number'}}, ['clip_id', 'time']),
-    _fn('remove_clips', 'Delete clips from the timeline.', {'ids': {'type': 'array', 'items': {'type': 'string'}}},
-        ['ids']),
-    _fn('add_layer_clip', 'Create an empty Layer segment (compositing container) on a layer track; '
-        'creates the track when missing. Editing its layer set = select_clips focus.',
-        {'time': {'type': 'number'}, 'duration': {'type': 'number', 'description': 'default 5s'},
-         'track_id': {'type': 'string'}}),
-    _fn('select_layer', 'Select a layer row in the workbench (canvas compositing).',
-        {'id': {'type': 'number'}}, ['id']),
-    _fn('add_layer', 'Add a new layer onto a stack: stack=layers|guidances; kind=default|stash.',
-        {'stack': {'type': 'string', 'enum': ['layers', 'guidances']},
-         'kind': {'type': 'string', 'enum': ['default', 'stash']}}, ['stack']),
-    _fn('create_comic_layout',
-        'Lay out a comic / manga page on the canvas — layout only, no artwork. Creates one empty '
-        'layer per panel (named Panel N, sized and placed at its page rectangle, ready for '
-        'layer_generate), an optional paper layer underneath and an optional frame-line layer on '
-        'top; the whole layout is one undo step. Use it for requests like "漫画格排版 / 分镜排版 / '
-        'panel grid / comic page layout". rows/cols (+ optional row_weights / col_weights) make a '
-        'regular grid; `panels` with explicit px rectangles makes an irregular page. Omit w/h to '
-        'keep the current canvas; when they differ the canvas is resized first.',
-        {'w': {'type': 'number', 'description': 'page width px (default: current canvas)'},
-         'h': {'type': 'number', 'description': 'page height px (default: current canvas)'},
-         'rows': {'type': 'number', 'description': 'grid rows, 1..12 (default 2)'},
-         'cols': {'type': 'number', 'description': 'grid columns, 1..12 (default 2)'},
-         'row_weights': {'type': 'array', 'items': {'type': 'number'},
-                         'description': 'relative row heights, one per row (default equal)'},
-         'col_weights': {'type': 'array', 'items': {'type': 'number'},
-                         'description': 'relative column widths, one per column (default equal)'},
-         'margin': {'type': 'number', 'description': 'page margin px (default ~4% of the short side)'},
-         'gutter': {'type': 'number', 'description': 'gap between panels px (default ~3% of the short side)'},
-         'border': {'type': 'number', 'description': 'panel frame line width px; 0 = no frame layer (default 3)'},
-         'ink': {'type': 'string', 'description': 'frame colour #rrggbb (default #000000)'},
-         'paper': {'type': 'string',
-                   'description': 'paper colour #rrggbb, or "none" for a transparent page (default #ffffff)'},
-         'panels': {'type': 'array',
-                    'description': 'explicit panel rectangles in page px (overrides rows/cols) — '
-                                   'use for irregular pages',
-                    'items': {'type': 'object',
-                              'properties': {'x': {'type': 'number'}, 'y': {'type': 'number'},
-                                             'w': {'type': 'number'}, 'h': {'type': 'number'},
-                                             'name': {'type': 'string'}},
-                              'required': ['x', 'y', 'w', 'h']}}}),
-    _fn('remove_layer', 'Remove a layer row.', {'id': {'type': 'number'}, 'stack': {'type': 'string'}}, ['id']),
-    _fn('duplicate_layer', 'Duplicate a layer row.', {'id': {'type': 'number'}}, ['id']),
-    _fn('rename_layer', 'Rename a layer row.', {'id': {'type': 'number'}, 'name': {'type': 'string'}},
-        ['id', 'name']),
-    _fn('set_layer_opacity', 'Set a layer overall opacity 0..1.', {'id': {'type': 'number'},
-        'opacity': {'type': 'number'}}, ['id', 'opacity']),
-    _fn('toggle_layer_visibility', 'Toggle a layer eye.', {'id': {'type': 'number'}}, ['id']),
-    _fn('layer_generate', 'Run the layer Generate (image generation) on a layer row.',
-        {'id': {'type': 'number'}}, ['id']),
-    _fn('layer_from_asset', 'Insert a repo asset (content hash) as a new layer image.',
-        {'hash': {'type': 'string'}, 'name': {'type': 'string'},
-         'stack': {'type': 'string', 'enum': ['layers', 'guidances']}}, ['hash']),
-    _fn('set_extra_prompt', 'Set the Extra Prompt text used by Blend / Tag runs.',
-        {'text': {'type': 'string'}}, ['text']),
-    _fn('run_blend', 'Start a Blend run (canvas -> processed result into staging).'),
-    _fn('run_tag', 'Start a Tag run (annotate the canvas).'),
-    _fn('run_pipeline', 'Run a pipeline preset on the active document (the workbench main run). '
-        'Omit preset_id to use the active preset.',
-        {'preset_id': {'type': 'string'}}),
-    _fn('cancel_run', 'Cancel the currently running generation.'),
-    _fn('set_canvas_size', 'Resize the canvas (pixels).', {'w': {'type': 'number'}, 'h': {'type': 'number'}},
-        ['w', 'h']),
-    _fn('undo', 'Undo the last edit (works in both image and video mode).'),
-    _fn('redo', 'Redo an undone edit.'),
-    _fn('view_fit', 'Fit the canvas view (zoom to content).'),
-    _fn('set_fps', 'Set the video project output frame rate.', {'fps': {'type': 'number'}}, ['fps']),
-    _fn('set_paint_color', 'Set the painting foreground color (#rrggbb).', {'fg': {'type': 'string'}}, ['fg']),
-    _fn('set_brush', 'Configure the brush.', {'size': {'type': 'number'}, 'strength': {'type': 'number'}}),
-    _fn('add_vgen_segment', 'Add a Video Generator segment for interface #interface_index onto the '
-        'process track (opens its prompt card for the user to fill).',
-        {'interface_index': {'type': 'number'}}, ['interface_index']),
-    _fn('add_continue_segment', 'Like add_vgen_segment but seeds the new segment with the last '
-        'frame of the currently selected video segment (continuation).',
-        {'interface_index': {'type': 'number'}}, ['interface_index']),
-    _fn('document', 'Document actions: new (blank document), save (silent when the file path is '
-        'known, otherwise a native Save dialog pops).',
-        {'action': {'type': 'string', 'enum': ['new', 'save']}}, ['action']),
-]
-TOOL_NAMES = {t['function']['name'] for t in AGENT_TOOLS}
+def load_agent_tools():
+    """返回 (OpenAI tools 数组, 工具名集合)。文件没变就吃缓存;读坏了保留上一份。"""
+    try:
+        st = os.stat(_TOOLS_FILE)
+    except OSError:
+        return [], frozenset()
+    key = (st.st_mtime_ns, st.st_size)
+    with _TOOLS_LOCK:
+        if _TOOLS_CACHE['key'] == key:
+            return _TOOLS_CACHE['tools'], _TOOLS_CACHE['names']
+        try:
+            with open(_TOOLS_FILE, 'r', encoding='utf-8') as f:
+                doc = json.load(f)
+            tools = [t for t in (doc.get('tools') or [])
+                     if isinstance(t, dict) and (t.get('function') or {}).get('name')]
+            _TOOLS_CACHE.update(
+                key=key, tools=tools,
+                names=frozenset(t['function']['name'] for t in tools),
+                sha=str(doc.get('sha') or ''))
+        except (OSError, ValueError):
+            # 构建用 rename 落盘(原子),所以读坏更可能是有人手改了 JSON:留上一份,
+            # 总比让正在跑的 agent 忽然一个工具都没有好。
+            pass
+        return _TOOLS_CACHE['tools'], _TOOLS_CACHE['names']
+
+
+def tool_catalog_meta():
+    """给 MCP 判断"工具表变没变"的轻量元信息(不含 schema 全文)。"""
+    tools, names = load_agent_tools()
+    return {'count': len(tools), 'names': sorted(names), 'sha': _TOOLS_CACHE['sha']}
 
 # ── Run 状态 ────────────────────────────────────────────────────────────────────────────────
 _RUNS: dict = {}
@@ -282,7 +217,7 @@ class AgentRun:
             payload = {
                 'model': s['model'],
                 'messages': msgs,
-                'tools': AGENT_TOOLS,
+                'tools': load_agent_tools()[0],
                 'tool_choice': 'auto',
                 'temperature': float(s.get('temperature', 0.7)),
             }
@@ -406,13 +341,25 @@ def handle(h) -> None:
 
     if h.command == 'GET' and path == '/api/agent/tools':
         # 工具目录给终端侧的编辑 MCP(tools/wb_mcp.py)用:它不 import 这个模块(带 ComfyUI 依赖),
-        # 启动时来取一次 schema,再把调用送回 /api/agent/direct_tool。
-        h._send_json({'ok': True, 'tools': AGENT_TOOLS})
+        # 需要时来取,再把调用送回 /api/agent/direct_tool。**每次现取**(按 mtime 缓存),
+        # 所以前端重新构建后新工具立刻可见,不用重启后端。
+        tools, names = load_agent_tools()
+        if not tools:
+            h._send_json({'ok': False, 'error': 'agent_tools.json missing or unreadable — '
+                                                'run `cd ui && npm run build -w sampler_node`'})
+            return
+        h._send_json({'ok': True, 'tools': tools, 'sha': _TOOLS_CACHE['sha'],
+                      'count': len(tools)})
+        return
+
+    if h.command == 'GET' and path == '/api/agent/tools/meta':
+        # MCP 用它判断"工具表变没变"(只回指纹,不回 schema 全文),变了就推 tools/list_changed。
+        h._send_json({'ok': True, **tool_catalog_meta()})
         return
 
     if h.command == 'GET' and path == '/api/agent/config':
         s = _load_settings()
-        h._send_json({'ok': True, 'config': s, 'tools': [t['function']['name'] for t in AGENT_TOOLS]})
+        h._send_json({'ok': True, 'config': s, 'tools': sorted(load_agent_tools()[1])})
         return
 
     if h.command == 'POST' and path == '/api/agent/config':

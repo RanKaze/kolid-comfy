@@ -5,6 +5,7 @@ import { blocksToGraph, graphToBlocks, sanitizeGraph, type PipelineGraph } from 
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, preprocessFlag } from './types';
 import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendAttrOpen, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUiOf, setBlendUi, setBlendActiveUid, dropBlendUi, getActiveBlendUid } from './workbench/store';
+import { parseDocAssets, setDocAssets, dropDocAssets } from './workbench/docAssets';
 import { getVidStagingOverlay, dropVidProcState } from './workbench/video/procRun';
 import { dropVidProcPicks } from './workbench/video/procPicks';
 import { bumpAssets } from './workbench/video/assetsTick';
@@ -1209,6 +1210,11 @@ const App: React.FC = () => {
         // 工作台自己往仓库里写了一件（Processor 的 Assets 落位）。Assets 窗的清单是拉的，
         // 这里敲一下让每一扇挂着的窗重拉；写方自己不重复导入。
         bumpAssets();
+      } else if (event.data?.type === 'blend-cud-assets') {
+        // 活跃文档内嵌的那些图（Video / Image 两档的唯一数据源）。页面按整份清单去过重才发，
+        // 这里再按 uid 入桶 —— 切 tab 那一瞬窗里显示的就是目标文档自己的清单。
+        const next = parseDocAssets(event.data);
+        if (next.uid !== null) setDocAssets(next);
       } else if (event.data?.type === 'blend-guidance-card') {
         // Guidances 栈的那一张总卡（Layers 合成 + 整个 guidance 栈）。后端按保留 id
         // staging_guidance 原地换像素 —— 工作区永远只有这一张；image 为空 = 撤回它
@@ -1254,6 +1260,7 @@ const App: React.FC = () => {
             dropBlendUi(uid);
             dropVidProcState(uid);
             dropVidProcPicks(uid);
+            dropDocAssets(uid);
           }
           if (!stale.length) return prev;
           const next = { ...prev };

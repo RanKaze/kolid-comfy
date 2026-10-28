@@ -975,6 +975,17 @@ let vidBaseHidden = false;
 // （别段的合成图副本）。空串 = 缓冲刚被清掉，下一次 stageSync 必须重铺。
 let stageMode = '';
 let stageBaseStamp = '';       // 底片帧上台时用的时间戳（没变就不重传）
+// 台上这张图**属于哪一份文档**，以及"这一份换了但还没画出第一帧"。显示面只有一块，而换文档
+// 以前没人记账：台上留着上一份的最后一帧，一直留到新文档自己画出第一帧为止 —— 而新文档若在
+// 等帧包（暂停的视频段 / 缺源帧 / 底片还没换过来），那一帧可能永远不来，于是一扇窗里长久摆着
+// 别份工程的画面（用户报的"切 cud tab 串图像"）。从这一版起换文档是**一次事务**：
+//   · activateDocument 先**收台**（铺一张空台，谁也不属于）并把上一份的底片 / 帧包 / 合成缓存
+//     全部作废，再让新文档自己画；
+//   · 真画出第一帧时才 commitSwap()，宿主收到 ack 才把活画布盖到那扇窗上；
+//   · captureStill 只认 stageOwnUid === 那一份 的时候抄 —— 抄一张"别人的台面"是把错图
+//     永久刻进那扇窗的静帧（错一次，之后每次切回它都是错的那张）。
+let stageOwnUid = null;        // 台上这张图属于哪一份（null = 空白/占位，不属于任何一份）
+let swapPendingUid = null;     // 这一份还没画出第一帧（宿主那边此刻不该把活画布露出来）
 // 镜像 <video> 的出帧计数：requestVideoFrameCallback 每呈现一帧 +1（见 vidBaseWatchFrames）。
 // 为什么不能拿 currentTime 当"有没有新帧"：那是媒体时钟，几乎每个 rAF tick 都在动
 // （实测 2 秒 309 个不同值），而 24fps 的片源 2 秒只出 49 帧 —— 按时刻去重等于一秒白传
@@ -2464,6 +2475,9 @@ let blendUiQueued = false;      // 有没有一条快照在等 rAF —— 句柄
 let blendUiFallback = 0;
 let blendUiSent = '';
 function sendBlendUiNow() {
+    // 文档内嵌资产的清单（Assets 窗的 Video / Image 两档）走自己的等值闸，但借这一拍算 ——
+    // 它只在那份清单真变了的时候才发一句，平常这一句就是一次几十个图层的哈希比对。
+    pushDocAssets(false);
     // 盖章：这份快照说的是活跃文档（盖完进等值闸，切换文档后 uid 变了自然算新的一条）。
     blendUiState.uid = activeDoc ? activeDoc.uid : null;
     // 图层集的"吃哪几条轨的帧"摘要（宿主判引用失效要它）与这份快照同一个节拍，自己的等值闸。
@@ -4127,8 +4141,11 @@ function previewNow() {
 }
 
 function pushPreview() {
+    // 台面不属于活跃文档 = 正在换文档、这一份还没画出第一帧。这一条发出去会被当成"活跃文档此刻
+    // 的合成图"（Context 卡读的就是它），所以宁可不说：宿主那一侧按文档分桶，它留着自己那一张。
+    if (activeDoc && stageOwnUid !== activeDoc.uid) return;
     if (!canvasW || !canvasH) {
-        window.parent.postMessage({ type: 'blend-preview', image: null }, '*');
+        window.parent.postMessage({ type: 'blend-preview', image: null, uid: activeDoc ? activeDoc.uid : null }, '*');
         return;
     }
     const s = Math.min(1, PREVIEW_MAX_SIDE / Math.max(canvasW, canvasH));
@@ -4158,7 +4175,9 @@ function pushPreview() {
     }
     let image = null;
     try { image = previewCanvas.toDataURL('image/jpeg', 0.85); } catch (e) { image = null; }
-    window.parent.postMessage({ type: 'blend-preview', image, width: canvasW, height: canvasH }, '*');
+    // 这一条也带上它的主人（宿主按文档分桶存这张预览，切 tab 时看到的是目标文档自己那一张，
+    // 而不是上一份留下的画面 —— 那是另一种"串图像"）。
+    window.parent.postMessage({ type: 'blend-preview', image, width: canvasW, height: canvasH, uid: activeDoc ? activeDoc.uid : null }, '*');
 }
 
 // 每层一张**自己的**临时面（笔刷预览的抄写 / 栅格拖动的烘焙）。按图层对象做键，图层没了它跟着回收。
@@ -5451,9 +5470,60 @@ function stageBackdropItem() {
 
 /** 把一组 items 合成到唯一显示面。GL 不可用时同一块 canvas 退成 2D（items 逐张 drawImage）。
  *  这里**只落地、不补救** —— 落什么是什么。缺底的那一帧按"没底"如实落画（透明），不是异常;
- *  录像带取证（vidTrace）整套已随 Trace 按钮退役。 */
+ *  录像带取证（vidTrace）整套已随 Trace 按钮退役。
+ *  **归属**在这一处记（显示面只有这一个出口）：'work'（活画布这一套）/ 'base'（底片帧）/
+ *  'no-canvas'（空画布）三种是真画面的呈现，台上这张图从此属于活跃文档，等待中的那次换文档
+ *  到这里算画完了。'live'（把 context image 铺上台）与 'guidance'（叠加层）、'blank'（换文档
+ *  时的空台）都不改归属 —— 它们可能只是一张空白占位，认成"画过了"就会让静帧抄成空图。 */
 function stagePresent(items, clear, tag) {
-    return stagePresentRaw(items, clear);
+    const ok = stagePresentRaw(items, clear);
+    // 空画布的文档（新建的 Untitled、还没定栅格的工程）没有像素可画，但它**就是这一份此刻的样子**：
+    // 归属与 ack 照算 —— 否则宿主等不到 ack，只能等超时，新工程白白先暗一秒多。
+    if (tag === 'no-canvas') {
+        stageOwnUid = activeDoc ? activeDoc.uid : null;
+        if (swapPendingUid !== null && swapPendingUid === stageOwnUid) commitSwap();
+        return ok;
+    }
+    if (ok && (tag === 'work' || tag === 'base')) {
+        stageOwnUid = activeDoc ? activeDoc.uid : null;
+        if (swapPendingUid !== null && swapPendingUid === stageOwnUid) commitSwap();
+    }
+    return ok;
+}
+
+/** 换文档时把显示面**收空**：从这一刻起台上不属于任何一份文档。
+ *  不这么做，接下来那一趟 render 若被 hold（缺帧 / 换套 / 底片还没换过来）就会把上一份的
+ *  最后一帧留在台上 —— 而宿主已经把活画布盖到新文档那扇窗上了，用户看到的就是"串图像"。 */
+function blankStageForSwap() {
+    stageMode = '';
+    stageBaseStamp = '';
+    stageOwnUid = null;
+    if (!canvasW || !canvasH) return;
+    if (stagePresent([], true, 'blank')) return;
+    // 合成器这一刻不肯画（初始化早期 / 上下文丢了）：直接抹一遍。台上绝不能留上一份的像素。
+    try {
+        if (stageCtx2d) {
+            stageCtx2d.setTransform(1, 0, 0, 1, 0, 0);
+            stageCtx2d.globalAlpha = 1;
+            stageCtx2d.globalCompositeOperation = 'source-over';
+            stageCtx2d.clearRect(0, 0, canvasW, canvasH);
+        }
+    } catch (e) { /* 没有 2D 上下文（纯 GL）：present 已经试过了，认命 */ }
+}
+
+/** 这一份文档的第一帧真画面已经落在台上了 —— 告诉宿主可以把活画布露出来。
+ *  双 rAF：浏览器把这一帧**真合成到 iframe 上**之后再说，早一步说，宿主掀开盖子的那一瞬
+ *  看到的还是上一份的最后一帧（同一类串图，只是短）。 */
+function commitSwap() {
+    const uid = swapPendingUid;
+    if (uid == null) return;
+    swapPendingUid = null;
+    if (window.parent === window) return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        // 这两帧之间又切走了：这条 ack 说的是别人，宿主那边按 uid 丢，不发也无妨 —— 但别发错的。
+        if (!activeDoc || activeDoc.uid !== uid) return;
+        window.parent.postMessage({ type: 'blend-doc-painted', uid }, '*');
+    }));
 }
 
 
@@ -5674,6 +5744,9 @@ function vidBaseSeek() {
 function handleVidBaseSrcMessage(d) {
     const src = String(d.src || '');
     if (!src) { vidBaseOff(); return; }
+    // 底片是页面级的唯一一只 <video>：谁的包都能把它换走。换 tab 那一瞬宿主的旧 Player 可能
+    // 还补发一包上一份的片段 —— 那一帧会被当成本文档的底，压在本文档的图层下面（串图的最短路径）。
+    if (d.uid != null && activeDoc && (d.uid | 0) !== activeDoc.uid) return;
     vidBaseWant = Math.max(0, (+d.offset || 0) + (+d.t || 0) - (+d.start || 0));
     vidBasePlaying = !!d.playing;
     vidBaseHidden = d.hidden === true;
@@ -6275,6 +6348,9 @@ function vidCompSame(a, b) {
 }
 
 function handleVidFrameMessage(d) {
+    // 这一包说的是哪一份文档的帧（宿主盖的章）。对不上 = 换 tab 那一瞬还在飞的旧包 —— 折进去
+    // 就是把上一份的源帧画进这一份的面里。没有这一格（老版本宿主）就照旧按 layerKey 判。
+    if (d.uid != null && activeDoc && (d.uid | 0) !== activeDoc.uid) return;
     const prev = vidFramePacket;
     const sources = new Map();
     const bitmaps = [];
@@ -6440,7 +6516,10 @@ function scheduleGuidanceCard() {
 // composite, which is the truth of what that card shows.
 function publishGuidanceCard() {
     if (window.parent === window) return;         // standalone: there is no workspace to write to
-    if (!canvasW || !canvasH) {
+    // 台面不是这一份画的（刚换文档、这一份还没画出第一帧）：不许拿别人的 context image 当它的
+    // 指导卡 —— 工作区里那一张只能有一份，摆错了就是"这份工程的 guidance 是别人的"。
+    // 撤掉（image 为 null）比摆一张错的强，下一次真画完会自己回来。
+    if (!canvasW || !canvasH || (activeDoc && stageOwnUid !== activeDoc.uid)) {
         if (guidanceCardLast === null) return;    // already withdrawn — say it once
         guidanceCardLast = null;
         window.parent.postMessage({ type: 'blend-guidance-card', image: null }, '*');
@@ -7085,6 +7164,8 @@ function switchLayerSet(key, noPaint) {
     if (!noPaint) render();
     syncStackRows();
     syncHistoryUI();
+    // 换段 = 换了"活跃的那一套图层"，Video 档的归账（哪张图属于哪一段）跟着换一句。
+    pushDocAssets(true);
     setStatus(k ? 'Layer segment — this segment owns its own layers' : 'Document layers');
     // 手上那一包现在能在**活画布**上折了（源帧也在手上）：立刻重折一次并回图。
     // 不催这一下的话，进段那一刻包里还没有"这一套"，走的是临时画布；要等下一个包
@@ -7833,7 +7914,7 @@ function setLayerOpacity(id, a) {
 function jumpLayerRow(id) {
     const l = getLayer(id);
     if (!l) return;
-    if (is3DLayer(l)) open3DSceneDocument(l);
+    if (is3DLayer(l)) void open3DSceneDocument(l);
     else if (isCudLayer(l)) openLinkedCudDocument(l);
 }
 
@@ -11006,7 +11087,7 @@ function update3DPanel() {
 function openSelected3DScene() {
     const l = getSelected();
     if (!l || !findAttr(l, '3d')) { setStatus('Select a layer that carries a 3D step', 'error'); return; }
-    open3DSceneDocument(l);
+    void open3DSceneDocument(l);
 }
 
 // ==================== Geometry 工具小窗 ====================
@@ -13224,6 +13305,10 @@ function stillDataUrl(maxSide) {
 function captureStill(entry) {
     if (!entry || window.parent === window || isSceneDoc(entry)) return;
     if (!canvasW || !canvasH) return;
+    // 只有"台上这张就是这一份画的"才抄。台上若摆着别人的画面（换文档后这一份被 hold 住，
+    // 一次都没画出来），抄下来的静帧就是别人那张 —— 而且它会被永久刻进那扇窗：
+    // 之后每次切回这一份，看到的就是那张错图。宁可留上一张（它自己的旧图），也不刻一张错的。
+    if (stageOwnUid !== entry.uid) return;
     const image = stillDataUrl(DOC_STILL_MAX_SIDE);
     if (!image) return;
     window.parent.postMessage({ type: 'blend-doc-still', uid: entry.uid, image }, '*');
@@ -13341,10 +13426,34 @@ function stashHistory(entry) {
     entry.undo = undoStack; entry.redo = redoStack; entry.lastActionKey = lastActionKey;
 }
 
-function switchDocument(uid) {
+// 换文档要离开的那一份，宿主可能还欠着一笔落盘（Video 工程的时间线进出点 / 监视开关改过，
+// 它那边 700ms 的去抖**会在换人时自己放弃** —— 换完再存，写进去的就是新文档的状态）。而在页面
+// 这侧，只有那份**还活跃**的时候才写得进它自己的文件，所以这笔账记在这儿、换人之前补上。
+// 见宿主 saveVidSoon 的 `blend-vid-owe`：改一次记一次，写入成功才销账。
+const vidSaveOwed = new Set();
+async function flushVidSave(entry) {
+    if (!entry || !vidSaveOwed.has(entry.uid)) return;
+    // 别人的 ctx 不在全局里（写不了）；正在读写（cudBusy）时不插队 —— 那一趟自己会 markDocumentClean；
+    // 没落过盘的、3D 场景 tab 也都不写：autosave 的门槛就是 saveCud 的门槛，这里一个字都不放宽。
+    if (entry !== activeDoc || cudBusy || !currentCudHandle || isSceneDoc(entry)) return;
+    setStatus(`Saving ${entry.name}…`);
+    // 失败就留着这笔账：下一趟再试，别把没写进去的东西记成写过了。
+    if (await saveCud()) vidSaveOwed.delete(entry.uid);
+}
+
+// 换 tab。**有欠账时这一趟要先把账写完**，所以它是异步的：调用方拿到的是"已经在路上"，
+// 页面在 await 之前一个字节都没换。没有欠账的那一支**一个 await 都没有** —— 换人仍然同步发生，
+// 时序与从前逐字相同（这是它的要紧处：整页都假设 activateDocument 当场就换完了）。
+async function switchDocument(uid) {
     const entry = documents.find(d => d.uid === uid);
     if (!entry || entry === activeDoc) return false;
     if (!guardSwitch('what you are doing')) return false;
+    if (activeDoc && vidSaveOwed.has(activeDoc.uid)) {
+        // 换人之前写：saveCud 边走边读全局，换完再跑，存进去的就是新文档的像素。
+        await flushVidSave(activeDoc);
+        if (entry === activeDoc) return true;
+        if (!documents.includes(entry)) return false;   // 保存那趟里文档被关掉了
+    }
     activateDocument(entry);
     setStatus(`Switched to ${entry.name}`);
     return true;
@@ -13366,6 +13475,21 @@ function activateDocument(entry) {
     // that frame is all its window can show until the engine is per document rather than per page.
     captureStill(activeDoc);
     activeDoc = entry;
+    // ── 换文档是一次事务 ────────────────────────────────────────────────────────────────────
+    // 上面那一排（底片 / 帧包 / 合成缓存 / 缩略图记账 / 蒙版静帧 / 指导卡去重）全是**上一份**的，
+    // 新文档一个字都不继承：底片不换走，新文档的图层就会压在别人的视频帧上；帧包不扔，别人的
+    // 源帧会被折进这一份的面里；缓存不清，同一套 layerKey（Save As 出来的副本）会命中别人的图。
+    // 台面最后收空 —— 新文档下面那一趟 render 若被 hold，台上就是一张空台，而不是上一份的最后一帧。
+    swapPendingUid = entry.uid;
+    vidFramePacket = null;
+    vidLastUsedTracks = new Set();
+    vidCompCache = null;
+    vidCompPending = null;
+    vidBaseOff();                 // 换源与对时由宿主按新文档重报（Player 换挂载时会重来一遍）
+    blankStageForSwap();
+    faceSent.clear();             // 宿主按文档分桶喂缩略图：这一份的每一张面都得重新发
+    maskStillSrc = null; maskStillGen = -1;   // 蒙版卡是活跃文档那一张，去重记忆跟着换人
+    guidanceCardLast = null;      // 指导卡同理：让这一份自己重发（空栈就是撤回）
     undoStack = entry.undo || []; redoStack = entry.redo || []; lastActionKey = entry.lastActionKey || null;
     setCurrentDocument(entry.doc, entry.doc ? entry.name : '');
     docSwapping = true;
@@ -13382,11 +13506,16 @@ function activateDocument(entry) {
     } finally {
         docSwapping = false;
     }
+    // 场景 tab 的画面不归这块显示面（3D 有自己那张 WebGL 画布，restoreState 里已经进出完毕），
+    // 没有 present 可等 —— 直接算它画好了，否则宿主会白等一趟超时，那扇窗先暗一秒多。
+    if (swapPendingUid === entry.uid && isSceneDoc(entry)) commitSwap();
     if (!isSceneDoc(entry) && (bootSwap || stagingPoolOwner !== entry.uid)) {
         stagingPoolOwner = entry.uid;
         if (!bootSwap) postStagingSync();
     }
     syncDocList();
+    // 换完人立刻报一次这份文档的内嵌资产（不等下一帧：宿主的 Assets 窗在切 tab 那一瞬就换档内容）。
+    pushDocAssets(true);
     return true;
 }
 
@@ -13418,16 +13547,18 @@ function adoptDocument(entry) {
     activeDoc = entry;
     stashHistory(entry);       // the live stacks become this project's — Ctrl+Z is already wired to them
     syncDocList();
+    pushDocAssets(true);       // 开机这一份：Assets 窗的 Video / Image 两档第一帧就有内容
     return entry;
 }
 
 // Closing never drops work on the floor: an untouched project goes straight away, a dirty one is
 // prompted for, and a background project is shown first so the user sees what they are discarding.
-function closeDocument(uid) {
+async function closeDocument(uid) {
     const entry = documents.find(d => d.uid === uid);
     if (!entry) return false;
     if (!guardSwitch('what you are doing')) return false;
-    if (entry !== activeDoc && !switchDocument(uid)) return false;
+    // 后台那份要露一次脸（用户得看见自己在丢什么），换过去这一趟可能先把欠账写完 —— 所以要等。
+    if (entry !== activeDoc && !(await switchDocument(uid))) return false;
     if (!entry.dirty) { dropDocument(entry); return true; }
     openDocCloseModal(entry);
     return false;
@@ -13441,13 +13572,14 @@ function dropDocument(entry) {
     if (isSceneDoc(entry)) releaseSceneAssets(entry);
     const wasActive = entry === activeDoc;
     documents.splice(at, 1);
+    vidSaveOwed.delete(entry.uid);      // 文档没了，欠它那一笔也就没了（uid 会被新文档复用）
     if (wasActive) activeDoc = null;
     else { syncDocList(); setStatus(`Closed ${entry.name}`); return; }
     // 关掉一份，邻座接手。**关掉最后一份就是真的空了** —— 不再替你补一个 Untitled：那个项目不是
     // 你开的，它只是页面的落脚点，而落脚点不该每次都多出一份要收拾的东西。空下来之后，File 那一排
     // 的 New / Load 仍是原地可用的入口。
     const next = documents[Math.min(at, documents.length - 1)];
-    if (next) switchDocument(next.uid);
+    if (next) void switchDocument(next.uid);
     else {
         undoStack = []; redoStack = []; lastActionKey = null;
         restoreState(blankContext(), { document: true });
@@ -13455,6 +13587,7 @@ function dropDocument(entry) {
         refreshLayerPanels();
         updateCanvasReadout();
         syncDocList();
+        pushDocAssets(true);       // 一份都没了：两份"文档自己的"档清空，不留上一份的清单
     }
     setStatus(`Closed ${entry.name}`);
 }
@@ -13470,8 +13603,10 @@ function dropPristineBootDocument() {
     return true;
 }
 
-function createBlankProject() {
+async function createBlankProject() {
     if (!guardSwitch('what you are doing')) return null;
+    // 新建一份也是"离开当前那份"：它欠的落盘先补（补不上照常往下走，见 flushVidSave）。
+    await flushVidSave(activeDoc);
     const entry = createDocument('Untitled', null, blankContext(), true);
     setStatus('New project — add a layer to start');
     return entry;
@@ -13536,6 +13671,9 @@ function markDocumentClean() {
 // 注意：不能挂在 markDocumentClean 里 —— 那份早退（文档本来就不脏）恰好是
 // “只改了 Video” 的情形，挂在里面就永远发不出去。
 function announceSaved() {
+    // 写成功 = 欠账销了（这一句要放在下面那个早退**之前**：单页打开时没有宿主可通知，
+    // 但账还是页面自己的账）。见 vidSaveOwed / flushVidSave。
+    if (activeDoc) vidSaveOwed.delete(activeDoc.uid);
     if (window.parent === window || !activeDoc) return;
     window.parent.postMessage({ type: 'blend-saved', uid: activeDoc.uid | 0 }, '*');
 }
@@ -13552,12 +13690,12 @@ function announceSaved() {
 // 那一层的记录)。它不是图层种类,所以 Layers 的 Add 菜单里没有它的位置。
 
 // 跳转:和 cud 那枚按钮同一个分寸 —— 已经在这一枚 tab 上就什么也不做,否则正常走 tab 切换的闸门。
-function open3DSceneDocument(l) {
+async function open3DSceneDocument(l) {
     if (!is3DLayer(l)) return false;
     const at = documents.findIndex(d => d.uid === l.sceneUid);
     if (at < 0) { setStatus(`「${l.name}」has no 3D tab — its scene was closed`, 'error'); return false; }
     if (documents[at] === activeDoc) return true;
-    if (!switchDocument(l.sceneUid)) return false;
+    if (!(await switchDocument(l.sceneUid))) return false;
     setStatus('3D scene — hold the right mouse button and fly with W A S D Q E');
     return true;
 }
@@ -14902,6 +15040,11 @@ function cudContext(header, records, maskSurface, setData) {
 // happens before a tab exists, so a bad file leaves every open project exactly as it was.
 async function openCudDocument(file, doc) {
     if (cudBusy) return false;
+    // Load 也是一次"离开当前那份"：它欠的那笔落盘得在**换人之前**补（这个流程一拿 cudBusy，
+    // saveCud 就进不去了）。补不上（没落过盘 / 3D tab / 本来就写失败）就照常往下走 —— 这
+    // 一步是救那一笔，不是设闸门。
+    await flushVidSave(activeDoc);
+    if (cudBusy) return false;
     cudBusy = true; syncDocList();
     setStatus(`Opening ${file.name}…`);
     try {
@@ -15085,7 +15228,7 @@ function findOpenDocument(doc) {
 
 function requestImportCud(file, doc) {
     const already = findOpenDocument(doc);
-    if (already) { switchDocument(already.uid); setStatus(`${already.name} is already open`, 'success'); return true; }
+    if (already) { void switchDocument(already.uid); setStatus(`${already.name} is already open`, 'success'); return true; }
     return openCudDocument(file, doc);
 }
 
@@ -15384,7 +15527,7 @@ async function openLinkedCudDocument(l) {
     const doc = cudDocFor(l.cud.link);
     if (!doc) { setStatus('This row lost its link when the page reloaded — right-click it to Relink', 'error'); return false; }
     const already = findOpenDocument(doc);
-    if (already) return switchDocument(already.uid);
+    if (already) return await switchDocument(already.uid);
     if (!guardSwitch('what you are doing')) return false;
     if (cudBusy) { setStatus('Still working on the last one…'); return false; }
     try {
@@ -15463,14 +15606,14 @@ async function relinkCudLayer(l) {
 // title bars — so they arrive as messages instead of clicks (see the 'blend-doc-command' handler). Each
 // one is the same entry point the keyboard path and the dialogs call; only where the click came from moved.
 const DOC_COMMANDS = {
-    new: () => { createBlankProject(); },
+    new: () => { void createBlankProject(); },
     load: () => { void loadCud(); },
     save: () => { void saveCud(); },
     'save-as': () => { void saveCudAs(); },
     'export-png': () => { void exportPng(); },
     import: () => { void importImages(); },
-    activate: uid => { switchDocument(uid); },
-    close: uid => { closeDocument(uid); },
+    activate: uid => { void switchDocument(uid); },
+    close: uid => { void closeDocument(uid); },
 };
 // Canvas / Transform / Selection / View 四格现在是宿主的 dock 单元：按钮不再属于这一页，点下去发的
 // 是一个动作键。每一条就是那一颗按钮原来那行调用 —— 消息不是另一种点击，守卫一个都不减。
@@ -15984,6 +16127,86 @@ function postStagingSync() {
         names: stagingItems.map(s => s.name),
         ids: stagingItems.map(s => s.id),
     }, '*');
+}
+
+// ==================== 文档内嵌资产（Assets 窗的 Video / Image 两档） ====================
+// A4 起图像是**内嵌**的（.cud 是权威，仓库那份只是载入时落下的缓存），所以宿主那扇 Assets 窗有
+// 两个"文档自己的"档位，差别只在**用途**：
+//   Image = image 模式那一套工作面：主图层栈（含 Guidances 那一摞）+ 图池里还没落成图层的那些；
+//   Video = Video 模式每个 Layer 段各自那一套图层（含各自的 Guidances 摞）。
+// 这条播报只说"这份文档用着哪几张、各是什么用途、在哪一摞"——**不搬字节**：这些哈希在载入/保存
+// 时已经进了仓库，宿主按 `/api/asset_media/<hash>` 就能画。等值闸按整份清单（含 uid），所以切
+// 文档、加删图层、换图池都会让它说一句新的；没有变化时一个字都不发。
+const DOC_ASSETS_MIN_MS = 150;
+let docAssetsSent = '';
+let docAssetsAt = 0;
+
+// 一层（或一张图池条目）→ 一条引用。`buffer` 是保存那一刻这一层的像素哈希（文件里内嵌的那份），
+// `asset` 是像素的**来源货**（图池拖入 / 文件导入）—— 前者才是"内嵌的那张"，只有这一层还没物化
+// （新拖进来、没存过）时才拿后者当答案。
+function docAssetPush(out, seen, l, role, setKey) {
+    if (!l || typeof l !== 'object') return;
+    const hash = (typeof l.buffer === 'string' && l.buffer)
+        || (typeof l.asset === 'string' && l.asset) || '';
+    if (!hash) return;
+    const key = role + '|' + setKey + '|' + hash + '|' + (Number.isInteger(l.id) ? l.id : 0);
+    if (seen.has(key)) return;
+    seen.add(key);
+    const n = l.img ? nativeSize(l.img) : { w: 0, h: 0 };
+    out.push({
+        hash, role, setKey: setKey || '',
+        id: Number.isInteger(l.id) ? l.id : 0,
+        name: String(l.name || 'Layer'),
+        w: Math.max(0, Math.round(Number(n.w) || 0)),
+        h: Math.max(0, Math.round(Number(n.h) || 0)),
+    });
+}
+
+function collectDocAssets() {
+    const image = [], video = [];
+    const seenImage = new Set(), seenVideo = new Set();
+    const roleOf = l => (l && l.stack === GUIDANCE_STACK ? 'guidance' : 'layer');
+    // Image：主图层栈（两摞一起）+ 图池。图池里那张合成的指导卡不算一件货（它是 Layers 的折叠
+    // 结果，后端按保留 id 原地换像素），跳过它。
+    for (const l of layers) docAssetPush(image, seenImage, l, roleOf(l), '');
+    for (const s of stagingItems) {
+        if (!s || !s.asset || s.id === GUIDANCE_CARD_ID) continue;
+        const key = 'staging|' + s.id;
+        if (seenImage.has(key)) continue;
+        seenImage.add(key);
+        image.push({
+            hash: String(s.asset), role: 'staging', setKey: '', id: 0,
+            name: String(s.name || 'Staged'),
+            w: Math.max(0, Math.round(Number(s.width) || 0)),
+            h: Math.max(0, Math.round(Number(s.height) || 0)),
+        });
+    }
+    // Video：每个 Layer 段一套。活跃那套就是全局 `layers`（layerSets 里那份是上次切走的旧壳）,
+    // 所以它按 activeLayerSet 记账，其余各按自己的 key。
+    const activeKey = activeLayerSet || '';
+    for (const l of layers) docAssetPush(video, seenVideo, l, roleOf(l), activeKey);
+    for (const [key, set] of layerSets) {
+        if (!set || key === activeKey) continue;
+        for (const l of (set.layers || [])) docAssetPush(video, seenVideo, l, roleOf(l), key);
+    }
+    return { uid: activeDoc ? activeDoc.uid : null, image, video };
+}
+
+function pushDocAssets(force) {
+    if (window.parent === window) return;
+    try {
+        const now = performance.now();
+        if (!force && now - docAssetsAt < DOC_ASSETS_MIN_MS) return;
+        docAssetsAt = now;
+        const payload = collectDocAssets();
+        const json = JSON.stringify(payload);
+        if (json === docAssetsSent) return;
+        docAssetsSent = json;
+        window.parent.postMessage(Object.assign({ type: 'blend-cud-assets' }, payload), '*');
+    } catch (e) {
+        // 早期调用时 `stagingItems` / `GUIDANCE_CARD_ID` 这些还没初始化（let/const 的 TDZ）：
+        // 下一次节拍自然会再来，不在这里制造噪声。
+    }
 }
 
 // ==================== Extra Prompt：宿主编辑，这一页只留那份字符串 ====================
@@ -16523,11 +16746,13 @@ window.addEventListener('message', event => {
         // init 时随配置带一份工作区列表（此后靠 'blend-staging' 增量同步）。
         if (Array.isArray(d.staging)) { stagingItems = d.staging; syncProcessorUI(); }
         updateStagingPanel();
+        pushDocAssets(true);          // 开机那一份的图池也在这一条里，清单当场就齐
         return;
     }
     if (d.type === 'blend-staging') {
         stagingItems = Array.isArray(d.items) ? d.items : [];
         syncProcessorUI();          // staging 输入的下拉跟着图池走
+        pushDocAssets(true);        // 图池变了：Image 档里的 staging 那几条跟着换
         return;
     }
     if (d.type === 'blend-save') {
@@ -16546,6 +16771,15 @@ window.addEventListener('message', event => {
         // 一下"的地方（关闭时那句问话在它那儿），所以把脏记到它自己的账上。
         const entry = documents.find(x => x.uid === (d.uid | 0));
         if (entry && !entry.dirty) { entry.dirty = true; syncDocList(); }
+        return;
+    }
+    if (d.type === 'blend-vid-owe') {
+        // 宿主记账：这份文档的 Video 工程改过，它那边 700ms 后会自己敲一次自动保存。但那条去抖
+        // **会在换文档时自己放弃**（换完再存，写进去的就是新文档的状态），而页面只能在那份还
+        // 活跃时写得进它自己的文件 —— 所以这笔账记在这儿，换人之前由 switchDocument 补上
+        // （见 flushVidSave）。值可以重复来，集合是幂等的。
+        const uid = d.uid | 0;
+        if (uid) vidSaveOwed.add(uid);
         return;
     }
     if (d.type === 'blend-vid-frame') { handleVidFrameMessage(d); return; }

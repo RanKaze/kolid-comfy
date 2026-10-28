@@ -3,9 +3,11 @@ import { defineConfig } from 'vite';
 import type { Plugin } from 'vite';
 import { resolve } from 'path';
 import { copyFileSync, existsSync } from 'fs';
+import { spawnSync } from 'child_process';
 
 const uiUtilsSrc = resolve(__dirname, '../packages/ui-utils/src');
 const outDir = resolve(__dirname, '../../nodes/web');
+const repoRoot = resolve(__dirname, '../..');
 
 // 构建戳 —— 界面探针靠它回答"页面上的 build 与仓库里的源码是不是同一版"。
 // 没有它，每次排查都要先花一轮问一个侧面问题（"你刷新了吗"）才能问正面问题，
@@ -30,12 +32,26 @@ const probeViewer: Plugin = {
   },
 };
 
+// Agent 工具目录（`nodes/workbench/agent_tools.json`）是**构建产物**：源在
+// src/agent/toolSchemas.ts，后端按 mtime 热读它。挂在这里而不是单独的 npm script，
+// 是因为"前端改动生效"的唯一路径就是 build —— 只要构建过，后端就不可能拿着过期的工具表，
+// 也就不存在"改了 schema 忘了同步、下次启动才发现"这种事。
+const agentToolCatalog: Plugin = {
+  name: 'agent-tool-catalog',
+  closeBundle() {
+    const gen = resolve(repoRoot, 'tools/gen_agent_tools.cjs');
+    if (!existsSync(gen)) return;
+    const r = spawnSync(process.execPath, [gen], { stdio: 'inherit', cwd: repoRoot });
+    if (r.status !== 0) throw new Error('agent tool catalog generation failed (see above)');
+  },
+};
+
 export default defineConfig({
   ...createViteConfig({
     appName: 'sampler_node',
     outDir,
     base: '',
-    extraPlugins: [probeBuildStamp, probeViewer],
+    extraPlugins: [probeBuildStamp, probeViewer, agentToolCatalog],
   }),
   resolve: {
     alias: {

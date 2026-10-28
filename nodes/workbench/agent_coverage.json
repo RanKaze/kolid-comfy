@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "note": "非动作键的用户操作清单。页面动作键（BlendUiAction，125 条）由 ui_action 自动覆盖、不计入这份账（见 nodes/workbench/ui_actions.json）。这份账只管『不经过动作键』的操作：文档、时间线面板、资产窗、停靠、设置。state=covered 要有 tool；state=missing 必须写 why（下一批补什么，一眼能读）。tests/agent_coverage.py 会检查每个 tool 名真的存在。",
+  "groups": [
+    {
+      "id": "document",
+      "label": "文档（新建/打开/保存/另存/导出/导入/关闭）",
+      "actions": [
+        { "id": "document.new", "ui": "New", "tool": "document" },
+        { "id": "document.load", "ui": "Load（原生对话框）", "tool": "document" },
+        { "id": "document.save", "ui": "Save / Ctrl+S", "tool": "document" },
+        { "id": "document.save_as", "ui": "Save As", "tool": "document" },
+        { "id": "document.export_png", "ui": "Export PNG", "tool": "document" },
+        { "id": "document.import", "ui": "Import（图片/PSD → 图层）", "tool": "document" },
+        { "id": "document.close", "ui": "关掉当前文档", "tool": "document" }
+      ]
+    },
+    {
+      "id": "transport",
+      "label": "时间线：播放头与视图",
+      "actions": [
+        { "id": "transport.seek", "ui": "拖播放头 / 点时间尺", "tool": "seek" },
+        { "id": "transport.play", "ui": "播放", "tool": "play" },
+        { "id": "transport.pause", "ui": "暂停", "tool": "pause" },
+        { "id": "transport.zoom", "ui": "缩放尺（pps）", "tool": "set_timeline_zoom" },
+        { "id": "transport.select", "ui": "点/框选片段", "tool": "select_clips" }
+      ]
+    },
+    {
+      "id": "tracks",
+      "label": "时间线：轨道",
+      "actions": [
+        { "id": "tracks.add", "ui": "加轨", "tool": "add_track" },
+        { "id": "tracks.remove", "ui": "删轨", "tool": "remove_track" },
+        { "id": "tracks.rename", "ui": "双击改名", "tool": "rename_track" },
+        { "id": "tracks.reorder", "ui": "拖轨排序", "tool": "move_track" },
+        { "id": "tracks.mute", "ui": "静音", "tool": "toggle_track_mute" },
+        { "id": "tracks.solo", "ui": "solo", "tool": "toggle_track_solo" },
+        { "id": "tracks.mask", "ui": "掩码轨下拉", "tool": "set_mask_track" }
+      ]
+    },
+    {
+      "id": "clips",
+      "label": "时间线：片段",
+      "actions": [
+        { "id": "clips.place", "ui": "从资产/暂存拖上轨", "tool": "place_asset" },
+        { "id": "clips.move", "ui": "拖动换位/换轨", "tool": "move_clip" },
+        { "id": "clips.trim", "ui": "拖两端裁剪", "tool": "trim_clip" },
+        { "id": "clips.split", "ui": "切割", "tool": "split_clip" },
+        { "id": "clips.remove", "ui": "删除片段", "tool": "remove_clips" },
+        { "id": "clips.layer_seg", "ui": "加 Layer 段", "tool": "add_layer_clip" },
+        { "id": "clips.copy_paste", "ui": "Ctrl+C / Ctrl+V", "state": "missing",
+          "why": "粘贴 Layer 段要页面回执克隆整套图层集（vid.layerCopy）+ 关键帧按层 id 重映射，这段编排还住在 Timeline 的事件处理里，没抽成宿主可复用的函数。" },
+        { "id": "clips.merge_layer", "ui": "合并 Layer 段（两套图层集签名一致才许）", "state": "missing",
+          "why": "mergeVidClips 是纯函数，但前置的 layerSigs 比对与回滚在 Timeline 里；抽出来再做工具。" },
+        { "id": "clips.snap", "ui": "吸附开关（Ctrl 临时关）", "state": "missing",
+          "why": "吸附是 Timeline 的本地 UI 偏好，不在工程里；先确认要不要给它一条工程级设置。" },
+        { "id": "clips.proc_rerun", "ui": "占位段 ▶ 重跑 / 队列 / 停止", "state": "missing",
+          "why": "continueProc/continueProcMany/pauseProc/stopProc 在 controller 上，但前置校验（prepVidProcRun）在 EditPhase 闭包里，需要先抽口。" },
+        { "id": "clips.vgen_chain", "ui": "Video Generator 段的接续开关（Ctrl+点接缝）", "tool": "toggle_vgen_chain" },
+        { "id": "clips.keyframes", "ui": "关键帧：加帧/移帧/删帧/删通道", "state": "missing",
+          "why": "kf* 全家（record/moveKey/removeKey/removeChannel/sample）都在 model.ts，通道命名规则要先写进 schema 说明，留给下一批。" }
+      ]
+    },
+    {
+      "id": "layers",
+      "label": "图层与指导层（页面动作键之外的）",
+      "actions": [
+        { "id": "layers.add", "ui": "Add（default/stash/dynamic/cud）", "tool": "add_layer" },
+        { "id": "layers.remove", "ui": "删层", "tool": "remove_layer" },
+        { "id": "layers.duplicate", "ui": "复制层", "tool": "duplicate_layer" },
+        { "id": "layers.rename", "ui": "改名", "tool": "rename_layer" },
+        { "id": "layers.opacity", "ui": "透明度滑杆", "tool": "set_layer_opacity" },
+        { "id": "layers.eye", "ui": "眼睛", "tool": "toggle_layer_visibility" },
+        { "id": "layers.select", "ui": "点行选中", "tool": "select_layer" },
+        { "id": "layers.generate", "ui": "层 Generate", "tool": "layer_generate" },
+        { "id": "layers.from_asset", "ui": "资产图卡落到图层栈", "tool": "layer_from_asset" },
+        { "id": "layers.comic", "ui": "漫画格排版", "tool": "create_comic_layout" },
+        { "id": "layers.transform", "ui": "拖动/缩放手柄、铺满", "tool": "ui_action",
+          "note": "transform-adjust / transform-fill 两条动作键" },
+        { "id": "layers.deep_edit", "ui": "特效链、decal/mask、文字、几何、姿态、3D", "tool": "ui_action",
+          "note": "attr-*, fx-*, text-*, geometry-*, pose-*, scene3d-open 动作键" }
+      ]
+    },
+    {
+      "id": "assets",
+      "label": "资产窗",
+      "actions": [
+        { "id": "assets.import_layer", "ui": "导入成图层", "tool": "document" },
+        { "id": "assets.drop_clip", "ui": "图卡拖到时间线", "tool": "place_asset" },
+        { "id": "assets.rename", "ui": "卡片改名", "state": "missing",
+          "why": "改名只改 vid.assets 的 name 与卡片显示；先补 rename_asset，注意同名不同哈希的两张卡不能互相顶掉。" },
+        { "id": "assets.delete", "ui": "Library 档删除（Del）", "state": "missing",
+          "why": "removeAsset 会让在用的片段变 MISSING；要一条带 usedBy 检查的 remove_asset（refuse unless force）。" },
+        { "id": "assets.relink", "ui": "右键『链接资产…』换绑", "state": "missing",
+          "why": "rebindAsset 需要先挑文件、再 ingest 出哈希；文件挑选用原生对话框，做成工具要两步（给候选 + 确认）。" },
+        { "id": "assets.library_toggle", "ui": "移出/收回公用库", "state": "missing",
+          "why": "改的是 inLibrary 标记与仓库，语义要跟 docs/assets_single_store_design.md 对一遍再开口。" }
+      ]
+    },
+    {
+      "id": "dock",
+      "label": "停靠 / 面板 / 布局",
+      "actions": [
+        { "id": "dock.show_panel", "ui": "开关某一格面板", "state": "missing",
+          "why": "面板开关是 EditPhase 的 UI state（dock 布局分槽位），不是工程数据；要做成工具就得先把 dock 的读写抽成宿主命令。" },
+        { "id": "dock.layout_preset", "ui": "套一份布局（★/current）", "state": "missing",
+          "why": "同上，属于界面状态。" }
+      ]
+    },
+    {
+      "id": "settings",
+      "label": "工程设置",
+      "actions": [
+        { "id": "settings.fps", "ui": "输出帧率", "tool": "set_fps" },
+        { "id": "settings.canvas", "ui": "画布尺寸", "tool": "set_canvas_size" },
+        { "id": "settings.extra_prompt", "ui": "Extra Prompt", "tool": "set_extra_prompt" },
+        { "id": "settings.preset", "ui": "选 pipeline 预设", "tool": "run_pipeline",
+          "note": "run_pipeline(preset_id) 就是「换预设并跑」；纯切换没有单独工具" }
+      ]
+    }
+  ]
+}

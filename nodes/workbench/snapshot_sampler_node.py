@@ -630,12 +630,21 @@ _LAYOUTS_MAX = 40
 
 
 def _layouts_read():
-    """读档案。形状不认识就当成空的 —— 一份坏档案不该让页面打不开。"""
+    """读档案。形状不认识就当成空的 —— 一份坏档案不该让页面打不开。
+
+    档案里有三样东西，别混：
+      · `items`   —— 用户起名字存下来的槽位（Layout 那一格的清单）；
+      · `default` —— ★：**一片空白的页面**从哪一份起手（没有"上一次"时的备份答案）；
+      · `current` —— 用户**此刻**的摆法。页面每次动一下布局就写回这里（实时、去抖），
+                     下一次打开就原样还给他。它不是一个槽位 —— 不进清单、不占 40 份的限额，
+                     也不会因为被别的存档挤掉而消失。
+    """
+    empty = {'v': 1, 'default': None, 'items': [], 'current': None}
     try:
         with open(_workbench_file('dock_layouts.json'), 'r', encoding='utf-8') as f:
             data = json.load(f)
     except Exception:
-        return {'v': 1, 'default': None, 'items': []}
+        return empty
     items = []
     if isinstance(data, dict):
         for it in (data.get('items') or []):
@@ -653,7 +662,15 @@ def _layouts_read():
     default = data.get('default') if isinstance(data, dict) else None
     if not isinstance(default, str) or default not in names:
         default = None
-    return {'v': 1, 'default': default, 'items': items}
+    # 「此刻的摆法」：只有一棵树是必须的，时间戳缺了就记 0。
+    current = None
+    cur = data.get('current') if isinstance(data, dict) else None
+    if isinstance(cur, dict):
+        dock = cur.get('dock')
+        if isinstance(dock, dict) and isinstance(dock.get('tree'), dict):
+            at = cur.get('at')
+            current = {'at': at if isinstance(at, (int, float)) else 0, 'dock': dock}
+    return {'v': 1, 'default': default, 'items': items, 'current': current}
 
 
 def _layouts_write(store):
@@ -666,15 +683,18 @@ def _layouts_write(store):
 
 
 def _layouts_apply(action, name, dock=None):
-    """改档案：save / delete / default。返回 (store, error)，error 是 (http_code, message) 或 None。
+    """改档案：save / delete / default / current。返回 (store, error)，error 是 (http_code, message) 或 None。
 
     逻辑放在这里而不是路由里，是为了能在 ComfyUI 之外单测这一套（路由只剩下读 body / 回 JSON）。
+    `current`（页面此刻的摆法）在这四条路上都**原样留着** —— 存一份取名的布局、删一份、
+    换一颗 ★，都不该把用户当前摆在屏幕上的那个样子动一下。
     """
     name = (name or '')[:64]
     with _LAYOUTS_LOCK:
         store = _layouts_read()
         items = store['items']
         default = store['default']
+        current = store['current']
         if action == 'save':
             if not name:
                 return None, (400, 'name required')
@@ -686,6 +706,12 @@ def _layouts_apply(action, name, dock=None):
             items = items[:_LAYOUTS_MAX]
             if default and default not in [i['name'] for i in items]:
                 default = None
+        elif action == 'current':
+            # 页面自己每隔一会儿就把屏幕上的摆法写回来一次。**只认一棵树**，形状不对就当没听见
+            # （一次坏包不该把用户上一份好布局顶掉）。
+            if not isinstance(dock, dict) or not isinstance(dock.get('tree'), dict):
+                return None, (400, 'dock must hold a tree')
+            current = {'at': time.time() * 1000, 'dock': dock}
         elif action == 'delete':
             items = [i for i in items if i['name'] != name]
             if default == name:
@@ -696,9 +722,56 @@ def _layouts_apply(action, name, dock=None):
             default = name or None
         else:
             return None, (400, 'unknown action %r' % action)
-        store = {'v': 1, 'default': default, 'items': items}
+        store = {'v': 1, 'default': default, 'items': items, 'current': current}
         _layouts_write(store)
     return store, None
+
+
+def _layouts_boot_payload():
+    """页面**第一帧**要用的那一份摆法，随 HTML 一起送下去（见下面 do_GET 里的注入）。
+
+    为什么要塞进 HTML，而不是让页面 mount 之后再 fetch：晚一步就来不及了 —— 页面会先按
+    localStorage 里那份（或者干脆按内置默认）把窗摆一遍，等 `/api/layouts` 回来再跳一次。
+    用户看到的就是"打开时闪一下默认布局"。localhost 上这一跳也就几十毫秒，可它跳的是**整页的
+    形状**，比什么都显眼。塞进 HTML 就没有"晚一步"这回事：脚本解析时答案已经在手上。
+
+    空壳（没有 `current`、也没有 ★）时给 null —— 页面据此知道"这一趟真的什么都没有"，
+    照内置默认摆，并且**不许**把那个默认写回盘上（见前端的 `armed`）。
+    """
+    store = _layouts_read()
+    cur = store['current']
+    items = store['items']
+    def_dock = None
+    if store['default']:
+        for it in items:
+            if it['name'] == store['default']:
+                def_dock = it['dock']
+                break
+    if cur is None and def_dock is None:
+        return None
+    return {'v': 1,
+            'current': cur['dock'] if cur else None,
+            'currentAt': cur['at'] if cur else 0,
+            'default': def_dock,
+            'defaultName': store['default']}
+
+
+def _inject_boot_layout(html):
+    """把上面那份塞进 `</head>` 之前。塞不进去就把页面原样发出去 —— 一份布局不该挡住页面。"""
+    try:
+        payload = _layouts_boot_payload()
+        if payload is None:
+            return html
+        blob = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+        # 树里只有 id / 数字，可 JSON 里万一出现 `</script` 就会把脚本提前截断 —— 一律打断。
+        blob = blob.replace('</', '<\\/')
+        tag = '<script>window.__DOCK_BOOT__=%s;</script>' % blob
+        at = html.find('</head>')
+        if at < 0:
+            return html
+        return html[:at] + tag + '\n  ' + html[at:]
+    except Exception:
+        return html
 
 
 # =============================================================================
@@ -3425,7 +3498,17 @@ class SnapshotDetailerSamplerServer:
                     self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
                     self.end_headers()
                     with open(file_path, 'rb') as f:
-                        self.wfile.write(f.read())
+                        raw = f.read()
+                    # 顶栏（sampler_node）的那一份布局随页面一起送下去：用户上次摆的样子在**第一帧**
+                    # 就已经在手上，不必等页面 mount 再去问一次（那一次就是"打开时闪一下默认布局"）。
+                    # 见 `_layouts_boot_payload`。工作台（blend_node）没有 dock，原样发。
+                    if name == 'sampler_node.html':
+                        try:
+                            html = _inject_boot_layout(raw.decode('utf-8'))
+                            raw = html.encode('utf-8')
+                        except Exception:
+                            pass
+                    self.wfile.write(raw)
                 else:
                     self.send_error(404, "%s not found" % name)
                 return
@@ -3840,7 +3923,8 @@ class SnapshotDetailerSamplerServer:
                 with _LAYOUTS_LOCK:
                     store = _layouts_read()
                 self._send_json({'ok': True, 'kind': 'layouts',
-                                 'default': store['default'], 'items': store['items']})
+                                 'default': store['default'], 'items': store['items'],
+                                 'current': store['current']})
                 return
 
             # ---- 文档 IO：前端问一次能力，之后就只按 token 读文件 ----
@@ -4210,7 +4294,8 @@ class SnapshotDetailerSamplerServer:
                         self._send_json({'ok': False, 'error': err[1]}, err[0])
                         return
                     self._send_json({'ok': True, 'kind': 'layouts',
-                                     'default': store['default'], 'items': store['items']})
+                                     'default': store['default'], 'items': store['items'],
+                                     'current': store['current']})
                 except Exception as e:
                     self._send_json({'ok': False, 'error': str(e)}, 500)
                 return

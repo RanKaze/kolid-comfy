@@ -139,21 +139,32 @@ operate the live app with the `wb` bridge — a stdlib-only CLI that round-trips
 ```bash
 "{python}" "{cli}" ping                      # is the workbench reachable
 "{python}" "{cli}" state                     # full snapshot: tracks, clips, layers, selection
+"{python}" "{cli}" tools                     # every tool, one line each (read from the backend)
+"{python}" "{cli}" ui-actions [group]        # the workbench UI action keys
 "{python}" "{cli}" call <tool> '<json>'      # one tool, e.g. call seek '{{"time": 4.0}}'
 ```
 
-Run `state` first, act on the ids it shows, run `state` again to verify. Tools: transport
-(seek/play/pause) · timeline (select_clips/add_track/remove_track/rename_track/place_asset/
-move_clip/trim_clip/split_clip/remove_clips/add_layer_clip) · layers (select_layer/add_layer/
-remove_layer/duplicate_layer/rename_layer/set_layer_opacity/toggle_layer_visibility/layer_generate/
-layer_from_asset/create_comic_layout) · generation (run_pipeline/run_blend/run_tag/cancel_run/
-set_extra_prompt) · canvas (set_canvas_size/view_fit/set_paint_color/set_brush/undo/redo) · video
-project (set_fps/add_vgen_segment/add_continue_segment/document). `create_comic_layout` lays out a
-whole comic page (paper + one empty panel layer per cell + frame lines, one undo step) — use it
-instead of stacking primitives when the user asks for 漫画格 / 分镜 / panel layout. Mutations are
-real, undoable edits in the user's project. If a call reports the workbench page is not loaded, ask
-the user to open it, then retry. Do not edit the Kolid Comfy source tree ({repo}) unless the user
-explicitly asks for code changes.
+Run `state` first, act on the ids it shows, run `state` again to verify. **The tool list is not
+written down here on purpose** — a hand-copied list goes stale, so ask the bridge (`tools`) or the
+MCP for the live catalog.
+
+You reach the app on two layers:
+
+* **Typed tools** — e.g. `get_app_state`, `seek`, `add_layer`, `layer_generate`, `run_pipeline`,
+  `prompt_*`, `document` — for the things one does often. They validate their arguments and say
+  what they did. The catalog is generated from the frontend source and hot-read by the backend, so
+  new tools can appear without restarting anything; `tools` always reflects the current set.
+* **`ui_action` — every button, slider and menu item in the workbench is an action key.** Whatever a
+  person can click, you can fire: `ui-actions layer` lists the keys with their payload shape, then
+  `call ui_action '{{"action":"layer-expand","value":{{"id":3}}}}'`. Unknown keys are rejected rather
+  than silently ignored (the page would just do nothing). Treat `ui_action` as the floor, not the
+  ceiling — prefer a typed tool when one exists.
+
+`create_comic_layout` lays out a whole comic page (paper + one empty panel layer per cell + frame
+lines, one undo step) — use it instead of stacking primitives when the user asks for 漫画格 / 分镜 /
+panel layout. Mutations are real, undoable edits in the user's project. If a call reports the
+workbench page is not loaded, ask the user to open it, then retry. Do not edit the Kolid Comfy source
+tree ({repo}) unless the user explicitly asks for code changes.
 
 The same catalog is also exposed over MCP as `mcp__kolid-workbench__<tool>` (server
 `kolid-workbench`) — prefer those calls when your client lists them; the CLI above is the same

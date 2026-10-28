@@ -1,25 +1,31 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { InspectSel } from './Inspector';
 import {
-  type VidAsset, type VidController, fmtTime, isAudioName, isVideoName, addAsset, newVidId, removeAsset,
+  type AssetIdentity, type VidController, clipUseIndex, fmtTime, isAudioName, isVideoName, addAsset, newVidId,
+  usedByCount,
 } from './model';
 import { probeMedia } from './audio';
 import { assetsTick, subscribeAssets } from './assetsTick';
 import { ingestFile } from './ingest';
+import { useCudState } from '../cudScope';
+import { useDocAssets } from '../docAssets';
+import { clipCards, groupDocAssets, whereText } from './assetScope';
 import { ensureFrame, ensureWaveform } from './previews';
 
-// ── Assets 窗（资产库 = 唯一的家）────────────────────────────────────────────────────────────
-// 这一窗是资产仓库（data/assets/）唯一的脸：**所有字节都在这里** —— 图层用的图、图池里的图、
-// run/processor 的产出、特效贴图、视频与音频，全都是一条记录。staging 只是它上面的一个有序
-// 视图（A2），不再是另一个仓库。
+// ── Assets 窗 ───────────────────────────────────────────────────────────────────────────────
+// 三档作用域（顶部那条 segmented），三档说的是**三处不同的字节**：
 //
-// 四档作用域（顶部那条 segmented）：
-//   All     = 仓库里的一切
-//   Library = 库成员（跨文档共享：Assets 节点的产出 + 用户主动入库的货）
-//   Project = 本工程自己的资产（时间线在用的那些，跟着 VidProject 走）
-//   Session = 仓库里有、却没有库成员身份的临时产物（run / processor 的中间图）
+//   Library = 公用库（`data/assets/` 里的库成员）—— 跨文档共享：Assets 节点的产出、用户主动入库
+//             的图、任何一份工程"另存进库"的货。这一档是全库的脸，视频/音频/图片都在。
+//   Video   = **这份文档内嵌的图**里，Video 模式那些 Layer 段用到的（每段一套 layers/guidances）。
+//   Image   = **这份文档内嵌的图**里，image 模式那一套工作面用到的（layers + guidances + staging）。
 //
-// 拖出去：卡片带 `application/x-asset` = `{id, url, name, kind}`；本工程资产另带老的
+// 后两档不是"仓库里的另一堆" —— 它们是同一份文件里的字节（A4：图像内嵌，.cud 是权威），所以只能
+// 由工作台页面报过来（`blend-cud-assets` → `docAssets.ts`）。仓库里那份是载入时落下的缓存，卡片
+// 走 `/api/asset_media/<hash>` 画；缓存缺了就是 MISSING，字节还在文件里。
+//
+// 拖出去：卡片带 `application/x-asset` = `{id, url, name, kind, asset}`；本工程资产另带老的
 // `application/x-vid-asset`（时间线按 asset id 认）；旧的 `application/x-vid-global` 也一起发一份，
 // 免得还有哪个落点只认它（A2 之后可以只留 x-asset）。
 
@@ -28,8 +34,11 @@ const STAGING_ITEM_TYPE = 'application/x-blend-staging';
 export const ASSET_ITEM_TYPE = 'application/x-asset';
 /** 老载荷：全局资产落到轨道上时带 URL + 名字（时间线拿它 importSource）。仍然发，兼容老落点。 */
 export const GLOBAL_ITEM_TYPE = 'application/x-vid-global';
+/** 工程资产的老载荷：只带资产 id（时间线据此直接落片段，不再走一次 importSource）。 */
+export const VID_ASSET_TYPE = 'application/x-vid-asset';
 
-export type Scope = 'all' | 'library' | 'project' | 'session';
+/** 三档：公用库 / 这份文档的 Layer 段 / 这份文档的 image 工作面。后两档的字节在 .cud 里。 */
+export type Scope = 'library' | 'video' | 'image';
 
 /** 仓库里的一件货（/api/global_assets 的响应项；A0 加了 hash / inLibrary / thumb 三个字段）。
  *  老服务没有这三个字段 —— 读的时候按"是库成员、没有 hash"兜底，窗不会白屏。 */
@@ -83,10 +92,8 @@ const GlobeIcon: React.FC<{ size?: number }> = ({ size = 14 }) => (
   </svg>
 );
 
-// 图片资产：src 是 data:image/...（图池条目）或扩展名是图片。视频之外的一种"长相"。
+// 图片的扩展名判据（导入那条路要认"这文件是不是一张图"）。
 const IMG_EXT = /\.(png|jpe?g|webp|gif|bmp|avif|tiff?)(?:[?#]|$)/i;
-const isImageAsset = (a: VidAsset): boolean =>
-  a.src.startsWith('data:image/') || IMG_EXT.test(a.name) || IMG_EXT.test(a.src);
 
 /** 卡片缩略图：视频 = 首帧（客户端抓一张）；图片 = 它自己（仓库图用后端生成的 thumb）；
  *  音频 = 整段波形（有就画，没有留音符图标）。`given` 有值就不再算 —— 省一趟解码。 */
@@ -266,8 +273,10 @@ export type CardItem = {
   hasAudio: boolean | null;
   /** 缩略图直给（仓库图有后端生成的那张）；不给就按 kind 现算。 */
   poster?: string | null;
-  /** 字节在哪：`store` 只在仓库；`doc` 某份文档里也内嵌了一份（A4 之后才可能出现）。 */
-  byteFrom?: 'store' | 'doc' | 'missing';
+  /** 字节在哪：`store` 只在仓库；`doc` 某份文档里也内嵌了一份（A4 之后才可能出现）；
+   *  `ref` 文档只是**引用**它（.cud 里记哈希与 URL，字节留在仓库 —— 视频/音频走这一档）；
+   *  `missing` 引用还在、字节没了。 */
+  byteFrom?: 'store' | 'doc' | 'ref' | 'missing';
   /** 来源徽章：upload / legacy / run / staging … */
   origin?: string;
   /** 谁在用它（"3 clips"）。 */
@@ -286,6 +295,7 @@ export type CardItem = {
 const BYTE_BADGE = {
   store: { text: 'LOCAL', color: '#8e8e93', title: 'Bytes live in the asset store (data/assets)' },
   doc: { text: 'IN DOC', color: '#30d158', title: 'Bytes are also embedded in an open document' },
+  ref: { text: 'REF', color: '#5ac8fa', title: 'Referenced, not embedded — the .cud stores the hash and URL; bytes stay in the asset store' },
   missing: { text: 'MISSING', color: '#ff453a', title: 'Referenced, but the bytes are gone' },
 } as const;
 
@@ -345,7 +355,14 @@ const RenameInput: React.FC<{ initial: string; commit: (next: string) => void; c
 /** 资产卡片的唯一长相（Assets 窗在用；绑帧弹窗等挑选场景也复用它 —— 选中态用 selected，
  *  整卡可点用 onClick（收一个鼠标事件,多选要读 Ctrl/Shift）,双击用 onDoubleClick,
  *  都不给就是窗里那张默认卡）。 */
-export const Card: React.FC<{ it: CardItem; selected?: boolean; onClick?: (e: React.MouseEvent) => void; onDoubleClick?: () => void }> = ({ it, selected, onClick, onDoubleClick }) => {
+export const Card: React.FC<{
+  it: CardItem;
+  selected?: boolean;
+  onClick?: (e: React.MouseEvent) => void;
+  onDoubleClick?: () => void;
+  /** 右键：引用件用它开"链接资产"菜单（别的卡不给 —— 它们没有可换的引用）。 */
+  onContextMenu?: (e: React.MouseEvent) => void;
+}> = ({ it, selected, onClick, onDoubleClick, onContextMenu }) => {
   const poster = useCardThumb(it.kind, it.src, it.poster);
   const [over, setOver] = useState(false);
   const badge = it.byteFrom ? BYTE_BADGE[it.byteFrom] : null;
@@ -354,6 +371,7 @@ export const Card: React.FC<{ it: CardItem; selected?: boolean; onClick?: (e: Re
       draggable={!!it.drag}
       onClick={e => onClick?.(e)}
       onDoubleClick={onDoubleClick}
+      onContextMenu={onContextMenu}
       onDragStart={e => {
         if (!it.drag) return;
         for (const k of Object.keys(it.drag)) {
@@ -415,11 +433,14 @@ const fileToDataURL = (f: File) => new Promise<string | null>(res => {
 });
 
 const SCOPES: { id: Scope; label: string; title: string }[] = [
-  { id: 'all', label: 'All', title: 'Everything in the asset store' },
-  { id: 'library', label: 'Library', title: 'Library members — shared across documents' },
-  { id: 'project', label: 'Project', title: "This project's own assets — what the timeline plays" },
-  { id: 'session', label: 'Session', title: 'In the store but not in the library — run / processor leftovers' },
+  { id: 'library', label: 'Library', title: 'Shared library — bytes in data/assets, visible to every document' },
+  { id: 'video', label: 'Video', title: "This document's own assets, as used by video mode: media referenced by the timeline (hash only) + images on Layer segments (embedded)" },
+  { id: 'image', label: 'Image', title: "This document's own images, as used by layers / guidances / staging (embedded in the .cud)" },
 ];
+
+/** 内嵌图的可播地址：载入时这些字节已经落回仓库（storeCudImages），所以一张 <img> 就能画。
+ *  仓库副本没了（用户手删）就会 404 —— 卡片上标 MISSING，字节其实还在文件里。 */
+const docUrlOf = (hash: string): string => '/api/asset_media/' + encodeURIComponent(hash);
 
 const selStyle: React.CSSProperties = {
   height: 18, fontSize: 9.5, color: 'rgba(255,255,255,0.6)', background: '#1b1b1e',
@@ -429,8 +450,15 @@ const selStyle: React.CSSProperties = {
 
 export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSel?: (s: InspectSel | null) => void; onActivate?: () => void }> = ({ vid, sel, onSel, onActivate }) => {
   const { project: p } = vid;
+  // 这份文档内嵌的图（Video / Image 两档的唯一数据源）。页面按整份清单播报，这里按活跃文档取桶 ——
+  // 切 tab 那一瞬读到的就是目标文档自己那份，不必等页面重播。
+  const doc = useDocAssets();
   const [over, setOver] = useState(false);
-  const [scope, setScope] = useState<Scope>('all');
+  // 起手看文档自己的模式：image 模式落到它那套工作面，video 模式落到 Layer 段。之后跟着用户的手 ——
+  // 切文档不把人从自己选的档上拽走。
+  const [scope, setScope] = useState<Scope>(() => (p.mode === 'video' ? 'video' : 'image'));
+  /** 这一档说的是"文档内嵌的图"（字节在 .cud 里，不是仓库里的一堆）。 */
+  const docScope = scope === 'video' || scope === 'image';
   const [kind, setKind] = useState<'all' | 'image' | 'video' | 'audio'>('all');
   const [q, setQ] = useState('');
   const [store, setStore] = useState<StoreAsset[] | null>(null);
@@ -450,57 +478,105 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
   // 点 = 只选这张(照旧报 Inspector);Ctrl/Cmd+点 = 增减;Shift+点 = 从锚点连选到这张;
   // Del = 删掉选中的(工程资产出工程 / 仓库条目出仓库,各走各的路);Ctrl+A 全选;Esc 清空。
   // 选择集是**窗内**的事实:换作用域即清(两档 population 不同),搜索/类型过滤不动它。
-  const [multiSel, setMultiSel] = useState<Set<string>>(new Set());
+  // 多选**按文档分桶**（useCudState）：卡片身份是资产哈希，而同一个哈希完全可能两份工程都有
+  // —— 从前这颗 state 是页面级的，切到另一份工程后那几张"选中"仍然亮着，底下的 Del / Relink /
+  // Remove from project 就冲着**那一份工程**里同哈希的卡去做了。现在换文档 = 换一桶。
+  const [multiSel, setMultiSel] = useCudState<Set<string>>(() => new Set());
   const anchorRef = useRef<string | null>(null);       // Shift 连选的起点(最后一次普通点的那张)
   const [renaming, setRenaming] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null); // Del/Ctrl+A 只在网格握焦点时接手,不抢全局
 
+  // 引用件的键（时间线在播的视频/音频）。不随 scope 收窄 —— 与"doc 两份清单都算在册"同一口径。
+  const clipAliveKeys = useMemo(
+    () => p.assets.map(a => 'c:' + (a.id || a.asset || a.play || a.src || a.name)),
+    [p.assets],
+  );
+
   // ── 选中态 → Inspector ── 点卡片选中(再点同一张不切换),Inspector 窗照这份载荷放大看。
-  // 选中的卡被删掉/仓库条目消失 → 撤选。判**全量**两份列表(工程资产 + 仓库),与 scope/类型
+  // 选中的卡被删掉/仓库条目消失 → 撤选。判**全量**四处列表(库 + 工程引用件 + 文档内嵌两份),与 scope/类型
   // 过滤无关:过滤只是"这档里看不见",不是"不在了"。
   useEffect(() => {
     if (!sel) return;
     const keys = new Set<string>([
-      ...p.assets.map(a => 'p:' + a.id),
       ...(store ?? []).map(s => 's:' + (s.hash || s.name)),
+      ...clipAliveKeys,
+      ...doc.image.map(a => 'd:' + a.hash),
+      ...doc.video.map(a => 'd:' + a.hash),
     ]);
     if (!keys.has(sel)) onSel?.(null);
-  }, [sel, p.assets, store, onSel]);
+  }, [sel, store, doc, clipAliveKeys, onSel]);
 
-  // 多选集里指向已消失条目(删除 / 仓库清单刷新)的键,静默清掉 —— 与上面主选的守卫同一口径。
+  // 多选集里指向已消失条目(删除 / 仓库清单刷新 / 换文档)的键,静默清掉 —— 与上面主选的守卫同一口径。
   useEffect(() => {
     setMultiSel(prev => {
       if (!prev.size) return prev;
       const alive = new Set<string>([
-        ...p.assets.map(a => 'p:' + a.id),
         ...(store ?? []).map(s => 's:' + (s.hash || s.name)),
+        ...clipAliveKeys,
+        ...doc.image.map(a => 'd:' + a.hash),
+        ...doc.video.map(a => 'd:' + a.hash),
       ]);
       const next = new Set([...prev].filter(k => alive.has(k)));
       return next.size === prev.size ? prev : next;
     });
-  }, [p.assets, store]);
+  }, [store, doc, clipAliveKeys]);
 
-  // ── 缺失 / relink（A5）─────────────────────────────────────────────────────────────────────
-  // `vid.missing` 是宿主问过仓库的结论（工程引用的哈希里没字节的那些）。卡片挂 MISSING，
-  // 点回形针挑本地文件 → `vid.relink` 重新入库；哈希对不上会被拒（那说明挑错了文件）。
-  const gone = useCallback((a: VidAsset) =>
-    !!((a.asset && vid.missing.has(a.asset)) || (a.play && vid.missing.has(a.play))), [vid.missing]);
-  const relinkRef = useRef<HTMLInputElement | null>(null);
-  const relinkForRef = useRef<string | null>(null);
-  const startRelink = (hash: string | undefined) => {
-    if (!hash) return;
-    relinkForRef.current = hash;
+  // ── 链接资产（右键菜单）────────────────────────────────────────────────────────────────────
+  // 引用件只是"指着"仓库里的字节，指着的那份可能没了（MISSING），也可能当初就链错了（换成另一份）。
+  // 两种都是同一件事：**把这条引用重新绑一份字节**。所以卡片右键给一个"链接资产…"——
+  // 哈希一致 = 接回同一份（顺手把 src 换成仓库地址）；不一致先问一句再换（换的是整件货：
+  // 原件 + 代理两个哈希一起换，只换一个会变成"新原件 + 旧代理"）。
+  const [menu, setMenu] = useState<{ x: number; y: number; from: AssetIdentity; name: string } | null>(null);
+  const linkRef = useRef<HTMLInputElement | null>(null);
+  const linkForRef = useRef<{ from: AssetIdentity; name: string } | null>(null);
+  const startLink = (from: AssetIdentity, name: string) => {
+    if (!from.asset && !from.play && !from.src) return;
+    linkForRef.current = { from, name };
     setErr(null);
-    relinkRef.current?.click();
+    linkRef.current?.click();
   };
-  const onRelinkPick = async (f: File | undefined) => {
-    const hash = relinkForRef.current;
-    relinkForRef.current = null;
-    if (!f || !hash) return;
-    const r = await vid.relink(hash, f);
-    if (!r.ok) setErr(r.error || 'relink failed');
-    bump();          // 入库可能新增了一件货（影不影响 relink 都重拉一次清单）
+  /** 右键一张引用件：先把它选中（菜单说的事就是这张卡），再开菜单。 */
+  const openCardMenu = (e: React.MouseEvent, key: string, from: AssetIdentity, name: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!from.asset && !from.play && !from.src) return;
+    if (!multiSel.has(key)) setMultiSel(new Set([key]));
+    setMenu({ x: e.clientX, y: e.clientY, from, name });
   };
+  const onLinkPick = async (f: File | undefined) => {
+    const t = linkForRef.current;
+    linkForRef.current = null;
+    if (!f || !t) return;
+    const ing = await ingestFile(f);
+    if (!ing || !ing.asset) { setErr('This file could not be read (ingest failed)'); return; }
+    // 不是同一份字节 ⇒ 这是一次换绑，不是接回。把两句实话摆出来再让他决定。
+    if (ing.asset !== t.from.asset && ing.play !== t.from.play) {
+      const n = usedByCount(useIdx, t.from.asset, t.from.play, t.from.src);
+      const ok = window.confirm(
+        `「${t.name}」现在指向 ${(t.from.asset || t.from.play || t.from.src || '?').slice(0, 8)}…\n`
+        + `你挑的这个文件是 ${ing.asset.slice(0, 8)}… —— 不是同一份字节。\n\n`
+        + `要把这条引用改指到它吗？`
+        + (n ? `时间线上引用它的 ${n} 个片段一起换。` : '时间线上还没有片段用它。'));
+      if (!ok) return;
+    }
+    const r = await vid.relink(t.from, ing);
+    if (!r.ok) setErr(r.error || 'link failed');
+    bump();
+  };
+  // 菜单关掉的三条路：点别处、滚网格（菜单位置不跟着走）、Esc。
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(null); };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('wheel', close, { passive: true });
+    window.addEventListener('keydown', key);
+    return () => {
+      window.removeEventListener('pointerdown', close);
+      window.removeEventListener('wheel', close);
+      window.removeEventListener('keydown', key);
+    };
+  }, [menu]);
 
   // 仓库清单：一次拉全（`/api/global_assets` = 仓库里的一切 + 媒体探测），四档作用域与搜索都在
   // 本地过滤 —— 一百多件的过滤比往返一趟便宜，搜索也不必去抖。`tick` 变了就重拉（导入/删除之后）。
@@ -520,14 +596,12 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
     return () => { alive = false; };
   }, [tick, extTick]);
 
-  // 谁在用它：片段按 src 认资产（模型里片段只记 src，不记资产 id）。
-  const clipsBySrc = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const c of p.clips) if (c.src) m.set(c.src, (m.get(c.src) || 0) + 1);
-    return m;
-  }, [p.clips]);
-  const usedBy = (src: string) => {
-    const n = clipsBySrc.get(src) || 0;
+  // 谁在用它 —— 判据在模型里（`clipUseIndex` / `usedByCount`）：一件货有三个身份
+  // （asset / play / src），仓库里同一份字节又有两个地址面，只比 src 字符串会得出
+  // "明明在用却写 0 clips"，而且换个拖法结论就变。这里只负责把它画成一行字。
+  const useIdx = useMemo(() => clipUseIndex(p.clips), [p.clips]);
+  const usedBy = (...keys: (string | null | undefined)[]) => {
+    const n = usedByCount(useIdx, ...keys);
     return n ? `${n} clip${n > 1 ? 's' : ''}` : '';
   };
 
@@ -535,29 +609,47 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
   const hits = (name: string, extra?: string) =>
     !needle || name.toLowerCase().includes(needle) || (extra || '').toLowerCase().includes(needle);
 
-  const storeItems = (store || []).filter(s => {
-    if (scope === 'project') return false;
+  // Library 档只列**库成员**：仓库里剩下的那些（run / processor 的中间图、别人文档带进来的图）
+  // 不再占一档 —— 它们不是"我的东西"，跨文档也认不出来。
+  const storeItems = scope !== 'library' ? [] : (store || []).filter(s => {
     // 老服务没有 inLibrary 字段 ⇒ 当作库成员（宁可多显示，也别把整库藏起来）。
-    if (scope === 'library' && s.inLibrary === false) return false;
-    if (scope === 'session' && s.inLibrary !== false) return false;
+    if (s.inLibrary === false) return false;
     if (kind !== 'all' && s.kind !== kind) return false;
     return hits(s.displayName || s.name, s.hash);
   });
-  // Project 是**本工程资产表**（可能指向 vid_media / 图池 URL）；All/Library/Session 只列仓库。
-  // 一件货被收进工程后又出现在 All 里是正常的（同一个字节的两条身份），但**同一个视图里**
-  // 不能因为"它既在工程又在库"就画两遍。
-  const projectItems = scope !== 'project' ? [] : p.assets.filter(a => {
-    const k = isImageAsset(a) ? 'image' : a.kind;
-    if (kind !== 'all' && k !== kind) return false;
-    return hits(a.name);
-  });
-  // 时间线上引用了、但资产表里没有对应行（老工程/库件被删后片段还留着）的缺失哈希 ——
-  // 也得给一张卡，否则"3 missing"却找不到可以 relink 的那一件。
+
+  // 文档那两档：页面报来的引用按内容哈希收成一叠卡（同一张图被几层共用只有一张脸）。
+  // `setNames` 把 Layer 段的 key 翻成段名 —— 段名住在视频工程里，页面只认 key。
+  const setNames = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of p.clips) {
+      if (c.kind === 'layer' && c.layerKey) m.set(c.layerKey, c.name || 'Layer');
+    }
+    return m;
+  }, [p.clips]);
+  const docGroups = useMemo(
+    () => (docScope ? groupDocAssets(scope === 'video' ? doc.video : doc.image) : []),
+    [docScope, scope, doc],
+  );
+  const docItems = docGroups.filter(g => hits(g.name, g.hash));
+  // Video 档的另一半：时间线在播的视频 / 音频。**只引用、不内嵌** —— .cud 里是哈希与 URL，
+  // 字节还在仓库里（素材动辄几百兆，内嵌一份就把文件撑爆）。Image 档没有片段，所以不列。
+  const clipCardsAll = useMemo(
+    () => (scope === 'video' ? clipCards(p.assets, useIdx, vid.missing) : []),
+    [scope, p.assets, useIdx, vid.missing],
+  );
+  const clipItems = clipCardsAll.filter(c => hits(c.name, c.asset || c.play));
+  // 页面还没播报这份文档（刚切过去的那一瞬）—— 空网格要说是"在等"，不是"没有"。
+  // 引用件不靠播报（工程就在宿主手里），所以只有"一份内嵌图都没有"时它才算数。
+  const docPending = docScope && doc.uid === null && docItems.length === 0;
+
+  // 时间线引用了、但仓库里没有字节的哈希。它们没有自己的档了（工程资产表不单独成档），
+  // 就挂在 Library 档末尾当"MISSING"那几张 —— 点回形针能把原件接回来。
   const coveredHashes = new Set<string>();
   for (const a of p.assets) { if (a.asset) coveredHashes.add(a.asset); if (a.play) coveredHashes.add(a.play); }
-  const orphanMissing = scope !== 'project' || kind === 'image' ? []
+  const orphanMissing = scope !== 'library' || kind === 'image' ? []
     : [...vid.missing].filter(h => !coveredHashes.has(h));
-  const total = storeItems.length + projectItems.length + orphanMissing.length;
+  const total = storeItems.length + docItems.length + clipItems.length + orphanMissing.length;
 
   // 收进本工程（视频/音频才有片段可落；图片不是可播素材）。
   const claimStore = (s: StoreAsset) => {
@@ -572,11 +664,12 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
     }), 'Add library asset');
   };
 
-  // 渲染序的全量键表(Shift 连选按它取范围)。工程档只有工程资产 + 孤儿缺失;其余档只有仓库条目。
+  // 渲染序的全量键表(Shift 连选按它取范围)。库档只有库条目 + 孤儿缺失;文档两档 = 引用件 + 内嵌图。
   const visibleKeys = [
-    ...projectItems.map(a => 'p:' + a.id),
-    ...orphanMissing.map(h => 'm:' + h),
     ...storeItems.map(s => 's:' + (s.hash || s.name)),
+    ...orphanMissing.map(h => 'm:' + h),
+    ...clipItems.map(c => c.key),
+    ...docItems.map(g => 'd:' + g.hash),
   ];
 
   const cardClick = (e: React.MouseEvent, key: string, payload: InspectSel) => {
@@ -598,29 +691,21 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
     onSel?.(payload);
   };
 
-  // Del:两类键各走各的删除路。工程资产 = 出工程(一次可撤销的工程改动,不弹确认);
-  // 仓库条目 = 出仓库(字节真删,整批一次确认)。孤儿缺失键不可选,天然走不到。
+  // Del:只对**库条目**生效（字节真删，整批一次确认）。文档那两档里的图删不得 —— 它们是文件的
+  // 一部分，删一行库表只是把文档的缓存抹掉，画面该缺还是缺。孤儿缺失键不可选,天然走不到。
   const deleteSelected = async () => {
-    const keys = [...multiSel];
-    const pIds = keys.filter(k => k.startsWith('p:')).map(k => k.slice(2));
-    const sKeys = keys.filter(k => k.startsWith('s:')).map(k => k.slice(2));
-    if (pIds.length) {
-      vid.update(proj => {
-        let n = proj;
-        for (const id of pIds) n = removeAsset(n, id);
-        return n;
-      }, pIds.length > 1 ? `Remove ${pIds.length} assets` : 'Remove asset');
-    }
+    if (docScope) return;
+    const sKeys = [...multiSel].filter(k => k.startsWith('s:')).map(k => k.slice(2));
     if (sKeys.length) {
       const items = sKeys
         .map(id => (store || []).find(s => (s.hash || s.name) === id))
         .filter((s): s is StoreAsset => !!s && !!s.hash);
       if (items.length) {
         const ok = window.confirm(items.length === 1
-          ? `Delete「${items[0].displayName || items[0].name}」from the asset store?\n\nThe file and its record are removed. ` +
-            `Timeline clips that reference it are marked MISSING until you relink the original file.`
-          : `Delete ${items.length} assets from the asset store?\n\nThe files and their records are removed. ` +
-            `Timeline clips that reference them are marked MISSING until you relink the originals.`);
+          ? `Delete「${items[0].displayName || items[0].name}」from the library?\n\nThe file and its record are removed. ` +
+            `Timeline clips and layers that reference it are marked MISSING until you relink the original file.`
+          : `Delete ${items.length} assets from the library?\n\nThe files and their records are removed. ` +
+            `Timeline clips and layers that reference them are marked MISSING until you relink the originals.`);
         if (ok) {
           for (const s of items) {
             const r = await fetch('/api/asset_delete', {
@@ -642,7 +727,7 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
   // 网格自己的快捷键:焦点在网格上才接手(改名输入框会拦住自己的键,冒不上来)。
   const gridKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Delete' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-      if (!multiSel.size) return;
+      if (!multiSel.size || docScope) return;
       e.preventDefault();
       void deleteSelected();
     } else if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
@@ -654,8 +739,8 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
     }
   };
 
-  // 双击名字 → 原地改名。仓库条目走 /api/asset_update(名字在库表里,跨文档共享);
-  // 工程资产改工程表(VidAsset.name)—— 时间线上已有片段的名字是落位时抄走的,不受影响。
+  // 双击名字 → 原地改名。只有库条目能改（名字在库表里，跨文档共享）；文档里那张的名字是**图层名**，
+  // 该在 Layers 窗改，不在这儿改。
   const commitStoreRename = async (id: string, next: string) => {
     setRenaming(null);
     const r = await fetch('/api/asset_update', {
@@ -664,10 +749,6 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
     }).then(x => x.json()).catch(() => null);
     if (!r?.ok) setErr(r?.error || 'rename failed');
     bump();
-  };
-  const commitProjectRename = (id: string, next: string) => {
-    setRenaming(null);
-    vid.update(proj => ({ ...proj, assets: proj.assets.map(a => a.id === id ? { ...a, name: next } : a) }), 'Rename asset');
   };
 
   // 导入图片进库（POST /api/asset_import）。视频/音频不走这条路：它们要 ffmpeg 入库 + 探测，
@@ -747,7 +828,7 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
       onDrop={onDrop}
       style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#141416', minWidth: 0, overflow: 'hidden' }}
     >
-      {/* 第一行：作用域。四档 = 同一张表的三条过滤线 + 本工程那一份。 */}
+      {/* 第一行：作用域。三档 = 公用库 + 这份文档的两种用途（层段 / image 工作面）。 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '5px 6px 3px', flexShrink: 0 }}>
         {SCOPES.map(s => (
           <button
@@ -768,14 +849,16 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
         ))}
       </div>
 
-      {/* 第二行：种类 + 搜索 + 导入。 */}
+      {/* 第二行：种类 + 搜索 + 导入。种类与导入只对库有意义 —— 文档那两档里全是图，也 import 不了。 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px 5px', borderBottom: '0.5px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
-        <select value={kind} onChange={e => setKind(e.target.value as 'all' | 'image' | 'video' | 'audio')} style={selStyle}>
-          <option value="all">All kinds</option>
-          <option value="image">Images</option>
-          <option value="video">Video</option>
-          <option value="audio">Audio</option>
-        </select>
+        {!docScope && (
+          <select value={kind} onChange={e => setKind(e.target.value as 'all' | 'image' | 'video' | 'audio')} style={selStyle}>
+            <option value="all">All kinds</option>
+            <option value="image">Images</option>
+            <option value="video">Video</option>
+            <option value="audio">Audio</option>
+          </select>
+        )}
         <input
           value={q}
           onChange={e => setQ(e.target.value)}
@@ -787,40 +870,45 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
             padding: '0 4px', outline: 'none',
           }}
         />
-        <button
-          title="Import images into the library (they are copied into data/assets)"
-          onClick={() => fileRef.current?.click()}
-          style={{ ...rowBtn, width: 18, height: 18, border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 4, color: 'rgba(255,255,255,0.55)' }}
-        >
-          <PlusIcon />
-        </button>
+        {!docScope && (
+          <>
+            <button
+              title="Import images into the library (they are copied into data/assets)"
+              onClick={() => fileRef.current?.click()}
+              style={{ ...rowBtn, width: 18, height: 18, border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 4, color: 'rgba(255,255,255,0.55)' }}
+            >
+              <PlusIcon />
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{ display: 'none' }}
+              onChange={e => {
+                const fs = Array.from(e.target.files || []);
+                e.target.value = '';
+                void importFiles(fs);
+              }}
+            />
+          </>
+        )}
+        {/* 链接资产的文件入口：引用件右键菜单那一项、以及卡上那颗回形针，都点它
+            （同一时刻只为一条引用挑文件）。 */}
         <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          multiple
-          style={{ display: 'none' }}
-          onChange={e => {
-            const fs = Array.from(e.target.files || []);
-            e.target.value = '';
-            void importFiles(fs);
-          }}
-        />
-        {/* relink 的文件入口：Project 档卡片上的回形针点它（同一时刻只为一个哈希挑文件）。 */}
-        <input
-          ref={relinkRef}
+          ref={linkRef}
           type="file"
           accept="video/*,audio/*"
           style={{ display: 'none' }}
           onChange={e => {
             const f = e.target.files?.[0];
             e.target.value = '';
-            void onRelinkPick(f);
+            void onLinkPick(f);
           }}
         />
       </div>
 
-      {/* 缺失横幅：工程引用的字节不在仓库里了。All/Library/Session 不列工程资产，所以这里给个入口。 */}
+      {/* 缺失横幅：时间线引用的字节不在仓库里了。缺失卡在 Library 档末尾，这里是入口 + 一句实话。 */}
       {vid.missing.size > 0 && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', flexShrink: 0,
@@ -830,11 +918,12 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
             {vid.missing.size} missing
           </span>
           <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.5)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {scope === 'project' ? 'Pick the original file with the paperclip on a card.' : 'The timeline references bytes that are gone from the store.'}
+            {/* 引用件卡（Video 档）与 Library 档末尾那几张都带回形针，只有 Image 档无处下手。 */}
+            {scope === 'image' ? 'The timeline references bytes that are gone from the store.' : 'Pick the original file with the paperclip on a card.'}
           </span>
-          {scope !== 'project' && (
+          {scope === 'image' && (
             <button
-              onClick={() => setScope('project')}
+              onClick={() => setScope('library')}
               style={{ ...rowBtn, width: 'auto', height: 16, padding: '0 5px', fontSize: 9, flexShrink: 0, color: '#ff9a92', background: 'rgba(255,69,58,0.18)', borderRadius: 4 }}
             >Show</button>
           )}
@@ -856,25 +945,74 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
         }}
       >
         {total === 0 && (
-          <div style={{ gridColumn: '1 / -1', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8 }}>
-            {busy ? 'Loading…'
-              : scope === 'project' ? 'This project has no assets yet.\nDrop video/audio here, or claim one from Library.'
-                : scope === 'session' ? 'No leftover assets — everything in the store belongs to the library.'
-                  : 'Nothing here yet.\nDrop files here or use ＋ to import images.'}
+          <div style={{ gridColumn: '1 / -1', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8, whiteSpace: 'pre-line' }}>
+            {docPending ? 'Reading this document…'
+              : docScope && scope === 'video' ? 'Nothing in this document yet.\nMedia you drop on the timeline shows up here as a reference;\nimages on Layer segments are embedded.'
+                : docScope ? 'This document has no images yet.\nLayers, guidances and the staging pool show up here.'
+                  : busy ? 'Loading…'
+                    : 'The library is empty.\nDrop files here or use ＋ to import images.'}
           </div>
         )}
 
-        {projectItems.map(a => {
-          const img = isImageAsset(a);
-          const k = img ? 'image' : a.kind;
-          const miss = gone(a);
-          const key = 'p:' + a.id;
+        {/* 引用件：时间线在播的视频 / 音频。字节不在 .cud 里（只存哈希与 URL），所以卡上写 REF
+            而不是 IN DOC —— 仓库里那份字节没了，这份文档就跟着废。 */}
+        {clipItems.map(c => {
           const payload: InspectSel = {
-            key, name: a.name, kind: k,
-            // 播放优先仓库地址(同一份字节,比 src 里的 objectURL 靠得住);缺字节退回 src。
-            src: a.asset && !miss ? '/api/asset_media/' + encodeURIComponent(a.asset) : a.src,
-            duration: a.duration, hasAudio: img ? null : a.hasAudio,
-            origin: a.origin, hash: a.asset,
+            key: c.key, name: c.name, kind: c.kind, src: c.missing ? '' : c.url,
+            duration: c.duration, hasAudio: c.hasAudio,
+            origin: 'timeline', hash: c.asset || c.play,
+          };
+          return (
+            <Card
+              key={c.key}
+              selected={multiSel.has(c.key) || (multiSel.size === 0 && sel === c.key)}
+              onDoubleClick={onActivate}
+              onClick={e => cardClick(e, c.key, payload)}
+              onContextMenu={e => openCardMenu(e, c.key, { asset: c.asset, play: c.play, src: c.src }, c.name)}
+              it={{
+                name: c.name, kind: c.kind, src: c.missing ? '' : c.url,
+                duration: c.duration, hasAudio: c.hasAudio,
+                byteFrom: c.missing ? 'missing' : 'ref',
+                origin: 'timeline',
+                usedBy: c.uses ? `${c.uses} clip${c.uses > 1 ? 's' : ''}` : 'unused',
+                // 拖回时间线：它**已经是**这份工程的资产了，所以带上资产 id —— 落点直接
+                // placeAsset（复用这一件，不会再去 importSource 一趟）。图片落点另认 x-asset。
+                drag: c.missing ? undefined : {
+                  [ASSET_ITEM_TYPE]: JSON.stringify({
+                    id: c.id || c.asset || c.play, url: c.url, name: c.name, kind: c.kind,
+                    asset: c.asset, play: c.play,
+                  }),
+                  [GLOBAL_ITEM_TYPE]: JSON.stringify({
+                    url: c.url, name: c.name, kind: c.kind, asset: c.asset, play: c.play,
+                  }),
+                  ...(c.id ? { [VID_ASSET_TYPE]: c.id } : null),
+                },
+                // 缺字节的回形针 = 同一件事的快路（不用右键也能接）。丢了的接回来，
+                // 链错了也能换 —— 挑到不一样的字节时会先问一句（见 onLinkPick）。
+                actions: (
+                  <button
+                    title={c.missing
+                      ? 'Link「' + c.name + '」— pick the original file'
+                      : 'Link「' + c.name + '」to a different file — every clip that uses it follows'}
+                    onClick={() => startLink({ asset: c.asset, play: c.play, src: c.src }, c.name)}
+                    style={{ ...rowBtn, color: c.missing ? '#ff6b60' : 'rgba(255,255,255,0.5)' }}
+                  >
+                    <ClipIcon />
+                  </button>
+                ),
+              }}
+            />
+          );
+        })}
+
+        {docItems.map(g => {
+          const key = 'd:' + g.hash;
+          const url = docUrlOf(g.hash);
+          // 库副本没了（用户手删过 data/assets）→ 标 MISSING。字节其实还在 .cud 里，下一次保存
+          // 会把它写回仓库 —— 所以这里不给 relink（那会把一张同样的图再接一遍），只说实话。
+          const payload: InspectSel = {
+            key, name: g.name, kind: 'image', src: url, duration: 0, hasAudio: null,
+            origin: scope === 'video' ? 'layer segment' : 'document', hash: g.hash,
           };
           return (
             <Card
@@ -883,49 +1021,33 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
               onDoubleClick={onActivate}
               onClick={e => cardClick(e, key, payload)}
               it={{
-                name: a.name, kind: k, src: a.src, duration: a.duration, hasAudio: img ? null : a.hasAudio,
-                byteFrom: miss ? 'missing' : 'store', origin: a.origin, usedBy: usedBy(a.src),
-                drag: (() => {
-                  // 图卡也要能拖走（Staging / Layers 两处都收 `application/x-asset`）；时间线那枚老载荷
-                  // 只给音视频（图片没有片段可落）。有哈希就指仓库地址 —— 同一份字节，跨 iframe 也读得到；
-                  // 仓库里缺了就退回资产自己的 src（A4 内嵌的那份 bytes 还在，别把一张活图判死）。
-                  const url = a.asset && !miss
-                    ? '/api/asset_media/' + encodeURIComponent(a.asset)
-                    : a.src;
-                  const out: Record<string, string> = {
-                    [ASSET_ITEM_TYPE]: JSON.stringify({ id: a.id, url, name: a.name, kind: k, asset: a.asset, play: a.play }),
-                  };
-                  if (!img) out['application/x-vid-asset'] = a.id;
-                  return out;
-                })(),
-                renaming: renaming === key,
-                onNameDoubleClick: () => setRenaming(key),
-                onRenameCommit: next => commitProjectRename(a.id, next),
-                onRenameCancel: () => setRenaming(null),
-                actions: miss ? (
-                  <button
-                    title={'Relink「' + a.name + '」— pick the original file; its bytes must hash to ' + (a.asset || a.play || '').slice(0, 8) + '…'}
-                    onClick={() => startRelink(a.asset || a.play)}
-                    style={{ ...rowBtn, color: '#ff6b60' }}
-                  >
-                    <ClipIcon />
-                  </button>
-                ) : undefined,
+                name: g.name, kind: 'image', src: url, duration: 0, hasAudio: null,
+                poster: url,
+                byteFrom: 'doc',
+                // 它在这份文档里干什么：图层像 / 指导卡 / 图池，以及（Video 档）属于哪一段。
+                // 空 setKey 是"文档主栈"那一套（image 模式的图层，也常是 Layer 段接手前的壳）。
+                origin: whereText(g, k => setNames.get(k) || (k === '' ? 'document' : 'Layer')),
+                drag: {
+                  [ASSET_ITEM_TYPE]: JSON.stringify({ id: g.hash, url, name: g.name, kind: 'image', asset: g.hash }),
+                },
               }}
             />
           );
         })}
 
+        {/* 时间线引用了、却没有资产行的哈希（老工程 / 库件被删后片段还留着）。它也是一条引用 ——
+            同样能链接资产（接回原件或换绑），所以右键菜单照给。 */}
         {orphanMissing.map(h => (
           <Card
             key={'m:' + h}
+            onContextMenu={e => openCardMenu(e, 'm:' + h, { asset: h }, 'missing · ' + h.slice(0, 8))}
             it={{
               name: 'missing · ' + h.slice(0, 8), kind: 'video', src: '', duration: 0, hasAudio: null,
               byteFrom: 'missing', origin: 'referenced by the timeline',
               actions: (
                 <button
-                  title={'Relink the bytes for ' + h.slice(0, 8) + '… — pick the original file; the hash must match'}
-                  onClick={() => startRelink(h)}
+                  title={'Link the bytes for ' + h.slice(0, 8) + '… — pick the original file, or another one to rebind'}
+                  onClick={() => startLink({ asset: h }, 'missing · ' + h.slice(0, 8))}
                   style={{ ...rowBtn, color: '#ff6b60' }}
                 >
                   <ClipIcon />
@@ -944,7 +1066,7 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
             key, name: label, kind: s.kind,
             src: s.kind === 'image' ? s.url : play,
             duration: s.duration, hasAudio: s.hasAudio,
-            origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
+            origin: s.origin || 'library',
             hash: s.hash, size: s.size,
           };
           return (
@@ -957,8 +1079,8 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
                 name: label, kind: s.kind, src: s.kind === 'image' ? s.url : play, duration: s.duration, hasAudio: s.hasAudio,
                 poster: s.kind === 'image' ? (s.thumb || s.url) : null,
                 byteFrom: 'store',
-                origin: s.origin || (s.inLibrary === false ? 'session' : 'library'),
-                usedBy: usedBy(play),
+                origin: s.origin || 'library',
+                usedBy: usedBy(s.hash, s.playHash, play, s.url),
                 drag: (() => {
                   const out: Record<string, string> = {
                     [ASSET_ITEM_TYPE]: JSON.stringify({ id, url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash }),
@@ -986,7 +1108,7 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
         })}
       </div>
 
-      {/* 底栏：一句实话 —— 现在这一档有多少件、库成员多少。 */}
+      {/* 底栏：一句实话 —— 现在这一档有多少件、是什么在喂它。 */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', flexShrink: 0,
         borderTop: '0.5px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.015)',
@@ -997,20 +1119,74 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
             fontSize: 9.5, color: (err || listErr) ? '#ff8a80' : 'rgba(255,255,255,0.32)',
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
           }}>
-          {busy ? 'loading…' : err ? err : listErr ? listErr : `${total} ${total === 1 ? 'asset' : 'assets'} · ${scope}`}
+          {busy && !docScope ? 'loading…' : err ? err : listErr ? listErr
+            : `${total} ${total === 1 ? 'item' : 'items'} · ${scope === 'library' ? 'library' : 'in this document'}`}
         </span>
         {multiSel.size > 0 && (
           <span style={{ fontSize: 9, color: '#3b9dff', flexShrink: 0, whiteSpace: 'nowrap' }}>
-            {multiSel.size} selected · Del to {scope === 'project' ? 'remove' : 'delete'}
+            {docScope ? `${multiSel.size} selected` : `${multiSel.size} selected · Del to delete from the library`}
           </span>
         )}
         <span style={{ flex: 1 }} />
-        {store && (
+        {docScope ? (
+          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.26)', flexShrink: 0, whiteSpace: 'nowrap' }}
+            title={scope === 'video'
+              ? 'REF = the .cud stores only the hash and URL (bytes stay in the store). IN DOC = the pixels are embedded in the .cud.'
+              : 'These bytes are embedded in the .cud — data/assets keeps a load-time cache of them'}>
+            {scope === 'video'
+              ? `${clipItems.length} referenced · ${docItems.length} embedded`
+              : `${docItems.length} embedded in the .cud`}
+          </span>
+        ) : store && (
           <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.26)', flexShrink: 0 }}>
             {store.filter(s => s.inLibrary !== false).length} in library
           </span>
         )}
       </div>
+
+      {/* 引用件的右键菜单：只有一条 —— 链接资产（引用不是字节，链错了就得能换）。
+          菜单挂 body 上（网格会滚、会裁，fixed 的浮层只有挂到 body 才压得住）。 */}
+      {menu && createPortal(
+        <div
+          data-asset-menu="1"
+          onContextMenu={e => e.preventDefault()}
+          style={{
+            position: 'fixed', zIndex: 9999,
+            left: Math.max(8, Math.min(menu.x, window.innerWidth - 240)),
+            top: Math.max(8, Math.min(menu.y, window.innerHeight - 96)),
+            width: 232, padding: 4, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 1,
+            background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
+            boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
+          }}
+        >
+          <div style={{
+            padding: '4px 9px 6px', fontSize: 9, lineHeight: 1.5, color: 'rgba(255,255,255,0.36)',
+            borderBottom: '0.5px solid rgba(255,255,255,0.08)', marginBottom: 3,
+          }}>
+            {menu.name}
+            <br />
+            <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+              → {(menu.from.asset || menu.from.play || menu.from.src || '?').slice(0, 16)}…
+            </span>
+          </div>
+          <button
+            type="button"
+            title={'Bind this reference to a file — clips that use it follow. Same bytes = relink; different bytes = rebind (you get asked first).'}
+            onClick={() => { startLink(menu.from, menu.name); setMenu(null); }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left',
+              padding: '6px 9px', borderRadius: 5, border: 'none', background: 'transparent',
+              color: 'rgba(255,255,255,0.92)', fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+          >
+            <ClipIcon />
+            链接资产…
+          </button>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 };

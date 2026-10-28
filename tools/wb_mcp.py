@@ -4,8 +4,9 @@
 探针 MCP(tools/ui_probe_mcp.py)偏**读现场**:布局、命中、轨迹、组件层;这份偏**改工程**:
 切播放头、摆段、改图层、起生成、改画布。两者互补,各挂一个 server。
 
-工具目录不在这里手抄:schema 的唯一真源是 nodes/workbench/agent_backend.py 的 AGENT_TOOLS,
-后端经 `GET /api/agent/tools` 原样交出来。执行也不在这里:`POST /api/agent/direct_tool`
+工具目录不在这里手抄:schema 的唯一真源是前端 `ui/sampler_node/src/agent/toolSchemas.ts`
+(与执行体同目录、由 tsc 咬合),构建时转成 `nodes/workbench/agent_tools.json`,后端按 mtime
+热读后经 `GET /api/agent/tools` 交出来。执行也不在这里:`POST /api/agent/direct_tool`
 把调用送进**用户当前打开的那个页面**(页面上的 window.__wbAgentTool → runAgentTool),
 所以页面必须开着;关着时会拿到一句明确的话而不是假成功。
 
@@ -107,9 +108,13 @@ def resolve_base() -> str:
         'MCP 只是把调用送进那个页面;先让用户在 ComfyUI 里跑一次 sampler 节点/打开工作台。')
 
 
-# ── 工具目录(后端 AGENT_TOOLS)───────────────────────────────────────────────
+# ── 工具目录(后端热读的 agent_tools.json)─────────────────────────────────────
+# 这里**不再"启动时读一次"**:后端把 agent_tools.json 的 sha 一起发出来,这边按 sha 判断
+# 工具表变没变 —— 前端重新构建之后,dsh 不用重启 MCP 就能看见新工具。
 _CATALOG = None
+_CATALOG_SHA = None
 _CATALOG_LOCK = threading.Lock()
+_CATALOG_READY = threading.Event()
 
 
 def _schema(t: dict) -> dict:
@@ -123,7 +128,7 @@ def _schema(t: dict) -> dict:
 
 def catalog() -> dict:
     """name -> MCP tool schema。后端起不来时重试几秒再报错(它和页面同源,通常在)。"""
-    global _CATALOG
+    global _CATALOG, _CATALOG_SHA
     with _CATALOG_LOCK:
         if _CATALOG:
             return _CATALOG
@@ -133,7 +138,8 @@ def catalog() -> dict:
                 d = _get(resolve_base(), '/api/agent/tools', timeout=8)
                 if d.get('ok') and isinstance(d.get('tools'), list):
                     _CATALOG = {s['name']: s for s in (_schema(t) for t in d['tools']) if s['name']}
-                    log('[wb-mcp] %d tools loaded' % len(_CATALOG))
+                    _CATALOG_SHA = str(d.get('sha') or '') or None
+                    log('[wb-mcp] %d tools loaded (sha %s)' % (len(_CATALOG), _CATALOG_SHA))
                     return _CATALOG
                 last = str(d.get('error') or 'unexpected answer')
             except ToolError as e:
@@ -143,16 +149,59 @@ def catalog() -> dict:
             time.sleep(0.4)
     raise ToolError(
         'cannot read the workbench tool catalog: %s\n'
-        '这条路由在 /api/agent/tools —— 若后端还是旧代码,重启 ComfyUI 让 agent_backend 重新加载。' % last)
+        '这条路由在 /api/agent/tools —— 后端没起来,或 agent_tools.json 还没生成'
+        '(cd ui && npm run build -w sampler_node)。' % last)
+
+
+def refresh_catalog(force: bool = False) -> bool:
+    """工具表变了没有?变了就作废缓存重取,返回 True;没变(或问不到)返回 False。
+
+    后端把 `agent_tools.json` 的 sha 一起交出来,前端重新构建会改写它 —— 于是"加了个工具"
+    这件事在这里自动可见,不需要谁记得重启 MCP。
+    """
+    global _CATALOG, _CATALOG_SHA
+    try:
+        meta = _get(resolve_base(), '/api/agent/tools/meta', timeout=4)
+    except (ToolError, OSError, ValueError):
+        return False
+    sha = str(meta.get('sha') or '')
+    if not sha:
+        return False
+    with _CATALOG_LOCK:
+        if not force and _CATALOG and sha == _CATALOG_SHA:
+            return False
+        _CATALOG = None
+    catalog()
+    with _CATALOG_LOCK:
+        _CATALOG_SHA = sha
+    return True
+
+
+def watch_catalog():
+    """后台盯工具表:变了就告诉客户端(`notifications/tools/list_changed`)。
+
+    只在客户端连上之后才开始(initialize 之前发通知会把它弄困惑)。客户端若不认这条通知,
+    至少 `tools/list` / `tools/call` 下次会拿到新表 —— 比"必须重启 dsh"好。
+    """
+    _CATALOG_READY.wait()
+    while True:
+        time.sleep(2.0)
+        try:
+            if refresh_catalog():
+                send({'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'})
+                log('[wb-mcp] catalog changed -> tools/list_changed')
+        except Exception:  # noqa: BLE001 — 后台线程不该把进程带下去
+            pass
 
 
 def call_tool(name: str, arguments: dict) -> dict:
     tools = catalog()
     if name not in tools:
-        # 后端可能刚重启、工具表变了:再取一次,仍没有就如实说。
-        global _CATALOG
-        with _CATALOG_LOCK:
-            _CATALOG = None
+        # 工具表可能刚变(前端重新构建了):强刷一次,仍没有就如实说。
+        try:
+            refresh_catalog(force=True)
+        except ToolError:
+            pass
         tools = catalog()
     if name not in tools:
         raise ToolError('没有这个工具:%s(有:%s)' % (name, ', '.join(sorted(tools))))
@@ -223,6 +272,8 @@ def handle(msg):
     if mid is None:  # 通知:不回应
         if method == 'notifications/initialized':
             log('[wb-mcp] client ready')
+            _CATALOG_READY.set()
+            threading.Thread(target=watch_catalog, daemon=True).start()
         return
 
     if method == 'initialize':
@@ -230,7 +281,7 @@ def handle(msg):
         pv = want if want in PROTOCOLS else PROTOCOLS[0]
         ok(mid, {
             'protocolVersion': pv,
-            'capabilities': {'tools': {'listChanged': False}},
+            'capabilities': {'tools': {'listChanged': True}},
             'serverInfo': {'name': SERVER_NAME, 'version': SERVER_VERSION},
             'instructions': (
                 '编辑 Kolid Comfy 工作台的工具(与 kolid-ui-probe 的"读现场"互补)。'
@@ -245,9 +296,10 @@ def handle(msg):
         ok(mid, {})
         return
     if method == 'tools/list':
-        # 后端可能是旧代码(没有 /api/agent/tools):如实回一条 JSON-RPC 错误,而不是让线程
+        # 后端可能没起来(没有 /api/agent/tools):如实回一条 JSON-RPC 错误,而不是让线程
         # 在异常里死掉 —— 客户端等不到应答只会显示超时,分不清"没这个服务"和"服务挂了"。
         try:
+            refresh_catalog()
             ok(mid, {'tools': list(catalog().values())})
         except ToolError as e:
             fail(mid, -32603, str(e))

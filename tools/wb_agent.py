@@ -5,6 +5,8 @@
 用法:
   python wb_agent.py ping                      # 连通性 + sidecar 状态
   python wb_agent.py state                     # 应用全家桶快照(轨/段/图层/选中/预设……)
+  python wb_agent.py tools                     # 全部工具(从后端取,不手抄)
+  python wb_agent.py ui-actions [group]        # 界面动作键(ui_action 能按的那张表)
   python wb_agent.py call <tool> [json_args]   # 执行一个工作台工具
   python wb_agent.py --port 8703 call seek '{"time": 4.0}'
 
@@ -81,6 +83,29 @@ def main(argv):
         print(json.dumps(snap, ensure_ascii=False, indent=2))
         return 0
 
+    if cmd == 'tools':
+        # 工具表从后端现取（真源是前端 toolSchemas.ts，后端热读它的构建产物），不在这里手抄
+        # —— 手抄的清单一定会过期。
+        d = _get(port, '/api/agent/tools')
+        rows = [t.get('function', {}) for t in (d.get('tools') or []) if isinstance(t, dict)]
+        for f in rows:
+            desc = (f.get('description') or '').strip().split('\n')[0]
+            print('%-24s %s' % (f.get('name', '?'), desc[:110]))
+        print('\n%d tools (source: GET /api/agent/tools)' % len(rows))
+        return 0
+
+    if cmd == 'ui-actions':
+        # 界面动作键：`ui_action` 能按的那张表（每一颗按钮 / 滑杆 / 菜单项 = 一个键）。
+        group = rest[0] if rest else ''
+        args = {'group': group} if group else {}
+        d = _post(port, '/api/agent/direct_tool', {'name': 'get_ui_actions', 'args': args})
+        if not d.get('ok'):
+            print(json.dumps(d, ensure_ascii=False, indent=2))
+            return 1
+        v = d.get('value') or {}
+        print(v.get('content') or json.dumps(v, ensure_ascii=False, indent=2))
+        return 0 if v.get('ok') else 1
+
     if cmd == 'call':
         if not rest:
             print(json.dumps({'ok': False, 'error': 'usage: wb call <tool> [json_args]'}))
@@ -95,7 +120,7 @@ def main(argv):
         print(json.dumps(d, ensure_ascii=False, indent=2))
         return 0 if d.get('ok') else 1
 
-    print(json.dumps({'ok': False, 'error': 'unknown command %r (ping | state | call)' % cmd}))
+    print(json.dumps({'ok': False, 'error': 'unknown command %r (ping | state | tools | ui-actions | call)' % cmd}))
     return 2
 
 

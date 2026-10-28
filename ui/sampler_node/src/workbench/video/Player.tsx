@@ -7,6 +7,7 @@ import { decodeAudio, vidAudio } from './audio';
 import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame } from './previews';
 import { acquireAudioSlot, buildStereoProbe, releaseAudioSlot, type AudioProbe } from './audioFocus';
 import { markRender } from './perf';
+import { useCudScope } from '../cudScope';
 
 // 播放器的电平探头:全部声源在 vidAudio.master 汇流,一只探头管整条时间线,缓存会话级一份。
 let playerProbe: AudioProbe | null = null;
@@ -225,6 +226,8 @@ export const VidPlayer: React.FC<{
     } : null;
     vid.blendPost({
       type: 'blend-vid-frame', reqId, t: q, layerKey: plan.layerKey,
+      // 这一包属于哪份文档：工作台只有一块显示面，换 tab 那一瞬在飞的旧包得能被认出来丢掉。
+      uid: vid.docUid ?? null,
       baseTrackId: plan.baseTrackId, tracks, ...(kf ? { kf } : {}), ...(kfMeta ? { kfMeta } : {}),
       ...(clip ? { clip } : {}),
       planT, planRev: (opts?.planRev ?? 0) | 0,
@@ -242,6 +245,18 @@ export const VidPlayer: React.FC<{
   /** 计划版本号：换 Layer 段 / 换底片片段就 +1。"这一帧归哪一份计划"由此唯一确定。 */
   const planRevRef = useRef(0);
   const planSigRef = useRef('');
+  // 换文档时把这三张按 `layerKey` 的记账一起作废。理由和页面那头（stageSwapBlank 清合成缓存）
+  // 是同一条：**layer id 是每份 .cud 自己从 1 数的**，跨文档撞上同一个键再正常不过 ——
+  // 留着上一份的结论，这扇窗就会"以为这套图层不用逐帧重算"（台面停在别人那一张），
+  // 或者按别人报的轨去取帧。vgen 帧卡跳转、Save As 出来的副本都撞得上。
+  useCudScope('video:player', {
+    leave: () => {
+      compFrameless.current.clear();
+      compUsedTracks.current.clear();
+      warmSent.current = '';
+      planSigRef.current = '';
+    },
+  });
   const requestComposite = useCallback((plan: VidCompositePlan | null, t: number, force = false, sync = false) => {
     if (!visible) return;
     const r = compReq.current;
@@ -335,6 +350,8 @@ export const VidPlayer: React.FC<{
     // Video 2 段左边缘），铺上台就是把 Video 2 的裸帧闪一下，而关键帧只作用于合成图。
     const sent = vid.blendPost({
       type: 'blend-vid-base-src', src: clip.src,
+      // 底片是工作台页面级唯一的一只 <video>：谁的包都能换走它 —— 所以这一包也盖章。
+      uid: vid.docUid ?? null,
       start: clip.start, offset: clip.offset, t: q, playing, hidden,
     });
     r.on = sent;

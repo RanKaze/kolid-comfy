@@ -124,12 +124,20 @@ const KLayerFold = (function () {
 
     /** 资产引用 → `{ resource: 'res:<hash>' }`，顺手把资源登记进这一趟的 resources 表。
      *  env.res 返回字符串（就是 res id）或资源记录（`{ id: 'res:…', kind, uri, … }`）都认；
-     *  给不出就 null（契约允许 null）。 */
+     *  给不出就 null（契约允许 null）。
+     *
+     *  "已经是资源记录"的判据必须**同时**满足两条，缺一条就会把内存像素吞掉：
+     *    · 不是 DOM 节点（`nodeType` 是数字）—— 底像素、贴片、蒙版在页面上就是 `<img>` / `<canvas>`；
+     *    · `resource` / `id` 是**非空**字符串 —— 每个 HTML 元素都天生带 `id: ''`，一条空串被当成
+     *      资源号，`base` 就成了 `{ resource: '' }`，合成器那边 `pl.base.resource` 为假 ⇒ 底像素
+     *      整张丢掉（症状：带 mask/特效的层只剩条带画的，自己的图一片全黑）。
+     *  落不下去的记录与内存像素都交给 `env.res` —— 活资源那一趟在那里登记 `live:<n>`。 */
     function refOf(v, role, env, ctx) {
         if (v === null || v === undefined || v === '') return null;
-        if (typeof v === 'object' && (typeof v.resource === 'string' || typeof v.id === 'string')) {
-            note(ctx, v);
-            return { resource: v.resource || v.id };
+        if (typeof v === 'object' && typeof v.nodeType !== 'number') {
+            const rid = (typeof v.resource === 'string' && v.resource)
+                || (typeof v.id === 'string' && v.id) || '';
+            if (rid) { note(ctx, v); return { resource: rid }; }
         }
         const hit = env.res ? env.res(v, role) : null;
         if (!hit) return null;

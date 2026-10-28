@@ -6,7 +6,8 @@ import {
   vgenChainPrevOf, vgenSeamsOf, vgenWithDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
-import { getActiveBlendUid } from '../store';
+import { getActiveBlendUid, subscribeBlendActive } from '../store';
+import { useCudScope, useCudState } from '../cudScope';
 import { probeMedia } from './audio';
 import { ingestFile } from './ingest';
 import { GLOBAL_ITEM_TYPE } from './Assets';
@@ -261,11 +262,21 @@ export const VidTimeline: React.FC<{
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   // 多选：Ctrl/⌘ 点选切换单颗、Shift 在同轨上连选。锚点是上一次单击的那颗。
-  const [selIds, setSelIds] = useState<ReadonlySet<string>>(() => new Set<string>());
+  // 选中**按文档分桶**（useCudState）：切到别的工程看到的是那份自己的选中（多半是空），切回来
+  // 原样还在。从前它是页面级一颗 state —— 换文档后仍记着上一份的段 id：那几颗 id 在新工程里
+  // 要么不存在（选中静默失效，Del / Copy 全落空），要么撞上同名的（选中了一颗你看不见的段）。
+  const [selIds, setSelIds] = useCudState<ReadonlySet<string>>(() => new Set<string>());
+  // 活跃文档 uid：只给下面"重播选中"那一条 effect 当触发器用（见那里的注释）。
+  const cudUid = useSyncExternalStore(subscribeBlendActive, getActiveBlendUid);
   // 选中态抄一份给跨窗的 store:Video Generator 窗的 Add continue segment 读它来判断
-  // "时间线上选中了哪段"(Timeline 自己的 state 别人看不见)。
-  useEffect(() => { setVidSelection(selIds); }, [selIds]);
+  // "时间线上选中了哪段"(Timeline 自己的 state 别人看不见)。**换文档也要重播一次**：切回
+  // 上一份时那一桶选中的 Set 还是原来的对象（dep 不变），而 store 在离开时已被
+  // `video:selection` 那一条清空 —— 只盯 selIds 的话，屏幕上选着、store 里却是空的。
+  useEffect(() => { setVidSelection(selIds); }, [selIds, cudUid]);
   const selAnchorRef = useRef<string | null>(null);
+  // 连选的锚点是**段 id**：换文档后它指向上一份的段（新工程里没有这颗），Shift 连选会从
+  // 一个不存在的起点算区间。选中本身由 useCudState 按文档分桶，这里只需把锚点丢掉。
+  useCudScope('video:timeline', { leave: () => { selAnchorRef.current = null; } });
   const selectOnly = useCallback((id: string) => {
     selAnchorRef.current = id;
     setSelIds(new Set([id]));

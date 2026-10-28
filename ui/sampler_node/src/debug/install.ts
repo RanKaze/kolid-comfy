@@ -4,6 +4,7 @@ import {
   type ProbeSendResult, type ProbeSnapshot,
 } from './probe';
 import { installLive, liveHelpers, liveNow, liveReport } from './live';
+import { cudScopeReport } from '../workbench/cudScope';
 import { onGlobalKey, keyIs } from '../hotkeys';
 
 /**
@@ -59,6 +60,9 @@ export function installProbe(): void {
     // 页面登记 / 面板
     register: registerProbe,
     subscribe: subscribeProbe,
+    // 换 .cud 的登记簿：哪些窗对自己的切换负责、最近一次换文档是谁→谁。探针用它证明
+    // "没有一扇窗是漏登记的"（见 workbench/cudScope.ts）。
+    cud: cudScopeReport,
     openPanel: () => setProbePanelOpen(true),
     closePanel: () => setProbePanelOpen(false),
     togglePanel: toggleProbePanel,

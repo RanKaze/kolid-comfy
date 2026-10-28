@@ -647,6 +647,26 @@ export type BlendDocs = { activeUid: number | null; busy: boolean; docs: BlendDo
 
 export const EMPTY_BLEND_DOCS: BlendDocs = { activeUid: null, busy: false, docs: [], announced: false };
 
+/** 文档内嵌的一张图（.cud header.assets 的活视图 —— A4 起图像就住在文件里，仓库那份是载入时落下
+ *  的缓存）。`role` 说的是它在这份文档里干什么：图层像素 / 指导卡摞里的图层 / 图池里的条目。
+ *  `setKey` 只有 Video 那一档有意义 —— 它属于哪个 Layer 段（段的 layerKey，'' = 活跃段，也常是
+ *  image 模式那份主栈）。尺寸是图层原生像素，卡片按它算长宽比。 */
+export type BlendDocAsset = {
+  hash: string;
+  role: 'layer' | 'guidance' | 'staging';
+  setKey: string;
+  id: number;
+  name: string;
+  w: number;
+  h: number;
+};
+
+/** 活跃文档的那两份清单：`image` = image 模式的工作面（主图层栈 + 图池），`video` = 每个 Layer 段
+ *  的图层集。两份都是"引用"，不是字节 —— 页面只说用着哪几张，字节在文件里（仓库有缓存副本）。 */
+export type BlendDocAssets = { uid: number | null; image: BlendDocAsset[]; video: BlendDocAsset[] };
+
+export const EMPTY_BLEND_DOC_ASSETS: BlendDocAssets = { uid: null, image: [], video: [] };
+
 /** 宿主顶栏与文档窗口 tab 发回工作台的文档动作 —— 与 iframe 里 DOC_COMMANDS 的八个键一一对应。 */
 export type BlendDocCommand = 'new' | 'load' | 'save' | 'save-as' | 'export-png' | 'import' | 'activate' | 'close';
 
