@@ -8,6 +8,9 @@
 同一条"HTTP 轮询"口径(/api/status 也是轮询)。
 
 事件序列号 = events 数组下标;poll 带 cursor 增量取,wait=1 时最多挂 25s 长轮询。
+
+注:内建 Chat 的界面已撤掉(Agent 窗只用 dsh),这段 LLM run 循环与 LLM 设置保留为后端能力,
+目前没有前端入口;/api/agent/direct_tool 与 AGENT_TOOLS 仍被两个 MCP 和 tools/wb_agent.py 使用。
 """
 import json
 import os
@@ -37,7 +40,7 @@ DEFAULT_SETTINGS = {
     'max_steps': 24,
     # 追加到系统提示尾部的用户自定义段落(工作流习惯、项目背景……)。
     'system_extra': '',
-    # ---- DeepSeek Harness sidecar(见 agent_dsh.py;Agent 窗的 DSH 模式)----
+    # ---- DeepSeek Harness sidecar(见 agent_dsh.py;Agent 窗的唯一形态)----
     'dsh_port': 3080,
     'dsh_command': 'npx -y @deepseek-ai/dsh web --no-open',
     'dsh_api_key': '',
@@ -370,6 +373,12 @@ def handle(h) -> None:
             return json.loads(h.rfile.read(n)) if n else {}
         except ValueError:
             return {}
+
+    if h.command == 'GET' and path == '/api/agent/tools':
+        # 工具目录给终端侧的编辑 MCP(tools/wb_mcp.py)用:它不 import 这个模块(带 ComfyUI 依赖),
+        # 启动时来取一次 schema,再把调用送回 /api/agent/direct_tool。
+        h._send_json({'ok': True, 'tools': AGENT_TOOLS})
+        return
 
     if h.command == 'GET' and path == '/api/agent/config':
         s = _load_settings()

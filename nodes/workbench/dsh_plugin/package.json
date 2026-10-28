@@ -1,0 +1,19 @@
+{
+  "name": "kolid-dsh-bind",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bind one fixed workspace into the DeepSeek Harness web UI hosted by the Kolid Comfy workbench",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  },
+  "license": "MIT"
+}

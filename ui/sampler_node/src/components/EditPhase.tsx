@@ -37,7 +37,7 @@ import { VidAudioMonitor } from '../workbench/video/AudioMonitor';
 import { VidKeyframes } from '../workbench/video/Keyframes';
 import { VidPlayer } from '../workbench/video/Player';
 import { AgentPanel } from '../agent/AgentPanel';
-import type { AgentCtx, AgentConfig } from '../agent/tools';
+import type { AgentCtx } from '../agent/tools';
 
 // The rename field of a preset row.
 const tabInputStyle: React.CSSProperties = {
@@ -2528,8 +2528,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     vidMode, vidProject.fps, vidProject.maskTrackId, setVidFps, vidTrackList, vidAssetList, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment, vidUpdate]);
   // Agent 窗的 ctx:工具执行体(runAgentTool)要碰的宿主事实与写口捆成一份。AgentPanel 经 ref
   // 永远取最新一份用,所以这份对象只影响它自身重渲的频率,不影响工具执行的正确性。
+  // dsh 的工作区 = 当前 cud 的所在目录(Agent 窗把它报给 sidecar,再由插件钉进 dsh 页面)。
+  // 没有 cud / 这份还没存过盘 → 仓库根(`''`);工作台还没播报过 → null(别抢,先等它说完)。
+  const agentCudDir = useMemo(() => {
+    if (!blendDocs.announced) return null;
+    const p = blendDocs.docs.find(d => d.uid === blendDocs.activeUid)?.path;
+    if (!p) return '';
+    const cut = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+    return cut > 0 ? p.slice(0, cut) : '';
+  }, [blendDocs.announced, blendDocs.docs, blendDocs.activeUid]);
   const agentCtx: AgentCtx = useMemo(() => ({
-    uiSend, vid: vidCtl, docOpen: blendDocs.activeUid !== null, vidMode,
+    uiSend, vid: vidCtl, docOpen: blendDocs.activeUid !== null, vidMode, cudDir: agentCudDir,
     blockSets, activeBlockSetId,
     runPreset: id => {
       const set = blockSets.find(s => s.id === id);
@@ -2539,7 +2548,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     docCommand: onDocCommand,
     setFps: setVidFps,
     vgen: { list: videoGenList, add: addVideoGenSegment, cont: continueSel, addContinue: addContinueVgenSegment },
-  }), [uiSend, vidCtl, blendDocs.activeUid, vidMode, blockSets, activeBlockSetId, runPresetFromRow,
+  }), [uiSend, vidCtl, blendDocs.activeUid, vidMode, agentCudDir, blockSets, activeBlockSetId, runPresetFromRow,
     cancelActiveRun, onDocCommand, setVidFps, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
   // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
@@ -4379,7 +4388,7 @@ const VideoGenFrameModal: React.FC<{
 // pipeline that actually runs — replacing some of those nine for the runs it catches. The numbers
 // stay the host's either way: this page only edits what the Draw panel edited, so a value can
 // never exist twice.
-type SettingsScreen = 'default' | 'arch' | 'agent';
+type SettingsScreen = 'default' | 'arch';
 // Which screen is showing and which rule cards are open belong to the user, not to the program, so
 // they are remembered per browser — same policy as the section folds and the panel width, and ONE
 // key for both because they are one page's view state. An unreadable store just opens on Default.
@@ -4470,136 +4479,6 @@ const NumField: React.FC<{
   );
 };
 
-// ── Settings ▸ Agent ── Agent 窗的 LLM 端点配置(/api/agent/config 的读写口)。设置住 Settings 页
-// (与 Default Setting / Application 同一套 iOS 卡),Agent 窗本体只消费。后端没起/没重启时整卡
-// 降级成一句 unavailable —— 与 AgentPanel 的 readJson 同一句人话。
-const AgentConfigRows: React.FC = () => {
-  const [cfg, setCfg] = useState<AgentConfig | null>(null);
-  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    let dead = false;
-    void (async () => {
-      try {
-        const r = await fetch('/api/agent/config');
-        const d = JSON.parse(await r.text());
-        if (!dead && d.ok) setCfg(d.config as AgentConfig);
-      } catch { /* 保持 null:卡里显示 unavailable */ }
-    })();
-    return () => { dead = true; };
-  }, []);
-  const save = async () => {
-    if (!cfg || busy) return;
-    setBusy(true); setNote(null);
-    try {
-      const r = await fetch('/api/agent/config', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
-      });
-      const d = JSON.parse(await r.text());
-      if (d.ok) { setCfg(d.config); setNote({ ok: true, text: 'Saved.' }); }
-      else setNote({ ok: false, text: d.error || 'Save failed.' });
-    } catch {
-      setNote({ ok: false, text: 'Agent backend did not answer with JSON — restart ComfyUI so the /api/agent routes load.' });
-    } finally { setBusy(false); }
-  };
-  if (!cfg) {
-    return (
-      <>
-        <div style={styles.iosGroupTitle}>Agent</div>
-        <div style={styles.iosCard}>
-          <div style={styles.iosRow}>
-            <span style={{ ...styles.iosLabel, color: '#8e8e93', whiteSpace: 'normal' }}>
-              Not available — the agent backend did not answer. Restart ComfyUI so the /api/agent routes load.
-            </span>
-          </div>
-        </div>
-        <div style={styles.iosFooter}>The Agent dock window's LLM endpoint lives here once the backend is up.</div>
-      </>
-    );
-  }
-  const set = (patch: Partial<AgentConfig>) => { setCfg({ ...cfg, ...patch }); setNote(null); };
-  const textRows: { label: string; key: keyof AgentConfig; ph: string; secret?: boolean }[] = [
-    { label: 'Base URL', key: 'base_url', ph: 'https://api.z.ai/api/paas/v4' },
-    { label: 'API Key', key: 'api_key', ph: 'sk-…', secret: true },
-    { label: 'Model', key: 'model', ph: 'glm-4.6' },
-    { label: 'Extra Prompt', key: 'system_extra', ph: 'appended to the agent system prompt' },
-  ];
-  return (
-    <>
-      <div style={styles.iosGroupTitle}>Agent<em style={styles.iosGroupHint}>LLM endpoint</em></div>
-      <div style={styles.iosCard}>
-        {textRows.map(({ label, key, ph, secret }, i) => (
-          <React.Fragment key={key}>
-            {i > 0 && <div style={styles.iosSep} />}
-            <div style={styles.iosRow}>
-              <span style={styles.iosLabel}>{label}</span>
-              <input style={styles.iosPattern} type={secret ? 'password' : 'text'} placeholder={ph}
-                value={cfg[key] as string} onChange={e => set({ [key]: e.target.value } as Partial<AgentConfig>)} />
-            </div>
-          </React.Fragment>
-        ))}
-        <div style={styles.iosSep} />
-        <div style={styles.iosRow} title="Sampling temperature (0 = deterministic)">
-          <span style={styles.iosLabel}>Temperature</span>
-          <input style={{ ...styles.iosPattern, width: 84, flex: '0 0 auto', textAlign: 'right' }} type="number"
-            step="0.1" min="0" max="2" value={cfg.temperature}
-            onChange={e => set({ temperature: parseFloat(e.target.value) || 0 })} />
-        </div>
-        <div style={styles.iosSep} />
-        <div style={styles.iosRow} title="Max LLM round-trips per request (loop guard)">
-          <span style={styles.iosLabel}>Max Steps</span>
-          <input style={{ ...styles.iosPattern, width: 84, flex: '0 0 auto', textAlign: 'right' }} type="number"
-            min="1" max="64" value={cfg.max_steps}
-            onChange={e => set({ max_steps: parseInt(e.target.value, 10) || 24 })} />
-        </div>
-      </div>
-      <div style={styles.iosFooter}>
-        OpenAI-compatible /chat/completions endpoint the Agent dock window talks to. Extra Prompt is appended
-        to the agent's system prompt — your project background and house rules go there.
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 16px' }}>
-        <button disabled={busy} onClick={() => { void save(); }}
-          style={{ background: busy ? 'rgba(10,132,255,0.4)' : 'rgba(10,132,255,0.9)', color: '#fff', border: 'none',
-            borderRadius: 8, padding: '7px 18px', fontSize: 13, fontWeight: 600, cursor: busy ? 'default' : 'pointer' }}>
-          Save
-        </button>
-        {note && <span style={{ fontSize: 12.5, color: note.ok ? '#30d158' : '#ff453a' }}>{note.text}</span>}
-      </div>
-      <div style={styles.iosGroupTitle}>DeepSeek Harness<em style={styles.iosGroupHint}>sidecar — the Agent window's DSH mode</em></div>
-      <div style={styles.iosCard}>
-        <div style={styles.iosRow} title="Port the dsh web UI listens on">
-          <span style={styles.iosLabel}>Port</span>
-          <input style={{ ...styles.iosPattern, width: 84, flex: '0 0 auto', textAlign: 'right' }} type="number"
-            min="1024" max="65535" value={cfg.dsh_port}
-            onChange={e => set({ dsh_port: parseInt(e.target.value, 10) || 3080 })} />
-        </div>
-        <div style={styles.iosSep} />
-        <div style={styles.iosRow} title="Shell command that spawns the harness (Node.js; npm package @deepseek-ai/dsh)">
-          <span style={styles.iosLabel}>Start Command</span>
-          <input style={styles.iosPattern} type="text" placeholder="npx -y @deepseek-ai/dsh web --no-open"
-            value={cfg.dsh_command} onChange={e => set({ dsh_command: e.target.value })} />
-        </div>
-        <div style={styles.iosSep} />
-        <div style={styles.iosRow} title="Passed to the sidecar as DEEPSEEK_API_KEY (leave empty if dsh configures its own auth)">
-          <span style={styles.iosLabel}>API Key</span>
-          <input style={styles.iosPattern} type="password" placeholder="optional"
-            value={cfg.dsh_api_key} onChange={e => set({ dsh_api_key: e.target.value })} />
-        </div>
-        <div style={styles.iosSep} />
-        <div style={styles.iosRow} title="Start the sidecar automatically when the Agent window opens">
-          <span style={styles.iosLabel}>Auto Start</span>
-          <IOSToggle checked={cfg.dsh_autostart} onChange={v => set({ dsh_autostart: v })} />
-        </div>
-      </div>
-      <div style={styles.iosFooter}>
-        Runs `dsh web` with its workspace at data/sampler/dsh_workspace — an AGENTS.md there teaches the
-        harness the `wb` bridge (tools/wb_agent.py) it uses to operate the workbench. The Agent window
-        frames the harness UI; the workbench page must stay open for tool calls to land.
-      </div>
-    </>
-  );
-};
-
 const SettingsTab: React.FC<{
   values: Record<OverrideKey, number>;
   onDefaultParamChange: (key: OverrideKey, value: number) => void;
@@ -4677,8 +4556,6 @@ const SettingsTab: React.FC<{
             title="The nine values every run falls back to">Default Setting</button>
           <button style={segBtnStyle(ui.screen === 'arch')} onClick={() => pickScreen('arch')}
             title="Regex rules that replace some of those values for the runs they catch">Architecture</button>
-          <button style={segBtnStyle(ui.screen === 'agent')} onClick={() => pickScreen('agent')}
-            title="The LLM endpoint the Agent dock window talks to">Agent</button>
         </div>
 
         {/* DEFAULT SETTING — 三张卡：输出前处理 / 工作分辨率 / 输入封顶，每张卡下面跟一句 footer
@@ -4820,10 +4697,6 @@ const SettingsTab: React.FC<{
             ]} />;
           })()}
         </>)}
-
-        {/* AGENT — Agent 窗的 LLM 端点(第三屏,segmented control 最后一格)。配置读写都在
-            AgentConfigRows 里自洽,/api/agent/config 是它与 AgentPanel 共享的唯一真源。 */}
-        {ui.screen === 'agent' && <AgentConfigRows />}
       </div>
     </div>
   );

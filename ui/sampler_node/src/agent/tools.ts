@@ -16,9 +16,10 @@ export type AgentVgenEntry = {
   fixed_fps: boolean; fixed_fps_value?: number; missing: string[]; ready: boolean;
 };
 
-/** Agent 的 LLM 端点配置(data/sampler/agent_settings.json 的镜像)。设置住在 Settings 页
- *  ▸ Agent 屏,Agent 窗只消费(状态行显示模型名/缺 key 提示)。dsh_* 四项是 DeepSeek
- *  Harness sidecar(agent_dsh.py)的启动参数。 */
+/** data/sampler/agent_settings.json 的镜像。Settings 页不再有 Agent 屏 —— Agent 窗只读
+ *  dsh_port / dsh_autostart(端口回退与自动启动);dsh_* 四项是 DeepSeek Harness sidecar
+ *  (agent_dsh.py)的启动参数。base_url/api_key/model/temperature/max_steps/system_extra 属于
+ *  已撤掉界面的内建 Chat 回路(agent_backend.py 仍保留它的 run 循环)。 */
 export type AgentConfig = {
   base_url: string; api_key: string; model: string;
   temperature: number; max_steps: number; system_extra: string;
@@ -30,6 +31,9 @@ export type AgentCtx = {
   vid: VidController;
   /** 有没有开着的文档(没开 = 时间线/图层工具都该报"no document")。 */
   docOpen: boolean;
+  /** Agent 窗(dsh)的工作区 = 当前 cud 的所在目录;`''` = 没有 cud(绑仓库根),
+   *  `null` = 工作台还没播报过文档,先别改绑。 */
+  cudDir: string | null;
   vidMode: 'image' | 'video';
   blockSets: BlockSet[];
   activeBlockSetId: string;

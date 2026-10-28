@@ -1,19 +1,26 @@
 # -*- coding: utf-8 -*-
 """DeepSeek Harness(dsh)sidecar:把官方开源的 coding agent 当独立进程拉起来,Agent 窗 iframe 它的 Web UI。
 
-分工:**dsh 管 agent loop、终端、文件编辑与它自己的 UI;工作台只做三件事** ——
-  1. 拉起/停掉 `dsh web`(Node 子进程,workspace 指到 data/sampler/dsh_workspace);
-  2. 每次启动刷新 workspace 的 AGENTS.md(告诉 dsh 这是什么应用、怎么用 tools/wb_agent.py 桥
-     操作工作台 —— 工具真身住在浏览器,经 /api/agent/direct_tool 送进去执行);
-  3. 汇报状态给 Agent 窗(跑没跑、端口多少、要不要去 Settings 改命令)。
+分工:**dsh 管 agent loop、终端、文件编辑与它自己的 UI;工作台只做四件事** ——
+  1. 拉起/停掉 `dsh web`(Node 子进程,cwd 指到**绑定目录**);
+  2. 维护绑定目录:当前 cud 的所在目录,没有 cud 就是仓库根;写进 dsh 的全局 AGENTS.md(告诉它
+     这是什么应用、怎么用 tools/wb_agent.py 桥操作工作台 —— 工具真身住在浏览器,经
+     /api/agent/direct_tool 送进去执行);
+  3. 把 dsh_plugin/(kolid-dsh-bind)与两个工作台 MCP 装进 web profile —— dsh 的工作区只能由它
+     自己的页面选,跨域 iframe 摸不到 DOM,能说话的只有 postMessage(插件举手,Agent 窗把当前
+     目录发过去);MCP 则让 agent 直接操作:`kolid-ui-probe`(tools/ui_probe_mcp.py)读活页面的
+     布局/命中/轨迹,`kolid-workbench`(tools/wb_mcp.py)执行工具表里的编辑(get_app_state /
+     timeline / layers / generation / canvas / video project);
+  4. 汇报状态给 Agent 窗(跑没跑、端口多少)。
 
-dsh 是 developer preview(MIT,npm @deepseek-ai/dsh),破坏性变更会来 —— 所以命令/端口全部可配
-(Settings ▸ Agent),这里不硬编码任何超过 README 承诺的东西。
+dsh 是 developer preview(MIT,npm @deepseek-ai/dsh),破坏性变更会来 —— 所以命令/端口住在
+data/sampler/agent_settings.json(Agent 窗直读),这里不硬编码任何超过 README 承诺的东西。
 """
 import http.client
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -29,49 +36,11 @@ CREATE_NEW_PROCESS_GROUP = 0x00000200  # win32-only;别处给 0
 # ── 进程状态(模块级;同进程内只有一份 sampler 服务)─────────────────────────────────────────
 _LOCK = threading.Lock()
 _PROC: subprocess.Popen = None
-_INFO = {'pid': 0, 'port': 0, 'started_at': 0.0, 'mode': 'stopped', 'error': '', 'url': '', 'log': []}
+_INFO = {'pid': 0, 'port': 0, 'started_at': 0.0, 'mode': 'stopped', 'error': '', 'url': '', 'bind': '',
+         'log': []}
 # mode: stopped | starting | running | stopped_external(端口被占但不是我们拉的那份)
 # url: dsh 启动时打印的带 token 完整地址(iframe 直接用;无 token 是 401)。
-
-_AGENTS_MD = """# AGENTS.md — Kolid Comfy Workbench
-
-You are operating **inside** a visual AI workbench (Kolid Comfy): a layer-compositing canvas plus a
-multi-track video timeline, running in the user's browser. You can drive it with the `wb` bridge CLI
-(uses only the Python interpreter + stdlib).
-
-## The workbench
-
-- The UI lives on localhost — the workbench server listens on **8700..8799** (one port per run);
-  the `wb` CLI auto-discovers it. `wb ping` reports what is running.
-- Its state (timeline, clips, layers, selection, playhead) lives **in the browser**, not in files.
-- The user may not have the page open. If a `wb` call fails with "workbench page not loaded",
-  ask the user to open the workbench once, then retry.
-
-## Bridge CLI (all output is JSON)
-
-```bash
-"{python}" "{cli}" ping                      # reachability + who is running
-"{python}" "{cli}" state                     # full app snapshot (tracks/clips/layers/selection/...)
-"{python}" "{cli}" call <tool> [json_args]   # run one workbench tool, e.g.:
-"{python}" "{cli}" call seek '{{"time": 4.0}}'
-"{python}" "{cli}" call move_clip '{{"clip_id": "<id>", "start": 6.5}}'
-"{python}" "{cli}" call select_clips '{{"ids": ["<clip id>"], "focus": true}}'
-```
-
-Workflow that works well: `state` first, act on the ids you see, `state` again to verify.
-Tool names follow the workbench's agent toolset (seek, play, pause, select_clips, add_track,
-place_asset, move_clip, trim_clip, split_clip, remove_clips, add_layer_clip, select_layer,
-add_layer, set_layer_opacity, layer_generate, run_pipeline, run_blend, set_canvas_size, set_fps,
-undo, redo, ...). Times are seconds; clip/track ids are strings; layer ids are numbers.
-
-## Ground rules
-
-- This workspace is for your notes/scratch files. Do not edit the Kolid Comfy source tree
-  (`{repo}`) unless the user explicitly asks for code changes.
-- Mutations you make through `wb` are real edits in the user's project (undoable in-app).
-- Report what you changed, briefly, in the user's language.
-"""
-
+# bind: 这一份 dsh 的工作区(子进程 cwd + iframe 地址里的 kolid_ws)。
 
 _SETTINGS_LOADER = None  # 测试注入口;None = 默认读 agent_backend 的 agent_settings.json
 
@@ -81,10 +50,6 @@ def _settings() -> dict:
         return _SETTINGS_LOADER()
     from . import agent_backend
     return agent_backend._load_settings()
-
-
-def _workspace() -> str:
-    return os.path.join(data_dir('sampler'), 'dsh_workspace')
 
 
 def _repo_root(*parts) -> str:
@@ -97,6 +62,54 @@ def _repo_root(*parts) -> str:
 
 def _cli_path() -> str:
     return _repo_root('tools', 'wb_agent.py')
+
+
+# ── 绑定目录 ──────────────────────────────────────────────────────────────────────────────────
+# dsh 的"工作区"就是它跑 agent 时的那一个目录:相对路径、读写文件、会话分组(sessions/<escaped
+# cwd>/)全按它说话。工作台这边的口径只有一个 —— **当前 cud 的所在目录**;一份 cud 都没开就退到
+# 仓库根(那种时候用户通常就是在让 agent 改工作台自己)。
+#
+# 这个选择只记在盘上(bind.json),不跟着页面走:页面刷新、ComfyUI 重启之后,agent 仍落在同一个
+# 目录里,而不是悄悄换回某个默认值。
+def _bind_file() -> str:
+    return os.path.join(data_dir('sampler'), 'dsh_bind.json')
+
+
+def bound_dir() -> str:
+    """绑定目录(绝对路径)。记着的那份不在了(盘符拔走、目录被删)就退回仓库根。"""
+    try:
+        with open(_bind_file(), 'r', encoding='utf-8') as f:
+            path = json.load(f).get('path')
+    except (OSError, ValueError, AttributeError):
+        path = ''
+    if isinstance(path, str) and path and os.path.isdir(path):
+        return os.path.normpath(path)
+    return _repo_root()
+
+
+def bind(path) -> dict:
+    """把工作区钉到 `path`;传空 = 没有 cud,钉到仓库根。
+
+    调用方(页面)给的是 cud 文件的所在目录,这里只做归一和存在性检查 —— 一个不存在的目录会让
+    dsh 那边 create 失败,不如在这里就说清楚。运行中的那份 dsh 不吃新的 cwd(进程已经起来了),
+    它由 kolid-dsh-bind 插件在页面里换工作区;这里改的是**下一次**启动落哪儿。
+    """
+    raw = (path or '').strip() if isinstance(path, str) else ''
+    if raw:
+        target = os.path.normpath(os.path.expanduser(raw))
+        if not os.path.isdir(target):
+            return {'ok': False, 'error': 'not a directory: %s' % target, 'path': bound_dir()}
+    else:
+        target = _repo_root()
+    try:
+        os.makedirs(os.path.dirname(_bind_file()), exist_ok=True)
+        with open(_bind_file(), 'w', encoding='utf-8') as f:
+            json.dump({'path': target}, f, ensure_ascii=False)
+    except OSError as e:
+        return {'ok': False, 'error': 'cannot record binding: %s' % e, 'path': bound_dir()}
+    with _LOCK:
+        _INFO['bind'] = target
+    return {'ok': True, 'path': target}
 
 
 def _port_alive(port: int, timeout: float = 2.0) -> bool:
@@ -138,6 +151,11 @@ layer_from_asset) · generation (run_pipeline/run_blend/run_tag/cancel_run/set_e
 (set_fps/add_vgen_segment/add_continue_segment/document). Mutations are real, undoable edits in the
 user's project. If a call reports the workbench page is not loaded, ask the user to open it, then
 retry. Do not edit the Kolid Comfy source tree ({repo}) unless the user explicitly asks for code changes.
+
+The same catalog is also exposed over MCP as `mcp__kolid-workbench__<tool>` (server
+`kolid-workbench`) — prefer those calls when your client lists them; the CLI above is the same
+endpoint for shells. A second MCP, `kolid-ui-probe`, answers layout / hit-test / trace / React-tree
+questions about that page (read-only).
 {end}"""
 
 
@@ -158,23 +176,170 @@ def _write_global_bridge() -> None:
         block = _BRIDGE_BLOCK.format(begin=_BRIDGE_BEGIN, end=_BRIDGE_END,
                                      python=sys_executable(), cli=_cli_path(), repo=_repo_root())
         if _BRIDGE_BEGIN in old:
-            new = re.sub(re.escape(_BRIDGE_BEGIN) + r'.*?' + re.escape(_BRIDGE_END), block, old, flags=re.S)
+            # 替换串里全是 Windows 反斜杠(仓库/解释器路径),交给 lambda 才不被当成转义。
+            new = re.sub(re.escape(_BRIDGE_BEGIN) + r'.*?' + re.escape(_BRIDGE_END), lambda _m: block,
+                         old, flags=re.S)
         else:
             new = (old.rstrip() + '\n\n' if old.strip() else '') + block + '\n'
         with open(path, 'w', encoding='utf-8') as f:
             f.write(new)
     except OSError:
-        pass  # 写不进全局指令不该拖死 sidecar:工作区里那份 AGENTS.md 还在
+        pass  # 写不进全局指令不该拖死 sidecar:agent 顶多是不知道自己还能操作工作台
 
 
-def _ensure_workspace() -> str:
-    ws = _workspace()
-    os.makedirs(ws, exist_ok=True)
-    md = _AGENTS_MD.format(python=sys_executable(), cli=_cli_path(), repo=_repo_root())
-    with open(os.path.join(ws, 'AGENTS.md'), 'w', encoding='utf-8') as f:
-        f.write(md)
+# ── profile 插件(kolid-dsh-bind)──────────────────────────────────────────────────────────────
+# 工作区只能由 dsh 自己的页面去选:跨域 iframe 摸不到它的 DOM,能说话的只有地址栏参数和
+# postMessage。所以"钉住工作区 + 藏掉添加/切换入口"这件事做成一个 dsh client 插件,装进 web
+# profile 的 patch 层 —— 它跑在 dsh 进程里、同一个页面,只隔一道 iframe 边界。
+#
+# 同一个 patch 层里还挂上工作台的 MCP 服务(tools/ui_probe_mcp.py):agent 于是能直接读活页面的
+# 布局/命中/轨迹,而不是先拼一条 ui_probe_cli 命令。它自带一条 8791 通道,但页面那条长轮询
+# 走的是**工作台自己的端口**(同源 /api/ui_probe),所以这里用 UI_PROBE_BASE 把它钉到那个端口 ——
+# 否则它只会对着自己那条没人连的 8791 空等。端口由 /api/agent_dsh/start 的请求带过来。
+_PLUGIN_NAME = 'kolid-dsh-bind'
+_MCP_ID = 'mcp-kolid-ui-probe'
+_MCP_NAME = 'kolid-ui-probe'
+_PLUGIN_FILES = ('package.json', 'lib/index.js', 'lib/client.js')
+_PATCH_BEGIN = '# >>> %s:begin >>>' % _BRIDGE_MARK
+_PATCH_END = '# <<< %s:end <<<' % _BRIDGE_MARK
+_PATCH_BLOCK = """{begin}
+- insert:
+    - id: {name}
+      name: ./node_modules/{name}/lib/index.js
+{end}"""
+# MCP 单独一块:与插件那块各有各的界标,谁重写谁自己那块,互不覆盖。两块 MCP 也各占一对界标:
+# 探针(读现场)与编辑(改工程)是两件事,一方装失败不该把另一方抹掉,名字也不该互相覆盖。
+_MCP_ID = 'mcp-kolid-ui-probe'
+_MCP_NAME = 'kolid-ui-probe'
+_EDIT_ID = 'mcp-kolid-workbench'
+_EDIT_NAME = 'kolid-workbench'
+_PLUGIN_FILES = ('package.json', 'lib/index.js', 'lib/client.js')
+_PATCH_BEGIN = '# >>> %s:begin >>>' % _BRIDGE_MARK
+_PATCH_END = '# <<< %s:end <<<' % _BRIDGE_MARK
+_PATCH_BLOCK = """{begin}
+- insert:
+    - id: {name}
+      name: ./node_modules/{name}/lib/index.js
+{end}"""
+_MCP_BEGIN = '# >>> %s-mcp:begin >>>' % _BRIDGE_MARK
+_MCP_END = '# <<< %s-mcp:end <<<' % _BRIDGE_MARK
+_EDIT_BEGIN = '# >>> %s-edit:begin >>>' % _BRIDGE_MARK
+_EDIT_END = '# <<< %s-edit:end <<<' % _BRIDGE_MARK
+_MCP_BLOCK = """{begin}
+- insert:
+    - id: {mcp_id}
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: {mcp_name}
+        transport: stdio
+        command: {python}
+        args: [{script}]
+        cwd: {repo}{env}
+{end}"""
+_PLUGIN_OK = False
+
+
+def _profile_dir() -> str:
+    return os.path.join(_dsh_home(), 'profiles', 'web')
+
+
+def _copy_if_diff(src: str, dst: str) -> None:
+    with open(src, 'rb') as f:
+        want = f.read()
+    try:
+        with open(dst, 'rb') as f:
+            if f.read() == want:
+                return
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(dst, 'wb') as f:
+        f.write(want)
+
+
+def _upsert_block(text: str, begin: str, end: str, block: str) -> str:
+    if begin in text:
+        return re.sub(re.escape(begin) + r'.*?' + re.escape(end), lambda _m: block, text, flags=re.S)
+    return (text.rstrip('\n') + '\n\n' if text.strip() else '') + block + '\n'
+
+
+def _ensure_profile_plugin(host_port: int = 0) -> bool:
+    """把插件与两个 MCP 服务在 patch 层挂上;profile 还不存在(首跑)就返回 False。"""
+    global _PLUGIN_OK
+    profile = _profile_dir()
+    if not os.path.isdir(profile):
+        return False
+    src = _repo_root('nodes', 'workbench', 'dsh_plugin')
+    try:
+        for rel in _PLUGIN_FILES:
+            parts = rel.split('/')
+            _copy_if_diff(os.path.join(src, *parts),
+                          os.path.join(profile, 'node_modules', _PLUGIN_NAME, *parts))
+        path = os.path.join(profile, 'cordis.patch.yml')
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                old = f.read()
+        except OSError:
+            old = ''
+        block = _PATCH_BLOCK.format(begin=_PATCH_BEGIN, end=_PATCH_END, name=_PLUGIN_NAME)
+        # JSON 的字符串就是合法的 YAML 双引号标量,Windows 反斜杠不会被当成转义。
+        mcp = _MCP_BLOCK.format(
+            begin=_MCP_BEGIN, end=_MCP_END, mcp_id=_MCP_ID, mcp_name=_MCP_NAME,
+            python=json.dumps(sys_executable()), script=json.dumps(_mcp_path()),
+            repo=json.dumps(_repo_root()),
+            env=('\n        env:\n          UI_PROBE_BASE: %s' % json.dumps('http://127.0.0.1:%d' % host_port)
+                 if host_port else ''))
+        edit = _MCP_BLOCK.format(
+            begin=_EDIT_BEGIN, end=_EDIT_END, mcp_id=_EDIT_ID, mcp_name=_EDIT_NAME,
+            python=json.dumps(sys_executable()), script=json.dumps(_edit_mcp_path()),
+            repo=json.dumps(_repo_root()),
+            env=('\n        env:\n          WB_BASE: %s' % json.dumps('http://127.0.0.1:%d' % host_port)
+                 if host_port else ''))
+        new = _upsert_block(_upsert_block(_upsert_block(old, _PATCH_BEGIN, _PATCH_END, block),
+                                          _MCP_BEGIN, _MCP_END, mcp),
+                            _EDIT_BEGIN, _EDIT_END, edit)
+        if new != old:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new)
+        _PLUGIN_OK = True
+        return True
+    except OSError:
+        return False
+
+
+def _mcp_path() -> str:
+    return _repo_root('tools', 'ui_probe_mcp.py')
+
+
+def _edit_mcp_path() -> str:
+    return _repo_root('tools', 'wb_mcp.py')
+
+
+def _deferred_install(proc: subprocess.Popen, host_port: int = 0) -> None:
+    """首跑:profile 是 dsh 自己生成的,等它落盘再装插件,然后重启一次让它生效。
+
+    只在 profile 本来不存在时才会走到这儿;装完的重启由我们自己发起,页面重新连上来看到的
+    就已经是钉住工作区的那一份,用户不用知道中间死过一次。
+    """
+    for _ in range(45):
+        if _ensure_profile_plugin(host_port):
+            break
+        time.sleep(1)
+    else:
+        return
+    with _LOCK:
+        if _PROC is not proc:
+            return  # 用户已经手动停掉/重启过,别抢
+    time.sleep(1.0)
+    stop()
+    start(host_port)
+
+
+def _prepare(host_port: int = 0) -> str:
+    """启动前的一次性准备:全局桥接说明 + profile 插件/MCP;返回子进程的 cwd(绑定目录)。"""
     _write_global_bridge()
-    return ws
+    _ensure_profile_plugin(host_port)
+    return bound_dir()
 
 
 def sys_executable() -> str:
@@ -211,6 +376,8 @@ def _pump(proc: subprocess.Popen) -> None:
                 if m:
                     # URL 自己拼:--public-url 会把打印出来的前缀改成代理地址,而 iframe 直连的
                     # 永远是裸端口 —— 只认 token,不认那行里印的 host。
+                    # 不能再往这个地址上挂参数:token 换 cookie 的那一跳是 303 `location: ./`,
+                    # 查询串会被整个丢掉(连 referrer 都是 no-referrer),绑定只能走 postMessage。
                     _INFO['url'] = 'http://127.0.0.1:%d/?token=%s' % (_INFO['port'], m.group(1))
     except (OSError, ValueError):
         pass
@@ -238,7 +405,7 @@ def status() -> dict:
     return {**_snapshot('stopped'), 'log': log}
 
 
-def start() -> dict:
+def start(host_port: int = 0) -> dict:
     global _PROC
     with _LOCK:
         proc = _PROC
@@ -255,7 +422,7 @@ def start() -> dict:
     # 默认端口是它配置里的值。命令里用户已经写了 --port 就尊重他,不重复追加。
     if '--port' not in cmd.split():
         cmd += ' --port %d' % port
-    ws = _ensure_workspace()
+    ws = _prepare(host_port)
     env = os.environ.copy()
     if s.get('dsh_api_key'):
         env['DEEPSEEK_API_KEY'] = str(s['dsh_api_key'])
@@ -268,8 +435,11 @@ def start() -> dict:
         return _snapshot('stopped', error='spawn failed: %s' % e)
     with _LOCK:
         _PROC = proc
-        _INFO.update(pid=proc.pid, port=port, started_at=time.time(), mode='starting', error='', url='', log=[])
+        _INFO.update(pid=proc.pid, port=port, started_at=time.time(), mode='starting', error='',
+                     url='', bind=ws, log=[])
     threading.Thread(target=_pump, args=(proc,), daemon=True).start()
+    if not _PLUGIN_OK:
+        threading.Thread(target=_deferred_install, args=(proc, host_port), daemon=True).start()
     return status()
 
 
@@ -299,6 +469,14 @@ def stop() -> dict:
 
 
 # ── HTTP 接口(agent_backend.handle 把 /api/agent_dsh/* 委派到这里)───────────────────────────
+def _host_port(h) -> int:
+    """工作台自己监听的端口 —— 页面那条探针长轮询就是发给它的,所以 MCP 也得连它。"""
+    try:
+        return int(h.server.server_address[1])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return 0
+
+
 def handle(h) -> None:
     path = h.path.split('?', 1)[0]
 
@@ -314,11 +492,22 @@ def handle(h) -> None:
         return
 
     if h.command == 'POST' and path == '/api/agent_dsh/start':
-        h._send_json({'ok': True, **start()})
+        h._send_json({'ok': True, **start(_host_port(h))})
         return
 
     if h.command == 'POST' and path == '/api/agent_dsh/stop':
         h._send_json({'ok': True, **stop()})
+        return
+
+    if h.command == 'POST' and path == '/api/agent_dsh/bind':
+        # 页面报"当前 cud 在哪":落盘给下一次启动,运行中的那份由插件自己换(见 client.js)。
+        # 空的 path 是有意义的(没有 cud → 绑仓库根),所以只把"整个字段都没给"当成坏请求。
+        req = body()
+        if 'path' not in req:
+            h._send_json({'ok': False, 'error': 'path required'}, 400)
+            return
+        r = bind(req.get('path'))
+        h._send_json({'ok': True, **r})
         return
 
     h._send_json({'ok': False, 'error': 'unknown agent_dsh route: %s %s' % (h.command, path)}, 404)
