@@ -55,6 +55,25 @@ const num = (v: unknown, d = 0): number => {
 };
 const str = (v: unknown): string => (typeof v === 'string' ? v : v == null ? '' : String(v));
 const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+const clampInt = (v: unknown, lo: number, hi: number, d: number): number =>
+  Math.min(hi, Math.max(lo, Math.round(num(v, d))));
+/** 把一条总长按权重切段；最后一段吃掉舍入余量，各段之和恒等于总长。 */
+const splitSpan = (total: number, weights: number[]): number[] => {
+  const sum = weights.reduce((s, x) => s + x, 0);
+  const out: number[] = [];
+  let acc = 0;
+  weights.forEach((w, i) => {
+    const len = i === weights.length - 1 ? total - acc : Math.round(total * w / sum);
+    out.push(len);
+    acc += len;
+  });
+  return out;
+};
+const weightsOf = (v: unknown, n: number): number[] | null => {
+  if (v == null) return Array(n).fill(1);
+  const arr = Array.isArray(v) ? v.map(x => num(x, 0)) : [];
+  return arr.length === n && arr.every(x => x > 0) ? arr : null;
+};
 const clipShort = (c: VidClip) => ({
   id: c.id, track: c.trackId, kind: c.kind, name: c.name,
   start: r3(c.start), dur: r3(c.duration), offset: r3(c.offset), src_dur: r3(c.srcDuration),
@@ -219,6 +238,73 @@ export const runAgentTool = async (name: string, rawArgs: unknown, ctx: AgentCtx
       const stack = (str(a.stack) === 'guidance' ? 'guidance' : 'layer') as BlendStack;
       ctx.uiSend('layer-add', { stack, kind: str(a.kind) === 'stash' ? 'stash' : 'default' });
       return sent(`added layer on ${stack} stack`);
+    }
+    // 漫画格排版：一条调用摆出一整页分格(纸 + 每格一张空层 + 线稿层)。几何在这里算 ——
+    // 页面只照矩形建层,边距/沟槽只有这一处算术;每格的图层 transform 用同一个页内矩形。
+    case 'create_comic_layout': {
+      const ui = getBlendUi();
+      const pw = Math.round(num(a.w, ui.canvas.w));
+      const ph = Math.round(num(a.h, ui.canvas.h));
+      if (!(pw >= 8 && ph >= 8)) return fail('No canvas yet — pass w/h (or call set_canvas_size first).');
+      if (pw > 8192 || ph > 8192) return fail('page out of range (8..8192 px per side)');
+      // 与页面同一个像素上限（blend_node.html 的 MAX_CANVAS_PIXELS）：超了改尺寸会被静默拒绝，
+      // 排版随后因尺寸对不上整条作废 —— 不如这里先把话说清楚。
+      if (pw * ph > 40e6) return fail('page is over 40 megapixels — pick a smaller w/h');
+      const ink = /^#[0-9a-fA-F]{6}$/.test(str(a.ink)) ? str(a.ink) : '#000000';
+      const paperArg = str(a.paper);
+      const paper = paperArg === 'none' ? '' : /^#[0-9a-fA-F]{6}$/.test(paperArg) ? paperArg : '#ffffff';
+      const border = clampInt(a.border, 0, 40, 3);
+      type Rect = { name: string; x: number; y: number; w: number; h: number };
+      const rects: Rect[] = [];
+      let grid = '';
+      if (Array.isArray(a.panels) && a.panels.length) {
+        a.panels.forEach((p, i) => {
+          const o = (p && typeof p === 'object' ? p : {}) as Record<string, unknown>;
+          rects.push({
+            name: str(o.name) || `Panel ${i + 1}`,
+            x: Math.round(num(o.x)), y: Math.round(num(o.y)),
+            w: Math.round(num(o.w)), h: Math.round(num(o.h)),
+          });
+        });
+        if (rects.some(r => r.w < 8 || r.h < 8 || r.x < 0 || r.y < 0 || r.x + r.w > pw || r.y + r.h > ph)) {
+          return fail('panels must be page rectangles in px — at least 8×8 and inside the page');
+        }
+        grid = 'custom panels';
+      } else {
+        const rows = clampInt(a.rows, 1, 12, 2);
+        const cols = clampInt(a.cols, 1, 12, 2);
+        const rowW = weightsOf(a.row_weights, rows);
+        const colW = weightsOf(a.col_weights, cols);
+        if (!rowW || !colW) return fail(`row_weights needs ${rows} positive numbers and col_weights ${cols}`);
+        const short = Math.min(pw, ph);
+        const margin = a.margin != null ? clampInt(a.margin, 0, Math.floor(short / 2), 0) : Math.max(8, Math.round(short * 0.04));
+        const gutter = a.gutter != null ? clampInt(a.gutter, 0, Math.floor(short / 2), 0) : Math.max(6, Math.round(short * 0.03));
+        const usableW = pw - 2 * margin - (cols - 1) * gutter;
+        const usableH = ph - 2 * margin - (rows - 1) * gutter;
+        if (usableW < 8 || usableH < 8) return fail('margin + gutter leave no room on the page');
+        const colWidths = splitSpan(usableW, colW);
+        const rowHeights = splitSpan(usableH, rowW);
+        let y = margin;
+        rowHeights.forEach(h => {
+          let x = margin;
+          colWidths.forEach(w => {
+            rects.push({ name: `Panel ${rects.length + 1}`, x, y, w, h });
+            x += w + gutter;
+          });
+          y += h + gutter;
+        });
+        grid = `${rows}×${cols} grid, margin ${margin}, gutter ${gutter}`;
+      }
+      if (ui.canvas.w !== pw || ui.canvas.h !== ph) ctx.uiSend('canvas-resize', { w: pw, h: ph });
+      ctx.uiSend('panel-layout', {
+        page: { w: pw, h: ph }, panels: rects, paper,
+        frame: border > 0 ? { width: border, color: ink } : null,
+      });
+      const list = rects.slice(0, 24)
+        .map(r => `${r.name} (${r.x},${r.y},${r.w}×${r.h})`).join('; ')
+        + (rects.length > 24 ? `; …${rects.length - 24} more` : '');
+      return sent(`${pw}×${ph} comic layout — ${grid}; ${rects.length} empty panel layer${rects.length === 1 ? '' : 's'}`
+        + `${paper ? ` + paper ${paper}` : ''}${border > 0 ? ` + frame ${border}px ${ink}` : ''}. ${list}`);
     }
     case 'remove_layer':
       ctx.uiSend('layer-remove', { id: num(a.id) });

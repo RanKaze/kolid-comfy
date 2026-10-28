@@ -42,14 +42,20 @@ Harness**(官方开源 coding agent,sidecar + iframe 它的 Web UI)。曾有的�
 全局 `~/.dsh/AGENTS.md` 里有一段由 `agent_dsh.py` 维护的桥接说明(成对注释包住,原地替换),
 告诉 harness 这三条通道与工具清单。
 
-## 工具面(38 个)
+## 工具面(39 个)
 
 `get_app_state`(全家桶快照)· 传输 seek/play/pause · 时间线 select_clips/add_track/
 remove_track/rename_track/place_asset/move_clip/trim_clip/split_clip/remove_clips/add_layer_clip ·
 图层 select_layer/add_layer/remove_layer/duplicate_layer/rename_layer/set_layer_opacity/
-toggle_layer_visibility/layer_generate/layer_from_asset · 生成 run_pipeline/run_blend/run_tag/
-cancel_run/set_extra_prompt · 画布 set_canvas_size/view_fit/set_paint_color/set_brush/undo/redo ·
-视频工程 set_fps/add_vgen_segment/add_continue_segment/document(new|save)。
+toggle_layer_visibility/layer_generate/layer_from_asset/**create_comic_layout** · 生成 run_pipeline/
+run_blend/run_tag/cancel_run/set_extra_prompt · 画布 set_canvas_size/view_fit/set_paint_color/
+set_brush/undo/redo · 视频工程 set_fps/add_vgen_segment/add_continue_segment/document(new|save)。
+
+`create_comic_layout` 是唯一一条**高层排版**工具:一次调用摆出整页漫画格 —— 纸(可选)+ 每格一张
+与格等大的空层(命名 Panel N)+ 最上面一张线稿层,整页只落一步历史。几何(边距/沟槽/权重)在
+`ui/sampler_node/src/agent/tools.ts` 里算,页面 (`panel-layout` 动作 → `applyPanelLayout`) 只照
+矩形建层;`rows/cols` 出规则网格,`panels` 出不规则页。它下面没有任何新的图层原语 —— 用的还是
+`addSurfaceLayer` 那条既有写口,只是多了 `quiet`/`noHistory` 两个可选开关好让一批层合一步撤销。
 
 改动都走既有写口(vid.update + History label、uiSend 动作键),所以撤销栈、脏标记、.cud 存档
 全部天然成立。关键帧/Text/Geometry/Pose/3D 的深编辑面暂未开放 —— 加新工具 = 后端 `_fn` 一条

@@ -6,11 +6,11 @@
   2. 维护绑定目录:当前 cud 的所在目录,没有 cud 就是仓库根;写进 dsh 的全局 AGENTS.md(告诉它
      这是什么应用、怎么用 tools/wb_agent.py 桥操作工作台 —— 工具真身住在浏览器,经
      /api/agent/direct_tool 送进去执行);
-  3. 把 dsh_plugin/(kolid-dsh-bind)与两个工作台 MCP 装进 web profile —— dsh 的工作区只能由它
-     自己的页面选,跨域 iframe 摸不到 DOM,能说话的只有 postMessage(插件举手,Agent 窗把当前
-     目录发过去);MCP 则让 agent 直接操作:`kolid-ui-probe`(tools/ui_probe_mcp.py)读活页面的
-     布局/命中/轨迹,`kolid-workbench`(tools/wb_mcp.py)执行工具表里的编辑(get_app_state /
-     timeline / layers / generation / canvas / video project);
+  3. 把 dsh_plugin/(kolid-dsh-bind)与工作台编辑 MCP(kolid-workbench,tools/wb_mcp.py)装进 web
+     profile —— dsh 的工作区只能由它自己的页面选,跨域 iframe 摸不到 DOM,能说话的只有
+     postMessage(插件举手,Agent 窗把当前目录发过去);MCP 让 agent 直接改工程(get_app_state /
+     timeline / layers / generation / canvas / video project)。读现场的探针 MCP(kolid-ui-probe)
+     不再接入 dsh。
   4. 汇报状态给 Agent 窗(跑没跑、端口多少)。
 
 dsh 是 developer preview(MIT,npm @deepseek-ai/dsh),破坏性变更会来 —— 所以命令/端口住在
@@ -146,16 +146,18 @@ Run `state` first, act on the ids it shows, run `state` again to verify. Tools: 
 (seek/play/pause) · timeline (select_clips/add_track/remove_track/rename_track/place_asset/
 move_clip/trim_clip/split_clip/remove_clips/add_layer_clip) · layers (select_layer/add_layer/
 remove_layer/duplicate_layer/rename_layer/set_layer_opacity/toggle_layer_visibility/layer_generate/
-layer_from_asset) · generation (run_pipeline/run_blend/run_tag/cancel_run/set_extra_prompt) · canvas
-(set_canvas_size/view_fit/set_paint_color/set_brush/undo/redo) · video project
-(set_fps/add_vgen_segment/add_continue_segment/document). Mutations are real, undoable edits in the
-user's project. If a call reports the workbench page is not loaded, ask the user to open it, then
-retry. Do not edit the Kolid Comfy source tree ({repo}) unless the user explicitly asks for code changes.
+layer_from_asset/create_comic_layout) · generation (run_pipeline/run_blend/run_tag/cancel_run/
+set_extra_prompt) · canvas (set_canvas_size/view_fit/set_paint_color/set_brush/undo/redo) · video
+project (set_fps/add_vgen_segment/add_continue_segment/document). `create_comic_layout` lays out a
+whole comic page (paper + one empty panel layer per cell + frame lines, one undo step) — use it
+instead of stacking primitives when the user asks for 漫画格 / 分镜 / panel layout. Mutations are
+real, undoable edits in the user's project. If a call reports the workbench page is not loaded, ask
+the user to open it, then retry. Do not edit the Kolid Comfy source tree ({repo}) unless the user
+explicitly asks for code changes.
 
 The same catalog is also exposed over MCP as `mcp__kolid-workbench__<tool>` (server
 `kolid-workbench`) — prefer those calls when your client lists them; the CLI above is the same
-endpoint for shells. A second MCP, `kolid-ui-probe`, answers layout / hit-test / trace / React-tree
-questions about that page (read-only).
+endpoint for shells.
 {end}"""
 
 
@@ -192,25 +194,10 @@ def _write_global_bridge() -> None:
 # postMessage。所以"钉住工作区 + 藏掉添加/切换入口"这件事做成一个 dsh client 插件,装进 web
 # profile 的 patch 层 —— 它跑在 dsh 进程里、同一个页面,只隔一道 iframe 边界。
 #
-# 同一个 patch 层里还挂上工作台的 MCP 服务(tools/ui_probe_mcp.py):agent 于是能直接读活页面的
-# 布局/命中/轨迹,而不是先拼一条 ui_probe_cli 命令。它自带一条 8791 通道,但页面那条长轮询
-# 走的是**工作台自己的端口**(同源 /api/ui_probe),所以这里用 UI_PROBE_BASE 把它钉到那个端口 ——
-# 否则它只会对着自己那条没人连的 8791 空等。端口由 /api/agent_dsh/start 的请求带过来。
+# 同一个 patch 层里只挂工作台的**编辑** MCP(tools/wb_mcp.py):agent 借此直接改工程(图层 / 时间线 /
+# 生成 / 画布 / 视频工程)。读现场的探针 MCP(kolid-ui-probe)不再接入 dsh —— 它只服务于工作台自己的
+# 长轮询通道,dsh 这边没有对应需求,留着只会多占一条没人用的 stdio 进程。
 _PLUGIN_NAME = 'kolid-dsh-bind'
-_MCP_ID = 'mcp-kolid-ui-probe'
-_MCP_NAME = 'kolid-ui-probe'
-_PLUGIN_FILES = ('package.json', 'lib/index.js', 'lib/client.js')
-_PATCH_BEGIN = '# >>> %s:begin >>>' % _BRIDGE_MARK
-_PATCH_END = '# <<< %s:end <<<' % _BRIDGE_MARK
-_PATCH_BLOCK = """{begin}
-- insert:
-    - id: {name}
-      name: ./node_modules/{name}/lib/index.js
-{end}"""
-# MCP 单独一块:与插件那块各有各的界标,谁重写谁自己那块,互不覆盖。两块 MCP 也各占一对界标:
-# 探针(读现场)与编辑(改工程)是两件事,一方装失败不该把另一方抹掉,名字也不该互相覆盖。
-_MCP_ID = 'mcp-kolid-ui-probe'
-_MCP_NAME = 'kolid-ui-probe'
 _EDIT_ID = 'mcp-kolid-workbench'
 _EDIT_NAME = 'kolid-workbench'
 _PLUGIN_FILES = ('package.json', 'lib/index.js', 'lib/client.js')
@@ -221,10 +208,12 @@ _PATCH_BLOCK = """{begin}
     - id: {name}
       name: ./node_modules/{name}/lib/index.js
 {end}"""
-_MCP_BEGIN = '# >>> %s-mcp:begin >>>' % _BRIDGE_MARK
-_MCP_END = '# <<< %s-mcp:end <<<' % _BRIDGE_MARK
+# 两块各有各的界标,谁重写谁自己那块,互不覆盖:插件一块、编辑 MCP 一块。
+# _PROBE_BEGIN/_PROBE_END 只用于在已安装的旧 profile 里剔除残留的探针 MCP 块(新版不再写入)。
 _EDIT_BEGIN = '# >>> %s-edit:begin >>>' % _BRIDGE_MARK
 _EDIT_END = '# <<< %s-edit:end <<<' % _BRIDGE_MARK
+_PROBE_BEGIN = '# >>> %s-mcp:begin >>>' % _BRIDGE_MARK
+_PROBE_END = '# <<< %s-mcp:end <<<' % _BRIDGE_MARK
 _MCP_BLOCK = """{begin}
 - insert:
     - id: {mcp_id}
@@ -263,8 +252,19 @@ def _upsert_block(text: str, begin: str, end: str, block: str) -> str:
     return (text.rstrip('\n') + '\n\n' if text.strip() else '') + block + '\n'
 
 
+def _strip_block(text: str, begin: str, end: str) -> str:
+    """整段(含界标)删掉:用于在已安装的旧 profile 里剔除残留的探针 MCP 块。"""
+    if begin not in text:
+        return text
+    return re.sub(re.escape(begin) + r'.*?' + re.escape(end) + r'\n?', '', text, flags=re.S)
+
+
 def _ensure_profile_plugin(host_port: int = 0) -> bool:
-    """把插件与两个 MCP 服务在 patch 层挂上;profile 还不存在(首跑)就返回 False。"""
+    """把插件与编辑 MCP 在 patch 层挂上;profile 还不存在(首跑)就返回 False。
+
+    读现场的探针 MCP(kolid-ui-probe)不再接入 dsh,所以只在旧 profile 里把残留的探针块剔除,
+    不再写入;保留的是钉工作区的插件与改工程的编辑 MCP。
+    """
     global _PLUGIN_OK
     profile = _profile_dir()
     if not os.path.isdir(profile):
@@ -281,22 +281,17 @@ def _ensure_profile_plugin(host_port: int = 0) -> bool:
                 old = f.read()
         except OSError:
             old = ''
+        # 先剔掉旧版可能写进去的探针 MCP 块(新版不再写入),再落插件与编辑 MCP。
+        cleaned = _strip_block(old, _PROBE_BEGIN, _PROBE_END)
         block = _PATCH_BLOCK.format(begin=_PATCH_BEGIN, end=_PATCH_END, name=_PLUGIN_NAME)
         # JSON 的字符串就是合法的 YAML 双引号标量,Windows 反斜杠不会被当成转义。
-        mcp = _MCP_BLOCK.format(
-            begin=_MCP_BEGIN, end=_MCP_END, mcp_id=_MCP_ID, mcp_name=_MCP_NAME,
-            python=json.dumps(sys_executable()), script=json.dumps(_mcp_path()),
-            repo=json.dumps(_repo_root()),
-            env=('\n        env:\n          UI_PROBE_BASE: %s' % json.dumps('http://127.0.0.1:%d' % host_port)
-                 if host_port else ''))
         edit = _MCP_BLOCK.format(
             begin=_EDIT_BEGIN, end=_EDIT_END, mcp_id=_EDIT_ID, mcp_name=_EDIT_NAME,
             python=json.dumps(sys_executable()), script=json.dumps(_edit_mcp_path()),
             repo=json.dumps(_repo_root()),
             env=('\n        env:\n          WB_BASE: %s' % json.dumps('http://127.0.0.1:%d' % host_port)
                  if host_port else ''))
-        new = _upsert_block(_upsert_block(_upsert_block(old, _PATCH_BEGIN, _PATCH_END, block),
-                                          _MCP_BEGIN, _MCP_END, mcp),
+        new = _upsert_block(_upsert_block(cleaned, _PATCH_BEGIN, _PATCH_END, block),
                             _EDIT_BEGIN, _EDIT_END, edit)
         if new != old:
             with open(path, 'w', encoding='utf-8') as f:
@@ -305,10 +300,6 @@ def _ensure_profile_plugin(host_port: int = 0) -> bool:
         return True
     except OSError:
         return False
-
-
-def _mcp_path() -> str:
-    return _repo_root('tools', 'ui_probe_mcp.py')
 
 
 def _edit_mcp_path() -> str:

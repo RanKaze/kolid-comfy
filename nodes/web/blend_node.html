@@ -10805,10 +10805,10 @@ function addSurfaceLayer(opts) {
     };
     insertAtStackTop(ownSource(l, l.img, l.src));   // top of its own stack, never above the guidance block
     selectedId = l.id;
-    layoutCanvas();
-    refreshLayerPanels();
-    render();
-    pushHistory(null, 'Added layer 「' + l.name + '」');
+    // 批量建层（漫画格排版那一趟）由调用方统一收口：中间的层不各画一遍、不各落一步历史 ——
+    // 否则一次排版会闪 N 个中间帧，撤销也要按 N 次。
+    if (!opts.quiet) { layoutCanvas(); refreshLayerPanels(); render(); }
+    if (!opts.noHistory) pushHistory(null, 'Added layer 「' + l.name + '」');
     return l;
 }
 
@@ -10865,6 +10865,89 @@ function addStashLayer(stack) {
     });
     if (l) setStatus(`Stash added — its picture is the ${canvasW} × ${canvasH} composite of the layers under it, re-read on every draw`);
     return l;
+}
+
+// ==================== 漫画格排版（宿主 action `panel-layout`）====================
+// 一条动作摆出一整页分格：纸（可选）→ 每格一张空层 → 最上面一张线稿层。**几何不在这里算** ——
+// 宿主（agent/tools.ts 的 create_comic_layout）按页内像素把矩形与边距算好，这一侧只照矩形建层，
+// 边距/沟槽因此只有一处算术，不会两边各有一套。出生顺序就是层序（insertAtStackTop 后来者在上），
+// 所以纸必须第一个出生才落在最底下。全部建完只落一步历史：撤一次撤整页，不是一次撤一格。
+function applyPanelLayout(spec) {
+    const page = spec && spec.page;
+    const rects = (spec && Array.isArray(spec.panels) ? spec.panels : []).map(p => ({
+        name: String((p && p.name) || 'Panel'),
+        x: Math.round(Number(p && p.x) || 0),
+        y: Math.round(Number(p && p.y) || 0),
+        w: Math.round(Number(p && p.w) || 0),
+        h: Math.round(Number(p && p.h) || 0),
+    })).filter(p => p.w >= 1 && p.h >= 1);
+    if (!(canvasW > 0 && canvasH > 0)) {
+        setStatus('Set a canvas size before laying out comic panels', 'error');
+        return false;
+    }
+    // 尺寸对不上 = 中间那条改尺寸没落地（或用户刚换了画布）：照旧尺寸摆格只会摆歪，整条拒绝。
+    if (!page || Math.round(page.w) !== canvasW || Math.round(page.h) !== canvasH) {
+        setStatus('Comic layout skipped — the canvas size changed while the layout was in flight', 'error');
+        return false;
+    }
+    if (!rects.length) {
+        setStatus('Comic layout has no usable panel rectangles', 'error');
+        return false;
+    }
+    const made = [];
+    const identity = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+    if (spec.paper) {
+        const c = makeBlankCanvas(canvasW, canvasH);
+        c.getContext('2d').fillStyle = String(spec.paper);
+        c.getContext('2d').fillRect(0, 0, canvasW, canvasH);
+        const l = addSurfaceLayer({
+            pw: canvasW, ph: canvasH, transform: identity, img: c,
+            raster: true, name: 'Comic paper', quiet: true, noHistory: true,
+        });
+        if (l) made.push(l);
+    }
+    for (const r of rects) {
+        // 每格 = 一张与矩形等大的空层，transform 就是那个页内矩形 —— 与拖出来的 Dynamic Layer
+        // 同一副几何；空像素留给 Generate，排版本身不带内容。
+        const l = addSurfaceLayer({
+            pw: r.w, ph: r.h,
+            transform: {
+                cx: (r.x + r.w / 2) / canvasW,
+                cy: (r.y + r.h / 2) / canvasH,
+                w: r.w / canvasW,
+                h: r.h / canvasH,
+                rotation: 0,
+            },
+            name: r.name, quiet: true, noHistory: true,
+        });
+        if (l) made.push(l);
+    }
+    if (spec.frame && Number(spec.frame.width) > 0) {
+        const c = makeBlankCanvas(canvasW, canvasH);
+        const x = c.getContext('2d');
+        const lw = Math.max(1, Number(spec.frame.width) || 1);
+        x.strokeStyle = String(spec.frame.color || '#000000');
+        x.lineWidth = lw;
+        // 线压在矩形内缘半个线宽处：黑边整条落在格内，不会糊进沟槽把沟槽吃掉一半。
+        for (const r of rects) x.strokeRect(r.x + lw / 2, r.y + lw / 2, Math.max(0, r.w - lw), Math.max(0, r.h - lw));
+        const l = addSurfaceLayer({
+            pw: canvasW, ph: canvasH, transform: identity, img: c,
+            raster: true, name: 'Comic frame', quiet: true, noHistory: true,
+        });
+        if (l) made.push(l);
+    }
+    if (!made.length) {
+        setStatus('Comic layout created nothing', 'error');
+        return false;
+    }
+    selectedId = made[made.length - 1].id;      // 线稿层在最上面,选它
+    layoutCanvas();
+    refreshLayerPanels();
+    render();
+    const label = `Comic layout — ${rects.length} panel${rects.length === 1 ? '' : 's'}`;
+    pushHistory(null, label);
+    setStatus(`${label} on ${canvasW} × ${canvasH}`);
+    return true;
 }
 
 // ==================== 文本层交互 ====================
@@ -15543,6 +15626,8 @@ const UI_COMMANDS = {
         else if (kind === 'cud') addCudLayerFromPick(st);
     },
     'layer-clear': v => { const st = uiStack(uiRow(v).stack); if (st) clearStack(st); },
+    // 漫画格排版：矩形与边距由宿主算好（agent/tools.ts 的 create_comic_layout），这里只照矩形建层。
+    'panel-layout': v => applyPanelLayout(v),
     'raster-drop': () => toggleRasterDrop(),
     // cud 那一行的两条自己的动作。两个函数本来就是 async（它们自己会开 tab / 起文件对话框并报那句
     // "Not linked any more"），菜单那颗条目今天也没等它们，这里一样只管点火。

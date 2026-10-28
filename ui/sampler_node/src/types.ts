@@ -1037,6 +1037,8 @@ export type BlendUiAction =
   /** 资产仓库图卡落到 Layers / Guidances 某一摞：宿主读载荷，页面按 URL 建智能图层（跨 iframe
    *  那一口 drop 只有画布收得到，这两摞住在宿主，只能走消息）。 */
   | 'layer-from-asset'
+  /** 漫画格排版：宿主把每一格的页内像素矩形算好，页面照矩形建层（纸 / 每格一张空层 / 线稿层）。 */
+  | 'panel-layout'
   | 'visible-faces';
 
 /** 每个动作键的载荷形状，一条边界一个作者：`undefined` = 这一条不需要取值。
@@ -1234,6 +1236,15 @@ export type BlendUiPayloads = {
   /** 仓库图卡：`url` 是仓库地址（/api/asset_media/<hash> 或 /api/global_media/<file>），
    *  `hash` 是内容哈希（落进图层 source），`name` 是显示名。 */
   'layer-from-asset': { url: string; name?: string; hash?: string; stack?: BlendStack };
+  /** 漫画格排版：几何以 `page` 为准（与活画布对不上时整条拒绝，不用旧尺寸把格摆歪）。
+   *  `panels` 是页内像素矩形，名称原样落到图层行；`paper` 为空串 = 不建纸层，
+   *  `frame` 为 null = 不建线稿层。建完只落一步历史。 */
+  'panel-layout': {
+    page: { w: number; h: number };
+    panels: { name: string; x: number; y: number; w: number; h: number }[];
+    paper: string;
+    frame: { width: number; color: string } | null;
+  };
 };
 
 /** 发送口：泛型把动作键和它的载荷绑死 —— `'visible-faces'` 不给数组就编译不过，旋钮给了字符串也编译不过。

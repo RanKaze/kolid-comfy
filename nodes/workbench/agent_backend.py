@@ -144,6 +144,36 @@ AGENT_TOOLS = [
     _fn('add_layer', 'Add a new layer onto a stack: stack=layers|guidances; kind=default|stash.',
         {'stack': {'type': 'string', 'enum': ['layers', 'guidances']},
          'kind': {'type': 'string', 'enum': ['default', 'stash']}}, ['stack']),
+    _fn('create_comic_layout',
+        'Lay out a comic / manga page on the canvas — layout only, no artwork. Creates one empty '
+        'layer per panel (named Panel N, sized and placed at its page rectangle, ready for '
+        'layer_generate), an optional paper layer underneath and an optional frame-line layer on '
+        'top; the whole layout is one undo step. Use it for requests like "漫画格排版 / 分镜排版 / '
+        'panel grid / comic page layout". rows/cols (+ optional row_weights / col_weights) make a '
+        'regular grid; `panels` with explicit px rectangles makes an irregular page. Omit w/h to '
+        'keep the current canvas; when they differ the canvas is resized first.',
+        {'w': {'type': 'number', 'description': 'page width px (default: current canvas)'},
+         'h': {'type': 'number', 'description': 'page height px (default: current canvas)'},
+         'rows': {'type': 'number', 'description': 'grid rows, 1..12 (default 2)'},
+         'cols': {'type': 'number', 'description': 'grid columns, 1..12 (default 2)'},
+         'row_weights': {'type': 'array', 'items': {'type': 'number'},
+                         'description': 'relative row heights, one per row (default equal)'},
+         'col_weights': {'type': 'array', 'items': {'type': 'number'},
+                         'description': 'relative column widths, one per column (default equal)'},
+         'margin': {'type': 'number', 'description': 'page margin px (default ~4% of the short side)'},
+         'gutter': {'type': 'number', 'description': 'gap between panels px (default ~3% of the short side)'},
+         'border': {'type': 'number', 'description': 'panel frame line width px; 0 = no frame layer (default 3)'},
+         'ink': {'type': 'string', 'description': 'frame colour #rrggbb (default #000000)'},
+         'paper': {'type': 'string',
+                   'description': 'paper colour #rrggbb, or "none" for a transparent page (default #ffffff)'},
+         'panels': {'type': 'array',
+                    'description': 'explicit panel rectangles in page px (overrides rows/cols) — '
+                                   'use for irregular pages',
+                    'items': {'type': 'object',
+                              'properties': {'x': {'type': 'number'}, 'y': {'type': 'number'},
+                                             'w': {'type': 'number'}, 'h': {'type': 'number'},
+                                             'name': {'type': 'string'}},
+                              'required': ['x', 'y', 'w', 'h']}}}),
     _fn('remove_layer', 'Remove a layer row.', {'id': {'type': 'number'}, 'stack': {'type': 'string'}}, ['id']),
     _fn('duplicate_layer', 'Duplicate a layer row.', {'id': {'type': 'number'}}, ['id']),
     _fn('rename_layer', 'Rename a layer row.', {'id': {'type': 'number'}, 'name': {'type': 'string'}},
