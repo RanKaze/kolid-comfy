@@ -99,6 +99,48 @@ ui/sampler_node/src/agent/toolSchemas.ts     ← 名字 / description / 参数�
 没有工具)。产物由 vite 的 `closeBundle` 自动重写,所以"改了 TS 忘了同步"也不存在 —— 除非有人
 手改了 `agent_tools.json`,那 G2b 会红。
 
+## 让"它正在动什么"看得见（脉冲）
+
+agent 操作自己的工程，用户却只看见界面突然变了 —— 分不清是自己手滑还是 agent 干的。所以
+**每次 MCP 调用落在页面上的那一刻，被碰的那扇窗外沿亮一圈淡淡的绿**，1.6 秒淡出。
+
+不是状态灯，是**脉冲**：没有持久化、不进历史、不影响 .cud；不看也什么都不缺。
+
+### 目标是算出来的，不是维护出来的
+
+| 来源 | 怎么定 | 谁保证不漏 |
+|---|---|---|
+| 64 个工具 | `ui/sampler_node/src/workbench/surfaces.ts` 的 `TOOL_SURFACE: Record<AgentToolName, …>` | 少一个键 `tsc` 报 **TS2741**（同 switch 穷尽检查） |
+| 125 个动作键 | 前缀映射：`layer→layers`、`select→selection`、`paint→canvas` 这类**只写对不上的**，其余前缀本身就是面板 id | 兜底 `doc`；实测 125 个里 **0 个**落到兜底 |
+
+`doc` 在运行时换成 `doc:<uid>`（文档窗一份 .cud 一扇，写死成 `doc` 永远找不到）；没有活跃文档
+就**不亮**，不找一个叫 "doc" 的窗。
+
+覆盖：62/64 有目标（`get_app_state`、`get_ui_actions` 是纯目录查询，不亮）。Prompt 那 17 个
+指向侧栏的 `tab:prompt`（prompt_node 是 tab 里的 iframe，不是 dock 窗）。
+
+### 画在哪里
+
+`AgentPulseLayer` 挂在 `DockPanel` 里，但**画到 `document.body`**（portal）：dock 外框是
+`overflow: hidden`，将来谁给祖先加个 `transform` 也会把 `position: fixed` 变成"相对那个祖先"。
+
+位置每帧读 `getBoundingClientRect`，所以拖分隔条、滚列表、缩窗口时框都贴着窗走。淡入淡出在
+JS 里算（这个仓没有全局 CSS，也就没有地方放 keyframes）。
+
+DockView 那边只多了一个属性 `data-dock-win`（三种卡片形态都挂；`default` 块用
+`display: contents` 包一层 —— 不生成盒子，尺寸一个像素都不变）。`pointer-events: none`，
+所以它挡不住任何点击。
+
+### 三条纪律
+
+1. **只提示，不改状态。** 高亮缺席不算错误，绝不冒泡成"工具失败"。
+2. **不叠框。** 同一个窗连点两次只是重跑动画（换时间戳），不是两个框套一起。
+3. **找不到就不画。** 面板被关掉/折进 tab 时静默。
+
+**闸**：`node temporary/_test_agent_pulse.mjs`（桩掉 pulse，bundle 真 `surfaces.ts` 问它：
+每个工具都有目标、`doc`→`doc:<uid>`、没有文档时不亮、只读工具不亮）；现场
+`node temporary/_probe_agent_pulse.cjs`（自带 Chrome，不碰在用页面）。
+
 ## 覆盖面:让"用户能做的"等于"agent 能做的"
 
 问题不是"再加几个工具",而是**怎么保证不漏** —— 手抄清单一定漏,漏了还没人发现。所以这里不靠

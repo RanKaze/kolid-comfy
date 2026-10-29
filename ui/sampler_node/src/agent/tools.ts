@@ -5,6 +5,7 @@ import {
 } from '../workbench/video/model';
 import { getVidSelection, setVidSelection } from '../workbench/video/selection';
 import { getBlendUi } from '../workbench/store';
+import { pulseForTool } from '../workbench/surfaces';
 import { UI_ACTIONS, UI_ACTION_IDS } from './uiActions.generated';
 import { AGENT_TOOL_NAMES, type AgentToolName } from './toolSchemas';
 
@@ -147,6 +148,9 @@ export const runAgentTool = async (name: string, rawArgs: unknown, ctx: AgentCtx
       + `${AGENT_TOOL_NAMES.slice(0, 6).join(', ')}…)`);
 
   const tool = name as AgentToolName;
+  // 亮一下这扇窗：让用户看见 agent 正在动这里。纯提示 —— 不改状态、不进历史，
+  // 目标面板由 workbench/surfaces.ts 从工具名/动作键算出来。
+  pulseForTool(tool, a, ctx.docUid);
   switch (tool) {
     case 'get_app_state':
       return { ok: true, content: getAgentAppState(ctx) };

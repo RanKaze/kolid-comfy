@@ -3471,6 +3471,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           {tabs.map(t => (
             <button
               key={t.id}
+              // agent 脉冲的锚点：Prompt 那一组工具作用在侧栏的 tab 上（prompt_node 是独立
+              // iframe，不是 dock 窗），所以它们的"那扇窗"就是这个按钮。
+              data-dock-win={`tab:${t.id}`}
               title={TAB_LABELS[t.id]}
               style={{
                 ...styles.sidebarBtn,

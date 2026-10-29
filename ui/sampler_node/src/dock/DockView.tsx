@@ -10,6 +10,7 @@ import {
 // 探针的轨迹钩子。这里只发"发生了什么"，不做判断、不读布局 —— 判断留在探针那边，
 // 免得把排查规则散进渲染层（那才是第二份真相）。
 import { note } from '../debug/probe';
+import { AgentPulseLayer } from '../workbench/AgentPulseLayer';
 // ── Dock 的骨架 ──：一颗单元 = 卡片 + 标题把手。iOS 词汇（#1c1c1e 卡片、发丝内缩分隔、
 // #8e8e93 大写小标题、#0a84ff 强调）从这里开始就是全页通用，不再只属于 Settings 页。
 // Only the frame is here; a unit's own interior (its cards and rows) keeps the page's skin.
@@ -825,7 +826,7 @@ const DockWindow: React.FC<{
   // 收成 toolbar 之后那条边由条子说了算：横条压到 TB_SZ 高、竖条压到 TB_SZ 宽，另一头还归用户。
   if (float) {
     return (
-      <div data-dock-float={float.id} style={{
+      <div data-dock-float={float.id} data-dock-win={id} style={{
         ...dockStyles.dockFloatBox, position: 'fixed', left: float.x, top: float.y, zIndex: 60,
         width: tb && tbDir === 'v' ? TB_SZ : float.w,
         height: tb && tbDir === 'h' ? TB_SZ : float.h,
@@ -856,7 +857,7 @@ const DockWindow: React.FC<{
       : tbDir === 'v' ? { width: TB_SZ, minWidth: TB_SZ, maxWidth: TB_SZ }
         : { height: TB_SZ, minHeight: TB_SZ, maxHeight: TB_SZ };
     return (
-      <div data-dock-member={node.ids[0]} style={{
+      <div data-dock-member={node.ids[0]} data-dock-win={id} style={{
         ...dockStyles.dockBox,
         // 收起（折叠）的格**不再吃份额**，否则它收起来也还是那么高 —— 那正是 "Guidances / Layers
         // 收不起来"：这两格是这一列里唯一两个 `grows` 的单元，份额（`1 1 0` + 地板）压在它们身上，
@@ -870,7 +871,11 @@ const DockWindow: React.FC<{
     );
   }
   // A `default` block: the block's card IS this window, so the block hands it the box to fill.
-  return inner;
+  //
+  // `data-dock-win` 是 agent 脉冲的锚点（见 workbench/AgentPulseLayer.tsx）：这一支没有卡片元素
+  // 可以挂属性，所以用 `display: contents` 包一层 —— 子元素照旧直接参与上一级布局，尺寸一个像素
+  // 都不变，只是让 `[data-dock-win="…"]` 找得到这扇窗。
+  return <div data-dock-win={id} style={{ display: 'contents' }}>{inner}</div>;
 };
 
 // The corner of a float. Not a dock handle — a float lives outside the tiling, so nothing else in the
@@ -1805,6 +1810,9 @@ export const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
             onClick={() => ctx.setDock(defaultDock(ctx.rules))}>Reset layout</button>
         </div>
       )}
+      {/* agent 脉冲层：MCP 碰到哪扇窗就在它外沿画一圈淡淡的绿（见 workbench/AgentPulseLayer.tsx）。
+          fixed 定位，不参与这里的布局；没有脉冲时它返回 null，连一个节点都不留。 */}
+      <AgentPulseLayer />
     </div>
   );
 };
