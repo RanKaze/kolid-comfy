@@ -11,7 +11,11 @@ import { type DockDrag, type DockOver, DockPanel } from '../dock/DockView';
 import { registerProbe, note } from '../debug/probe';
 import { ProbePanelBody } from '../debug/ProbePanel';
 import { probePanelOpen, setProbePanelOpen, subscribePanel } from '../debug/install';
-import { onGlobalKey, keyIs } from '../hotkeys';
+import { onGlobalKey } from '../hotkeys';
+import {
+  KEYMAP, chordsOf, chordOf, conflicts, displayChord, groupedKeymap, hit, isCustom, isRecording,
+  onKeymapChange, resetAllBindings, resetBinding, setBinding, setRecording,
+} from '../keybindings';
 import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
@@ -1204,18 +1208,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 页面在 iframe 的 window 上（bubble）处理同一组键；这里是 document 的 capture（见 hotkeys.ts），
   // 先跑一步。只有"最近动的是视频、且视频栈里确实有步"时才拦下来，其余原样放行给工作台 ——
   // 所以刚刷了一笔图层时按 Ctrl+Z，撤的是那一笔，而不是前面改过的片段。
+  // 键位按名字取自表（edit.undo / edit.redo）：用户在 Key Bindings 里换掉 Ctrl+Z，这边跟着换。
   useEffect(() => onGlobalKey(e => {
-    const ctrl = (e.ctrlKey || e.metaKey) && !e.altKey;
-    if (!ctrl) return;
-    const k = e.key.toLowerCase();
-    if (k !== 'z' && k !== 'y') return;
+    if (isRecording()) return;          // 正在录快捷键：一个热键都不许响
+    const redo = hit(e, 'edit.redo');
+    if (!redo && !hit(e, 'edit.undo')) return;
     const t = e.target as HTMLElement | null;
     const tag = (t && t.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
-    const isRedo = k === 'y' || e.shiftKey;
-    if (!vidOwnsUndo(isRedo)) return;
+    if (!vidOwnsUndo(redo)) return;
     e.preventDefault(); e.stopPropagation();
-    if (isRedo) vidRedo(); else vidUndo();
+    if (redo) vidRedo(); else vidUndo();
   }), [vidOwnsUndo, vidUndo, vidRedo]);
   // ── Processor 的 Allow List 视频路（宿主自己发的那一趟）─────────────────────────────
   // Blend 页那条跑法吃的是画布 / 图层 / 工作区，视频不在它那边 —— 所以视频模式下
@@ -2761,7 +2764,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   useEffect(() => onGlobalKey(e => {
     // 按住不放会连发 keydown，切换制下那就是一路翻转。只认每次按下后的第一发。
     if (e.repeat) return;
-    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && keyIs(e, 'p')) {
+    // 正在录快捷键：让开（否则录 Alt+P 会顺手把停靠编辑打开）。
+    if (isRecording()) return;
+    if (hit(e, 'app.dock-edit')) {
       e.preventDefault(); e.stopPropagation();
       setBlockEdit(v => !v);
       return;
@@ -2771,7 +2776,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // ── Ctrl+S：存 .cud（视频工程随 header 一起进去）──
     // Video 模式下焦点通常在宿主这一侧（时间线/播放器在宿主渲染），iframe 收不到这个键 ——
     // 所以由宿主统一转交，工作台那条 `blend-save` 直接走它自己的 saveCud，两条路径汇成一处。
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && keyIs(e, 's')) {
+    if (hit(e, 'file.save')) {
       const t = e.target as HTMLElement | null;
       const tag = (t && t.tagName || '').toLowerCase();
       // 文本框里让浏览器自己来（页面侧同样在文本框里放行，但 Ctrl+S 在那边是显式保存，
@@ -4538,29 +4543,43 @@ const VideoGenFrameModal: React.FC<{
 };
 
 // ── SettingsTab ──
-// Two screens behind one iOS segmented control, dressed as iOS Settings' inset-grouped lists: a
+// Three screens behind one iOS segmented control, dressed as iOS Settings' inset-grouped lists: a
 // centered column with a large title, uppercase section headers, #1c1c1e cards with 44px rows and
 // hairline separators inset to the text, and a grey footer under each card stating what the group
-// does (the tooltips keep the longer form — footer is the glanceable sentence). DEFAULT SETTING is
-// the nine numeric knobs every run starts from (they used to sit at the bottom of the Draw column);
-// ARCHITECTURE is a list of rules — each one a regex matched against the architecture of the
-// pipeline that actually runs — replacing some of those nine for the runs it catches. The numbers
-// stay the host's either way: this page only edits what the Draw panel edited, so a value can
-// never exist twice.
-type SettingsScreen = 'default' | 'arch';
+// does (the tooltips keep the longer form — footer is the glanceable sentence).
+//
+//   Preference  — what the application does around a run (one switch today).
+//   Image       — everything that shapes the picture: the nine numeric knobs every run starts from
+//                 (they used to sit at the bottom of the Draw column) and the Architecture rules
+//                 that replace some of them for the pipelines they match. They are one screen
+//                 because a rule is nothing but those nine numbers, per architecture — two screens
+//                 meant looking up the default on one to understand the override on the other.
+//   Key Bindings — every shortcut in the workbench, editable (see KeyBindingsScreen).
+//
+// The numbers stay the host's either way: this page only edits what the Draw panel edited, so a
+// value can never exist twice.
+type SettingsScreen = 'pref' | 'image' | 'keys';
 // Which screen is showing and which rule cards are open belong to the user, not to the program, so
 // they are remembered per browser — same policy as the section folds and the panel width, and ONE
-// key for both because they are one page's view state. An unreadable store just opens on Default.
+// key for both because they are one page's view state. An unreadable store just opens on Image.
 const SETTINGS_UI_STORE = 'sampler.settingsUI';
 type SettingsUI = { screen: SettingsScreen; openRules: string[] };
+const SCREENS: { id: SettingsScreen; label: string; title: string }[] = [
+  { id: 'pref', label: 'Preference', title: 'What the application does around a run' },
+  { id: 'image', label: 'Image', title: 'The numbers every run starts from, and the rules that change them' },
+  { id: 'keys', label: 'Key Bindings', title: 'Every shortcut in the workbench' },
+];
 const loadSettingsUI = (): SettingsUI => {
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_UI_STORE) || 'null');
+    // 旧的两种屏（default / arch）都并进了 Image —— 老浏览器里存着的那个值读进来不能变成"哪屏都不亮"。
+    const raw = saved?.screen;
+    const screen: SettingsScreen = raw === 'pref' || raw === 'keys' ? raw : 'image';
     return {
-      screen: saved?.screen === 'arch' ? 'arch' : 'default',
+      screen,
       openRules: Array.isArray(saved?.openRules) ? saved.openRules.filter((s: unknown) => typeof s === 'string') : [],
     };
-  } catch { return { screen: 'default', openRules: [] }; }
+  } catch { return { screen: 'image', openRules: [] }; }
 };
 const saveSettingsUI = (next: SettingsUI) => {
   try { localStorage.setItem(SETTINGS_UI_STORE, JSON.stringify(next)); } catch { /* nothing to remember */ }
@@ -4638,6 +4657,136 @@ const NumField: React.FC<{
   );
 };
 
+// ── KeyBindingsScreen ──
+// 这一屏只是键位表的**编辑器**：表本身在 `nodes/web/js/keymap.js`（画布页面直接加载的那份），
+// 构建时转成 `keybindings.ts` 手边这份带类型的副本。所以这里不写死任何一条命令 —— 加一条键
+// 只需要改那张表，这一屏跟着长一行。
+//
+// 交互按 iOS 的习惯：点一行 → 变成 "Press keys…" → 你按的那组键就记下了。录制期间 Esc 取消、
+// Delete/Backspace 解绑（"想绑 Delete"这种需求让位给"能清空"，清空之后随时可以再录）。
+// 冲突不拦：同一 scope 里两条命令占同一个键是合法的（页面按表的顺序判定），但必须让用户看见。
+const kbStyle = {
+  chip: {
+    flexShrink: 0, minWidth: 26, padding: '3px 8px', borderRadius: 7, textAlign: 'center' as const,
+    background: 'rgba(255,255,255,0.09)', border: '0.5px solid rgba(255,255,255,0.08)',
+    color: 'rgba(255,255,255,0.88)', fontSize: 12, fontFamily: 'ui-monospace, Consolas, monospace',
+    letterSpacing: '0.2px', whiteSpace: 'nowrap' as const,
+  },
+  chipWarn: { background: 'rgba(255,159,10,0.16)', borderColor: 'rgba(255,159,10,0.45)', color: '#ff9f0a' },
+  chipNone: { color: 'rgba(255,255,255,0.3)', fontFamily: 'inherit', fontStyle: 'italic' as const },
+  rec: { color: '#0a84ff', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' as const },
+  reset: {
+    flexShrink: 0, width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'none', border: 'none', outline: 'none', padding: 0, cursor: 'pointer',
+    color: 'rgba(142,142,147,0.85)', fontSize: 14, borderRadius: 6,
+  },
+  conflict: {
+    padding: '0 16px 8px', marginTop: -4, fontSize: 11.5, lineHeight: '15px', color: '#ff9f0a',
+  },
+};
+
+const KeyBindingsScreen: React.FC = () => {
+  // 键位的真相在 localStorage 里，React 看不见；用版本号把"变了"转成重渲染。
+  const [, setVersion] = useState(0);
+  const [rec, setRec] = useState<string | null>(null);
+  const bump = useCallback(() => setVersion(v => v + 1), []);
+  useEffect(() => onKeymapChange(bump), [bump]);
+
+  useEffect(() => {
+    if (!rec) return;
+    // 录制期间全局热键全哑（见 keybindings.ts 的注释：它们同处捕获阶段，靠冒泡挡不住）。
+    setRecording(true);
+    const onKey = (e: KeyboardEvent): void => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat) return;
+      const bare = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+      if (e.key === 'Escape' && bare) { setRec(null); return; }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && bare) { setBinding(rec, null); setRec(null); return; }
+      const chord = chordOf(e);
+      // 只按了修饰键（⌘ / ⇧ / ⌥ 单独一下）时 chordOf 给空串：继续等主键，别把这半下记成绑定。
+      if (!chord) return;
+      setBinding(rec, chord);
+      setRec(null);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => { window.removeEventListener('keydown', onKey, true); setRecording(false); };
+  }, [rec]);
+
+  const groups = groupedKeymap();
+  const customCount = KEYMAP.filter(d => isCustom(d.id)).length;
+
+  return (
+    <>
+      {groups.map(group => (
+        <React.Fragment key={group.group}>
+          <div style={styles.iosGroupTitle}>{group.group}</div>
+          <div style={styles.iosCard}>
+            {group.defs.map((d, i) => {
+              const chords = chordsOf(d.id);
+              const clashes = chords.map(c => conflicts(d.id, c)).find(x => x.length) || [];
+              const active = rec === d.id;
+              return (
+                <React.Fragment key={d.id}>
+                  {i > 0 && <div style={styles.iosSep} />}
+                  <div
+                    data-kb-row={d.id}
+                    style={{
+                      ...styles.iosRow, cursor: 'pointer',
+                      background: active ? 'rgba(10,132,255,0.12)' : 'transparent',
+                      minHeight: 40,
+                    }}
+                    onClick={() => setRec(active ? null : d.id)}
+                    title={active
+                      ? 'Press the keys to use — Esc cancels, Delete / Backspace unbinds'
+                      : (d.note ? `${d.note}\n\nClick to record a new shortcut.` : 'Click to record a new shortcut.')}
+                  >
+                    <span style={{ ...styles.iosLabel, fontSize: 13.5 }}>{d.label}</span>
+                    {active ? (
+                      <span style={kbStyle.rec}>Press keys…</span>
+                    ) : chords.length ? (
+                      <span style={{ display: 'flex', gap: 5 }}>
+                        {chords.map(c => (
+                          <span key={c} style={{ ...kbStyle.chip, ...(clashes.length ? kbStyle.chipWarn : {}) }}>
+                            {displayChord(c)}
+                          </span>
+                        ))}
+                      </span>
+                    ) : (
+                      <span style={{ ...kbStyle.chip, ...kbStyle.chipNone }}>unbound</span>
+                    )}
+                    {isCustom(d.id) && !active && (
+                      <button style={kbStyle.reset} title="Restore this one to its default"
+                        onClick={ev => { ev.stopPropagation(); resetBinding(d.id); }}>↺</button>
+                    )}
+                  </div>
+                  {!active && clashes.length > 0 && (
+                    <div style={kbStyle.conflict}>
+                      Same key as {clashes.map(c => `“${c.label}”`).join(', ')} — both stay bound; the one higher in its scope wins.
+                    </div>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </div>
+        </React.Fragment>
+      ))}
+
+      <div style={{ ...styles.iosCard, marginTop: 14 }}>
+        <button style={styles.iosAddRow} onClick={() => resetAllBindings()}
+          title="Put every shortcut back the way it shipped">Restore All Defaults</button>
+      </div>
+      <div style={styles.iosFooter}>
+        {customCount
+          ? `${customCount} shortcut${customCount > 1 ? 's' : ''} changed — the ↺ on a row puts that one back. `
+          : 'All shortcuts are at their defaults. '}
+        Click a shortcut and press the new keys; Esc cancels, Delete or Backspace unbinds it.
+        Shortcuts are stored per browser and reach the canvas immediately.
+      </div>
+    </>
+  );
+};
+
 const SettingsTab: React.FC<{
   values: Record<OverrideKey, number>;
   onDefaultParamChange: (key: OverrideKey, value: number) => void;
@@ -4710,16 +4859,38 @@ const SettingsTab: React.FC<{
         <div style={styles.iosPageTitle}>Settings</div>
 
         {/* 子 tab：iOS 分段控件。选哪屏是视图状态，落 sampler.settingsUI（用户的选择，不自动跳）。 */}
-        <div style={styles.iosSeg}>
-          <button style={segBtnStyle(ui.screen === 'default')} onClick={() => pickScreen('default')}
-            title="The nine values every run falls back to">Default Setting</button>
-          <button style={segBtnStyle(ui.screen === 'arch')} onClick={() => pickScreen('arch')}
-            title="Regex rules that replace some of those values for the runs they catch">Architecture</button>
+        <div style={styles.iosSeg} data-settings-seg="">
+          {SCREENS.map(s => (
+            <button key={s.id} data-settings-screen={s.id}
+              style={{ ...segBtnStyle(ui.screen === s.id), padding: '6px 2px' }}
+              onClick={() => pickScreen(s.id)} title={s.title}>{s.label}</button>
+          ))}
         </div>
 
-        {/* DEFAULT SETTING — 三张卡：输出前处理 / 工作分辨率 / 输入封顶，每张卡下面跟一句 footer
-            （组语义的一目了然版）。范围与说明仍出自 DEFAULT_PARAM_META 那一张表（规则卡读同一张）。 */}
-        {ui.screen === 'default' && SETTINGS_GROUPS.map(group => (
+        {/* PREFERENCE — 应用自己的行为（不是画面参数）：执行到节点时页面从哪儿弹出来。
+            开 = KolidUI 不在就把 Kolid Desktop.exe 拉起来再注入；关 = 原逻辑
+            （客户端在就注入标签页，不在退系统浏览器）。 */}
+        {ui.screen === 'pref' && (
+          <>
+            <div style={styles.iosGroupTitle}>Application</div>
+            <div style={styles.iosCard}>
+              <div style={styles.iosRow}
+                title={'When a node opens its UI during a run: ON — launch Kolid Desktop and inject the page '
+                  + 'as its tab when the client is not running. OFF — original behavior (inject if the client '
+                  + 'is running, otherwise the system browser).'}>
+                <span style={styles.iosLabel}>Open With Application</span>
+                <IOSToggle checked={openWithApp} onChange={onOpenWithAppChange} />
+              </div>
+            </div>
+            <div style={styles.iosFooter}>What happens when a node opens its UI while a run is going.</div>
+          </>
+        )}
+
+        {/* IMAGE — 三张卡：输出前处理 / 工作分辨率 / 输入封顶，每张卡下面跟一句 footer
+            （组语义的一目了然版）。范围与说明仍出自 DEFAULT_PARAM_META 那一张表（规则卡读同一张）。
+            紧接着是 Architecture 的规则列表：一条规则就是"给匹配到的架构换其中几个数"，
+            所以它和这九个值同屏。 */}
+        {ui.screen === 'image' && SETTINGS_GROUPS.map(group => (
           <React.Fragment key={group.title}>
             <div style={styles.iosGroupTitle}>{group.title}{group.hint && <em style={styles.iosGroupHint}>{group.hint}</em>}</div>
             <div style={styles.iosCard}>
@@ -4741,29 +4912,10 @@ const SettingsTab: React.FC<{
           </React.Fragment>
         ))}
 
-        {/* APPLICATION — user preference，不是数值旋钮：执行到节点时页面从哪儿弹出来。
-            开 = KolidUI 不在就把 Kolid Desktop.exe 拉起来再注入；关 = 原逻辑
-            （客户端在就注入标签页，不在退系统浏览器）。 */}
-        {ui.screen === 'default' && (
-          <>
-            <div style={styles.iosGroupTitle}>Application</div>
-            <div style={styles.iosCard}>
-              <div style={styles.iosRow}
-                title={'When a node opens its UI during a run: ON — launch Kolid Desktop and inject the page '
-                  + 'as its tab when the client is not running. OFF — original behavior (inject if the client '
-                  + 'is running, otherwise the system browser).'}>
-                <span style={styles.iosLabel}>Open With Application</span>
-                <IOSToggle checked={openWithApp} onChange={onOpenWithAppChange} />
-              </div>
-            </div>
-            <div style={styles.iosFooter}>What happens when a node opens its UI while a run is going.</div>
-          </>
-        )}
-
         {/* ARCHITECTURE — 一张卡一条规则：卡头是把手 + 正则框 + 徽章 + 折叠箭头（"architecture"
             那个前缀标签撤了 —— 框里的正则本身和占位符已经把"这是什么"说全，宽度还给输入框），
-            九排在收起时不画。 */}
-        {ui.screen === 'arch' && (<>
+            九排在收起时不画。归在 Image 屏，因为它动的就是上面那九个值。 */}
+        {ui.screen === 'image' && (<>
           <div style={styles.iosGroupTitle}>Rules<em style={styles.iosGroupHint}>first match wins</em></div>
           {archSettings.rules.map((rule, idx) => {
             const problem = patternProblem(rule.architecture);
@@ -4856,6 +5008,9 @@ const SettingsTab: React.FC<{
             ]} />;
           })()}
         </>)}
+
+        {/* KEY BINDINGS — 表是唯一真源、这里只是编辑器（见 KeyBindingsScreen 的注释）。 */}
+        {ui.screen === 'keys' && <KeyBindingsScreen />}
       </div>
     </div>
   );

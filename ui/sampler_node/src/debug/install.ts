@@ -6,6 +6,7 @@ import {
 import { installLive, liveHelpers, liveNow, liveReport } from './live';
 import { cudScopeReport } from '../workbench/cudScope';
 import { onGlobalKey, keyIs } from '../hotkeys';
+import { isRecording } from '../keybindings';
 
 /**
  * 探针的装配层：把上面那些零件挂到全局，并给出两个入口 —— 热键与 `window.__uiProbe`。
@@ -71,6 +72,8 @@ export function installProbe(): void {
 
   // ── 热键 ───────────────────────────────────────────────────────────────────
   const onKey = (e: KeyboardEvent): void => {
+    // 正在录快捷键：探针面板的 Alt+D 不是产品功能，别在录制时抢键。
+    if (isRecording()) return;
     if (!e.altKey || e.metaKey || e.ctrlKey) return;
     // `keyIs` 同时认物理键位：macOS 上 Option 会把 `key` 变成符号（Alt+D → ∂），只认 key 会漏。
     if (!keyIs(e, 'd')) return;

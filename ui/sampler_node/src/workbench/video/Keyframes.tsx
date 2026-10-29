@@ -10,6 +10,7 @@ import { getKfArmed, setKfArmed, subscribeKfArmed } from './kfArmed';
 import { getKfSelection, kfKeyAt, kfPickBox, kfPickChannel, kfPickKey, kfPickKeys, subscribeKfSelection, switchKfClip } from './kfSelection';
 import { markRender } from './perf';
 import { wbStyles } from '../skin';
+import { hit, isRecording } from '../../keybindings';
 
 // ── Keyframes 窗（Dopesheet）──────────────────────────────────────────────────────────────────
 // 读法照 Unity 的 Animation 视图：**左列一行一个属性，右侧同一行的泳道把这枚属性的关键帧按时刻
@@ -762,19 +763,23 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
   const onKey = (e: React.KeyboardEvent): void => {
     const t = e.target as HTMLElement | null;
     if (!!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-    if (!clip || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
-    const k = e.key.toLowerCase();
-    if (k === 'k') {
+    if (!clip || e.repeat || isRecording()) return;
+    // 三条命令按名字查表（keyframes.add / delete / fit）；React 的事件包一层，判定要用原生那个。
+    const add = hit(e.nativeEvent, 'keyframes.add');
+    const del = add ? false : hit(e.nativeEvent, 'keyframes.delete');
+    const fitH = add || del ? false : hit(e.nativeEvent, 'keyframes.fit');
+    if (!add && !del && !fitH) return;
+    if (add) {
       e.preventDefault();
       e.stopPropagation();
       const picked = kfSel.clipId === clip.id && kfSel.channels.size ? [...kfSel.channels] : allKeys;
       void addKeysAtPlayhead(picked.filter(key => allKeys.includes(key)));
-    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+    } else if (del) {
       if (kfSel.clipId !== clip.id || !kfSel.keys.size) return;
       e.preventDefault();
       e.stopPropagation();
       removeKeys([...kfSel.keys]);
-    } else if (k === 'f') {
+    } else {
       e.preventDefault();
       e.stopPropagation();
       fit();

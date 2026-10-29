@@ -710,6 +710,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="fx/data_bend.js"></script>
 <script src="fx/rgb_split.js"></script>
 <script src="fx/ui.js"></script>
+<!-- 键位表的唯一真源。宿主 Settings 的 Key Bindings 屏就是照它渲染的（构建时
+     tools/gen_keymap.cjs 转成 TS 副本），所以这里加一条键，那边当天就出现。
+     加载顺序要在下面那些内联脚本之前：keydown 处理按名字查表，表得先到。 -->
+<script src="js/keymap.js"></script>
 <!-- RenderPlan 合成器（P2）：吃 RenderPlan 出 Frame(plan,t)。现在还是 2D 采样（与旧路径同一条，
      所以与 golden 必须逐像素相同）；第二步换成 GL 预乘混合。它不认识编辑器/播放器 —— 见 docs/render_plan.md。 -->
 <script src="js/frame-source.js"></script>
@@ -12976,31 +12980,33 @@ window.addEventListener('keydown', e => {
     // Enter / Esc on a border-drag mode: apply or rewind. These outrank the generic tool-exit
     // handling below because both modes strand a live preview that generic setMode('none')
     // would neither commit nor roll back.
-    if (adjustModeActive() && (e.key === 'Enter' || e.key === 'Escape')) {
+    // 下面这一整条链的每个键都按**名字**查 `js/keymap.js`（KB.hit），不再写死字母 ——
+    // 用户在 Settings ▸ Key Bindings 里改过的键立刻在这儿生效，且两边判定是同一套语义。
+    if (adjustModeActive() && (KB.hit(e, 'layer.confirm') || KB.hit(e, 'view.cancel'))) {
         e.preventDefault();
-        if (e.key === 'Enter') { if (mode === 'canvasModify') applyCanvasModify(); else endExpandCommit(); }
+        if (KB.hit(e, 'layer.confirm')) { if (mode === 'canvasModify') applyCanvasModify(); else endExpandCommit(); }
         else { if (mode === 'canvasModify') cancelCanvasModify(); else cancelExpand(); }
         return;
     }
     // Enter / Esc on a released transform drag: the box the pointer left is a preview until now.
     // Same ranking reason as the border-drag modes — the generic tool handling below would neither
     // bake nor roll it back.
-    if (transformPending && (e.key === 'Enter' || e.key === 'Escape')) {
+    if (transformPending && (KB.hit(e, 'layer.confirm') || KB.hit(e, 'view.cancel'))) {
         e.preventDefault();
-        if (e.key === 'Enter') { if (applyTransformPending()) setStatus('Transform applied'); }
+        if (KB.hit(e, 'layer.confirm')) { if (applyTransformPending()) setStatus('Transform applied'); }
         else if (cancelTransformPending()) setStatus('Transform cancelled');
         return;
     }
     // Ctrl+S saves. It sits above the text-field guard on purpose: typing a prompt and pressing
     // Ctrl+S must save the document, not hand the keystroke back to the browser's "save page".
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 's' || e.key === 'S')) {
+    if (KB.hit(e, 'file.save')) {
         e.preventDefault();
         saveCud();
         return;
     }
     // Esc drops the active tool AND straightens the view. It sits before the text-field guard so
     // it keeps working while the extra-prompt box has focus — Esc has no native use in a text box.
-    if (e.key === 'Escape') {
+    if (KB.hit(e, 'view.cancel')) {
         e.preventDefault();
         if (layerMenuOpen()) { closeLayerMenu(); return; }
         // 摊开的网格先于工具:第一下 Esc 只把它从画布上收走,工具与视图不动 (再按才是原来的 Esc)。
@@ -13023,24 +13029,22 @@ window.addEventListener('keydown', e => {
     // Sliders and checkboxes keep their own key handling (arrows, space, enter).
     if ((tag === 'input' || tag === 'button' || editable) && [' ', 'Spacebar', 'Enter', 'Delete', 'Backspace', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
     // Undo / redo — Ctrl+Z and Ctrl+Y (Ctrl+Shift+Z too, the other common redo binding).
-    // Text fields returned above, so their native undo keeps working.
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'z' || e.key === 'Z' || e.key === 'y' || e.key === 'Y')) {
+    // Text fields returned above, so their native undo keeps working. 三条默认都挂在
+    // edit.undo / edit.redo 上，用户在 Key Bindings 里改一条就换一条。
+    if (KB.hit(e, 'edit.undo') || KB.hit(e, 'edit.redo')) {
         e.preventDefault();
-        const k = e.key.toLowerCase();
-        if (k === 'y') redoAction();
-        else if (e.shiftKey) redoAction();
-        else undoAction();
+        if (KB.hit(e, 'edit.redo')) redoAction(); else undoAction();
         return;
     }
     const l = getSelected();
     // Ctrl+D / Ctrl+A are the selection's two whole-document commands. They sit below the text
     // guard on purpose: inside a text field the browser keeps its own select-all.
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
+    if (KB.hit(e, 'edit.deselect')) {
         e.preventDefault();
         deselectAndReport();
         return;
     }
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'a' || e.key === 'A')) {
+    if (KB.hit(e, 'edit.select-all')) {
         e.preventDefault();
         selectAll();
         return;
@@ -13049,56 +13053,60 @@ window.addEventListener('keydown', e => {
     // later. They sit below the text guard on purpose: inside the Extra Prompt box the browser keeps
     // its own copy/paste. stopPropagation because this page lives inside the node graph, where the
     // same keys would otherwise also copy and paste a NODE while the workbench is typing.
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
+    if (KB.hit(e, 'edit.copy')) {
         e.preventDefault();
         e.stopPropagation();
         copyToClipboard();
         return;
     }
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+    if (KB.hit(e, 'edit.paste')) {
         e.preventDefault();
         e.stopPropagation();
         pasteFromClipboard();
         return;
     }
-    if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!keySpace) { keySpace = true; onViewKeyChange(); } return; }
+    // Space / Alt / Shift / Ctrl 是"按住"的状态位，不是命令 —— 只有 Space 那条是表里的命令
+    // （view.hold-pan），另外三个是修饰键本身，改不了也不该改。
+    if (KB.hit(e, 'view.hold-pan')) { e.preventDefault(); if (!keySpace) { keySpace = true; onViewKeyChange(); } return; }
     if (e.key === 'Alt') { if (!keyAlt) { keyAlt = true; syncBrushCursor(); refreshCursor(); } return; }
     // Shift moves the marquee's boolean badge, so the pointer has to be re-read for it exactly
     // like Alt already is — otherwise the + only appears once the button goes down.
     if (e.key === 'Shift') { keyShift = true; refreshCursor(); return; }
     if (e.key === 'Control' || e.metaKey) { setKeyCtrl(true); return; }
-    if ((e.key === 'z' || e.key === 'Z') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('zoom'); return; }
-    if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('pan'); return; }
-    if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rotate'); return; }
-    if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('brush'); return; }
-    if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('eraser'); return; }
-    if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('bucket'); return; }
+    if (KB.hit(e, 'tool.zoom')) { activateMode('zoom'); return; }
+    if (KB.hit(e, 'tool.pan')) { activateMode('pan'); return; }
+    if (KB.hit(e, 'tool.rotate')) { activateMode('rotate'); return; }
+    if (KB.hit(e, 'tool.brush')) { selectTool('brush'); return; }
+    if (KB.hit(e, 'tool.eraser')) { selectTool('eraser'); return; }
+    if (KB.hit(e, 'tool.bucket')) { selectTool('bucket'); return; }
     // X swaps the two colours (PS). It is not a tool, so it answers whatever mode is armed.
-    if ((e.key === 'x' || e.key === 'X') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); swapPaintColors(); return; }
+    if (KB.hit(e, 'paint.swap-colors')) { e.preventDefault(); swapPaintColors(); return; }
     // Each key names the surface it lands on: Tab is always the decal, ` is always the mask. Neither
     // flips, so a press means the same thing from every mode — nothing painted yet, Transform, a
     // marquee, or mid-stroke on the other surface. One entry with the strip's chips; and because a
     // kind can carry several attributes, a press carries no ref — it lands on the RIGHTMOST one of
     // that kind, i.e. this layer's last step, which is the one a key is meant to repeat.
-    if ((e.key === 'Tab' || e.key === '`') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+    // （两条各是一个命令：用户在表里把它们指到别的键上，语义仍是"真面 / 蒙版"，不会互换。）
+    if (KB.hit(e, 'paint.decal') || KB.hit(e, 'paint.mask')) {
         if (modalOpen()) return;             // a modal keeps its own focus traversal
         e.preventDefault();
         if (!l) { setStatus('No layer selected to paint', 'error'); return; }
         if (isMaskLayerTarget()) { setStatus('The Mask layer has one surface — neither key does anything here', 'error'); return; }
-        setPaintTarget(e.key === 'Tab' ? 'decal' : 'mask', l, null);
-        setStatus(isDecalTarget() ? 'Paint target — the last Decal step' : 'Paint target — the last Mask step');
+        const decal = KB.hit(e, 'paint.decal');
+        setPaintTarget(decal ? 'decal' : 'mask', l, null);
+        setStatus(decal ? 'Paint target — the last Decal step' : 'Paint target — the last Mask step');
         return;
     }
     // PS's own letters: M is the marquee family, L the lasso family. Both are canvas-level tools,
     // so unlike B/E/G they need no selected layer.
-    if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rect'); return; }
-    if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('lasso'); return; }
+    if (KB.hit(e, 'tool.marquee')) { activateMode('rect'); return; }
+    if (KB.hit(e, 'tool.lasso')) { activateMode('lasso'); return; }
     // D points the geometry dock unit at the selected layer's first geometry step — the family window
     // for the canvas-relative 3D objects (Direction / Point / Ray / Plane). It is a settings panel, not
     // a canvas mode (the steps are made from each strip's + menu); the unit is always in the dock, so
     // this only pins its target and lets it light up.
     // (Alt+D is not used: Chrome eats it for the address bar before the page ever sees it.)
-    if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (KB.hit(e, 'panel.geometry')) {
         e.preventDefault();
         e.stopPropagation();
         const geo = l ? (GEO_KINDS.map(k => findAttr(l, k)).find(Boolean)) : null;
@@ -13108,7 +13116,7 @@ window.addEventListener('keydown', e => {
     }
     // P points the Pose dock unit at the selected layer's Pose step — same courtesy as D (it used to open
     // the Pose tool window; the window is gone, the unit lives in the dock, so this only pins its target).
-    if ((e.key === 'p' || e.key === 'P') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (KB.hit(e, 'panel.pose')) {
         e.preventDefault();
         e.stopPropagation();
         const pose = l ? findAttr(l, 'pose') : null;
@@ -13116,59 +13124,56 @@ window.addEventListener('keydown', e => {
         else setStatus('No Pose step on the selected layer — add one from its + chip', 'error');
         return;
     }
-    if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
+    if (KB.hit(e, 'view.flip')) { e.preventDefault(); flipView(); return; }
     // T shows the transform box; Alt+T arms the rectangle drag that draws a NEW text layer —
     // the layer lands in the box the user sweeps, not at a default size. Ctrl+T is kept as an
     // alias (a tabbed browser answers it first with a new tab; app windows hand it to the page),
     // and stopPropagation keeps the host page (LiteGraph, other nodes) from also answering it.
-    const isT = (e.key === 't' || e.key === 'T' || e.code === 'KeyT');
     // 底片态没有可动的对象：T / Ctrl+T / Alt+T 都不进编辑（Transform 那一格在宿主那儿也是灰的）。
-    if (isT && vidBaseOn) {
+    if (KB.hit(e, 'layer.text-box') || KB.hit(e, 'layer.transform')) {
+        const textBox = KB.hit(e, 'layer.text-box');
         e.preventDefault();
-        setStatus('Move the playhead onto a Layer segment to transform', 'error');
-        return;
-    }
-    if (isT && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
+        if (vidBaseOn) {
+            setStatus('Move the playhead onto a Layer segment to transform', 'error');
+            return;
+        }
         e.stopPropagation();
-        if (l) activateMode('transform');
-        return;
-    }
-    if (isT && e.altKey) {
-        e.preventDefault();
-        armRectDrag(WORK_STACK, 'text');
-        return;
-    }
-    if (isT && !e.altKey) {
-        e.preventDefault();
+        if (textBox) { armRectDrag(WORK_STACK, 'text'); return; }
         if (l) activateMode('transform');
         return;
     }
     // 底片态没有可编辑的图层：Enter（编辑文字）/ Delete / Backspace（删层）都不接，免得改到
     // 画布背后那一套看不见的图层。视图键、播放键、Esc 不受影响。
-    if (vidBaseOn && (e.key === 'Enter' || e.key === 'Delete' || e.key === 'Backspace')) {
+    if (vidBaseOn && (KB.hit(e, 'layer.confirm') || KB.hit(e, 'layer.delete'))) {
         e.preventDefault();
         return;
     }
-    if (e.key === 'Enter') {
+    if (KB.hit(e, 'layer.confirm')) {
         if (mode === 'none' && l && isTextLayer(l)) { e.preventDefault(); openTextEditor(l.id); return; }
         if (mode !== 'none') { e.preventDefault(); setMode('none'); }
         return;
     }
-    if ((e.key === 'Delete' || e.key === 'Backspace') && l && !l.isMaskLayer) { e.preventDefault(); removeLayer(l.id); return; }
+    if (KB.hit(e, 'layer.delete') && l && !l.isMaskLayer) { e.preventDefault(); removeLayer(l.id); return; }
     if (!l || l.isMaskLayer || mode !== 'transform') return;
     // A Stash is welded to the canvas (see the press handlers): an arrow nudge would only be undone
     // by the next re-copy, so it takes no part in one — alone or inside a group.
     if (isStashLayer(l)) return;
+    // 四个方向各是一条命令（可以分别指到别的键上）；Shift 不参与绑定判定 —— 它是步长参数
+    // （1 像素 / 10 像素），表里标了 shiftAsParam，所以 KB.hit 会忽略 e.shiftKey。
+    const nudgeDir = KB.hit(e, 'layer.nudge-left') ? 'ArrowLeft'
+        : KB.hit(e, 'layer.nudge-right') ? 'ArrowRight'
+        : KB.hit(e, 'layer.nudge-up') ? 'ArrowUp'
+        : KB.hit(e, 'layer.nudge-down') ? 'ArrowDown'
+        : '';
     const step = (e.shiftKey ? 10 : 1) / (canvasW || 1);
     const stepY = (e.shiftKey ? 10 : 1) / (canvasH || 1);
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+    if (nudgeDir) {
         e.preventDefault();
         // The arrow keys drive the whole group — nudging a set is the same gesture, one step.
         const targets = (dragGroupMembers() || [l]).filter(t => !isStashLayer(t));
         if (!targets.length) return;
-        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
-        const dy = e.key === 'ArrowUp' ? -stepY : e.key === 'ArrowDown' ? stepY : 0;
+        const dx = nudgeDir === 'ArrowLeft' ? -step : nudgeDir === 'ArrowRight' ? step : 0;
+        const dy = nudgeDir === 'ArrowUp' ? -stepY : nudgeDir === 'ArrowDown' ? stepY : 0;
         for (const t of targets) {
             if (isRasterLayer(t) && rasterLiveFrame(t)) {
                 // A released drag is still waiting for Enter, so there is nothing to bake into —
@@ -13198,7 +13203,8 @@ window.addEventListener('keydown', e => {
 window.addEventListener('keyup', e => {
     // 松手也要报给场景:飞行是靠 keys 集合积分的,漏一次 keyup 就会一直往前飘。
     if (Scene3D.active) Scene3D.onKeyUp(e);
-    if (e.key === ' ' || e.key === 'Spacebar') { keySpace = false; onViewKeyChange(); return; }
+    // Space 的松手按表算（与 keydown 同一条命令）；Alt / Shift / Ctrl 是修饰键本身，不受表管。
+    if (KB.hit(e, 'view.hold-pan')) { keySpace = false; onViewKeyChange(); return; }
     if (e.key === 'Alt') { keyAlt = false; syncBrushCursor(); refreshCursor(); return; }
     if (e.key === 'Shift') { keyShift = false; refreshCursor(); return; }
     if (e.key === 'Control' || e.key === 'Meta') { setKeyCtrl(false); return; }

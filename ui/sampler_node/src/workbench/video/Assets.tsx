@@ -9,6 +9,7 @@ import { probeMedia } from './audio';
 import { assetsTick, subscribeAssets } from './assetsTick';
 import { ingestFile } from './ingest';
 import { useCudState } from '../cudScope';
+import { hit, isRecording } from '../../keybindings';
 import { useDocAssets } from '../docAssets';
 import { clipCards, groupDocAssets, whereText } from './assetScope';
 import { ensureFrame, ensureWaveform } from './previews';
@@ -726,15 +727,18 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
 
   // 网格自己的快捷键:焦点在网格上才接手(改名输入框会拦住自己的键,冒不上来)。
   const gridKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Delete' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+    // 两键都按名字查表（assets.delete / assets.select-all）—— React 的事件包一层，判定用原生那个。
+    const native = e.nativeEvent;
+    if (isRecording()) return;
+    if (hit(native, 'assets.delete')) {
       if (!multiSel.size || docScope) return;
       e.preventDefault();
       void deleteSelected();
-    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+    } else if (hit(native, 'assets.select-all')) {
       e.preventDefault();
       setMultiSel(new Set(visibleKeys.filter(k => !k.startsWith('m:'))));   // 孤儿缺失卡不可选
       anchorRef.current = null;
-    } else if (e.key === 'Escape') {
+    } else if (native.key === 'Escape') {
       setMultiSel(new Set());
     }
   };

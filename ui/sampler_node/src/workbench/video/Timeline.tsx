@@ -5,7 +5,8 @@ import {
   addLayerClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, moveClip, moveTrack, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
   vgenChainPrevOf, vgenSeamsOf, vgenWithDuration,
 } from './model';
-import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
+import { onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
+import { hit, isRecording } from '../../keybindings';
 import { getActiveBlendUid, subscribeBlendActive } from '../store';
 import { useCudScope, useCudState } from '../cudScope';
 import { probeMedia } from './audio';
@@ -343,17 +344,20 @@ export const VidTimeline: React.FC<{
   }, [vid, transport, flash]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
-      if (!keyIs(e, 'c') && !keyIs(e, 'v')) return;
+      // 键位按名字取自表（timeline.copy / timeline.paste）：这一对是时间线的独占语义，
+      // 和画布的图层复制是两条命令，用户在 Key Bindings 里能分别改。
+      if (isRecording()) return;
+      const copyH = hit(e, 'timeline.copy');
+      if (!copyH && !hit(e, 'timeline.paste')) return;
       const t = e.target as HTMLElement | null;
       const tag = t?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return;
       // 页面上正选着一段文字（比如读数、段名）⇒ 让浏览器照常复制，别抢。
       const sel = document.getSelection();
-      if (keyIs(e, 'c') && sel && !sel.isCollapsed && String(sel).trim()) return;
+      if (copyH && sel && !sel.isCollapsed && String(sel).trim()) return;
       e.preventDefault();
       e.stopPropagation();
-      if (keyIs(e, 'c')) doCopy(); else doPaste();
+      if (copyH) doCopy(); else doPaste();
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
@@ -568,10 +572,10 @@ export const VidTimeline: React.FC<{
       return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
     };
     const un1 = onGlobalKey(e => {
-      if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (keyIs(e, 'c') && !inField(e)) set(true);
+      if (e.repeat || isRecording()) return;
+      if (hit(e, 'timeline.blade') && !inField(e)) set(true);
     });
-    const un2 = onGlobalKeyUp(e => { if (keyIs(e, 'c')) set(false); });
+    const un2 = onGlobalKeyUp(e => { if (hit(e, 'timeline.blade')) set(false); });
     const blur = () => set(false);
     window.addEventListener('blur', blur);
     return () => { un1(); un2(); window.removeEventListener('blur', blur); };
@@ -754,7 +758,7 @@ export const VidTimeline: React.FC<{
       if (!selIds.size) return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement | null)?.isContentEditable) return;
-      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      if (!hit(e, 'timeline.delete')) return;
       const ids = [...selIds];
       vid.update(proj => ids.reduce((acc, id) => removeClip(acc, id), proj), 'Delete clip');
       clearSel();
