@@ -3286,6 +3286,48 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .layer-empty { flex: 1 0 auto; display: flex; align-items: center; justify-content: center; font-size: 11px; color: rgba(255,255,255,0.25); padding: 10px 4px; text-align: center; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }
         .layer-row { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 5px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid transparent; cursor: pointer; user-select: none; }
         .layer-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; }
+        /* 行尾那根不透明度滑杆（动作键 layer-opacity）。这一族**不是**从页面搬来的：页面上那一根是
+           浏览器默认的 range（圆头轨道 + 圆头拇指 + 系统蓝），在这么窄的一行里既占宽又和旁边方角的
+           缩略图、徽章不是一个族。这里画成方角的（只给 2px 一点圆角，不是药丸）：轨道 6px 高、一道
+           发丝边，已经走过的那段用 --wb-op（行内写的是百分比）切一刀填蓝 —— 不用 ::before 叠一条进度，
+           少一个会被 flex 挤歪的节点。
+           **槽底必须是中性不透明色**（#212125）：原来那层 rgba(0,0,0,0.34) 是半透明的，落在选中行那片
+           蓝底上会把整条没走到的右半截染成灰蓝 —— 用户看到的就是"右边缘轻微泛蓝"。同理填充用淡一档的
+           蓝（rgba(110,160,225,.78)），不用 #0a84ff 那种电光蓝。
+           **两条坑（都量过像素，别再踩）**：① 轨道**不许写 border** —— 0.5px 的边框会让背景定位区
+           (padding-box) 比绘制区 (border-box) 窄 1px，CSS 渐变默认 repeat，右边缘那一条就落到第二块
+           图块的第一列（蓝的），表现为"右边缘轻微溢色"。发丝线改用 box-shadow: inset（不参与布局），
+           再补一句 background-repeat: no-repeat 断根。② 同理边框会把内容盒从 6px 压到 5px，拇指 6px
+           就会从上边框下沿开始、底部溢出 1px —— 用户看到的就是"handle 上下没居中"。无边框时内容盒=6px，
+           拇指高度写 6px、margin-top 0 才是严丝合缝。
+           **拇指（handle）不常显**：一块白方块杵在这么窄的一行里等于第二枚高亮徽章，比数值本身还抢眼。
+           它收成一条 2px、跟轨道同高的白线，而且只在「行悬停 / 键盘聚焦 / 正在拖」这三种时候才出现；
+           平时读的是蓝条走到哪儿 + 右边那格百分数。 */
+        .layer-opacity { display: flex; align-items: center; gap: 4px; flex: 0 1 92px; min-width: 40px; }
+        .layer-opacity.off { opacity: 0.35; cursor: default; }
+        .layer-opacity input[type=range] { -webkit-appearance: none; appearance: none; flex: 1 1 auto;
+            min-width: 0; width: 100%; height: 14px; margin: 0; padding: 0; background: transparent;
+            cursor: pointer; outline: none; }
+        .layer-opacity input[type=range]:disabled { cursor: default; }
+        .layer-opacity input[type=range]::-webkit-slider-runnable-track {
+            height: 6px; border-radius: 2px; border: 0;
+            background-color: #212125;
+            background-image: linear-gradient(90deg, rgba(110,160,225,0.78) 0 var(--wb-op, 100%), transparent var(--wb-op, 100%) 100%);
+            background-repeat: no-repeat;
+            box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.13); }
+        .layer-opacity input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+            width: 2px; height: 6px; margin-top: 0; border: 0; border-radius: 1px; background: transparent; }
+        .layer-row:hover .layer-opacity input[type=range]::-webkit-slider-thumb,
+        .layer-opacity input[type=range]:focus-visible::-webkit-slider-thumb,
+        .layer-opacity input[type=range]:active::-webkit-slider-thumb { background: rgba(255,255,255,0.85); }
+        .layer-opacity input[type=range]::-moz-range-track { height: 6px; border-radius: 2px; border: 0;
+            background: #212125; box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.13); }
+        .layer-opacity input[type=range]::-moz-range-progress { height: 6px; border-radius: 2px; background: rgba(110,160,225,0.78); }
+        .layer-opacity input[type=range]::-moz-range-thumb { width: 2px; height: 6px; border-radius: 1px;
+            background: rgba(255,255,255,0.85); border: 0; }
+        .layer-row:hover .layer-opacity input[type=range]::-moz-range-thumb { background: rgba(255,255,255,0.85); }
+        .layer-opacity-val { flex: 0 0 auto; width: 27px; text-align: right; font-size: 10px;
+            font-variant-numeric: tabular-nums; color: rgba(255,255,255,0.5); }
         .layer-row-thumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
         .layer-row:hover { background: rgba(255,255,255,0.08); }
         .layer-row.selected { border-color: rgba(0,122,255,0.85); background: rgba(0,122,255,0.14); }
@@ -3296,11 +3338,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .layer-row-thumbs.drop-tail { box-shadow: inset 0 0 0 1px rgba(0,122,255,0.6); border-radius: 6px; }
         .layer-thumb { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; }
         .layer-thumb img { width: 100%; height: 100%; display: block; }
-        .layer-thumb.no-image { background: #1c1113; box-shadow: inset 0 0 0 1px rgba(255,59,48,0.35); }
-        .layer-thumb.no-image svg { width: 14px; height: 14px; display: block; }
+        .layer-thumb.no-image { background: #16171a; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.24);
+            color: rgba(255,255,255,0.42); transition: box-shadow 0.12s, color 0.12s; }
+        .layer-thumb.no-image svg { width: 16px; height: 8px; display: block; }
+        .layer-row:hover .layer-thumb.no-image { box-shadow: inset 0 0 0 1px rgba(255,255,255,0.36); color: rgba(255,255,255,0.6); }
         .layer-thumb.mask-thumb { background: #000; cursor: pointer; }
-        .layer-thumb.canvas-thumb { background: #0a0a0a; }
-        .layer-thumb.decal-thumb { cursor: pointer; background-color: #2a2a2a;
+        /* 缩略图只有一枚（合成结果，左上角那格）。那个 :not(.no-image) 是必须的：这两条同特异度、
+           这条写在后头，少了它空层的中性底会被 #0a0a0a 盖掉。 */
+        .layer-thumb.canvas-thumb:not(.no-image) { background: #0a0a0a; }
+        .layer-thumb.decal-thumb, .layer-thumb.image-thumb { cursor: pointer; background-color: #2a2a2a;
             background-image: linear-gradient(45deg, #1c1c1c 25%, transparent 25%, transparent 75%, #1c1c1c 75%),
                               linear-gradient(45deg, #1c1c1c 25%, transparent 25%, transparent 75%, #1c1c1c 75%);
             background-size: 8px 8px; background-position: 0 0, 4px 4px; }
@@ -3319,9 +3365,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .layer-thumb.attr-chip.attr-off .attr-badge::after { content: ''; position: absolute; left: 50%; top: 50%; width: 16px; height: 2px; border-radius: 1px; background: #ff453a; transform: translate(-50%, -50%) rotate(45deg); }
         .layer-thumb.attr-chip.attr-off .attr-badge::after { transform: translate(-50%, -50%) rotate(-45deg); }
         .layer-thumb.attr-chip.attr-off img, .layer-thumb.attr-chip.attr-off > svg, .layer-thumb.attr-chip.attr-off .attr-visual > svg { opacity: 0.32; }
+        /* 底位那一枚（条带最左、恒在、折叠先画它）的角标：左上角一个小方点。位置挑过的 —— 类型角标
+           占右下角，拖放插入线占左右两侧 0 位（.drop-before / .drop-after），3px 内缩的小点一个都不撞。 */
+        .attr-base-mark { position: absolute; left: 3px; top: 3px; width: 4px; height: 4px; border-radius: 1px;
+            background: rgba(255,255,255,0.8); box-shadow: 0 0 0 1px rgba(0,0,0,0.55); pointer-events: none; }
         .attr-type-badge { position: absolute; right: 1px; bottom: 1px; width: 12px; height: 12px; border-radius: 3px; background: rgba(0,0,0,0.66); display: flex; align-items: center; justify-content: center; pointer-events: none; }
         .attr-type-badge svg { width: 9px; height: 9px; display: block; }
-        .attr-type-badge.decal { color: #ffb86e; }
+        .attr-type-badge.decal, .attr-type-badge.image { color: #ffb86e; }
         .attr-type-badge.mask { color: #9ecbff; }
         .attr-type-badge.effects { color: #ffd76e; }
         .attr-type-badge.text { color: #d9b8ff; }
@@ -3331,6 +3381,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .attr-type-badge.ray { color: #ff7ab0; }
         .attr-type-badge.model { color: #7ee0d0; }
         .attr-type-badge.pose { color: #a8e06e; }
+        /* Stash（"以下所有层的合成"那一枚活图）沿用旧 Stash 层行角标的黄 —— 它换了身份，颜色照旧认得出。 */
+        .attr-type-badge.stash { color: #e3d17a; }
         .layer-thumb.text-attr-thumb, .layer-thumb.direction-attr-thumb, .layer-thumb.scene3d-attr-thumb,
         .layer-thumb.plane-attr-thumb, .layer-thumb.point-attr-thumb, .layer-thumb.ray-attr-thumb,
         .layer-thumb.pose-attr-thumb { cursor: pointer; background-color: #1b1d24; }
@@ -3345,7 +3397,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .layer-type-badge.text { color: #d9b8ff; }
         .layer-type-badge.direction { color: #ff9ec4; }
         .layer-type-badge.model { color: #7ee0d0; }
-        .layer-type-badge.stash { color: #e3d17a; }
+        /* （.stash 那一档随图层种类一起删了：Stash 现在是条带上一枚 attribute，它那颗 chip 的角标
+           走 .attr-badge 那一族，不再借行上的类型角标。） */
         .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
         /* 行上那根 Opacity 滑杆（PS 式整体不透明度）：固定小宽（名字让位后剩下的空间不多），
            百分比读数定宽右对齐，拖动时数字不跳。off = 视频模式下没选中 Layer 段那道编辑闸。 */

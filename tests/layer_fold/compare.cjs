@@ -89,9 +89,19 @@ function flat(v, prefix, out) {
     return out;
 }
 
+// P0 改名：老 oracle（plan.v1.json 与老 .cud）里这一枚写的是 decal，新编译器写 image。
+// 两者同义 —— 比之前先把 type / role 上的旧名翻成新名，于是「旧档 plan 与新编译器逐字段相等」
+// 这条判据仍然是 0 差异，而不是被一次改名判成回归。注意只翻值，不翻 key。
+function canonFlat(m) {
+    for (const k of Object.keys(m)) {
+        if ((k.endsWith('.type') || k.endsWith('.role')) && m[k] === 'decal') m[k] = 'image';
+    }
+    return m;
+}
+
 function diff(want, got, label, out, skip) {
-    const a = flat(want, label, {});
-    const b = flat(got, label, {});
+    const a = canonFlat(flat(want, label, {}));
+    const b = canonFlat(flat(got, label, {}));
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
     for (const k of [...keys].sort()) {
         if (skip && skip.some((s) => k.indexOf(s) >= 0)) continue;

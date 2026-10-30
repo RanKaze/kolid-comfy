@@ -8,7 +8,8 @@
 // 三条规矩照抄契约：
 //   · layers 自底向上（plan 里已经是这个顺序，这里不再反转）
 //   · strip 折叠 = 底像素 + 从左到右每一步（decal 叠、mask 裁、chain 跑特效）
-//   · capture:'below' 的层（Stash）输入是"此刻画布上已经有的东西"，不是自己的底像素
+//   · （`capture:'below'` 那一格随旧 Stash **图层**一起删了 —— 它说的是"输入是此刻画布上已经有的
+//     东西，不是自己的底像素"。Stash 现在是条带上一枚普通的面，那一句话不再是合成的分支。）
 const KCompositor = (function () {
     const api = {
         /** uri → canvas/Image/Video（已加载的资源）。没加载返回 null。 */
@@ -83,10 +84,11 @@ const KCompositor = (function () {
      * 那条链"时才能走 —— 链后面若还有 decal/生成器，就得回到 2D 画上去，那时纹理意味着又一次 readback。
      * 链后面的**蒙版**例外：它是 alpha 乘，合成着色器里一句话（与 2D 的 destination-in 同义）。
      */
-    function foldLayer(pl, t, w, h, below, texOK) {
-        // 一笔正在纹理里（P3.1）：这一层的结果已经折好，直接交纹理。Stash 层的输入是「以下所有层」，
-        // 不在这一笔的纹理里，所以照旧走 2D 累积。
-        if (texOK && api.layerTexture && pl.capture !== 'below') {
+    function foldLayer(pl, t, w, h, texOK) {
+        // 一笔正在纹理里（P3.1）：这一层的结果已经折好，直接交纹理。
+        // （Stash 曾经是这里的例外 —— 它的输入是「以下所有层」，不在这一笔的纹理里。那一岔随图层
+        //  种类一起删了：现在它的输入就是它自己那枚面，跟一张贴片没有区别。）
+        if (texOK && api.layerTexture) {
             try {
                 const lt = api.layerTexture(pl, t, w, h);
                 if (lt && lt.tex) return { tex: lt.tex, mask: lt.mask || null };
@@ -110,9 +112,7 @@ const KCompositor = (function () {
                 chIdx = -1; break;                       // 链后还有别的墨 ⇒ 这一层走 canvas
             }
         }
-        const base = pl.capture === 'below'
-            ? (below || null)
-            : (pl.base && pl.base.resource && api.resource ? api.resource(pl.base.resource) : null);
+        const base = (pl.base && pl.base.resource && api.resource) ? api.resource(pl.base.resource) : null;
         const surf = blank(w, h);
         const g = surf.getContext('2d');
         g.setTransform(1, 0, 0, 1, 0, 0);
@@ -298,7 +298,7 @@ void main() {
         // 两张常备纹理：0 = 这一项的源（画布要上传/纹理直接绑），1 = 蒙版。
         const state = { c: canvas, gl, prog, vao, buf, tex: mkTexture(gl), mtex: mkTexture(gl),
             // 源纹理缓存：同一张画布 + 同一份内容身份（items 里的 `gen`）⇒ 不再上传。
-            // 播放一层带关键帧的段时一帧要贴好几张面（源帧、每条链的结果、Stash 的抄写图），其中
+            // 播放一层带关键帧的段时一帧要贴好几张面（源帧、每条链的结果、Stash 抄的那张），其中
             // **只有真变了的那一张**需要 texImage2D —— 剩下的整幅上传是纯烧（832×1216 一张 ~3ms，
             // 30 包/秒就是十几毫秒/帧）。`gen` 缺席 ⇒ 老规矩每次上传（不会贴旧图）。
             srcTex: new Map(), srcTexUse: 0, loc: {
@@ -490,23 +490,18 @@ void main() {
             // 借不到那台上下文（没有 WebGL2）就一个 tex 都不出，与 P2 一模一样。
             const stage = (useGL && !o.glTarget && typeof fxglStageSize === 'function')
                 ? fxglStageSize(w, h) : null;
-            let lastBelow = -1;
-            for (let i = 0; i < stack.length; i++) if (stack[i].capture === 'below') lastBelow = i;
-            // Stash 层的输入是"以下所有层的合成"。2D 路径上那就是目标画布（边画边攒）；
-            // GL 路径上目标要等全都贴完才画，所以另开一块 2D 累积画布——**只在这种工程里**才建。
-            const acc = useGL && lastBelow >= 0 ? blank(w, h) : null;
-            const actx = acc ? acc.getContext('2d') : null;
             for (let i = 0; i < stack.length; i++) {
                 const pl = stack[i];
-                const below = pl.capture === 'below' ? (acc || cv) : null;
-                // 只有**最后**一个 Stash 层之后才敢交纹理：在它之前的层都得落成画布，因为后面的 Stash
-                // 层要读"以下所有层的合成"，而那本账是 2D 攒的。
-                const got = foldLayer(pl, t, w, h, below, !!stage && i >= lastBelow);
+                // `below` 那一格随旧 Stash 图层一起删了（"底像素换成以下所有层的合成"那一岔）：那一枚
+                // 现在是条带上普通的面，像素由页面在 render 的循环里抄进它自己的记录，折的时候跟一张
+                // 贴片一样被读。于是这里再也没有"要另开一块 2D 累积画布"的工程。
+                const got = foldLayer(pl, t, w, h, !!stage);
                 if (!got) continue;
                 if (got.tex) { items.push({ tex: got.tex, mask: got.mask, transform: pl.transform, opacity: pl.opacity }); continue; }
                 items.push({ src: got.src, transform: pl.transform, opacity: pl.opacity });
-                if (useGL) { if (actx) drawTransformed(actx, got.src, pl.transform, w, h, pl.opacity); }
-                else drawTransformed(ctx, got.src, pl.transform, w, h, pl.opacity);
+                // 2D 那条路是"边画边攒"（目标画布本身就是账本）；GL 那条路由 compositeGL 一次贴完，
+                // 之前这里往 `actx` 多画的一笔只为 Stash 的累积账存在，那一本账已经随图层种类删了。
+                if (!useGL) drawTransformed(ctx, got.src, pl.transform, w, h, pl.opacity);
             }
             if (useGL) {
                 const g = compositeGL(items, w, h, stage || o.glTarget || null);
@@ -540,7 +535,8 @@ void main() {
     /**
      * 直接渲染到一块**外部**画布（必须是 webgl2，且只被这里用）。
      * 这是"唯一显示面"的技术入口：合成结果就是屏幕上那块画布，中间不再有一次全幅拷贝。
-     * `scratch` 是给 Stash 层用的 2D 累积面（只有含 stash 的工程才需要）。
+     * `scratch` 那块 2D 面曾经是给 Stash **层**攒"以下所有层"用的账本（只有含 stash 的工程才需要）。
+     * Stash 现在是条带上一枚普通的面，那一本账不再由合成器攒，这里就只剩"glTarget 之外的落点"这一件事。
      */
     function renderTo(canvas, plan, t, opts) {
         const w = (plan.grid && plan.grid.w) | 0;

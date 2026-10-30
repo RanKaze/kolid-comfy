@@ -208,9 +208,11 @@ const Jump = () => (
     <path d="M11.1 9.6v2.1a1.2 1.2 0 0 1-1.2 1.2H4.3a1.2 1.2 0 0 1-1.2-1.2V6.3a1.2 1.2 0 0 1 1.2-1.2h2.1" />
   </svg>
 );
+// 还没有底图的那一格：不画红框红叉（等于在说「出错了」，可这只是一层还没生成过），
+// 只留一个白描的细边 + 中间一枚省略符（三个小圆点），读作「这里还空着」，颜色随着行悬停一起亮。
 const NoImage = () => (
-  <svg viewBox="0 0 16 16" aria-hidden="true">
-    <path d="M4 4 L12 12 M12 4 L4 12" stroke="#ff3b30" strokeWidth="2" strokeLinecap="round" fill="none" />
+  <svg viewBox="0 0 16 8" aria-hidden="true" fill="currentColor">
+    <circle cx="4.4" cy="4" r="1.15" /><circle cx="8" cy="4" r="1.15" /><circle cx="11.6" cy="4" r="1.15" />
   </svg>
 );
 const Plus = () => (
@@ -290,9 +292,14 @@ const AttrChip = ({ row, chip, send }: { row: BlendLayerRow; chip: BlendAttrChip
     st.dragging === key ? 'dragging' : '',
     seam === 'before' ? 'drop-before' : seam === 'after' ? 'drop-after' : seam === 'into' ? 'drop-into' : ''];
   const faceUrl = chip.face ? ui.faces[chip.face] : '';
+  // 底位 = 这一层自己那张图（它就是 `l.img` 说的那一枚）。它是条带上**普通的一步**：拖得动，位置
+  // 决定它在哪画（拖到一条链右边 = 那条链不作用于它）。只有删/停用/复制还被页面那三道闸挡着 ——
+  // 那一层的"自己那张图"没了，这一层就没了自己的像素。
+  const isBase = chip.role === 'base';
   return (
-    <div ref={ref} className={cls.filter(Boolean).join(' ')} data-attr={chip.guid} draggable
-      title={chip.title + ` · Ctrl+click turns this step ${chip.enabled ? 'off (its data stays, the fold just skips it)' : 'back on'}`}
+    <div ref={ref} className={cls.filter(Boolean).join(' ')} data-attr={chip.guid}
+      data-base={isBase ? '1' : undefined} draggable
+      title={chip.title + (isBase ? '' : ` · Ctrl+click turns this step ${chip.enabled ? 'off (its data stays, the fold just skips it)' : 'back on'}`)}
       onClick={ev => {
         ev.stopPropagation();
         // ctrl+左键 = 启用/停用这一步（全体 attribute 同一套手势）；普通点击才是 spec.open 那一句。
@@ -314,6 +321,9 @@ const AttrChip = ({ row, chip, send }: { row: BlendLayerRow; chip: BlendAttrChip
       onDragStart={ev => {
         // 这一枚自己就是拖拽源：让它冒到行上，行的那套（图层重排序）会把它当成整层被拖走。
         ev.stopPropagation();
+        // 底位就是条带上普通的一步，跟别的 chip 一样拖：位置决定它在哪画。它曾经被写成
+        // `draggable={false}`，那反而更糟 —— 子元素写 false 挡不住祖先，整行会顶上当拖拽源，
+        // 于是"拖这一枚"变成"拖这一层"。
         attrDragRef = { layerId: row.id, attrId: chip.guid };
         ev.dataTransfer.effectAllowed = 'move';
         ev.dataTransfer.setData('text/plain', chip.guid);
@@ -359,6 +369,9 @@ const AttrChip = ({ row, chip, send }: { row: BlendLayerRow; chip: BlendAttrChip
           `.attr-off > svg` 的暗淡在这里多认一条 `.attr-visual > svg` —— CSS 里记明的第三处适配。 */}
       {!chip.face && chip.glyph && <span className="attr-visual" dangerouslySetInnerHTML={{ __html: chip.glyph }} />}
       {chip.badge && <span className={'attr-type-badge ' + chip.badgeClass} dangerouslySetInnerHTML={{ __html: chip.badge }} />}
+      {/* 底位那枚的角标：一个左上角的小方点（类型角标在右下、拖放插入线在左右两侧 0 位，都不撞）。
+          它说的不是"另一种类型"，而是"这一枚就是这一层自己的像素" —— `l.img` 读的也是它。 */}
+      {isBase && <span className="attr-base-mark" />}
       {/* 停用那枚红叉：页面用 syncAttrChipState 翻 `<i>` 的 class，可 CSS 认的是父颗的 `.attr-off`，
           所以这里只由 chip.enabled 决定那颗 class，结果一模一样。 */}
       <i className="attr-badge" />
@@ -460,16 +473,16 @@ const BADGE_TITLE: Record<string, string> = {
   model: '3D layer — its picture was baked from a scene; the jump button opens that scene as a tab',
   text: 'Text layer — the picture is re-rendered from the text at any size; double-click it on the canvas to edit',
   direction: 'Direction layer — the picture is the canvas view of a direction; point it in the Direction tool (D)',
-  stash: 'Stash layer — its picture is the layers under it, merged again on every draw; an effect here runs on that whole stack. '
-    + 'Welded to the canvas, so it does not move, scale or rotate.',
   raster: 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples',
   smart: 'Smart layer — transform is non-destructive and keeps the native image',
 };
+// （`stash` 这一档随图层种类一起删了：Stash 现在是条带上一枚 attribute，说明写在 attr/stash.js 的
+//   `addTitle` / `title` 里，角标也由那一枚自己的 badge 画 —— 行的类型角标不再提它。）
 const nameSuffix = (row: BlendLayerRow): string =>
   row.kind === 'model' ? ' · 3D'
     : row.kind === 'cud' ? (row.cudLinked ? ' · cud' : ' · cud (unlinked)')
       : row.kind === 'text' ? ' · text' : row.kind === 'direction' ? ' · direction'
-        : row.kind === 'stash' ? ' · stash' : row.kind === 'raster' ? ' · raster' : '';
+        : row.kind === 'raster' ? ' · raster' : '';
 
 const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend; video: WorkbenchHostCtx['video'] }) => {
   const ui = useBlendUi();
@@ -477,11 +490,10 @@ const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend;
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const origRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   // 与 StackHead / 行尾那排同一道闸：视频模式下没选中 Layer 段时这一摞不许写 —— 滑杆跟着灰。
   const blocked = useLayerEditBlocked();
-  useFaceVisible(origRef, row.orig);
+  // 只报一枚面：这一行现在只有一格缩略图（合成结果）。原先还报过 row.orig，那枚的位子已经并掉。
   useFaceVisible(canvasRef, row.canvas);
   const rowKey = 'row:' + row.id;
   const seam = st.over && st.over.key === rowKey ? st.over.seam : undefined;
@@ -494,6 +506,10 @@ const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend;
       + "The pixels are this file's own; right-click the row to Relink.";
   const badgeTitle = row.kind === 'cud' ? cudTitle : BADGE_TITLE[row.kind] || BADGE_TITLE.smart;
   const noImage = !row.orig;
+  // 盒是图的主人：网格与图数都从它读（`row.native` 只是底图那一枚的像素尺寸，空白盒没有）。
+  // `noImage` 仍按 `row.orig` 判 —— 文字/方向层的面是生成器算出来的，盒里没有图却照样有墨。
+  const boxGrid = row.box ? `${row.box.w} × ${row.box.h}` : `${row.native.w} × ${row.native.h}`;
+  const boxCount = row.box ? `${row.box.images} image${row.box.images === 1 ? '' : 's'}` : '';
   const isJump = row.kind === 'cud' || row.kind === 'model';
   const runTitle = !row.canGen ? `「${row.name}」is the Mask layer itself — not a Generate target`
     : row.hasImg ? `Refine「${row.name}」from its own image and mask (nothing painted = the whole layer)`
@@ -562,15 +578,19 @@ const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend;
       {/* 链容器摊在 head 之上；同一种挂了两枚容器时，条带上越靠左（越先执行）的那块排得越贴近 head。 */}
       {[...row.chains].reverse().map(lane => <ChainLane key={lane.guid} row={row} lane={lane} send={send} />)}
       <div className="layer-row-main">
-        <div ref={origRef} className={['layer-thumb', noImage ? 'no-image' : '',
+        {/* 这一格原先画"原始图"，条带最左另有一枚"合成结果"。两枚都是 36×24、都是选中并进 transform
+            的入口，上下并排只显得重复 —— 并成一枚：只留左上角这格，画的是**这一层此刻的样子**。
+            结果比原始图信息量大（加了 image/mask/生成之后原图根本没变），空层时又正好落进「…」占位，
+            不必在两个位置各画一次。 */}
+        <div ref={canvasRef} className={['layer-thumb', 'canvas-thumb', noImage ? 'no-image' : '',
           row.selected && ui.mode === 'transform' ? 'active' : ''].filter(Boolean).join(' ')}
           title={noImage
             ? (row.kind === 'text'
-              ? '1 · Empty text layer — double-click it on the canvas (or press Enter) to type'
-              : '1 · No image yet — run Generate (the ▶ on the row, or right-click it) or drop an image here')
-            : 'Original image — click to transform this layer'}
+              ? `Empty text layer · box ${boxGrid} — double-click it on the canvas (or press Enter) to type`
+              : `Empty box ${boxGrid} · no picture in it — run Generate (the ▶ on the row, or right-click it) or drop an image here`)
+            : `Result preview · box ${boxGrid}${boxCount ? ', ' + boxCount : ''} — click to transform`}
           onClick={ev => { ev.stopPropagation(); send('layer-select', { id: row.id, from: 'thumb', shift: ev.shiftKey }); }}>
-          {!noImage && ui.faces[row.orig] && <img src={ui.faces[row.orig]} alt="" draggable={false} />}
+          {!noImage && ui.faces[row.canvas] && <img src={ui.faces[row.canvas]} alt="" draggable={false} />}
           {noImage && <NoImage />}
           <span className={'layer-type-badge ' + (row.kind === 'cud' && !row.cudLinked ? 'cud unlinked' : row.kind)}
             title={badgeTitle} dangerouslySetInnerHTML={{ __html: row.badgeSvg }} />
@@ -599,6 +619,7 @@ const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend;
             "正在拖一行"（拖拽态不退、rowDragId 悬着一个旧 id）。 */}
         <div className={'layer-opacity' + (blocked ? ' off' : '')}
           draggable
+          style={{ '--wb-op': Math.round(row.opacity * 100) + '%' } as React.CSSProperties}
           onDragStart={ev => { ev.preventDefault(); ev.stopPropagation(); }}
           title={blocked
             ? 'Move the playhead onto a Layer segment in the Tracks window first'
@@ -610,7 +631,7 @@ const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend;
               const v = parseFloat(ev.target.value);
               if (Number.isFinite(v)) send('layer-opacity', { id: row.id, opacity: v });
             }} />
-          <span>{Math.round(row.opacity * 100)}%</span>
+          <span className="layer-opacity-val">{Math.round(row.opacity * 100)}%</span>
         </div>
         {isJump && (
           <button type="button" className="icon-btn" disabled={row.kind !== 'model' && !row.cudLinked}
@@ -627,6 +648,11 @@ const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend;
           onClick={ev => { ev.stopPropagation(); send('layer-remove', { id: row.id }); }}>×</button>
       </div>
       <div className={'layer-row-thumbs' + (stripOver ? ' drop-tail' : '')}
+        // 属性条和滑杆一样是**编辑面**：抓在它的空隙/`+` 上横拖，别让 Chromium 顺手把整层拖走
+        // （最近的 draggable 祖先是这一行；子元素写 draggable={false} 挡不住它）。自己当拖拽源再把
+        // 这一次在手里取消 —— 底下的 attr drop 两句不受影响。
+        draggable
+        onDragStart={ev => { ev.preventDefault(); ev.stopPropagation(); }}
         onDragOver={ev => {
           // 条带的空隙与 `+` 也是落点：跨层拖到这里 = 追加为这一层的最后一步。
           if (!attrDragRef) return;
@@ -641,11 +667,7 @@ const LayerRow = ({ row, send, video }: { row: BlendLayerRow; send: BlendUiSend;
           send('attr-move', { attrId: d.attrId, fromLayerId: d.layerId, toLayerId: row.id, beforeAttrId: null, after: false });
           setRowUi({ over: null, dragging: '' });
         }}>
-        <div ref={canvasRef} className="layer-thumb canvas-thumb"
-          title="Result preview — this layer as it sits on the canvas; click to transform"
-          onClick={ev => { ev.stopPropagation(); send('layer-select', { id: row.id, from: 'thumb', shift: ev.shiftKey }); }}>
-          {ui.faces[row.canvas] && <img src={ui.faces[row.canvas]} alt="" draggable={false} />}
-        </div>
+        {/* 条带这一行不再有缩略图：那枚"结果"已经并到上面那格去了，这里从第一枚属性开始。 */}
         {row.attrs.map(chip => <AttrChip key={chip.guid} row={row} chip={chip} send={send} />)}
         <button type="button" className="attr-add" draggable={false}
           title={'Add an attribute to「' + row.name + '」— it runs as the last step of this layer'}
@@ -890,7 +912,7 @@ export const LayerListView = ({ stack, rows, send, video }:
 };
 
 // ---- 两格头部 ----
-export type AddEntry = { kind: 'default' | 'stash' | 'dynamic' | 'cud'; title: string; label: string; sub: string };
+export type AddEntry = { kind: 'default' | 'dynamic' | 'cud'; title: string; label: string; sub: string };
 
 export const StackHead = ({ stack, entries, withBypass, send }:
   { stack: BlendStack; entries: AddEntry[]; withBypass?: boolean; send: BlendUiSend }) => {

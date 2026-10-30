@@ -58,7 +58,7 @@ var KOLID_KEYMAP = ([
 
     // ── Paint ─────────────────────────────────────────────────────────────────────────────────
     { id: 'paint.swap-colors', group: 'Paint', label: 'Swap foreground / background', scope: 'canvas', keys: ['X'] },
-    { id: 'paint.decal', group: 'Paint', label: 'Paint target — last Decal step', scope: 'canvas', keys: ['Tab'] },
+    { id: 'paint.decal', group: 'Paint', label: 'Paint target — last Image step', scope: 'canvas', keys: ['Tab'] },
     { id: 'paint.mask', group: 'Paint', label: 'Paint target — last Mask step', scope: 'canvas', keys: ['`'] },
 
     // ── View ──────────────────────────────────────────────────────────────────────────────────

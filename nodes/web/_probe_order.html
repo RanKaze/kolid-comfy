@@ -1,0 +1,112 @@
+<!doctype html><html><head><meta charset="utf-8"><title>base step order</title>
+<style>html,body{margin:0}iframe{width:900px;height:700px;border:0}pre{font:12px/1.4 monospace}</style></head>
+<body><iframe id="f" src="blend_node.html"></iframe><pre id="out"></pre>
+<script>
+const out = [];
+const log = (k, v) => { out.push(k + ' = ' + JSON.stringify(v)); document.getElementById('out').textContent = out.join('\n'); };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function solid(w, h, r, g, b, a) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  x.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + (a === undefined ? 1 : a) + ')';
+  x.fillRect(0, 0, w, h);
+  return c.toDataURL('image/png');
+}
+
+(async () => {
+  const f = document.getElementById('f');
+  if (!(f.contentDocument && f.contentDocument.readyState === 'complete')) {
+    await Promise.race([new Promise(r => f.addEventListener('load', r)), sleep(8000)]);
+  }
+  const w = f.contentWindow;
+  let lastUi = null;
+  window.addEventListener('message', ev => { if (ev.data && ev.data.type === 'blend-ui' && ev.data.stacks) lastUi = ev.data; });
+  for (let i = 0; i < 200 && !w.document.getElementById('blendCanvas'); i++) await sleep(50);
+  await sleep(500);
+  const rows = () => (lastUi && lastUi.stacks && lastUi.stacks.layers) || [];
+  const j = JSON.stringify;
+  const ev = expr => w.eval(expr);
+  const order = id => ev('(function(){ return attrRefList(getLayer(' + j(id) + ')).map(function(x){'
+    + 'var r = attrRecord(x); return r.type === "image" && r.role === "base" ? "base" : r.type; }).join(); })()');
+  // 这一层折出来的那一幅 64×64
+  const foldPx = id => ev('(function(){ var l = getLayer(' + j(id) + ');'
+    + 'var s = fxScratch(64, 64); var did = fxDropStrip(l, s, null, -1, FX_CUT_ALL);'
+    + 'return { did: did, px: Array.from(s.getContext("2d").getImageData(0,0,64,64).data) }; })()');
+  const at = (px, x, y) => { const i = (y * 64 + x) * 4; return [px[i], px[i+1], px[i+2], px[i+3]]; };
+  const diff = (a, b) => { let n = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++; return n; };
+  const moveTo = (id, attrId, targetId, after) => ev('(function(){ var l = getLayer(' + j(id) + ');'
+    + 'var ok = moveAttrStep(' + j(attrId) + ', ' + j(id) + ', ' + j(id) + ', ' + j(targetId) + ', ' + (!!after) + ');'
+    + 'return { ok: ok, order: attrRefList(l).map(function(x){ var r = attrRecord(x);'
+    + 'return r.type === "image" && r.role === "base" ? "base" : r.type; }).join() }; })()');
+
+  // ── C：只有底位、alpha .5 —— 画布上的那一格必须是 .5，不是叠两遍的 .75
+  w.postMessage({ type: 'blend-add-layer', smart: true, items: [{ src: solid(64, 64, 0, 200, 0, 0.5), name: 'C' }] }, '*');
+  for (let i = 0; i < 200 && rows().length !== 1; i++) await sleep(50);
+  await sleep(700);
+  const cv = w.document.getElementById('blendCanvas');
+  const centerPixel = () => { const d = cv.getContext('2d').getImageData(Math.round(cv.width / 2), Math.round(cv.height / 2), 1, 1).data; return [d[0], d[1], d[2], d[3]]; };
+  log('C 只有底位', { canvas: [cv.width, cv.height], center: centerPixel() });
+  log('C 结论（半透明底不许画两次）', {
+    不是两遍的191: centerPixel()[3] !== 191,
+    alpha落在一次那档: centerPixel()[3] > 110 && centerPixel()[3] < 140,
+  });
+
+  // ── A：底位(纯绿) + 一枚蒙版（左半留、右半裁）──
+  w.postMessage({ type: 'blend-add-layer', smart: true, items: [{ src: solid(64, 64, 0, 200, 0), name: 'A' }] }, '*');
+  for (let i = 0; i < 200 && rows().length !== 2; i++) await sleep(50);
+  await sleep(500);
+  const idA = rows()[0].id;                      // 播报里最新那一层在最前面
+  await ev('(function(){ addAttrToLayer(getLayer(' + j(idA) + '), "mask", ""); return 1; })()');
+  await sleep(200);
+  const maskId = await ev('(function(){ var rs = attrRecordsOf(getLayer(' + j(idA) + '));'
+    + 'for (var i=0;i<rs.length;i++) if (rs[i].type === "mask") return rs[i].id; return null; })()');
+  await ev('(function(){ var r = attrRecord(' + j(maskId) + ');'
+    + 'var c = document.createElement("canvas"); c.width = 64; c.height = 64;'
+    + 'var g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, 32, 64);'
+    + 'r.surface = c; markAttrPainted(r); render(); return 1; })()');
+  await sleep(500);
+  const baseId = () => ev('(function(){ return boxBase(getLayer(' + j(idA) + ')).id; })()');
+
+  const s1 = await foldPx(idA);
+  log('A [base, mask]', { order: await order(idA), left: at(s1.px, 8, 8), right: at(s1.px, 56, 8) });
+  const m1 = await moveTo(idA, await baseId(), maskId, true);       // 底位拖到蒙版之后
+  const s2 = await foldPx(idA);
+  log('A 拖成 [mask, base]', { move: m1, left: at(s2.px, 8, 8), right: at(s2.px, 56, 8) });
+  const m2 = await moveTo(idA, await baseId(), maskId, false);      // 拖回去
+  const s3 = await foldPx(idA);
+  log('A 拖回原处', { move: m2, sameAsFirst: diff(s1.px, s3.px) === 0, diff: diff(s1.px, s3.px) });
+  log('A 结论', {
+    orderChanged: m1.order !== 'base,mask',
+    pixelsChanged: diff(s1.px, s2.px) > 0,
+    maskLastCutsRightHalf: at(s1.px, 56, 8)[3] === 0,
+    baseAfterMaskKeepsIt: at(s2.px, 56, 8)[3] === 255,
+  });
+
+  // ── B：底位 + 一枚叠上去的蓝 patch ──
+  w.postMessage({ type: 'blend-append-image', layer_id: idA,
+                  items: [{ src: solid(32, 32, 0, 0, 255), place: { x: 16, y: 16, w: 32, h: 32, ow: 64, oh: 64 } }] }, '*');
+  for (let i = 0; i < 300; i++) {
+    const r = rows()[0];
+    if (r && (r.attrs || []).filter(a => a.type === 'image').length >= 2) break;
+    await sleep(50);
+  }
+  await sleep(500);
+  const extraId = await ev('(function(){ var rs = attrRecordsOf(getLayer(' + j(idA) + '));'
+    + 'for (var i=0;i<rs.length;i++) if (rs[i].type === "image" && rs[i].role !== "base") return rs[i].id; return null; })()');
+  const beforeOrder = await order(idA);
+  const b1 = await foldPx(idA);
+  const mB = await moveTo(idA, await baseId(), extraId, true);      // 底位拖到 patch 之后
+  const b2 = await foldPx(idA);
+  // 取样点避开 A 段留下的那枚蒙版（它裁右半），取 patch 与底位都盖得到的左半：(24,32)
+  log('B 顺序与取样点', { before: beforeOrder, move: mB,
+    whenBaseFirst: at(b1.px, 24, 32), whenBaseLast: at(b2.px, 24, 32) });
+  log('B 结论', {
+    pixelsChanged: diff(b1.px, b2.px) > 0,
+    baseLastShowsBase: at(b2.px, 24, 32)[1] > 0 && at(b2.px, 24, 32)[2] === 0,
+    baseFirstShowsPatch: at(b1.px, 24, 32)[2] === 255,
+  });
+
+  document.getElementById('out').textContent = out.join('\n');
+  document.title = 'DONE';
+})().catch(e => { out.push('THROW ' + (e && e.stack || e)); document.getElementById('out').textContent = out.join('\n'); document.title = 'DONE'; });
+</script></body></html>

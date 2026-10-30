@@ -261,7 +261,7 @@ export const runAgentTool = async (name: string, rawArgs: unknown, ctx: AgentCtx
       return sent(`selected layer ${num(a.id)}`);
     case 'add_layer': {
       const stack = (str(a.stack) === 'guidance' ? 'guidance' : 'layer') as BlendStack;
-      ctx.uiSend('layer-add', { stack, kind: str(a.kind) === 'stash' ? 'stash' : 'default' });
+      ctx.uiSend('layer-add', { stack, kind: 'default' });
       return sent(`added layer on ${stack} stack`);
     }
     // 漫画格排版：一条调用摆出一整页分格(纸 + 每格一张空层 + 线稿层)。几何在这里算 ——

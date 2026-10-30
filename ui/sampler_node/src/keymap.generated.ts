@@ -48,7 +48,7 @@ export const KEYMAP = [
   { id: "tool.marquee", group: "Tools", label: "Rectangle marquee", scope: "canvas", keys: ["M"] },
   { id: "tool.lasso", group: "Tools", label: "Lasso", scope: "canvas", keys: ["L"] },
   { id: "paint.swap-colors", group: "Paint", label: "Swap foreground / background", scope: "canvas", keys: ["X"] },
-  { id: "paint.decal", group: "Paint", label: "Paint target — last Decal step", scope: "canvas", keys: ["Tab"] },
+  { id: "paint.decal", group: "Paint", label: "Paint target — last Image step", scope: "canvas", keys: ["Tab"] },
   { id: "paint.mask", group: "Paint", label: "Paint target — last Mask step", scope: "canvas", keys: ["`"] },
   { id: "view.cancel", group: "View", label: "Cancel / reset view", scope: "canvas", keys: ["Escape"] },
   { id: "view.flip", group: "View", label: "Flip view", scope: "canvas", keys: ["Ctrl+F"] },

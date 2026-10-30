@@ -759,8 +759,8 @@ const App: React.FC = () => {
           // 壳按铃铛开关响铃。浏览器直开时 parent 是自己,这条消息无人听,无副作用。
           try { window.parent.postMessage({ __kolid: 'tinkle', event: 'pipeline-done' }, '*'); } catch { /* ignore */ }
           // The result never becomes the pipeline image by itself: it lands in the staging pool
-          // and then either is written back over the layer it came from (a layer-initiated
-          // Generate) or dropped on as a new layer (a preset run).
+          // and then either is appended onto the layer it came from as one more Image step
+          // (a layer-initiated Generate) or dropped on as a new layer (a preset run).
           const generateTarget = layerGenerateRef.current;
           layerGenerateRef.current = null;
           await refreshStaging();
@@ -773,10 +773,11 @@ const App: React.FC = () => {
             const item = (list?.staging || []).find((s: StagingItem) => s.id === sid);
             if (!item) return;
             if (generateTarget) {
-              // Replace in place. The workbench keeps the layer's mask / decal / transform and
-              // only swaps the image, so there is no new layer and nothing to de-duplicate.
+              // The result goes back to the layer it came from as one more Image step on its
+              // strip: the layer keeps its base pixels, mask and chains, and the new image is
+              // placed where the backend drew it. No new layer, nothing overwritten.
               blendIframeRef.current?.contentWindow?.postMessage(
-                { type: 'blend-replace-layer', layer_id: generateTarget.layerId, items: [item] }, '*');
+                { type: 'blend-append-image', layer_id: generateTarget.layerId, items: [item] }, '*');
             } else {
               blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-add-layer', items: [item] }, '*');
             }

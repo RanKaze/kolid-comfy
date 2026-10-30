@@ -111,8 +111,11 @@ export const TOOLS = [
   },
   {
     name: 'add_layer',
-    description: 'Add a new layer onto a stack: stack=layers|guidances; kind=default|stash.',
-    parameters: { type: 'object', properties: { stack: { type: 'string', enum: ['layers', 'guidances'] }, kind: { type: 'string', enum: ['default', 'stash'] } }, required: ['stack'] },
+    // Stash 不再是一种图层（它是条带上一枚 attribute：拍下"这一层以下所有图层的合成"）。要它就先
+    // add_layer 再 ui_action('attr-add', { layerId, type: 'stash' }) —— 那一枚落在条带末尾，
+    // 挂在它右边的特效链就作用于下面那一整叠。
+    description: 'Add a new empty layer onto a stack: stack=layers|guidances. To snapshot the layers under it, add a Stash attribute afterwards via ui_action attr-add (type=“stash”).',
+    parameters: { type: 'object', properties: { stack: { type: 'string', enum: ['layers', 'guidances'] } }, required: ['stack'] },
   },
   {
     name: 'create_comic_layout',

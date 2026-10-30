@@ -669,24 +669,31 @@ function stripCoverage(masks, w, h) {
 }
 
 // ---- 条带折叠 (the fold) ----
-// 图层表面 = 最左那枚隐式面 (base,通常是 l.img,空白层是噪声) + 条带上从左到右每一枚 attribute。
+// 图层表面 = 条带上从左到右**每一枚** attribute 顺序作用的结果（没有"隐式起点"了）。
 // 规矩全在这一个循环里:
-//   · decal 用 source-over 叠上去,蒙版用 destination-in 裁,各按**自己那个位置**发生,不再有谁是固定的
+//   · 贴片（含底位）用 source-over 叠上去,蒙版用 destination-in 裁,各按**自己那个位置**发生,不再有谁是固定的
 //     前一步或后一步 (所以 `Mask·Decal` 与 `Decal·Mask` 是两张不同的图:后者贴片的墨会被裁掉)。
+//   · **底位也是条带上普通的一步** (`role:'base'` 只说明"它是这一层自己的图",不说明位置):拖到一条链
+//     右边 = 那条链在画它之前跑,于是这条链不作用于它 —— 拖地完成的是一个真结果,不是换个说法。
 //   · 每一枚蒙版同时是**它右边所有链**的 silhouette:一路攒着,交给下一条真跑的链与成的那张覆盖率。
 //     注意是"它左边的全部",不是"距上一条链以来的那几枚" —— `Mask·Effects·Effects` 里两条链读同一张图。
 //   · cut(r, i) 说这枚蒙版在这一趟里裁不裁。后端那两条通道把「最后一条启用链右边」的蒙版留给后端乘
 //     (见 fxSplitForBackend / fxSurfaceForGenerate),前端这一趟就不能替它乘掉。
 // 返回 false = 整趟没跑 (这层没什么可折的),surface 归调用方自己画。
-function fxDropStrip(l, surface, base, thru, cut) {
+// `overrideBase` 只给 Generate 那条路用:空层的底位换成噪声好让链有东西可跑,它不是 Board 上的像素。
+function fxDropStrip(l, surface, overrideBase, thru, cut) {
     const recs = attrRecordsOf(l);
     const n = thru < 0 ? recs.length : Math.min(thru + 1, recs.length);
-    if (!recs.some((r, i) => i < n && attrInks(r, l, i, cut))) return false;
+    const inks = [];
+    for (let i = 0; i < n; i++) if (attrInks(recs[i], l, i, cut)) inks.push(recs[i]);
+    if (!inks.length) return false;
+    // 只有底位这一枚在做事 ⇒ 折出来与那张原图逐像素相同。照旧说"没得折":调用方各自拿 l.img 用,
+    // 几十层的文档不该为了翻个案簿全幅重绘一遍 (那一趟还顺手换掉面的身份,缓存会全部失效)。
+    if (inks.length === 1 && inks[0].role === 'base' && !overrideBase) return false;
     const w = surface.width, h = surface.height;
     const o = surface.getContext('2d');
     resetCtx(o);
     o.clearRect(0, 0, w, h);
-    if (base) o.drawImage(base, 0, 0, w, h);
     const left = [];              // 这条链左边那些蒙版 (与起来才是它的 silhouette)
     for (let i = 0; i < n; i++) {
         const r = recs[i];
@@ -700,7 +707,7 @@ function fxDropStrip(l, surface, base, thru, cut) {
         }
         // 这一枚的面这一趟还没注入（显示那条路把整层直接交给视频纹理、不造画布）：2D 这边现取一帧。
         // 取不到（那条轨此刻没有可画的帧）= 这一枚这一趟什么都不出，与"停用一步"同一个结果。
-        let s = r.surface;
+        let s = overrideBase && r.role === 'base' ? overrideBase : r.surface;
         if ((!s || !s.width || !s.height) && r.frameTrack && typeof vidFrameFaceFor === 'function') {
             s = vidFrameFaceFor(r, w, h);
         }
@@ -771,13 +778,16 @@ function fxSrcOf(img) { return (img && fxSrcBitmaps.get(img)) || img; }
 
 // 画面那一趟:整条折完,蒙版一律裁。结果就是画布要盖的那张图,所以它带缓存 (注释见上)。
 function fxResolved(l) {
-    if (!l || !l.img) return l && l.img;
+    if (!l) return null;
     return fxMirrorHidden(l, () => {
     // 生成器的面先同步 (attr/core.js):ownsGrid 的文字/方向可能当场换底换格子,必须发生在
     // nativeSize 与早退判据**之前**,否则一枚还没算过面的记录会被当成"没装"。
     syncGeneratorFaces(l);
-    const { w, h } = nativeSize(l.img);
-    if (!w || !h) return l.img;
+    // 格子问 `layerGridOf`(blend_node.html):底位有像素就听它;一张图都没有的层(Stash 那一类,
+    // 像素全来自下面)听条带上第一枚有像素的步骤,再退到画布。以前这里读 `l.img`,那种层直接
+    // 返回 null —— 整层不出现。
+    const { w, h } = layerGridOf(l);
+    if (!w || !h) return l.img || null;
     const recs = attrRecordsOf(l);
     // 纯像素层 (条带空着,或只挂了空蒙版) 每帧都走到这里就收工:签名与贴图戳一次都不算。
     if (!recs.some((r, i) => attrInks(r, l, i, FX_CUT_ALL))) return fxSrcOf(l.img);
@@ -793,7 +803,7 @@ function fxResolved(l) {
         && c.sig === sig && c.maps === maps && c.ext === ext && c.gen === gen) return c.surface;
     const reuse = !!(c && c.w === w && c.h === h && c.surface);
     const surface = reuse ? c.surface : fxScratch(w, h);
-    if (!fxDropStrip(l, surface, fxSrcOf(l.img), -1, FX_CUT_ALL)) return fxSrcOf(l.img);
+    if (!fxDropStrip(l, surface, null, -1, FX_CUT_ALL)) return fxSrcOf(l.img);
     l.fxCache = { w, h, img: l.img, faces, sig, maps, ext, gen, surface };
     // 命中缓存时 surface 是**同一块画布原地重画**的,身份键察觉不到「这一层现在长这样了」。Stash 层
     // 要认这一点 (它抄的是以下所有层的合成图),所以每重算一次就换一个代次 —— 见 blend_node.html 的
@@ -991,34 +1001,51 @@ function fxPaintEnd(l) {
 // 它左边 (含) 由前端折成一张结算面,它右边的 decal 与蒙版按序交给 Python 重放。默认那条
 // `Decal·Effects·Mask` 于是与这个功能出现之前逐像素相同 —— 贴片和链烘进 src,蒙版仍原样送出。
 // 折不出新面时 surface 就是 l.img 本身,调用方据此决定能不能走 l.src 那条免重编码的快路。
+//
+// **Stash 也把这条线往右推。** 它的面是"这一层以下那一叠",只有合成器现场才有 —— Python 那一侧
+// 收到一枚 `surface: None` 的面只会跳过它,于是快照在导出里凭空消失。所以分界线落在
+// `max(最后一条链, 最后一枚 Stash)`:那之前(含它)由前端折进结算面,后端只重放它右边那些。
+function backendCutIndex(l, recs) {
+    let i = lastChainIndex(l, recs);
+    for (let k = recs.length - 1; k >= 0; k--) {
+        const r = recs[k];
+        if (!r || r.type !== 'stash' || !attrEnabled(r)) continue;
+        // 面还没抄出来(这一帧没有累积账):它什么都不出,把它也算进分界线只会白折一趟。
+        if (r.surface && r.surface.width && r.surface.height) i = Math.max(i, k);
+        break;
+    }
+    return i;
+}
+
 function fxSplitForBackend(l) {
     return fxMirrorHidden(l, () => {
     syncGeneratorFaces(l);
     const recs = attrRecordsOf(l);
-    const thru = lastChainIndex(l, recs);
+    const thru = backendCutIndex(l, recs);
     if (thru < 0) return { surface: l.img, rest: recs };
-    const { w, h } = nativeSize(l.img);
+    const { w, h } = layerGridOf(l);
     const surface = fxScratch(w, h);
-    if (!fxDropStrip(l, surface, fxSrcOf(l.img), thru, FX_CUT_ALL)) return { surface: l.img, rest: recs };
+    if (!fxDropStrip(l, surface, null, thru, FX_CUT_ALL)) return { surface: l.img, rest: recs };
     return { surface, rest: recs.slice(thru + 1) };
     });
 }
 
 // Generate 那张图:整条折完,但**留给后端的那几枚蒙版不裁**。蒙版是覆盖率而不是剪刀时,后端还要乘
 // 一次;递一张已经裁过的图过去等于乘两次,而且模型会看见一个自己没挖的洞。
-// `base` 换掉最左那枚隐式面 —— 空白图层送出去的是噪声,链得跑在噪声上而不是跑在空的 img 上。
+// `base` **换掉底位那一枚的面** —— 空白图层送出去的是噪声,链得跑在噪声上而不是跑在空的 img 上。
 // 没有任何 attribute 做事时返回 null:调用方宁可发原始 l.src,也别白白重编码一张同图。
 function fxSurfaceForGenerate(l, base) {
-    if (!l || !l.img) return null;
+    if (!l) return null;
     return fxMirrorHidden(l, () => {
     syncGeneratorFaces(l);
     const recs = attrRecordsOf(l);
     const thru = lastChainIndex(l, recs);
     const cut = (r, i) => r.type !== 'mask' || i <= thru;
-    const { w, h } = nativeSize(base || l.img);
+    // 一张图都没有的层(Stash 那一类)没有底位可问,格子走 `layerGridOf`。
+    const { w, h } = base ? nativeSize(base) : layerGridOf(l);
     if (!w || !h) return null;
     const surface = fxScratch(w, h);
-    if (!fxDropStrip(l, surface, base || fxSrcOf(l.img), -1, cut)) return null;
+    if (!fxDropStrip(l, surface, base || null, -1, cut)) return null;
     return surface;
     });
 }
@@ -1027,9 +1054,11 @@ function fxSurfaceForGenerate(l, base) {
 // 裁进结算面了,后端乘全白 (调用方那侧的合成全白就是这个意思)。
 // 这里不按网格尺寸筛:蒙版本来就是按各自尺寸发过去、由后端 resample 的,筛掉会把一张画歪的蒙版
 // 变成「没有蒙版」。
+// 分界线与 `fxSplitForBackend` **必须是同一根**(`backendCutIndex`),否则一枚蒙版会在前端被裁一次、
+// 后端再乘一次 —— 那种"画面边缘忽然淡掉"的怪相就是这条不一致。
 function fxDistributedMask(l, w, h) {
     const recs = attrRecordsOf(l);
-    const thru = lastChainIndex(l, recs);
+    const thru = backendCutIndex(l, recs);
     const list = [];
     for (let i = thru + 1; i < recs.length; i++) {
         const s = recs[i].type === 'mask' ? recs[i].surface : null;

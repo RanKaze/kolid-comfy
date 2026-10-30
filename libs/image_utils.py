@@ -249,18 +249,24 @@ def composite_layers(layers, canvas_w, canvas_h):
             image = image.unsqueeze(0)
         attrs = layer.get('attrs')
         if attrs is None:
-            attrs = [{'type': 'decal', 'image': layer.get('decal')},
+            attrs = [{'type': 'image', 'image': layer.get('decal')},
                      {'type': 'mask', 'image': layer.get('mask')}]
         for attr in attrs:
+            # 底位（`role:'base'`）也是一步：只有它排在 `_attr_recs` 那一串里（前端切给后端重放的
+            # 那一段）时才出现在这里，跳过它 → 排在链右边的底图会整张消失。
             a = attr.get('image')
             if a is None:
                 continue
             if attr.get('type') == 'mask':
                 image = image * a
                 continue
-            if attr.get('type') != 'decal':
+            # P0 改名：这一枚以前叫 decal，现在叫 image。**两种都收** —— 老档、老负载里还是
+            # decal，只认 image 会把整层贴片静默跳掉（画面少一块，不报错）。
+            if attr.get('type') not in ('image', 'decal'):
                 # 链类 attribute 只有 WebGL 跑得动,前端烘完才发,永远不会跨这条边界;认不出的类型
                 # 就当没这一步,绝不当成贴片盖一下 —— 那会把一句描述画成一块墨。
+                # `stash` 也落在这一档:它的像素是"本层以下所有图层的合成",后端手上没有那一叠,
+                # 而它也不带 `image` 跨边界(前端只把裁切那段发给后端),于是这里天然跳过它。
                 continue
             # 直通 alpha 的 source-over。旧公式 rgb' = d_rgb*d_a + dst_rgb*(1-d_a)
             # 只在 dst 不透明时等价；dst 透明（空白图层/透明 PNG 区域）时 decal

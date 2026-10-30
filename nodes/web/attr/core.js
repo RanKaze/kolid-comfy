@@ -23,6 +23,13 @@
 
 const ATTR_TYPES = {};
 
+// 旧 **type 名** → 现在的名字。P0 把 decal 改名 image：档里存的、撤销快照里留的都还是 'decal'，
+// 一律在读端改名，写出去只有 'image'。**少了这一层，旧档的贴片会被 `ATTR_TYPES[...]` 认不出，
+// 在 adoptAttrPayloads / recAttrEntries 里被静默丢掉** —— 症状是旧档打开后所有笔画不见。
+// 注意它和老**字段**名 (`spec.legacy = 'decal'` → `l.decal`) 是两件事:一个改类型,一个改属性。
+const ATTR_TYPE_ALIAS = { decal: 'image' };
+function canonAttrType(t) { return ATTR_TYPE_ALIAS[t] || t; }
+
 function defineAttrType(spec) {
     if (!spec || !spec.type || !ATTR_KINDS[spec.kind] || ATTR_TYPES[spec.type]) {
         throw new Error('bad attribute definition: ' + String(spec && spec.type));
@@ -44,9 +51,26 @@ const ATTR_KINDS = {
         init: () => ({ surface: null, frameTrack: '' }),
         // 老字段有面才立记录 (见上面"有 attribute 才有数据")。
         fromLegacy: raw => (raw ? { surface: raw } : null),
-        snap: r => (r.frameTrack ? { surface: r.surface, frameTrack: r.frameTrack } : { surface: r.surface }),
-        load: raw => ({ surface: raw.surface || null, frameTrack: typeof raw.frameTrack === 'string' ? raw.frameTrack : '' }),
-        clone: (r, dup) => ({ surface: dup(r.surface), frameTrack: r.frameTrack || '' }),
+        snap: r => {
+            const s = r.frameTrack ? { surface: r.surface, frameTrack: r.frameTrack } : { surface: r.surface };
+            // 底位是**身份**:那一枚是"这一层自己的像素"而不是一步,快照丢了这一格,undo 回来就
+            // 变成"底位 + 一张全幅贴片"两张图叠着 (不透明图看不出,带 alpha 的图当场变浓)。
+            if (r.role) s.role = r.role;
+            if (r.src) s.src = r.src;
+            return s;
+        },
+        load: raw => {
+            const r = { surface: raw.surface || null, frameTrack: typeof raw.frameTrack === 'string' ? raw.frameTrack : '' };
+            if (raw.role) r.role = raw.role;
+            if (raw.src) r.src = raw.src;
+            return r;
+        },
+        clone: (r, dup) => {
+            const c = { surface: dup(r.surface), frameTrack: r.frameTrack || '' };
+            if (r.role) c.role = r.role;
+            if (r.src) c.src = r.src;
+            return c;
+        },
         // chip = 条带上那颗缩略图。它只负责**画**,节点本身由 blend_node 的那颗 chip 造好交进来 ——
         // 因为"有没有这颗 chip"归条带管,"这颗 chip 上摆什么"才归 attribute 管。
         // 蒙版与贴片画的是同一件事 (把自己那张面按图层网格的比例摆进这块小画布),规矩只有一处不同:
@@ -141,15 +165,20 @@ function attrRecordsOf(l) {
     }
     return out;
 }
+// **底位**(`role:'base'`) 是"这一层自己的像素"那一枚 image —— 但它**也是条带上普通的一步**:
+// 位置随便放,顺序就是生效顺序,拖到一条链右边 = 那条链在画它之前跑(于是这条链不作用于它)。
+// 只有"这一种 attribute 是哪一枚"那类查询(`l.decal`、链路 UI)跳过它 —— 那些问的是"额外那一枚",
+// 落到自己身上没有意义。
+function isBaseAttr(r) { return !!r && r.role === 'base'; }
 function findAttr(l, type) {
-    for (const r of attrRecordsOf(l)) if (r.type === type) return r;
+    for (const r of attrRecordsOf(l)) if (r.type === type && !isBaseAttr(r)) return r;
     return null;
 }
 // 同一种装了多枚时,**最右**那枚是"这个图层自己那一步的最后一次"。落笔的快捷键点的是它:画笔要落在
 // 执行序末尾那一刀上,而不是落在最早那一枚上 (老语义里只有一枚,两种读法没有区别)。
 function lastAttr(l, type) {
     let hit = null;
-    for (const r of attrRecordsOf(l)) if (r.type === type) hit = r;
+    for (const r of attrRecordsOf(l)) if (r.type === type && !isBaseAttr(r)) hit = r;
     return hit;
 }
 function attrRecord(ref) { return ref ? attrRecords.get(ref) || null : null; }
@@ -241,6 +270,9 @@ function attrRefs(ref) {
     // 剪贴板是表外的持有者 (复制之后把原本删掉,再粘贴必须还有那份数据可贴),所以它也算一次引用。
     const cb = clipboardRecord && clipboardRecord.layer;
     if (cb && attrRefList(cb).indexOf(ref) >= 0) n++;
+    // 那张纯 Mask 层不在 `layers` 里,但它也是一个活的持有者 (它的底位与它自己的步骤都住在这张表)。
+    // 不算上,"删掉最后一层"那趟 pruneAttrs 会当场放掉 Mask 的画布。
+    if (maskLayer && maskLayer !== cb && attrRefList(maskLayer).indexOf(ref) >= 0) n++;
     return n;
 }
 
@@ -301,6 +333,9 @@ function remapAttrFaces(l, fn) {
     for (let i = 0; i < refs.length; i++) {
         const r = attrRecord(refs[i]);
         if (!r || !r.surface) continue;
+        // 底位不跟着"面"搬:它就是这一层的像素本身,由调用方自己的人那一步 (writeSource / 重采样)
+        // 换掉。这里要是也搬一次,同一张图会被缩两遍。
+        if (isBaseAttr(r)) continue;
         // 生成器的面是派生数据,不跟着格子搬:格子变了由 sync 按新网格现算 (3D 的 bake 折叠时
         // 自动拉伸)。搬它反而会把一张按旧网格算好的面钉在新格子上。
         if (ATTR_TYPES[r.type].kind === 'generator') continue;
@@ -415,8 +450,14 @@ function listSlot(refs, dragId, targetId, after, idOf) {
 }
 
 // 拖拽重排:把 `dragRef` 插到同一条里 `targetRef` 那一颗的左边还是右边。缝位算法住在 `listSlot`。
+//
+// 这里**不再钳制底位**。从前底位必须恒在最左,于是"拖一枚 image 到最前"是不可能的 —— 也正是用户
+// 报的那句"image attribute 拖不动"。现在底位跟别的步骤一样按落点走:位置就是生效位置(拖到一条 FX 链
+// 右边,那条链就不作用于它)。`role:'base'` 由页面那一侧的 `ensureBaseInStrip` 归到 `l.srcRef` 说的
+// 那一枚,不跟位置走。
 function moveAttr(l, dragRef, targetRef, after) {
-    return listSlot(attrRefList(l), dragRef, targetRef, after) >= 0;
+    const refs = attrRefList(l);
+    return listSlot(refs, dragRef, targetRef, after) >= 0;
 }
 
 // 跨层移动:把 `ref` 从 `src` 的条带摘下来,插进 `dst` 的 `targetRef` 那一侧 (`targetRef` 为空 =
@@ -436,6 +477,8 @@ function moveAttrToLayer(src, dst, ref, targetRef, after) {
     if (!Array.isArray(dst.attrs)) dst.attrs = [];
     const to = targetRef ? dst.attrs.indexOf(targetRef) : dst.attrs.length;
     dst.attrs.splice(to < 0 ? dst.attrs.length : to + (after ? 1 : 0), 0, ref);
+    // 落点层的"底"也由位置说了算：搬到最左的是一枚 image，它就是对方的起始面；搬到最左的是别的
+    // 步骤，页面那一侧的归一会把它挤回底位右边。这里不再替它挪 —— 挪了就等于"拖了又弹回去"。
     const spec = ATTR_TYPES[rec.type];
     if (spec.kind === 'generator' && spec.sync && attrEnabled(rec)) spec.sync(dst, rec);
     const { w, h } = nativeSize(dst.img);
@@ -450,6 +493,9 @@ function migrateAttrs(l) {
     const found = [];
     for (const type of Object.keys(ATTR_TYPES)) {
         const spec = ATTR_TYPES[type];
+        // 没有老字段的类型 (Stash —— 它从来不是图层上的一个字段) 不参与迁移:不读、也不删。
+        // 少了这一句,`delete l[undefined]` 会在每个图层上留一个叫 "undefined" 的属性。
+        if (!spec.legacy) continue;
         // 第二个参数是图层本体:有的老字段是一对 (3D 的 three + sceneUid),fromLegacy 要两个一起读。
         const payload = spec.fromLegacy(l[spec.legacy], l);
         if (payload) found.push({ type, payload, order: spec.order });
@@ -460,7 +506,10 @@ function migrateAttrs(l) {
         const r = newAttrRecord(f.type, f.payload);
         if (r) l.attrs.push(r.id);
     }
-    for (const type of Object.keys(ATTR_TYPES)) delete l[ATTR_TYPES[type].legacy];
+    for (const type of Object.keys(ATTR_TYPES)) {
+        const spec = ATTR_TYPES[type];
+        if (spec.legacy) delete l[spec.legacy];
+    }
     return l;
 }
 
@@ -471,6 +520,8 @@ function attachAttrView(l) {
     if (!Array.isArray(l.attrs)) migrateAttrs(l);
     for (const type of Object.keys(ATTR_TYPES)) {
         const spec = ATTR_TYPES[type];
+        // 没有老字段的类型不建视图（Stash）。少了这一句它会在每个图层上盖一个叫 "undefined" 的属性。
+        if (!spec.legacy) continue;
         if (spec.kind === 'surface') {
             Object.defineProperty(l, spec.legacy, {
                 configurable: true,
@@ -535,11 +586,14 @@ function snapshotAttrs(l) {
 function adoptAttrPayloads(list, byId) {
     const refs = [];
     for (const raw of (list || [])) {
-        const spec = raw && ATTR_TYPES[raw.type];
+        // 老档写的是 'decal'：先改名再查表。查不到的类型照旧跳过（未知类型是"别的版本"的，
+        // 但 decal 不是未知，它是改名 —— 两者在下面这一行分开）。
+        const type = canonAttrType(raw && raw.type);
+        const spec = raw && ATTR_TYPES[type];
         if (!spec) continue;
         let r = byId && raw.id ? byId.get(raw.id) : null;
         if (!r) {
-            r = newAttrRecord(spec.type, spec.load(raw), raw.id);
+            r = newAttrRecord(type, spec.load(raw), raw.id);
             if (byId && raw.id) byId.set(raw.id, r);
         }
         if (r) {
@@ -551,6 +605,8 @@ function adoptAttrPayloads(list, byId) {
 }
 
 // 复制图层时 attribute 一律"浅拷贝":自己那份数据完整另立 (面是新画布、链是深拷贝),guid 也是新的。
+// 底位不在这一趟里:它是这一层的像素,走的是源图那套 (ownSource / shareSourceWith),复制完由那一步
+// 装进副本的条带 —— 这里再拷一份,副本就会带着两条底位。
 function cloneCanvasSurface(surface) {
     if (!surface) return null;
     const c = document.createElement('canvas');
@@ -561,6 +617,7 @@ function cloneCanvasSurface(surface) {
 function cloneAttrList(l) {
     const refs = [];
     for (const r of attrRecordsOf(l)) {
+        if (isBaseAttr(r)) continue;
         const copy = newAttrRecord(r.type, ATTR_TYPES[r.type].clone(r, cloneCanvasSurface));
         if (!copy) continue;
         copy.enabled = attrEnabled(r);

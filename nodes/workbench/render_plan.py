@@ -152,12 +152,50 @@ def compile_plan(doc, key=None, t=None):
                           'w': None, 'h': None, 'role': role or a.get('role'), 'assetId': asset_id}
         return {'resource': rid}
 
+    def base_image_ref(layer):
+        """老档的底像素（`l.image` / `buffer` / 盒里那一格）。
+
+        今天的新档这一枚就是条带上 `role:'base'` 的那一步 —— 那时这里返回 None，`steps_of` 也不会
+        替它再立一枚。只有**根本没有条带记录**、像素还住在图层字段里的老文件才走这一路，补一枚出来
+        是为了让这条老成分在同一套" strip 顺序即为生效顺序"的规矩里还是有图的那一步。
+        """
+        for rec in _attr_recs(layer, table):
+            if rec.get('type') in ('image', 'decal'):
+                return None
+        box = layer.get('box') if isinstance(layer.get('box'), dict) else None
+        box_base = None
+        if box:
+            base_rec = box.get('base')
+            if isinstance(base_rec, dict) and 'image' in base_rec:
+                box_base = base_rec.get('image')
+            else:
+                box_imgs = box.get('images') if isinstance(box.get('images'), list) else []
+                if box_imgs and isinstance(box_imgs[0], dict):
+                    box_base = box_imgs[0].get('image')
+        if box_base is not None:
+            return box_base
+        if layer.get('buffer') is not None:
+            return layer.get('buffer')
+        return layer.get('image')
+
     def steps_of(layer):
         out = []
+        # 老文件的像素住在图层字段里：把它当成条带上**最左那一枚 image**（那时的形状也的确如此），
+        # 于是" strip 顺序即生效顺序"这一句对整个老成分都成立 —— 否则那一层会整层不出现。
+        legacy = base_image_ref(layer)
+        if legacy is not None:
+            out.append({'kind': 'surface', 'type': 'image', 'enabled': True,
+                        'surface': res_ref(legacy, role='base'), 'frameTrack': ''})
         for rec in _attr_recs(layer, table):
+            # 底位（`role:'base'`）**也是条带上普通的一步**：位置就是生效位置，拖到一条链右边那条链
+            # 就不作用于它。以前它被 `layers[].base` 单独交出去（留在这儿会被叠两遍），现在没有了。
             t = rec.get('type')
             if not t:
                 continue
+            # P0 改名：老档里这一枚写的是 decal，plan 一侧统一成 image。**必须在这里归一**，
+            # 否则它掉进下面的 else 分支被当成 generator（走 baked 面），症状是"贴片不叠"。
+            if t == 'decal':
+                t = 'image'
             # 停用的一步照样进 plan（参数还在，撤销/重新启用不必回档），但 `enabled` 必须是 false：
             # 合成器 `foldLayer` 就是按 `enabled === false` 跳过它。写死 True 会让 plan 一侧照旧出墨，
             # 与页面折叠（fxDropStrip 里 `attrEnabled` 跳过）不一致。
@@ -166,7 +204,9 @@ def compile_plan(doc, key=None, t=None):
                 chain = rec.get('chain') or []
                 out.append({'kind': 'chain', 'type': 'effects', 'enabled': en,
                             'chain': _effects(chain)})
-            elif t in ('decal', 'mask'):
+            # stash 与 image/mask 同一档：它是条带上一枚**面**（那一层以下所有图层的合成），只是面不在
+            # 档里（每次 render 现抄，存下来只会是一张 stale 的副本），所以 `surface` 常是 None。
+            elif t in ('image', 'mask', 'stash'):
                 out.append({'kind': 'surface', 'type': t, 'enabled': en,
                             'surface': res_ref(rec.get('surface'), role=t),
                             'frameTrack': rec.get('frameTrack') or ''})
@@ -204,19 +244,21 @@ def compile_plan(doc, key=None, t=None):
         if not isinstance(l, dict):
             continue
         tr = l.get('transform') or {}
-        # 层的底像素：v6 叫 buffer、老档叫 image，都是 asset id（0 是合法 id）。
-        # null = 这一层没有底图（页面运行时给空白面）—— 契约里 base 允许 null。
-        base_ref = l.get('buffer') if l.get('buffer') is not None else l.get('image')
+        # 底下不再有"单独铺的那一张"：条带上每一枚 image（含底位）都是一次 source-over，第一张就是
+        # 最下面那张。`base` 这个键保留着是为了 plan schema 不变（对面 layer-fold.js 也恒为 null），
+        # Python 一侧没有任何消费方读它；回退链只是给还要比对旧 plan 的工具留个说法。
         layers.append({
             'id': l.get('id'),
             'name': l.get('name') or '',
-            'base': res_ref(base_ref, role='base'),
+            'base': None,
             'stack': _STACK.get(l.get('stack') or 'layer', 'work'),
             'visible': l.get('visible') is not False,
             'opacity': 1,
             'blend': 'source-over',
-            # Stash 的输入是"以下所有层的合成"，不是它自己的像素
-            'capture': 'below' if l.get('stash') else None,
+            # `capture` 只为旧 Stash **图层**存在（"底像素换成以下所有层的合成"）。Stash 现在是条带上
+            # 一枚普通的面（见 attr/stash.js），那一岔连同图层种类一起删了，所以这里恒为 None ——
+            # 键留着是为了 plan schema 不变（对面 layer-fold.js 同样恒为 null）。
+            'capture': None,
             'transform': {
                 'cx': float(tr.get('cx', 0.5)), 'cy': float(tr.get('cy', 0.5)),
                 'w': float(tr.get('w', 1)), 'h': float(tr.get('h', 1)),

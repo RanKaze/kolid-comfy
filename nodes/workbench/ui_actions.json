@@ -372,9 +372,9 @@
     },
     {
       "action": "layer-add",
-      "payload": "{ stack: BlendStack; kind: 'default' | 'stash' | 'dynamic' | 'cud' }",
+      "payload": "{ stack: BlendStack; kind: 'default' | 'dynamic' | 'cud' }",
       "kind": "object",
-      "doc": "头部那口 Add 菜单：一类一条，落到哪一摞由 `stack` 说。`dynamic` 是画布手势的起点（在画布上拉一个 矩形再问分辨率），所以这一条发的是\"开始那一下\"，不是\"造好一层\"。"
+      "doc": "头部那口 Add 菜单：一类一条，落到哪一摞由 `stack` 说。`dynamic` 是画布手势的起点（在画布上拉一个 矩形再问分辨率），所以这一条发的是\"开始那一下\"，不是\"造好一层\"。 `stash` 不在这里 —— 它不再是一种图层，是条带上一枚 attribute（拍下\"这一层以下所有图层的合成\"）， 入口在每一行条带末尾那颗 `+` 的菜单（动作 `attr-add`，与 Image / Mask / Effects 同一条路）。"
     },
     {
       "action": "layer-clear",

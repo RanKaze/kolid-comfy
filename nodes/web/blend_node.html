@@ -674,7 +674,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <!-- 图层 attribute 按种类拆在 attr/ 下:一类一个文件 (标签 + 默认落点 + 老字段名 + 缩略图),引擎只
      遍历注册表。跟 fx/ 同一个规矩:与页面本体共用全局作用域,静态文件由 /attr/ 路由提供。 -->
 <script src="attr/core.js"></script>
-<script src="attr/decal.js"></script>
+<script src="attr/image.js"></script>
+<script src="attr/stash.js"></script>
 <script src="attr/effects.js"></script>
 <script src="attr/mask.js"></script>
 <script src="attr/text.js"></script>
@@ -817,22 +818,126 @@ let selectedId = null;
 let groupIds = new Set();
 let mode = 'transform';        // 'transform' | 'mask' | 'zoom' | 'pan' | 'rotate' | 'expand' | 'canvasModify' | 'rect' | 'lasso' | 'none'
 
-// ==================== 源图资产表 ====================
-// 图层不再自己持有源图像素:它持有一枚 guid (`l.srcRef`),像素住在文档级的 `assets` 表里。这张表存在
-// 的理由只有一条 —— 共享需要一个**数得出来**的对象:复制一个智能图层时副本与原层引用同一条记录
-// (Photoshop 的 smart object 语义),而任何一方换掉自己的像素都必须自动把这份共享断开。
+// ==================== 源图记录 ====================
+// 图层**不自带图片**:它带一条条带,最左那一枚 `image` attribute (`role:'base'`) 就是这一层自己的
+// 像素,后面每一枚是叠在它上面的图。图层只存那一枚的 guid (`l.srcRef`),记录与条带上其它步骤住在
+// 同一张表 (attr/core.js 的 attrRecords) 里 —— 同一种记录、同一套身份、同一套引用计数。
 //
 // 三条规矩:
-//   · 只有智能图层之间允许共享一张源图;光栅/文本/方向/Stash/3D 一律私有。这条由**结构**保证而不是
-//     一串类型判断:可共享的记录里那张缓冲必须是解码出来的 <img> (JS 侧不可变、没有 getContext),而上
-//     面那些私有图层的 img 全是一张 canvas —— 于是「就地改写一张正被共享的源」在这套数据形式下写不出来。
-//   · refs 一律**扫**出来,不落字段:undo 重放和 tab 切换都会整批改写图层数组,存下来的计数在那种重放下
-//     必然漂移。
-//   · 换像素 = 没人共享时写自己那条记录,有人共享时先换一条只属于自己的再写。历史快照存的仍是每层自己
-//     的 img/src **值** 加 srcRef 这个分组标签,表因此是派生态:重放时按标签把同组的第一份值立成记录。
-//     这样历史里那条记录永远不会被就地改掉 —— 「img 只换不改」的既有约定搬到表上而已。
-let assetSeq = 0;                     // 同 layerSeq:永不清零,guid 在会话内唯一就够
-const assets = new Map();             // 'img_N' -> { id, img, src }
+//   · 只有智能图层之间允许共享一张图;光栅/文本/方向/Stash/3D 一律私有。这条由**结构**保证而不是
+//     一串类型判断:可共享的记录里那张缓冲必须是解码出来的 <img> (JS 侧不可变、没有 getContext),而
+//     上面那些私有图层的 img 全是一张 canvas —— 于是「就地改写一张正被共享的图」在这套数据形式下
+//     写不出来。
+//   · refs 一律**扫**出来,不落字段 (attrRefs):undo 重放和 tab 切换都会整批改写图层数组,存下来的
+//     计数在那种重放下必然漂移。
+//   · 换像素 = 没人共享时写自己那条记录,有人共享时先换一条只属于自己的再写。
+let assetSeq = 0;
+
+// 一枚 image 记录 = 一张面 (`surface`) + 它自己的 dataURL (`src`)。`role:'base'` 那一枚是这一层的
+// 底位;条带上的其它枚没有 role (它们是叠上去的步骤)。`guid` 只由读档/重放交进来 (照号收下),
+// 新立的一律现 mint。
+function newImageRecord(surface, src, role, guid) {
+    return newAttrRecord('image', {
+        role: role || 'base',
+        surface: surface || null,
+        src: src || '',
+    }, guid);
+}
+
+// ==================== 图层盒 (layer box) ====================
+// 盒里只剩**网格**:`l.box = { id, grid: { w, h } }` —— 这一层自己的坐标网格,与"有没有像素"脱钩,
+// 所以空白盒是合法状态。图片一枚都不在盒里,它们全是条带上的 `image` attribute:
+//
+//     layer = 盒 { grid }  +  条带[ image(role:'base') ×1 , image ×0…N , effects… , mask… ]
+//                                ↑ 这一层自己的像素        ↑ 往上叠的图 (落笔 / Generate)
+//
+// 三条判据各自只剩一个真值源:
+//   · 「这一层有没有图」 = 底位那一枚有没有面 (或者条带上有一枚画得出来的 image 步骤);
+//   · 「这一层的网格多大」 = `box.grid` (与底图有没有像素脱钩);
+//   · 「这一层画什么」 = 底位的像素 + 条带上那几枚 image 步骤按序叠上去。
+//
+// `l.img` / `l.src` 是**底位那一枚的别名**(getter/setter 见 attachSourceView),不再拥有任何东西 ——
+// 162 处调用点因此一行都没改,但真值只在条带上:谁想改像素,写的是那一枚记录;谁想问有没有图,问的
+// 也是它。改名/换面/重采样一律过 writeSource 这一个漏斗,盒的网格就在那里跟着底位走。
+let boxSeq = 0;
+function boxOf(l) { return (l && l.box) || null; }
+// 底位那一枚:guid 就在 `l.srcRef` 上 (热路径 O(1) —— `l.img` 每帧都要读它)。没有标签的老对象退回
+// "条带上第一枚 image"。
+function sourceAsset(l) { return l && l.srcRef ? attrRecord(l.srcRef) : null; }
+function boxBase(l) {
+    const a = sourceAsset(l);
+    if (a && a.type === 'image') return a;
+    for (const r of attrRecordsOf(l)) if (r.type === 'image') return r;
+    return null;
+}
+// 文件里那枚盒的底位引用（资产序号 / 哈希），undefined = 这一版没写。四种形状都认：
+//   · 这一版把底位写成条带上的一枚 `role:'base'` 的 image attribute（`attrs` 里那一枚）；
+//   · 上一版写 `box.base`（盒里一格）；
+//   · 再上一版写 `box.images[0]`（长度恒为 1 的"列表"）；
+//   · 更老的没有盒，底图就是图层记录自己的 `image`。
+// 这一句只服务**老文件**：新文件的底位随 attrs 回来，不需要它。
+function boxBaseRefOf(rec) {
+    const box = rec && rec.box && typeof rec.box === 'object' ? rec.box : null;
+    if (box) {
+        if (box.base && typeof box.base === 'object' && box.base.image !== undefined) return box.base.image;
+        if (Array.isArray(box.images) && box.images[0] && box.images[0].image !== undefined) return box.images[0].image;
+    }
+    return undefined;
+}
+
+// 条带上所有带图的步骤 —— 底位也在里面（它是普通一步，只是碰巧也是 `l.img` 说的那一枚）。
+function imageAttrs(l) {
+    return attrRecordsOf(l).filter(r => r && r.type === 'image');
+}
+// 这一层一共几张图:条带上每枚 image 记录各算一张,底位也不例外 —— 它现在也在这一串里,
+// 再单独加一次会把最底下那张数两遍。
+function boxImageCount(l) {
+    let n = 0;
+    for (const r of imageAttrs(l)) if (r.surface && r.surface.width && r.surface.height) n++;
+    return n;
+}
+function newBox(rec) {
+    const n = nativeSize(rec && rec.surface);
+    return { id: 'box_' + (++boxSeq), grid: { w: n.w || 1, h: n.h || 1 } };
+}
+// 换面 (writeSource) / 重采样 (l.img = …) / 换记录 (共享断开) 之后都得过这一句:盒的网格只由底位
+// 那张面自己的像素尺寸说话,别处不许各记一份。
+function syncBoxGrid(l) {
+    const n = nativeSize((boxBase(l) || {}).surface);
+    if (l.box) l.box.grid = { w: n.w || 1, h: n.h || 1 };
+}
+function adoptBox(l, rec) {
+    if (!l.box) l.box = newBox(rec);
+    else { const n = nativeSize(rec && rec.surface); l.box.grid = { w: n.w || 1, h: n.h || 1 }; }
+    return l.box;
+}
+// 底位的**归一**：角色 (`role:'base'`) 归 `l.srcRef` 那一枚 —— 位置**一个字都不动**。
+//
+// 底位现在是条带上**普通的一步**：顺序即生效顺序，所以它拖得动、拖了有用（拖到一条 FX 链右边
+// = 那条链在画它之前跑，于是这条链不作用于它）。这一句因此只记三笔账，摆位置的事情由拖拽决定：
+//   · `srcRef` 说的那枚必须在条带里（换源/老档重建时它刚被造出来，还没进去 ⇒ 补在最左）；
+//   · 只有它带 `role:'base'`，别的 image 一律摘掉 —— 一层只能有一枚"自己那张图"；
+//   · 一枚 image 都没有了 ⇒ 空盒，`srcRef` 归 null。
+function ensureBaseInStrip(l) {
+    if (!l) return;
+    if (!Array.isArray(l.attrs)) l.attrs = [];
+    let base = l.srcRef ? attrRecord(l.srcRef) : null;
+    if (base && base.type === 'image' && l.attrs.indexOf(base.id) < 0) l.attrs.unshift(base.id);
+    if (!base || base.type !== 'image') {
+        for (const id of l.attrs) {
+            const r = attrRecord(id);
+            if (r && r.type === 'image') { base = r; break; }
+        }
+    }
+    if (!base) { l.srcRef = null; return; }
+    for (const id of l.attrs) {
+        const r = attrRecord(id);
+        if (!r || r.type !== 'image') continue;
+        const want = r === base ? 'base' : '';
+        if (r.role !== want) r.role = want;
+    }
+    l.srcRef = base.id;
+}
 
 // Layer 集（Video 模式的 Layer 段，每个段一套独立图层）：活跃那一套永远就是全局 `layers`，其余
 // 每一套住在这里（键 = 段的 layerKey）。声明跟着这张表走是有意的 —— `sourceRefs` 也要扫它们，
@@ -840,82 +945,121 @@ const assets = new Map();             // 'img_N' -> { id, img, src }
 const layerSets = new Map();
 let activeLayerSet = '';
 
-function newAssetRecord(img, src) {
-    const a = { id: 'img_' + (++assetSeq), img: img || null, src: src || '' };
-    assets.set(a.id, a);
-    return a;
-}
-function sourceAsset(l) { return l && l.srcRef ? assets.get(l.srcRef) || null : null; }
 // 只有活图层 (在 layers 里,或者就是那张 Mask) 的 srcRef 才指向这张表。背景文档 ctx.layers 里那些快照
 // 记录带的是**标签**而不是视图,认不得它们的 ref —— 共享一律回退成「自己拿一份」。
 function liveSourceAsset(l) {
     const a = sourceAsset(l);
     return a && (layers.includes(l) || l === maskLayer) ? a : null;
 }
-function sourceRefs(ref) {
-    if (!ref) return 0;
-    let n = 0;
-    for (const l of layers) if (l.srcRef === ref) n++;
-    // Layer 段那一套套（没在用的那些）也拿这张表当视图：不算上它们，换文档/换段那趟 pruneAssets 会
-    // 把它们的源记录当场放手 —— 图层还在，像素却没了。活跃那套就是上面的 layers，别数两遍。
-    for (const [key, s] of layerSets) {
-        if (key === activeLayerSet) continue;
-        for (const l of (s.layers || [])) if (l.srcRef === ref) n++;
-    }
-    if (maskLayer && maskLayer.srcRef === ref) n++;
-    // 剪贴板是表外的持有者 (复制一个图层之后把它删掉,再粘贴必须还有像素可贴),所以它也算一次引用。
-    if (clipboardRecord && clipboardRecord.layer && clipboardRecord.layer.srcRef === ref) n++;
-    return n;
-}
+// 引用计数就是 attribute 那一套:底位在条带里,条带装在图层上,`attrRefs` 扫的正是它。
+function sourceRefs(ref) { return attrRefs(ref); }
 // 能被共享的只有解码图;canvas 缓冲一律私有 (见上面那条结构性不变量)。
 function shareableSourceBuffer(buf) { return !!buf && !buf.getContext; }
 
-// 写源的**唯一**出口。
+// 写源的**唯一**出口 —— 也就是"改底位那一枚"的唯一出口。
 function writeSource(l, field, value) {
+    const key = field === 'img' ? 'surface' : 'src';
     let a = sourceAsset(l);
-    if (!a || sourceRefs(a.id) > 1) {
-        a = newAssetRecord(field === 'img' ? value : (a ? a.img : null),
-            field === 'src' ? value : (a ? a.src : ''));
+    if (!a || attrRefs(a.id) > 1) {
+        a = newImageRecord(field === 'img' ? value : (a ? a.surface : null),
+            field === 'src' ? value : (a ? a.src : ''), 'base');
         l.srcRef = a.id;
-    } else a[field] = value;
+        if (!Array.isArray(l.attrs)) l.attrs = [];
+        l.attrs.unshift(a.id);           // 换来的那枚就是新的底,当场落到最左
+        ensureBaseInStrip(l);            // 底位那一格换成人人私有的新记录 (共享当场断开)
+    } else a[key] = value;
+    if (field === 'img') syncBoxGrid(l);      // 网格只跟着底位的像素走
 }
 
-// 每个图层对象出厂都要过一次:源图字段与 attribute 字段都换成各自表格的视图 (蒙版/贴片/链的老名字
-// 从此读的是 strip 里最左边那一枚,见 attr/core.js)。建层路径一律走下面三个包装。
+// 每个图层对象出厂都要过一次:盒、源图别名、attribute 字段都装在这里 (蒙版/贴片/链的老名字从此读的是
+// strip 里最左边那一枚,见 attr/core.js)。建层路径一律走下面三个包装 —— 它们是 `l.box` 唯一的出生地,
+// 也是"底位那一枚 image attribute"唯一的出生地。
 function attachSourceView(l) {
+    // 三样值必须在盖 getter **之前**读出来:下面 defineProperty 之后它们就从这个对象上消失了。
+    const v0 = l.img, s0 = l.src, ref0 = l.srcRef;
     for (const field of ['img', 'src']) Object.defineProperty(l, field, {
         configurable: true,
-        get() { const a = sourceAsset(this); return a ? a[field] : (field === 'src' ? '' : null); },
+        // 别名,不是字段:读的写的都是条带上那一枚底位 (role:'base')。没有记录的老对象 (还停在快照
+        // 形状里的那些) 退回旧读法,于是"没装过盒"永远不会比"装了盒"多出另一种行为。
+        get() {
+            const base = boxBase(this);
+            return base ? (field === 'img' ? base.surface : base.src) : (field === 'src' ? '' : null);
+        },
         set(v) { writeSource(this, field, v); },
     });
-    return attachAttrView(l);
+    let base = ref0 ? attrRecord(ref0) : null;
+    if (!base || base.type !== 'image') base = null;
+    if (!base) {
+        // **一张图都没有、但条带上已经有步骤**的层不补底位。这种形状来自老 Stash 层的迁移（一枚
+        // Stash、零张图）—— 补出来的那一枚 `src` 是空、没有像素、每帧被重写，正是最初要消灭的那个
+        // 「特殊的 image attribute」。空盒是合法状态：折叠问 `layerGridOf`，不指望底位。
+        // 反过来，"什么都没有"的层照旧立一枚（新建的空层、老快照那种还没装盒的形状）。
+        if (!v0 && !s0 && Array.isArray(l.attrs) && l.attrs.length) {
+            l.srcRef = null;
+            attachAttrView(l);
+            if (!Array.isArray(l.attrs)) l.attrs = [];
+            ensureBaseInStrip(l);
+            return l;
+        }
+        base = newImageRecord(v0, s0, 'base');
+        l.srcRef = base.id;
+    } else if (!base.surface && v0) {
+        // 按号立起来的那一枚 (读档/快照) 只有身份,像素由调用方交给这里。
+        base.surface = v0;
+        if (s0) base.src = s0;
+    }
+    adoptBox(l, base);
+    attachAttrView(l);                 // 老字段视图 (先让它把老档的字段迁进条带)
+    // 新建/按号立起来的那一枚还不认识条带（老字段迁完才有 `attrs`）：先让它进去，再归一。
+    if (!Array.isArray(l.attrs)) l.attrs = [];
+    if (base && base.type === 'image' && l.attrs.indexOf(base.id) < 0) l.attrs.unshift(base.id);
+    ensureBaseInStrip(l);              // 底 = 条带上最左那枚 image（`role` 与 `srcRef` 一起归位）
+    return l;
 }
 function ownSource(l, img, src) {
-    l.srcRef = newAssetRecord(img, src).id;
+    const rec = newImageRecord(img, src, 'base');
+    l.srcRef = rec.id;
+    adoptBox(l, rec);
     return attachSourceView(l);
 }
-// 副本与 from 指向同一条记录 —— 仅当那条记录属于一张活图层、且缓冲不可变时成立。否则退回「自己拿一
+// 副本与 from 共指同一条记录 —— 仅当那条记录属于一张活图层、且缓冲不可变时成立。否则退回「自己拿一
 // 份」,用的就是调用方已经放进副本身上的那份值 (cloneLayerFields 对 canvas 缓冲做过深拷贝,绝不能拿
 // 回原层那张,否则两个图层共用一张会被重画的画布)。
 function shareSourceWith(l, from) {
     const a = liveSourceAsset(from);
-    if (!a || !shareableSourceBuffer(a.img)) return ownSource(l, l.img, l.src);
+    if (!a || !shareableSourceBuffer(a.surface)) return ownSource(l, l.img, l.src);
     l.srcRef = a.id;
+    adoptBox(l, a);                    // 共指 = 两层条带里装的是同一枚底位记录
     return attachSourceView(l);
 }
-// 重放一张历史记录:同一个 srcRef 标签只立一次记录,让共享活过 undo 与 tab 往返。
+// 重放一张历史记录/一条读回来的图层:同一个 srcRef 标签只立一次记录,让共享活过 undo 与 tab 往返。
+// 记录可能已经按**身份**被 adoptAttrPayloads 立起来了 (它就是条带上那一枚) —— 那就在这里把像素补上。
 function restoreSource(l, ls, byRef) {
-    if (!ls.srcRef) return ownSource(l, ls.img, ls.src);
-    let a = byRef.get(ls.srcRef);
-    if (!a) { a = newAssetRecord(ls.img, ls.src); byRef.set(ls.srcRef, a); }
+    const guid = typeof ls.srcRef === 'string' && ls.srcRef ? ls.srcRef : null;
+    let a = guid ? attrRecord(guid) : null;
+    if (!a && guid) a = byRef.get(guid) || null;
+    // **一张图都没有的层不立底位**（老 Stash 层迁过来就是"一枚 Stash、零张图"）。立一枚空的
+    // 正是那个「src 为空、每帧被重写」的特殊 image attribute —— 现在那一枚是 Stash 自己。
+    // 没有 guid 才对：带 guid 就是文件/快照指名要某一枚记录，照号立起来。
+    if (!a && !guid && !ls.img && !ls.src && Array.isArray(l.attrs) && l.attrs.length) {
+        l.srcRef = null;
+        return attachSourceView(l);
+    }
+    if (!a) {
+        a = newImageRecord(ls.img, ls.src, 'base', guid || undefined);
+        if (guid) byRef.set(a.id, a);
+    } else {
+        // 值以快照/档为准 (那一枚记录可能刚刚才按号立起来,面还是空的)。
+        if (ls.img !== undefined && ls.img !== null) a.surface = ls.img;
+        if (typeof ls.src === 'string') a.src = ls.src;
+        if (guid) byRef.set(guid, a);
+    }
     l.srcRef = a.id;
+    adoptBox(l, a);
     return attachSourceView(l);
 }
-// 这张表只给活图层当视图用,不是仓库:没人指的记录当场放手,否则换过一次的那张画布会被表永久扣住
-// (历史里的记录各自存着 img 值,不需要表替它们保管)。
-function pruneAssets() {
-    for (const ref of [...assets.keys()]) if (sourceRefs(ref) === 0) assets.delete(ref);
-}
+// 底位的记录住在 attribute 表里,`pruneAttrs` 一并收拾 —— 这一句留着只是让调用点不必改名。
+function pruneAssets() { if (typeof pruneAttrs === 'function') pruneAttrs(); }
 
 // The pure Mask layer. It deliberately does NOT live in `layers`: ordering, deletion,
 // transform, composition and thumbnails all stay untouched, and `render()` never draws it
@@ -1043,7 +1187,7 @@ let eraserEdge = 0.0;
 let eraserGamma = 2.0;
 
 // Both tools paint onto the same surface, chosen here: the layer's mask (coverage) or its decal (colour).
-let paintTarget = 'mask';      // 'mask' | 'decal' —— 落的还是"哪一种" (和 attribute 的类型同名)
+let paintTarget = 'mask';      // 'mask' | 'image' —— 落的还是"哪一种" (和 attribute 的类型同名)
 // 同一种可以装好几枚,所以"落在哪一枚"要单独记:点某颗 chip 就点名那一枚;没点过 (按键直接武装) 就是
 // null,读作"这一种里最右的那一枚" —— 画笔该落在执行序末尾那一刀上,不是最早那一枚上。
 let paintRef = null;
@@ -1240,11 +1384,48 @@ function loadImage(src, callback, onerror) {
 
 function nativeSize(img) { return img ? { w: img.naturalWidth || img.width || 1, h: img.naturalHeight || img.height || 1 } : { w: 1, h: 1 }; }
 
-// A layer "has an image" when there is a file to show: either a decoded <img> from the history /
-// a dropped file, or an explicit data URL. A hand-made layer is a blank scratch canvas with
-// `src === ''` — it has pixels, but nothing to render in an <img>, and it is the case the row
-// must present as "no image yet" rather than letting the browser draw a broken-image glyph.
-function hasLayerImage(l) { return !!(l && l.img && l.src); }
+// A layer "has an image" when its base attribute has a file behind it: either a decoded <img> from
+// the history / a dropped file, or an explicit data URL. A hand-made layer is a blank scratch canvas
+// with `src === ''` — the base attribute exists and has a surface, but nothing to render in an <img>,
+// and it is the case the row must present as "no image yet" rather than letting the browser draw a
+// broken image glyph. 判据住在条带最左那一枚上:底位的 src 是第一真值;底位空着但条带上已经有一枚
+// 画得出来的 image 步骤(Generate 追加来的那张)时,这一层同样"有图" —— 不能因为它没有底图就说它空。
+function hasLayerImage(l) {
+    const base = boxBase(l);
+    if (base && base.surface && base.src) return true;
+    for (const r of imageAttrs(l)) if (r.surface && r.surface.width && r.surface.height) return true;
+    return !!(l && l.img && l.src);
+}
+
+// 这一层的**原生格子**（折叠、抄写、缓存钥匙一律问这一句，别各自写一份 —— 三处对不上就是
+// "这一层的面一会儿大一会儿小"）。
+//   1. 底位那张面有像素 ⇒ 听它。绝大多数层走这一条，也是唯一的真值来源；
+//   2. 一张 image 都没有（Stash 那种"像素全来自下面"的层）⇒ 听条带上第一枚自带像素的步骤；
+//   3. 都没有 ⇒ 画布尺寸（老 Stash 层存档时本来就不带像素，读回来就是这个形状）。
+function layerGridOf(l) {
+    if (l && l.img) { const n = nativeSize(l.img); if (n.w > 0 && n.h > 0) return n; }
+    for (const r of attrRecordsOf(l)) {
+        const s = r && r.surface;
+        if (s && s.width > 0 && s.height > 0) return { w: s.width, h: s.height };
+    }
+    return { w: canvasW | 0, h: canvasH | 0 };
+}
+// 这一层这一帧画不画得出东西。**不等于"底位有没有像素"**：Stash 的面是每帧现抄进它自己那枚记录的，
+// 一张图都没有的层照样能出墨。链也算（它从一张空面也能跑出结果），生成器也算（面由
+// syncGeneratorFaces 现算，此刻可能还没算过）。
+function layerCanDraw(l) {
+    if (!l) return false;
+    if (l.img) return true;
+    for (const r of attrRecordsOf(l)) {
+        if (!r || !r.type) continue;
+        if (r.chain) { if (attrEnabled(r)) return true; continue; }
+        const spec = ATTR_TYPES[r.type];
+        if (spec && spec.kind === 'generator') return true;
+        const s = r.surface;
+        if (s && s.width > 0 && s.height > 0) return true;
+    }
+    return false;
+}
 
 // ==================== 画布尺寸 / 布局 ====================
 function sizeCanvasElement() {
@@ -1313,21 +1494,31 @@ function restageAfterResize(wasMode) {
 // original pixels and map them through `transform`, raster layers have nothing left to preserve.
 function isRasterLayer(l) { return !!l && !!l.raster && !l.isMaskLayer; }
 
-// ==================== Stash 图层 ====================
-// 一张**活着**的栅格层:它的像素不是文件,也不是自己画出来的,而是「它以下所有可见层叠到一起」的
-// 那张图 —— 每合成一次重新抄一遍。于是挂在它身上的特效链,吃的就是下面整叠叠完的结果;它的网格就是
-// 画布,所以特效参数按画布像素计,与栅格层同一个读法。
-//   · 为什么不必另走一遍合成:render() 从最下面往上画,轮到这一层那一刻,目标画布里摆好的恰好就是它
-//     以下那一叠 ⇒ 抄下来就是「以下合成图」。它永远看不到自己,也永远看不到自己上面的层。
-//   · 只算可见的层 (PS「合并可见图层」的读法)。working 栈里抄它以下那叠;guidance 栈里的 Stash 压在
-//     整个 Layers 合成**之上**,它的「以下」= 全部工作层 + 它以下的 guidance —— 与 Guidance 卡片
-//     同一张图。若只抄 guidance 画布,拖到栈顶时它下面空无一物,fx 链吃的就是一张空面。
-//   · 几何焊死画布 (l.raster 一起为真,继承栅格层那整套身份):变换、Expand、nudge 一律不适用。挪它
-//     等于挪下面那一叠,而下面那一叠本来就在那儿,那不是这一层要表达的语义。
-//   · 没挂特效时它与下面逐像素相同,画面看不出变化;挂了特效就盖住下面那份,特效把 alpha 咬穿的透明
-//     处仍透出下层原图。蒙版照旧只在链外乘一次 (契约③),契约①②也不改:它不改谁的网格,只是读。
-//   · 在它上面落笔是允许的:墨进 decal,抄写只重写 img,「合成图 + 自己的墨」两者都留得住。
-function isStashLayer(l) { return !!l && !!l.stash && !l.isMaskLayer; }
+// ==================== Stash attribute ====================
+// Stash 是**条带上的一枚步骤**（`type:'stash'`，见 attr/stash.js），不是一种图层：它的像素不是文件、
+// 也不是自己画出来的，而是「**本层以下**所有可见层叠到一起」的那张图 —— 每合成一次重新抄一遍。于是
+// 挂在它右边的特效链，吃的就是下面整叠叠完的结果。
+//
+// 它**曾经是一个图层种类**（`l.stash` + `raster:true` + 几何焊死画布）。图层盒那一轮把底位变成条带上
+// 普通一步之后，那种层就成了条带上唯一的例外：它自己那枚 image 记录（底位）`src` 是空的、每一帧被
+// 原地重写 —— 也就是那枚「特殊的 image attribute」。改成 attribute 之后例外整片消失：
+//   · 它是**普通一步**（source-over），位置随便拖 —— 拖到一条链右边，那条链就不作用于它；
+//   · 所在的层是**普通层**：能移动 / 缩放 / 旋转 / 编组 / Rasterize / Combine（旧 Stash 层全拒）；
+//   · 没有底位、不进存档（每次 render 现抄），也不需要「这一层有没有图」那一套特例；
+//   · 一层可以挂 0~N 枚，跟别的种类一个规矩。
+//
+// 抄写只发生在 render 的循环里：
+//   · 为什么不必另走一遍合成 —— render() 从最下面往上画，轮到这一层那一刻，累积账（`stashAcc`）里
+//     摆好的恰好就是它以下那一叠 ⇒ 抄下来就是「以下合成图」。它永远看不到自己，也永远看不到自己上面
+//     的层。
+//   · 只算可见的层（PS「合并可见图层」的读法）。工作栈里抄它以下那叠；guidance 栈里那一枚压在**整个
+//     Layers 合成之上**，它的「以下」= 全部工作层 + 它以下的 guidance —— 与 Guidance 卡片同一张图。
+//     若只抄 guidance 画布，拖到栈顶时它下面空无一物，链吃的就是一张空面。
+//   · 面按**本层自己的网格**抄（跟每一枚 surface attribute 同一个规矩）：下面那张合成图是画布尺寸，
+//     抄进这一层的格子时按格子缩放，于是它跟一张贴片一样接受这一层的 transform。
+//   · 没挂特效时它与下面逐像素相同，画面看不出变化；挂了特效就盖住下面那份，特效把 alpha 咬穿的透明
+//     处仍透出下层原图。蒙版照旧只在链外乘一次（契约③），契约①②也不改：它不改谁的网格，只是读。
+//   · 在它上面落笔照旧允许 —— 加一枚 Image 步骤（Tab 键装的就是那一种），墨与抄写各走各的面。
 
 // canvas 对象 → 小整数:脏指纹要认「下面某层换了表面」,而字符串化 canvas 只会得到同一个前缀。
 // WeakMap 跟着对象回收,不牵住任何一块画布。
@@ -1338,6 +1529,20 @@ function stashSurfId(c) {
     let id = stashSurfIds.get(c);
     if (id === undefined) { id = ++stashSurfSeq; stashSurfIds.set(c, id); }
     return id;
+}
+
+// 这一层有没有要抄的 Stash:可见,且条带上真有一枚。没有就一分不多花(连累积账都不建)。
+function layerWantsStash(l) {
+    if (!l || l.visible === false || l.isMaskLayer) return false;
+    for (const r of attrRecordsOf(l)) if (r.type === 'stash') return true;
+    return false;
+}
+// 条带上那几枚 Stash 的面指纹:抄写是**就地**重画的(同一块画布),只认身份看不见新内容,所以折叠缓存
+// 的钥匙里必须有它 —— 少了这一项,"下面变了、这一层却拿旧快照" 会静默发生。
+function stashFaceIds(l) {
+    let s = '';
+    for (const r of attrRecordsOf(l)) if (r.type === 'stash') s += ':' + stashSurfId(r.surface) + '.' + (r.paintGen | 0);
+    return s;
 }
 
 // 一个层「这一帧往画布上盖的是哪张图」的指纹 = 表面身份 + 就地改墨的代次 + 链重算的代次 + 落点。
@@ -1358,26 +1563,38 @@ function stashLayerKey(l) {
         + ':' + vidLayerFrameStamp(l) + ';';
 }
 
-// 抄写。指纹没变就一个字都不动 —— 挪它**上面**的层绝不该让整条链重跑一遍。就地重写 img 之后按既有
-// 约定 +1 paintGen (「写表面的路径要 +1 paintGen」,见 fx/gl.js 的缓存注释),链的缓存才认这份新墨。
-// `src` 是"以下所有**图层**"此刻的那张图 —— **不含底片帧**（契约 §2.1 的「以下所有层的合成」按字面执行）。
-// 工作栈那一趟喂的是 render 自己攒的 `stashAcc`（只有图层），不是 stage/blendCtx（那两个永远垫着底片）；
-// guidance 栈那一趟喂的同样是 `stashAcc`，再叠上 guidanceCtx 里它以下那几层。传画布而不是传 ctx。
-function stashResample(l, src, key, over) {
-    const same = l.stashKey === key && !!l.img && l.img.width === canvasW && l.img.height === canvasH;
+// 抄写:把「以下所有**图层**」此刻的那张图画进这一层条带上**每一枚** Stash 的面。
+// 指纹没变就一个字都不动 —— 挪它**上面**的层绝不该让整条链重跑一遍。重抄之后按既有约定 +1 那一枚
+// 记录的 paintGen（「写表面的路径要 +1 paintGen」，见 fx/gl.js 的缓存注释），链的缓存才认这份新墨。
+// **不含底片帧**（契约 §2.1 的「以下所有层的合成」按字面执行）：工作栈那一趟喂的是 render 自己攒的
+// `stashAcc`（只有图层），不是 stage/blendCtx（那两个永远垫着底片）；guidance 栈那一趟喂的同样是
+// `stashAcc`，再叠上 guidanceCtx 里它以下那几层（`over`）。传画布而不是传 ctx。
+//
+// 同一层上挂了几枚就抄几枚 —— 它们的「以下」是同一张图（都是这一层以下），所以只画一次源、各写各的面。
+function stashCapture(l, src, key, over) {
+    const recs = attrRecordsOf(l).filter(r => r.type === 'stash');
+    if (!recs.length) return;
+    // 网格 = 本层自己的格子（与每一枚 surface attribute 同款）。一张图都没有的层（老 Stash 层
+    // 迁过来就是这样）由 `layerGridOf` 退到画布 —— 那也正是旧版这一层的网格。
+    const grid = layerGridOf(l);
+    const w = grid.w, h = grid.h;
+    const same = l.stashKey === key && recs.every(r => r.surface && r.surface.width === w && r.surface.height === h);
     l.stashKey = key;
-    if (same) return;
-    // 画布换了尺寸 = 该层自己的网格也换了,换一张新画布 (身份变了,fxResolved 自然重算)。
-    if (!l.img || l.img.width !== canvasW || l.img.height !== canvasH) l.img = makeBlankCanvas(canvasW, canvasH);
-    const c = l.img.getContext('2d');
-    resetCtx(c);
-    c.clearRect(0, 0, canvasW, canvasH);
+    if (same || !(w > 0 && h > 0)) return;
     const from = src && src.canvas ? src.canvas : src;          // 传进来的是 ctx 也认
-    try { c.drawImage(from, 0, 0); } catch (e) { /* 还没有像素 */ }
-    // guidance 栈里的 Stash 有两个来源:先铺整条 Layers 合成,再叠 guidanceCtx 里
-    // 它以下那几层 —— 次序就是画布上的叠放次序。
-    if (over) { try { c.drawImage(over.canvas ? over.canvas : over, 0, 0); } catch (e) { /* 空 guidance */ } }
-    l.paintGen = (l.paintGen | 0) + 1;
+    const ov = over ? (over.canvas ? over.canvas : over) : null;
+    for (const r of recs) {
+        // 格子换了尺寸 ⇒ 换一张新画布（身份变了，折叠缓存自然重算）。
+        if (!r.surface || r.surface.width !== w || r.surface.height !== h) r.surface = makeBlankCanvas(w, h);
+        const c = r.surface.getContext('2d');
+        resetCtx(c);
+        c.clearRect(0, 0, w, h);
+        try { c.drawImage(from, 0, 0, w, h); } catch (e) { /* 还没有像素 */ }
+        // guidance 栈那一枚有两个来源:先铺整条 Layers 合成,再叠它以下的 guidance —— 次序就是
+        // 画布上的叠放次序。
+        if (ov) { try { c.drawImage(ov, 0, 0, w, h); } catch (e) { /* 空 guidance */ } }
+        markAttrPainted(r);
+    }
 }
 
 // ── Stash 的累积账：**只有图层**，没有底片帧 ───────────────────────────────────────────────
@@ -2908,7 +3125,7 @@ function layerOpacity(l) {
 
 function drawLayer(l, target) {
     const ctx = target || blendCtx;
-    if (!l.visible || !l.img) return;
+    if (!l.visible || !layerCanDraw(l)) return;
     const opacity = layerOpacity(l);
     if (opacity <= 0) return;
     // P3.1: while a stroke owns this layer's GPU texture, the display reads that texture (already
@@ -3860,7 +4077,7 @@ function fillSelection() {
     queueBlendUi();
     syncPaintUI();
     render();
-    setStatus(`Fill — ${selection.count.toLocaleString()} px poured into ${l.name}'s ${toMask ? 'mask (coverage ' + Math.round(brushAlpha * 255) + '/255)' : 'decal'}`);
+    setStatus(`Fill — ${selection.count.toLocaleString()} px poured into ${l.name}'s ${toMask ? 'mask (coverage ' + Math.round(brushAlpha * 255) + '/255)' : 'image'}`);
 }
 
 // PS Layer via Copy: the merged picture inside the ants becomes its own layer. The copy is the
@@ -4209,7 +4426,8 @@ function scratchFor(l, key, w, h) {
  *  **绑了视频轨的面还要带帧戳**：显示那条路为了省一趟拷贝不注入面（见 layerItem 的直通），
  *  于是那些代次逐帧不变 —— 少了帧戳，这张"内容身份"会冻在第一帧上（合成器于是永远贴旧纹理）。 */
 function layerSurfaceGen(l) {
-    return (l.paintGen | 0) + ':' + attrPaintGens(l) + ':' + (l.fxResolveGen | 0) + ':' + stashSurfId(l.img)
+    // Stash 的面每帧就地重抄（身份不变），所以那几枚要单列 —— 见 stashFaceIds。
+    return (l.paintGen | 0) + ':' + attrPaintGens(l) + ':' + (l.fxResolveGen | 0) + ':' + stashFaceIds(l)
         + ':' + vidLayerFrameStamp(l);
 }
 
@@ -4257,11 +4475,10 @@ function foldResOfPage(v, role) {
 /** 折图编译器要的那几个查询（缺项一律退回"没有"，模块自己会兜）。 */
 function foldEnvPage() {
     return {
+        // 条带 = 每一步，**连底位在内**：它就指着 array 顺序作用下第一张真正叠上去的图。
+        // 这一枚以前回家由 env.base 单独交出去（留在这儿会被折两遍），那会儿底位不是一步。
         records: (l) => attrRecordsOf(l),
         res: foldResOfPage,
-        // 底像素：运行时口径就是 `l.img` 那张画布（不是 `l.buffer` 的哈希 —— 页面上根本没有
-        // hash→像素 的表，拿哈希只会解析成 null，白丢一层底图）。
-        base: (l) => (l && l.img) || null,
         stack: (l) => (l && l.stack === GUIDANCE_STACK ? 'guidance' : 'work'),
         transform: (l) => (l ? l.transform : null),
         opacity: (l) => layerOpacity(l),
@@ -4381,10 +4598,9 @@ function foldCompareLayers() {
         let a = null, b = null, got = null;
         try { a = layerSource(l); } catch (e) { rows.push(Object.assign(base, { err: 'legacy: ' + (e && e.message || e) })); continue; }
         try {
-            // Stash 的累积账页面自己有一份：`l.img` 就是「以下所有层的合成」（render 轮到它之前
-            // 刚抄过），两份实现拿的是**同一张**输入，所以这一层比得了。
-            const below = pl.capture === 'below' ? l.img : null;
-            got = KCompositor.foldLayer(pl, t, w, h, below, false);
+            // 两份实现拿的是**同一份**输入：Stash 那一枚的面此刻已经被 render 抄好（它就在条带上），
+            // 所以这一层比得了 —— 以前要单独把 `l.img` 当 `below` 交进来，那一格现在没有了。
+            got = KCompositor.foldLayer(pl, t, w, h, false);
             b = got && got.src;
         } catch (e) {
             rows.push(Object.assign(base, { err: 'plan: ' + (e && e.message || e) })); continue;
@@ -4475,11 +4691,11 @@ function layerBaseBlank(l) {
  *  （底图是否为空另判 —— 见 layerBaseBlank；面在不在都不影响这个结构判据：直通那一趟根本不造面。）
  *  返回那枚记录；不满足就 null。 */
 function soloDecalRecord(l) {
-    if (!l || l.isMaskLayer || isStashLayer(l) || isRasterLayer(l)) return null;
+    if (!l || l.isMaskLayer || isRasterLayer(l)) return null;
     const recs = attrRecordsOf(l);
     if (recs.length !== 1) return null;
     const r = recs[0];
-    if (!r || r.chain || r.type !== 'decal' || !attrEnabled(r)) return null;
+    if (!r || r.chain || r.type !== 'image' || !attrEnabled(r)) return null;
     if (!layerBaseBlank(l)) return null;
     return r;
 }
@@ -4545,13 +4761,13 @@ function soloChainRecord(l) {
 }
 
 /** 折叠这一层，但结果**留在纹理上**（不落 2D）。与 fxResolved 同一套缓存身份 ⇒ 内容没变就一帧都不跑。
- *  Stash 层也走这条路：循环里 `stashResample` 已经把"以下所有层"抄进它的 img，链读的就是那份。 */
+ *  带 Stash 的层也走这条路：循环里 `stashCapture` 已经把"以下所有层"抄进那枚记录的面，链读的就是它。 */
 function fxResolvedTexture(l) {
     const rec = soloChainRecord(l);
     if (!rec) return null;
     const { w, h } = nativeSize(l.img);
     if (!w || !h) return null;
-    const sig = fxSignature(l) + '|' + fxMapStamp(l) + '|' + fxExternalStamp(l) + '|' + stashSurfId(l.img);
+    const sig = fxSignature(l) + '|' + fxMapStamp(l) + '|' + fxExternalStamp(l) + '|' + stashFaceIds(l);
     const gen = (l.paintGen | 0) + ':' + attrPaintGens(l) + ':' + w + 'x' + h;
     const c = l.fxTexCache;
     if (c && c.sig === sig && c.gen === gen && c.face) return c.face;
@@ -4573,7 +4789,7 @@ function foldTrace(l, branch) {
     if (t && t.push) t.push({ n: (l && l.name) || '?', b: branch });
 }
 function layerItem(l) {
-    if (!l || !l.visible || !l.img) return null;
+    if (!l || !l.visible || !layerCanDraw(l)) return null;
     const opacity = layerOpacity(l);
     if (opacity <= 0) return null;             // 完全透明：这一层这一帧什么都不出
     // P3.1: while a stroke owns this layer's GPU texture, the display reads that texture (already
@@ -4643,9 +4859,9 @@ function layerItem(l) {
 // 两处**刻意不换**（它们不属于"折一层"，各有各的几何/语义）：
 //   · Raster 层：像素就是画布像素，1:1 贴（拖动时走 affine），没有"折"这回事；
 //   · 一枚出墨的记录都没有：折叠是恒等变换，`layerSource` 直接还 `l.img`，一个字节都不分配。
-// Stash 层**已经换过来**了：它的底像素不是 `l.base`，而是"以下所有层的合成"（plan 里就是
-// `capture:'below'`）。那份累积账不必在这儿重新攒 —— render 的循环在轮到这一层之前已经
-// `stashResample` 把它写进 `l.img` 了，所以这里把 `l.img` 当 `below` 交下去就是同一张图。
+// Stash **不再是**一种图层（它是条带上一枚普通的面，见 attr/stash.js），所以这里没有"底像素换成了
+// 以下合成图"那一岔 —— plan 里也因此再没有 `capture:'below'`。抄写发生在 render 的循环里：轮到这一层
+// 那一刻，累积账里摆好的恰好就是它以下那一叠，抄进那枚记录的面，折的时候它跟一张贴片一样被读。
 // 另有两件事是"折这一层"的一部分，必须跟着搬（不搬就是换了语义）：
 //   · 生成器的面**先同步**（fxDropStrip 的头一句就是它）；
 //   · SSR 的镜面记录在折叠期间停用（`fxMirrorHidden`，否则倒影里会长出盘面记号）。
@@ -4655,30 +4871,30 @@ const foldSrcCache = new WeakMap();      // layer → { key, cv }
 let foldForceAll = false;
 function layerSourceViaPlan(l) {
     if (typeof KLayerFold === 'undefined' || typeof KCompositor === 'undefined' || !KCompositor.foldLayer) return layerSource(l);
-    // Stash 层也带 `raster`（几何焊死画布），但它的**像素**是真折出来的，所以这里要放过它。
-    if (!l || !l.img) return layerSource(l);
-    if (isRasterLayer(l) && !isStashLayer(l)) return layerSource(l);
+    if (!l || !layerCanDraw(l)) return layerSource(l);
+    if (isRasterLayer(l)) return layerSource(l);
     syncGeneratorFaces(l);
-    const nat = nativeSize(l.img);
+    const nat = layerGridOf(l);
     if (!nat.w || !nat.h) return layerSource(l);
     const recs = attrRecordsOf(l);
     if (!recs.some((r, i) => attrInks(r, l, i, FX_CUT_ALL))) return layerSource(l);
     // 缓存钥匙：条带的参数戳 + 三颗落笔代次 + 源帧戳 + 这一层的原生尺寸。
     // `fxResolveGen` 在这里**不会**变（这一趟没走 fxResolved），所以参数戳必须自己进钥匙 ——
     // 少一项的症状就是"改了特效参数画面不动"。
+    // Stash 的面是**就地**重抄的（同一块画布，身份不变），所以钥匙里必须有它那几枚的代次 ——
+    // 少了这一项，"下面改了、这一层却还拿旧快照" 会静默发生（见 stashFaceIds）。
     const key = fxSignature(l) + '|' + fxMapStamp(l) + '|' + fxExternalStamp(l) + '|'
-        + (l.paintGen | 0) + '|' + attrPaintGens(l) + '|' + stashSurfId(l.img) + '|'
+        + (l.paintGen | 0) + '|' + attrPaintGens(l) + '|' + stashFaceIds(l) + '|'
         + vidLayerFrameStamp(l) + '|' + nat.w + 'x' + nat.h;
     const hit = foldSrcCache.get(l);
     if (hit && hit.key === key) { __vidPerf.foldPlanHit = (__vidPerf.foldPlanHit | 0) + 1; return hit.cv; }
     let cv = null;
     try {
         const pl = KLayerFold.compile([l], foldEnvPage()).layers[0];
+        // `below` 恒 null：它只为旧 Stash 层存在（"底像素换成以下合成图"），那一岔已经随图层种类
+        // 一起删掉。现在每一层的底像素都在 plan 的 `base` 里，由 foldLayer 自己解析。
         if (pl) {
-            // Stash 的底像素 =「以下所有层的合成」= 这一刻的 `l.img`（render 刚抄好）。
-            // 非 Stash 层传 null：它们的底像素在 plan 的 `base` 里，foldLayer 自己解析。
-            const below = (pl.capture === 'below' && isStashLayer(l)) ? l.img : null;
-            const got = fxMirrorHidden(l, () => KCompositor.foldLayer(pl, 0, nat.w, nat.h, below, false));
+            const got = fxMirrorHidden(l, () => KCompositor.foldLayer(pl, 0, nat.w, nat.h, false));
             cv = got && got.src;
         }
     } catch (e) { cv = null; }
@@ -4796,7 +5012,7 @@ function render(opts) {
             // null，这条路径与之前一个字节都不差（只是不再白白 present 一次中间态）。
             let work = [];
             let stageCleared = true;
-            const hasStash = layers.some(l => isStashLayer(l) && l.visible);
+            const hasStash = layers.some(layerWantsStash);
             const stashAccLive = (hasStash && !skipDisplay) ? stashAccReset(canvasW, canvasH) : null;
             const flushWork = () => {
                 if (!skipDisplay) {
@@ -4811,10 +5027,11 @@ function render(opts) {
             for (let i = layers.length - 1; i >= 0; i--) {
                 const l = layers[i];
                 if (isGuidanceLayer(l)) continue;
-                if (isStashLayer(l) && l.visible && stashAccLive) {
-                    // 累积账里此刻就是「以下所有图层」（底片不在其中）。抄它 —— 不需要再 present 一次、
-                    // 也不需要 context image 那份 GPU→2D 回读了：那两个都只是"顺带装着一张含底片的图"。
-                    stashResample(l, stashAccLive, belowWork);
+                if (layerWantsStash(l) && stashAccLive) {
+                    // 累积账里此刻就是「以下所有图层」（底片不在其中）。抄进这一层条带上每一枚 Stash
+                    // 的面 —— 不需要再 present 一次、也不需要 context image 那份 GPU→2D 回读了：
+                    // 那两个都只是"顺带装着一张含底片的图"。
+                    stashCapture(l, stashAccLive, belowWork);
                 }
                 const it = layerItem(l);
                 if (it) {
@@ -4827,7 +5044,7 @@ function render(opts) {
                 // 一条例外: Stash 若在"正在编辑的那一枚"之后才轮到自己 (它压着那一枚), 它的快照里就带着
                 // 那一枚, 抄进参考面就又长出第二份。这种时候宁可少这一层 —— 它抄的那些像素本来也已经逐层
                 // 各自进来了 —— 也不许"两个标记"这件事发生。
-                if (dirRef && !(isStashLayer(l) && dirPainted)) {
+                if (dirRef && !(layerWantsStash(l) && dirPainted)) {
                     if (l.id === dirRef.skipLayer && l.visible && l.img) {
                         const rec = attrRecord(dirRef.skipRef);
                         const was = rec ? rec.enabled : null;
@@ -4863,7 +5080,7 @@ function render(opts) {
                 // guidance 栈里的 Stash 压在整条 Layers 合成之上：它的「以下」横跨两条栈 —— 工作栈那
                 // 一份只有图层（stashAcc），guidance 自己那几层在 guidanceCtx 里，按叠放次序再叠上去。
                 // 指纹也吃两条栈 —— 下面的工作层改了，它照样重抄。
-                if (isStashLayer(l) && l.visible && stashAccLive) stashResample(l, stashAccLive, belowWork + belowGuide, guidanceCtx);
+                if (layerWantsStash(l) && stashAccLive) stashCapture(l, stashAccLive, belowWork + belowGuide, guidanceCtx);
                 if (l.visible && l.img) { drawLayer(l, guidanceCtx); guidanceHasInk = true; }
                 belowGuide += stashLayerKey(l);
             }
@@ -6648,7 +6865,6 @@ function snapshotLayerRecord(l) {
         opacity: layerOpacity(l),
         fragment: !!l.fragment,
         raster: !!l.raster,
-        stash: !!l.stash,
         // 3D 图层的身份和它那块场景 tab 的 uid。合成不看它们;它们只保证一次 undo、一次 tab
         // 往返之后,行上的跳转按钮还认得原来那个场景。
         three: !!l.three,
@@ -6717,7 +6933,6 @@ function liveLayersFromRecords(recs, byRef, byAttr) {
         opacity: (typeof ls.opacity === 'number' && Number.isFinite(ls.opacity)) ? Math.min(1, Math.max(0, ls.opacity)) : undefined,
         fragment: !!ls.fragment,
         raster: !!ls.raster,
-        stash: !!ls.stash,
         three: !!ls.three,
         sceneUid: ls.sceneUid || null,
         // An undo step from before the Guidances stack existed (or from a hand-written snapshot)
@@ -6819,7 +7034,7 @@ function restoreState(s, opts) {
     pruneAttrs();
     if (asDocument) {
         mode = s.mode === 'canvasModify' ? 'transform' : (s.mode || 'transform');
-        paintTarget = s.paintTarget === 'decal' ? 'decal' : 'mask';
+        paintTarget = s.paintTarget === 'image' ? 'image' : 'mask';
         const v = s.view || {};
         if (Number.isFinite(v.zoom)) view.zoom = clampZoom(v.zoom);
         if (Number.isFinite(v.rotation)) view.rotation = v.rotation;
@@ -7029,7 +7244,6 @@ function vidLayerSetSig(key) {
         opacity: layerOpacity(l),
         fragment: !!l.fragment,
         raster: !!l.raster,
-        stash: !!l.stash,
         stack: stackOf(l),
         three: !!l.three,
         sceneUid: l.sceneUid || null,
@@ -7319,12 +7533,6 @@ function layerTypeBadgeSvg(l) {
         return '<svg viewBox="0 0 10 10"><ellipse cx="4.6" cy="7" rx="3.9" ry="1.7" fill="none" stroke="currentColor" stroke-width="1.1"/>'
             + '<path d="M4.6 7 8 2.4 M5.5 2.4H8V4.9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square"/></svg>';
     }
-    if (isStashLayer(l)) {
-        // 一张纸,底下那条线是它以下那一叠,箭头把整叠并上来 —— 「下面的合成图就是它自己的图」。
-        return '<svg viewBox="0 0 10 10"><rect x="1.2" y="1.1" width="7.6" height="5.1" rx="1" fill="none" stroke="currentColor" stroke-width="1.1"/>'
-            + '<path d="M2.2 9.1h5.6" fill="none" stroke="currentColor" stroke-width="1.1"/>'
-            + '<path d="M5 8.5V4.5M3.5 6 5 4.4 6.5 6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>';
-    }
     if (isRasterLayer(l)) {
         return '<svg viewBox="0 0 10 10"><rect x="1" y="1" width="3.4" height="3.4" fill="currentColor"/>'
             + '<rect x="5.6" y="1" width="3.4" height="3.4" fill="currentColor" opacity="0.5"/>'
@@ -7397,7 +7605,6 @@ function layerRowKind(l) {
         : isCudLayer(l) ? 'cud'
         : isTextLayer(l) ? 'text'
         : isDirectionLayer(l) ? 'direction'
-        : isStashLayer(l) ? 'stash'
         : isRasterLayer(l) ? 'raster' : 'smart';
 }
 
@@ -7427,7 +7634,22 @@ function layerRowModel(l) {
         // ▶ 的两件事：这一行能不能当 Generate 的目标，和它现在到底有没有墨（那句 tooltip 的分支）。
         canGen: layerMaskIsMeaningful(l),
         hasImg: hasLayerImage(l) || stripGeneratorInk(l),
-        native: nativeSize(l.img),
+        // 一张图都没有的层（老 Stash 层迁过来）没有底位可问尺寸，格子走 `layerGridOf`（它是画布）。
+        native: layerGridOf(l),
+        // 图层盒：盒里是这一层的**网格 + 底位**，往上加的图都是条带上的 image 步骤。宿主只读 ——
+        // 行上那枚缩略图说明的「这一层有没有图 / 网格多大 / 一共几张」从此问的是盒与条带，
+        // 不再问 l.src。`images` = 底位有像素算一张 + 条带上每枚 image 步骤各一张。
+        box: boxOf(l) ? {
+            id: boxOf(l).id,
+            w: boxOf(l).grid.w,
+            h: boxOf(l).grid.h,
+            images: boxImageCount(l),
+            base: {
+                image: !!((boxBase(l) || {}).src),
+                w: nativeSize((boxBase(l) || {}).surface).w,
+                h: nativeSize((boxBase(l) || {}).surface).h,
+            },
+        } : null,
         // 右键菜单归宿主画（拍板 5.a），但它每一条的**出现与灰掉**问的都是这一页的真值，不是样式：
         // 菜单里 Generate 那句 tooltip 的分支判据与行上 ▶ 那枚不是同一句（方向层恒算"有图"，哪怕还
         // 没墨），Fit Mask / Split / Rasterize 认的是"这一层还有没有 buffer""画布尺寸定了没有"，
@@ -7452,6 +7674,9 @@ function layerRowModel(l) {
             const hasFace = spec.kind === 'surface' || spec.kind === 'generator';
             return {
                 guid: r.id, type: r.type, label: spec.label, kind: spec.kind,
+                // 底位那一枚 (`role:'base'`) 与叠上去的那几枚同一个类型、同一颗 chip —— 宿主拿这一格
+                // 说话 (tooltip / 未来的角标),但它不当判据:所有行为都走同一个 `type`。
+                role: r.role || '',
                 chipClass: spec.chipClass || '',
                 badge: spec.badge ? spec.badge.svg : '',
                 badgeClass: spec.badge ? (spec.badge.class || '') : '',
@@ -7565,12 +7790,12 @@ function objId(o) {
     return String(v);
 }
 
-// 行里那颗"原图"到底该摆什么：DOM 那三岔判据一字不差搬过来 —— 有文件摆文件，文字/方向有墨摆折叠结果，
-// Stash 摆它自己那张抄件；第四岔是空，空没有面，那一格由 React 画红 ×。
+// 行里那颗"原图"到底该摆什么：DOM 那两岔判据一字不差搬过来 —— 有文件摆文件，文字/方向有墨摆折叠结果；
+// 第三岔是空，空没有面，那一格由 React 画省略符。（Stash 曾经是这里的第四岔 —— 它摆自己那张抄件；
+// 现在它是条带上一枚普通的面，抄件由它自己的 chip 摆，这一格不必再为它破例。）
 function origFaceOf(l) {
     if (hasLayerImage(l)) return l.img;
     if ((isTextLayer(l) || isDirectionLayer(l)) && stripGeneratorInk(l)) return layerSource(l) || null;
-    if (isStashLayer(l) && l.img) return l.img;
     return null;
 }
 
@@ -7578,7 +7803,7 @@ function origFaceSig(l, src) {
     const n = nativeSize(src);
     // 有文件那一岔摆的就是那一份原图：落笔改的是贴片那一面，链跑没跑也不关它的事 —— 那些都由结果面
     // 去说。文字/方向那一岔摆的才是折叠面，它命中缓存时是同一块画布原地重画，所以跟着折叠代次走。
-    const folded = !hasLayerImage(l) && !isStashLayer(l);
+    const folded = !hasLayerImage(l);
     return objId(src) + ':' + n.w + 'x' + n.h + (folded ? ':' + (l.fxResolveGen | 0) : '');
 }
 
@@ -7768,7 +7993,8 @@ function addAttrToLayer(l, type, frameTrack) {
     pushHistory(null, 'Added 「' + spec.label + '」 as a step');
     // 装上一枚面就该能画它 —— 空面和没装在读法上是一回事 ("蒙版还没画"),所以这一句不是额外状态,
     // 只是把笔尖放到用户刚点名的那一步上。链没有面可画,由行上那根魔棒开口子。
-    if (spec.kind === 'surface') setPaintTarget(type, l, r.id);
+    // Stash 例外 (`noPaint`):它的面每一帧被重抄，落上去的墨下一帧就没了 —— 把笔交给它等于骗人。
+    if (spec.kind === 'surface' && !spec.noPaint) setPaintTarget(type, l, r.id);
     // 到场动作 (3D 开一枚场景 tab 并写 sceneUid) 必须发生在 UI 刷新**之前**——工具小窗的面板
     // 读的是记录的最终形状,刷新完再动记录,面板就定格在旧读数上 (Open Scene 灰成一排的教训)。
     if (spec.onAdded) spec.onAdded(l, r);
@@ -7782,7 +8008,19 @@ function addAttrToLayer(l, type, frameTrack) {
 
 // 启用 / 停用条带上的一步。chip 的 ctrl+click 与它右键菜单里那一条一直是同一个状态（toggleAttrEnabled），
 // 如今也是同一句话：措辞只有一份，谁按都报同一句。停用那一档必须说清"数据还在，只是折叠时跳过"。
+// 底位那一枚 (`role:'base'`) 是**这一层自己的像素**,不是"加在这层上的一步":它恒在最左、恒在、
+// 永远参与折叠(折叠拿它当起始面,不看 enabled)。所以启用/停用、删除、复制、拖动这四件事对它一律
+// 不成立 —— 与其让它做了却什么都不变(停用不改画面、拖走会把 base 从最左挤掉),不如当场说清楚。
+// 底位现在不再是"恒在最左"，它能拖。剩下这三件事仍然拒：删/停用/复制掉这一枚，"这一层自己的像素"
+// 就没有着落了（ hiding 由图层自己的可见性说，不必拿不存在的一格凑）。
+function refuseBaseStep(l, r, what) {
+    if (!r || r.role !== 'base') return false;
+    setStatus(`The Base image is 「${l.name}」's own pixels — it cannot be ${what}`, 'error');
+    return true;
+}
+
 function toggleAttrStep(l, r) {
+    if (refuseBaseStep(l, r, 'disabled')) return;
     const spec = ATTR_TYPES[r.type];
     toggleAttrEnabled(r);
     setStatus(`「${spec.label}」step ${attrRefList(l).indexOf(r.id) + 1} of「${l.name}」is now `
@@ -7800,17 +8038,26 @@ function moveAttrStep(attrId, fromLayerId, toLayerId, beforeAttrId, after) {
     const dst = getLayer(toLayerId);
     const moved = attrRecord(attrId);
     if (!src || !dst || !moved) return false;
+    // 底位也是普通一步，所以这里没有特例：落到哪就在哪执行。拖到一条 FX 链右边 =
+    // 那条链在画它之前跑（于是这条链不作用于它）—— 位置真的改了结果，不是换个说法。
     if (src === dst) {
         // 同层拖到尾缝没有可说的位置（"最后一步"就是它自己在的地方），原样放走 —— 今天也是这样。
         if (!beforeAttrId || !moveAttr(dst, attrId, beforeAttrId, !!after)) return false;
-        setStatus(`「${ATTR_TYPES[moved.type].label}」is now step ${attrRefList(dst).indexOf(moved.id) + 1} of ${attrRefList(dst).length} — it runs there`);
+        ensureBaseInStrip(dst);
+        const dstSteps = attrRecordsOf(dst);
+        setStatus(moved.role === 'base'
+            ? `「${dst.name}」's own image is now step ${dstSteps.indexOf(moved) + 1} of ${dstSteps.length} — what runs before it never touches it`
+            : `「${ATTR_TYPES[moved.type].label}」is now step ${dstSteps.indexOf(moved) + 1} of ${dstSteps.length} — it runs there`);
         pushHistory(null, 'Reordered 「' + ATTR_TYPES[moved.type].label + '」');
         refreshLayerPanels();
         render();
         return true;
     }
     if (!moveAttrToLayer(src, dst, attrId, beforeAttrId || null, !!after)) return false;
-    setStatus(`「${ATTR_TYPES[moved.type].label}」moved from「${src.name}」to「${dst.name}」— it is now step ${attrRefList(dst).indexOf(moved.id) + 1} of ${attrRefList(dst).length}`);
+    ensureBaseInStrip(src);            // 搬走的若是源层唯一那枚图，源层当场变空盒
+    ensureBaseInStrip(dst);
+    const steps = attrRecordsOf(dst);
+    setStatus(`「${ATTR_TYPES[moved.type].label}」moved from「${src.name}」to「${dst.name}」— it is now step ${steps.indexOf(moved) + 1} of ${steps.length}`);
     pushHistory(null, 'Moved 「' + ATTR_TYPES[moved.type].label + '」 to「' + dst.name + '」');
     refreshLayerPanels();
     render();
@@ -7818,6 +8065,7 @@ function moveAttrStep(attrId, fromLayerId, toLayerId, beforeAttrId, after) {
 }
 
 function removeAttrFromLayer(l, r) {
+    if (refuseBaseStep(l, r, 'removed — delete the layer instead')) return;
     removeAttr(l, r.id);
     if (paintRef === r.id) paintRef = null;
     refreshLayerPanels();
@@ -7827,6 +8075,7 @@ function removeAttrFromLayer(l, r) {
 }
 
 function shallowDuplicateAttr(l, r) {
+    if (refuseBaseStep(l, r, 'duplicated')) return;
     const copy = dupAttrShallow(l, r.id);
     if (!copy) return;
     refreshLayerPanels();
@@ -8109,100 +8358,77 @@ function addLayer(item, stack) {
     });
 }
 
-// A Generate on a layer that ALREADY has an image must not overwrite it: the result lands on a
-// NEW layer stacked on top, framed by the SOURCE layer's transform (the backend ran at that
-// layer's own size), so it exactly covers where the source sits. Recover Crop off narrows that
-// frame onto the crop rect — the patch is only the masked region, not the whole layer. The source
-// layer keeps its image, mask and decal; the fresh layer carries none of them (an unpainted mask
-// IS the full layer). One Generate = one undo step, same as the in-place refill.
-// `opts.fit` is preset Enable Fit: the patch inherits the SOURCE layer's mask over its own place
-// rect and then fits onto it, inside this same undo step. Only a placed smart result has a rect to
-// inherit — a whole-canvas result (no place) and a raster buffer (position baked into pixels) are
-// left exactly as they were.
-function spawnGeneratedLayer(id, item, opts) {
+// A Generate result becomes a new **Image step on the source layer** — appended at the tail of its
+// strip, which is also where the brush lands next (rightmost Image step). Nothing is replaced and no
+// second layer appears:
+//   · the box's base keeps its pixels, so the run stays non-destructive (the same bargain a smart
+//     object makes when it gains another layer of paint above its own content);
+//   · the step is a full layer-grid surface holding the result **where the backend drew it**:
+//     Enable Mask + Recover Crop off returns only the mask's bounding box at working resolution, and
+//     `place` measures that box in the layer's own pixel grid (`ow/oh` = the size we sent), so the
+//     patch lands 1:1 instead of being smeared over the whole layer. No `place` ⇒ the result IS the
+//     whole frame, so it fills the grid;
+//   · the layer keeps its mask / chains / other steps: the new step only adds pixels on top, and it
+//     is folded in the same order everything else is (its position on the strip is what counts).
+// One Generate = one undo step. `opts.fit` (preset Enable Fit) is about shrinking a NEW layer's
+// frame onto the mask, which no longer exists on this path — it is read and ignored, not carried.
+function appendGeneratedImage(id, item, opts) {   // eslint-disable-line no-unused-vars
     const l = layers.find(x => x.id === id);
     if (!l || !item || !item.src) {
         setStatus('The Generate result could not be matched to its layer', 'error');
         return;
     }
     loadImage(item.src, img => {
-        const t = l.transform || { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
-        const raster = isRasterLayer(l);
-        // Enable Mask 开 + Recover Crop 关：回来的不是整幅图层，而是 mask 外接框那块工作分辨率
-        // patch，place 矩形量的就是它在**这个图层自己的像素网格**里的位置（ow/oh = 图层原始尺寸）。
-        // 于是新图层是源图层图框的一个（随源图层一起旋转的）子框；mask 铺满整层时算出来恰好等于源
-        // 图层的 transform，也就是没有 place 时的那条路径。
-        const placed = placeTransform(item.place, t);
-        const fit = !!(opts && opts.fit);
-        const copy = {
-            id: ++layerSeq,
-            name: l.name + ' · gen',
-            src: item.src,
-            img,
-            visible: true,
-            // raster 分支保持恒等：它的位置要烘进画布尺寸的 buffer，transform 动不得。
-            transform: (placed && !raster) ? { ...placed } : { ...t },
-            raster,
-            // 和 attribute 一样:生成出来的是新图层,不继承源图层的蒙版、贴片和链。
-            fxCache: null,
-            // A generated variant belongs to its source's stack — refining a guidance image must
-            // not silently drop the result into the working layers (and the other way round).
-            stack: stackOf(l),
-            // patch 的原始尺寸是模型的工作分辨率，比它所属的图层大是常态：它只属于那块矩形，
-            // 不属于整幅画布，所以不得反过来撑画布（见 autoCanvasSize 的 fragment 分支）。
-            // 烘进 buffer 的 raster 结果已经是画布尺寸，不该被当成 fragment。
-            fragment: !!placed && !raster,
-            // A Generate result is a brand-new picture, not the source project's composite: it never
-            // inherits the link, or the next save of that file would overwrite the refinement.
-            cud: null,
-        };
-        // A raster source generates a raster result: the buffer must stay canvas-sized, so the
-        // fresh image resamples into it immediately (the backend ran at the layer's own
-        // resolution — for a raster layer that IS the canvas size). The result's own history
-        // key is dropped with it: the buffer no longer matches that history image.
-        if (raster && canvasW && canvasH) {
-            if (placed) {
-                // 整幅拉伸会把 patch 摊满全画布（等于把 mask 外接框以外的地方也糊上）：
-                // 按 placed 画进画布尺寸的 buffer，位置就落在像素里。
-                copy.img = renderTransformedSurface(img, placed, canvasW, canvasH);
-                copy.src = copy.img.toDataURL('image/png');
-            } else {
-                rasterResampleBuffer(copy, canvasW, canvasH);
-            }
+        const { w, h } = nativeSize(l.img);
+        const gw = Math.max(1, Math.round(w)), gh = Math.max(1, Math.round(h));
+        const surface = document.createElement('canvas');
+        surface.width = gw; surface.height = gh;
+        const sctx = surface.getContext('2d');
+        const p = item.place;
+        const px = p ? Number(p.x) : NaN;
+        if (Number.isFinite(px) && Number(p.w) > 0 && Number(p.h) > 0) {
+            // `place` 说的是"这块 patch 在**我们送出去的那幅图**里的位置"，换算到这一层自己的网格。
+            const kx = gw / (Number(p.ow) || gw), ky = gh / (Number(p.oh) || gh);
+            const dx = Math.round(px * kx), dy = Math.round(Number(p.y) * ky);
+            const dw = Math.max(1, Math.round(Number(p.w) * kx));
+            const dh = Math.max(1, Math.round(Number(p.h) * ky));
+            const nat = nativeSize(img);
+            sctx.drawImage(img, 0, 0, nat.w, nat.h, dx, dy, dw, dh);
+        } else {
+            sctx.drawImage(img, 0, 0, gw, gh);
         }
-        let fitted = false;
-        if (fit && placed && !raster && l.mask && item.place) {
-            const p = item.place;
-            const from = nativeSize(l.mask);
-            const to = nativeSize(copy.img);
-            const m = document.createElement('canvas');
-            m.width = to.w; m.height = to.h;
-            m.getContext('2d').drawImage(
-                l.mask,
-                p.x * (from.w / p.ow), p.y * (from.h / p.oh),
-                p.w * (from.w / p.ow), p.h * (from.h / p.oh),
-                0, 0, to.w, to.h);
-            // 还没 attach 的那一句普通字段赋值:下面的 ownSource 会把它迁进 strip。
-            copy.mask = m;
-            fitted = fitLayerToMask(copy, { silent: true });
+        const r = newAttrRecord('image');
+        if (!r) { setStatus('Could not add an Image step to this layer', 'error'); return; }
+        r.surface = surface;
+        // 落点：**最后一枚 image 步骤之后**。这是"追加"在条带上的准确含义 —— 图要按序叠在前几张
+        // 之上，但仍在蒙版与链的**左边**（否则这一层自己的蒙版就裁不到这张新图）。一枚都没有时
+        // 落在条带头上，与 attr/image.js 的默认落点一致。
+        if (!Array.isArray(l.attrs)) l.attrs = [];
+        let at = 0;
+        for (let i = 0; i < l.attrs.length; i++) {
+            const prev = attrRecord(l.attrs[i]);
+            if (prev && prev.type === 'image') at = i + 1;
         }
-        insertAtStackTop(ownSource(copy, copy.img, copy.src));     // the generated variant lands on top of its own stack
-        selectedId = copy.id;
-        applyCanvasSize();
-        layoutCanvas();
+        l.attrs.splice(at, 0, r.id);
+        // 落笔的靶心交给这一枚：这一趟的结果就是这一层的最后一张图。
+        paintTarget = 'image';
+        paintRef = r.id;
+        if (autoDynLayerId === l.id) autoDynLayerId = null;   // 这层已经拿到像素了
+        // 画布尺寸不动:追加的是一枚步骤,不是一个可能伸到画布外的新图层。
         refreshLayerPanels();
         render();
-        setStatus(placed
-            ? `Generated onto a new layer over 「${l.name}」— placed on its masked region${fitted ? ', trimmed to that mask' : ''}`
-            : `Generated onto a new layer above 「${l.name}」— same size and position`, 'success');
-        pushHistory(null, 'Generated onto a new layer over「' + l.name + '」');
+        setStatus(`Generated a new Image step on 「${l.name}」`
+            + (item.place ? ' — placed on its masked region' : ' — same size and position'), 'success');
+        pushHistory(null, 'Generated a new Image step on「' + l.name + '」');
     }, () => setStatus('Could not load the Generate result', 'error'));
 }
 
-// Generate wrote a new image for an IMAGE-LESS (from-noise) target: fill the layer in place.
+// Swaps a layer's BASE pixels in place (its box's 底位) — the one-way refill used when a picture is
+// re-read from its source (a cud refresh). Generate no longer comes here: a Generate result is
+// appendGeneratedImage(), which adds an Image step and leaves the base alone.
+//
 // The mask, the decal and the transform all stay, because the caller asked for the layer to be
-// refined in place, not replaced by a fresh layer. A target that already has an image goes to
-// spawnGeneratedLayer() instead — its result never overwrites existing pixels.
+// refined in place, not replaced by a fresh layer.
 //
 // The new image can be a different size from the old one (the detailer works at its own resolution
 // and may hand back a crop), so the surfaces that are sized to the image are rescaled to match --
@@ -8318,8 +8544,6 @@ function cloneLayerFields(l, name) {
         opacity: l.opacity,
         transform: cloneTransform(l.transform),
         raster: !!l.raster,
-        // 一份副本仍是一张 Stash:它抄的是「它下面那一叠」,位置变了抄的就是那一段的新合成图。
-        stash: !!l.stash,
         // attribute 一律浅拷贝:strip 的顺序照搬,每枚自己的数据另立一份 (面是新画布、链是深拷贝),
         // guid 也全是新的 —— 副本之后改它的蒙版,不该牵动原本。可写的 attribute 不许被两层共指,
         // 所以复制从来没有"引用"这一档 (拍板过的设计标准,不是运行时要防的事)。
@@ -8372,12 +8596,13 @@ function applyAttrToLayer(l, r) {
         setStatus(`Apply ${label} — it runs as step ${i + 1}, so its pixels are not what「${l.name}」draws on its own. Apply the steps before it first, or drag this chip to the left.`, 'error');
         return;
     }
-    // 画面每帧重生的层不接受 bake:文字被下一次敲键抹掉、方向被下一次拖把手抹掉、Stash 被下一次抄写抹掉。
-    if (isTextLayer(l) || isDirectionLayer(l) || isStashLayer(l)) {
-        const what = isTextLayer(l) ? 'text' : isDirectionLayer(l) ? 'a direction layer' : 'a Stash layer';
+    // 画面每帧重生的层不接受 bake:文字被下一次敲键抹掉、方向被下一次拖把手抹掉。
+    // （Stash 曾经也在这条上 —— 它是"每层重抄"的图层；现在它是条带上一枚普通的面，抄写只重写它自己的
+    //   那一格，bake 到它身上照样会被抹掉，所以那一句换到了 attr/stash.js 的 open 里说。）
+    if (isTextLayer(l) || isDirectionLayer(l)) {
+        const what = isTextLayer(l) ? 'text' : 'a direction layer';
         const why = isTextLayer(l) ? 'its picture is re-rendered from the descriptor on every draw, so a baked step would be wiped by the next keystroke. Rasterize first if you want it baked in'
-            : isDirectionLayer(l) ? 'its picture is re-rendered from the three angles on every draw, so a baked step would be wiped by the next handle drag. Rasterize first if you want it baked in'
-            : 'its picture is re-copied from the layers under it on every draw, so a baked step would be wiped by the next one. Duplicate the stack below into a plain layer first if you want it baked in';
+            : 'its picture is re-rendered from the three angles on every draw, so a baked step would be wiped by the next handle drag. Rasterize first if you want it baked in';
         setStatus(`「${l.name}」is ${what} — ${why}`, 'error');
         return;
     }
@@ -8506,7 +8731,6 @@ function splitLayerByMask(l) {
     if (!l || l.isMaskLayer || isRasterLayer(l) || !l.img) return false;
     if (isTextLayer(l)) { setStatus(`「${l.name}」is text — Rasterize it first if you want its pieces split apart`, 'error'); return false; }
     if (isDirectionLayer(l)) { setStatus(`「${l.name}」is a direction — Rasterize it first if you want its pieces split apart`, 'error'); return false; }
-    if (isStashLayer(l)) { setStatus(`「${l.name}」is a Stash — duplicate the stack below it into a plain layer first`, 'error'); return false; }
     if (guardAdjustMode()) return false;
     // 旁路是视图开关:合成此刻不带链,切开得到的件也就不是这层平时画的东西 —— 同 Apply 的立场,宁可不动。
     if (effectsBypass && liveEffects(l).length) {
@@ -8660,10 +8884,6 @@ function combineLayerGroup(members) {
     }
     if (members.some(l => isTextLayer(l) || isDirectionLayer(l))) {
         setStatus('Combine — text / direction rows re-render from their descriptor every frame. Rasterize them first', 'error');
-        return false;
-    }
-    if (members.some(l => isStashLayer(l))) {
-        setStatus('Combine — a Stash row copies the stack under it, which is not part of this selection. Duplicate it into a plain layer first', 'error');
         return false;
     }
     const drawn = members.filter(l => l.visible && l.img);
@@ -9520,6 +9740,25 @@ function paintRecord(l, type, create) {
     return r;
 }
 
+// 底位的面在读档那一趟是那张可共享的 <img> —— JS 侧不可变、没有 getContext,所以"在它上面落笔"这件事
+// 得先换一张画布:同一层里把底位换成画布 (= 落笔那一刻断开共享,正是"在这层自己的像素上画"的语义),
+// 之后它就是一张普通的可写面。条带上其它 image 步骤的面本来就是画布 (读档走 blobToCanvas)。
+function writableBaseFace(l) {
+    const base = boxBase(l);
+    if (!base || !base.surface || base.surface.getContext) return base;
+    const n = nativeSize(base.surface);
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, n.w);
+    c.height = Math.max(1, n.h);
+    c.getContext('2d').drawImage(base.surface, 0, 0, c.width, c.height);
+    writeSource(l, 'img', c);          // 共享当场断开,条带最左那一格换成这张画布
+    const next = boxBase(l);
+    // 换过之后是**另一条记录**(共享那一支):笔尖得跟着走,否则后面 paintSurface/markPainted 读的
+    // 还是原来那张不能写的 <img>。
+    if (paintRef === base.id) paintRef = next.id;
+    return next;
+}
+
 // 第一张面长什么样是各类型的知识 (蒙版满幅白 = 覆盖从 1 起,贴片留空 = 没画就是透明),所以它住在
 // attr/<type>.js 的 firstFace 里,这里只负责按图层自己的网格把面造出来。
 function ensureAttrFace(l, r) {
@@ -9539,14 +9778,14 @@ function ensureMask(l) {
 }
 
 function ensureDecal(l) {
-    const r = paintRecord(l, 'decal', true);
+    const r = paintRecord(l, 'image', true);
     return r ? ensureAttrFace(l, r) : null;
 }
 
 // What the tools paint right now (and the surface a stroke composites into).
 // Selecting the Mask layer bypasses the mask/decal choice: that layer has exactly one surface,
 // so paintTarget keeps its value and switching back to a real layer behaves as before.
-const isDecalTarget = () => paintTarget === 'decal';
+const isDecalTarget = () => paintTarget === 'image';
 
 // One entry for the switch the strip's chips and the Tab/` keys all make: pick the surface (and,
 // from a chip, WHICH one of that kind), arm the paint mode on that layer, then let the two
@@ -9563,7 +9802,11 @@ function setPaintTarget(which, l, ref) {
 function ensurePaintSurface(l) {
     if (isMaskLayerTarget()) return ensureMaskLayer();
     const r = paintRecord(l, paintTarget, true);
-    return r ? ensureAttrFace(l, r) : null;
+    if (!r) return null;
+    // 底位那一枚读档时是那张可共享的 <img>(没有 getContext):要到"笔真要落上去"这一刻才换画布 ——
+    // 点开 chip 只看一眼不该付出换面 + 断共享 + 丢掉 0 编码保存的代价。换过记录后笔尖已指向新的那条。
+    if (r.role === 'base') { const b = writableBaseFace(l); return b ? b.surface : null; }
+    return ensureAttrFace(l, r);
 }
 function paintRecordOf(l) {
     if (isMaskLayerTarget()) return null;
@@ -9726,13 +9969,14 @@ function shiftConstrain(pos) {
 
 // P3.1: a stroke may land in the layer's GPU decal texture instead of the 2D surface. It is exact
 // only while the decal is the layer's LAST enabled step (base = the fold with the decal temporarily
-// disabled; composed = decal over base), the face is private to this layer, and the layer is not a
-// Stash (its input is "everything below", which a per-layer texture does not hold).
+// disabled; composed = decal over base), and the face is private to this layer.
+// Stash —— 它曾经是这里的第三道闸（"它的输入是下面所有层，逐层纹理里没有那份账"）。现在它是条带上一枚
+// 普通的面：笔尖落在 Image 上（下面 `r.type !== 'image'` 那一句），而"右边不能再有启用的步骤"那一条
+// （`recs` 循环）已经把"Stash 在笔尖右边"挡住了 —— 那时纹理里装不下它。
 function gpuPaintEligible(l) {
     if (!l || l.isMaskLayer || isMaskLayerTarget() || !isDecalTarget()) return false;
-    if (isStashLayer(l)) return false;
     const r = paintRecordOf(l);
-    if (!r || r.type !== 'decal' || !r.surface || r.frameTrack) return false;
+    if (!r || r.type !== 'image' || !r.surface || r.frameTrack) return false;
     // The texture and the ink share the layer's native grid (fxPaintInk checks it); a face that was
     // resampled/cropped away from that grid falls back to the 2D path.
     const n = nativeSize(l.img);
@@ -10000,7 +10244,11 @@ function bucketFillAt(pos) {
         sctx.drawImage(blendCanvas, 0, 0);
     } else {
         if (l.img) sctx.drawImage(l.img, 0, 0, w, h);
-        if (l.decal) sctx.drawImage(l.decal, 0, 0, w, h);
+        // 条带上每一枚 image 步骤都算这层自己的像素（0~N 枚，按序叠在底位之上）——
+        // 只读最左那枚会让"生成过两张再泼油漆"取样到一张过时的画面。
+        for (const a of imageAttrs(l)) {
+            if (a.surface && a.surface.width && a.surface.height) sctx.drawImage(a.surface, 0, 0, w, h);
+        }
     }
     const src = sctx.getImageData(0, 0, w, h).data;
     const si = (seedY * w + seedX) * 4;
@@ -10074,7 +10322,7 @@ function bucketFillAt(pos) {
     queueBlendUi();
     syncPaintUI();
     render();
-    setStatus(`Bucket — filled ${(count - skipped).toLocaleString()} px of ${l.name}'s ${toMask ? 'mask (coverage ' + fa + '/255)' : 'decal'}`
+    setStatus(`Bucket — filled ${(count - skipped).toLocaleString()} px of ${l.name}'s ${toMask ? 'mask (coverage ' + fa + '/255)' : 'image'}`
         + (selClip && skipped ? ` · ${skipped.toLocaleString()} px outside the selection left alone` : ''));
 }
 
@@ -10517,11 +10765,8 @@ viewport.addEventListener('mousedown', e => {
             const hit = pickLayer(pos);
             if (hit) { selectLayer(hit.id, mode, true); refreshCursor(); return; }
         }
-        // A Stash member never travels with a group drag (its picture is re-copied from the stack
-        // under it on every draw), so it is left out of the set — which also leaves its area out of
-        // the union box, and that is what stops the press from grabbing it.
         const group = dragGroupMembers();
-        const members = group && group.filter(m => !isStashLayer(m));
+        const members = group;
         if (members) {
             // A group owns the press: its handles and its union box are what the pointer meets.
             // Raster members are promoted for the gesture and reverted when the press grabs
@@ -10539,27 +10784,23 @@ viewport.addEventListener('mousedown', e => {
             return;
         }
         const l = getSelected();
-        // The Mask layer is canvas-locked: its transform must stay the identity. A Stash is locked
-        // the same way — and refusing it here is not refusing the press: the pointer still falls
-        // through to the pick below, so a click on a Stash selects whatever it is standing on.
+        // The Mask layer is canvas-locked: its transform must stay the identity —— 只有它。
+        // （Stash 曾经也锁在这里：它是"下面那叠"本身，挪它没有意义。现在它是条带上一枚普通的面，
+        //   所在的层就是普通层，快照跟着 transform 走 —— 把下面那叠缩小摆到角上是一句正当的话。）
         if (l && l.visible && !l.isMaskLayer) {
-            if (isStashLayer(l) && (hitHandleScreen(sp, pos, l) || pointInBox(pos, l))) {
-                setStatus('A Stash layer IS the composite under it — it cannot be moved, scaled or rotated', 'error');
-            } else {
-                // A raster layer's drag works on its CONTENT box: promote the cached bbox into
-                // l.transform so the drag machinery moves/resizes the box the user sees. If the
-                // press grabs nothing, undo the promotion — at rest the stored transform must stay
-                // the identity.
-                const rasterGrab = isRasterLayer(l);
-                if (rasterGrab) l.transform = cloneTransform(effectiveTransform(l));
-                const h = hitHandleScreen(sp, pos, l);
-                if (h === 'rotate') { beginRotateDrag(pos, l); e.preventDefault(); return; }
-                if (h) { beginScaleDrag(h, pos, l); e.preventDefault(); return; }
-                if (pointInBox(pos, l)) { beginMoveDrag(pos, l); e.preventDefault(); return; }
-                // Nothing was grabbed: un-promote the bbox unless this layer's box is a live preview
-                // that Enter still owns.
-                if (rasterGrab && !transformIsPending(l.id)) l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
-            }
+            // A raster layer's drag works on its CONTENT box: promote the cached bbox into
+            // l.transform so the drag machinery moves/resizes the box the user sees. If the
+            // press grabs nothing, undo the promotion — at rest the stored transform must stay
+            // the identity.
+            const rasterGrab = isRasterLayer(l);
+            if (rasterGrab) l.transform = cloneTransform(effectiveTransform(l));
+            const h = hitHandleScreen(sp, pos, l);
+            if (h === 'rotate') { beginRotateDrag(pos, l); e.preventDefault(); return; }
+            if (h) { beginScaleDrag(h, pos, l); e.preventDefault(); return; }
+            if (pointInBox(pos, l)) { beginMoveDrag(pos, l); e.preventDefault(); return; }
+            // Nothing was grabbed: un-promote the bbox unless this layer's box is a live preview
+            // that Enter still owns.
+            if (rasterGrab && !transformIsPending(l.id)) l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
         }
     }
     const picked = pickLayer(pos);
@@ -10728,7 +10969,7 @@ viewport.addEventListener('touchstart', e => {
         livePreviewStroke();
     } else {
         const group = dragGroupMembers();
-        const members = group && group.filter(m => !isStashLayer(m));   // same lock as the mouse press
+        const members = group;
         if (members) {
             for (const m of members) if (isRasterLayer(m)) m.transform = cloneTransform(effectiveTransform(m));
             const box = groupBox(members);
@@ -10737,7 +10978,7 @@ viewport.addEventListener('touchstart', e => {
             return;
         }
         const l = getSelected();
-        if (l && l.visible && !isStashLayer(l) && pointInBox(pos, l)) beginMoveDrag(pos, l);
+        if (l && l.visible && pointInBox(pos, l)) beginMoveDrag(pos, l);
     }
 }, { passive: false });
 viewport.addEventListener('touchmove', e => {
@@ -10882,11 +11123,10 @@ function addSurfaceLayer(opts) {
         fxCache: null,
         stack: opts.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
         fragment: false,
-        // Stash 层的两面身份也从外面交进来:stash 是「像素每帧从下面抄」,raster 是「网格焊死在画布上」
-        // —— 后者让它白拿到栅格层那一整套规矩 (恒等变换、没有 Expand/Rasterize、后端看见的是画布尺寸
-        // 的像素),前者只多管抄写、缩略图和那几处该拒绝的手势。
+        // raster = 「网格焊死在画布上」:恒等变换、没有 Expand/Rasterize、后端看见的是画布尺寸的像素。
+        // （Stash 以前是这里的第二种身份 —— 它每帧从下面抄。现在它是条带上一枚普通的面，不再由图层
+        //   种类背，那套"该拒绝的手势"也就一并没了。）
         raster: !!opts.raster,
-        stash: !!opts.stash,
     };
     insertAtStackTop(ownSource(l, l.img, l.src));   // top of its own stack, never above the guidance block
     selectedId = l.id;
@@ -10924,33 +11164,9 @@ function addDefaultLayer(stack) {
     return l;
 }
 
-// Stash Layer: the stack underneath it, re-copied on every composite (see the Stash section above).
-// It arrives at the top of its own stack. In Layers the usual aim is the whole picture; in Guidances
-// the picture is the Layers composite plus the guidance layers under that row. Drop it lower and it
-// stashes just what sits under it. Its pixels start empty because the very next render
-// fills them — the row is built before that first copy, so it must not read "no image" (see 图层行).
-function addStashLayer(stack) {
-    const st = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
-    if (!(canvasW > 0 && canvasH > 0) && activeLayerSet) {
-        whenLayerCanvas(() => addStashLayer(st));
-        return null;
-    }
-    ensureVidCanvas();
-    if (!canvasW || !canvasH) {
-        setStatus('Set a canvas size before adding a Stash', 'error');
-        return null;
-    }
-    const l = addSurfaceLayer({
-        pw: canvasW, ph: canvasH,
-        transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        stack: st,
-        raster: true,
-        stash: true,
-        name: `Stash ${stackLayers(st).filter(isStashLayer).length + 1}`,
-    });
-    if (l) setStatus(`Stash added — its picture is the ${canvasW} × ${canvasH} composite of the layers under it, re-read on every draw`);
-    return l;
-}
+// Stash 不再是一种图层，所以这里没有 `addStashLayer` —— 要它就往某一行的条带上加一枚 Stash
+// （条带末尾那颗 `+` 的菜单，与 Image / Mask / Effects 同一条路，见 attr/stash.js）。那一枚拍的是
+// "它所在那一层以下的所有图层"，于是落在 Layers 顶上就是"整幅画面"、落到中间就是"它下面那一叠"。
 
 // ==================== 漫画格排版（宿主 action `panel-layout`）====================
 // 一条动作摆出一整页分格：纸（可选）→ 每格一张空层 → 最上面一张线稿层。**几何不在这里算** ——
@@ -13093,8 +13309,8 @@ window.addEventListener('keydown', e => {
         if (!l) { setStatus('No layer selected to paint', 'error'); return; }
         if (isMaskLayerTarget()) { setStatus('The Mask layer has one surface — neither key does anything here', 'error'); return; }
         const decal = KB.hit(e, 'paint.decal');
-        setPaintTarget(decal ? 'decal' : 'mask', l, null);
-        setStatus(decal ? 'Paint target — the last Decal step' : 'Paint target — the last Mask step');
+        setPaintTarget(decal ? 'image' : 'mask', l, null);
+        setStatus(decal ? 'Paint target — the last Image step' : 'Paint target — the last Mask step');
         return;
     }
     // PS's own letters: M is the marquee family, L the lasso family. Both are canvas-level tools,
@@ -13155,9 +13371,6 @@ window.addEventListener('keydown', e => {
     }
     if (KB.hit(e, 'layer.delete') && l && !l.isMaskLayer) { e.preventDefault(); removeLayer(l.id); return; }
     if (!l || l.isMaskLayer || mode !== 'transform') return;
-    // A Stash is welded to the canvas (see the press handlers): an arrow nudge would only be undone
-    // by the next re-copy, so it takes no part in one — alone or inside a group.
-    if (isStashLayer(l)) return;
     // 四个方向各是一条命令（可以分别指到别的键上）；Shift 不参与绑定判定 —— 它是步长参数
     // （1 像素 / 10 像素），表里标了 shiftAsParam，所以 KB.hit 会忽略 e.shiftKey。
     const nudgeDir = KB.hit(e, 'layer.nudge-left') ? 'ArrowLeft'
@@ -13170,7 +13383,7 @@ window.addEventListener('keydown', e => {
     if (nudgeDir) {
         e.preventDefault();
         // The arrow keys drive the whole group — nudging a set is the same gesture, one step.
-        const targets = (dragGroupMembers() || [l]).filter(t => !isStashLayer(t));
+        const targets = dragGroupMembers() || [l];
         if (!targets.length) return;
         const dx = nudgeDir === 'ArrowLeft' ? -step : nudgeDir === 'ArrowRight' ? step : 0;
         const dy = nudgeDir === 'ArrowUp' ? -stepY : nudgeDir === 'ArrowDown' ? stepY : 0;
@@ -14273,10 +14486,20 @@ async function buildCudBlob() {
                             box: r.box ? Object.assign({}, r.box) : null, ownsGrid: !!r.ownsGrid } : null;
                     }
                 }
+                // 空白底位 (手画的空层、文字/方向层的格子) 不入档:它的正身是 `image: null` + grid,
+                // 重开时按格子重建那张空画布。写进去等于给每一张空层塞一枚全透明 PNG。
+                else if (r.role === 'base' && !r.src) e = null;
+                // Stash 的面是**派生**的（每次 render 从这一层以下那一叠重抄），存下来只是一张 stale
+                // 副本 —— 与生成器同一条规矩：入档的只有"这一枚在这条条带的第几位"。这一岔必须排在
+                // 下一句"有面才入档"**之前**，否则它会带着那张过期的快照进文件（几百 KB，还不准）。
+                else if (r.type === 'stash') e = { id: r.id, type: 'stash' };
                 else if ((r.surface && r.surface.width && r.surface.height) || r.frameTrack)
                     e = { id: r.id, type: r.type,
                         surface: (r.surface && r.surface.width && r.surface.height)
                             ? addAsset(r.type, r.surface, r.surface.width, r.surface.height) : null };
+                // 底位在档里必须自己说出来 (`role:'base'`):重开时它就是"这一层自己的像素",不是
+                // 一张叠上去的图 —— 少了这一格,每条图层回来都会多一张全幅贴片。
+                if (e && r.role) e.role = r.role;
                 // 停用的那一步要在文件里说得出"停用":稀疏字段,与 snapshotAttrs 同一读法 (缺席=开着)。
                 // 不落这一句的话,重开时折叠会把每一步都跑一遍 —— 关掉的那枚在屏幕上回来。
                 if (e && r.frameTrack) e.frameTrack = r.frameTrack;
@@ -14294,7 +14517,9 @@ async function buildCudBlob() {
     const buildLayerRecords = list => {
         const out = [];
         for (const l of list) {
-            const n = nativeSize(l.img);
+            // 一张图都没有的层（老 Stash 层那种形状）也要说出自己的网格 —— 它没有底位可问，
+            // `nativeSize(null)` 会给出 1×1，读回来就成了一枚 1×1 的空白底。
+            const n = layerGridOf(l);
             // A layer the row draws with the red × has no image, only a pixel box. Encoding its
             // all-transparent canvas as a PNG asset is what made the round trip lie: on reload the
             // layer had a `src` again, so it read as "an image" and displayed as black on the dark UI.
@@ -14302,15 +14527,20 @@ async function buildCudBlob() {
             // surface needs to be rebuilt at (a Dynamic Layer's box is not the canvas, so the
             // transform alone cannot recover it). A layer still decoding has no `img` at all — that
             // one is NOT blank, and encoding it must keep failing loudly instead of saving nothing.
-            const blank = !!l.img && !l.src;
+            // 一张图都没有的层（`!l.img`、条带上有 Stash）同一个说法：`image: null` + 网格。
+            const noImage = !l.img && attrRecordsOf(l).some(r => r && r.type === 'stash');
+            const blank = noImage || (!!l.img && !l.src);
+            // 底位那张资产只登记一次（addAsset 按表面去重 —— 它的正身在 `attrs` 那一枚里，这一句
+            // 走到时 cudAttrs 已经登记过同一个 surface 了，于是两边拿到同一个 id）。
+            // `image` 是给老读端的镜像字段：这一版的正身是条带上那枚 `role:'base'` 的 image。
+            const baseAsset = blank ? null : addAsset('image', l.img, n.w, n.h);
+            const box = boxOf(l);
             const row = {
                 id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
                 raster: !!l.raster,
-                // A Stash owns no pixels to store (its `src` is empty, so `blank` above files it with
-                // `image: null` like every hand-made surface) — the one flag is all the file needs, and
-                // the first draw after a load re-copies the stack under it. Storing the sample would
-                // only ever be a stale copy of layers the file already carries.
-                stash: !!l.stash,
+                // （Stash 以前在这里占一格 —— 一个布尔，因为它"没有像素可存"。现在它是条带上一枚
+                //   attribute，存档由 `attrs` 那一串统一负责：类型与位置进档，面不进（每次 render
+                //  现抄，存下来只会是一张 stale 的副本）。）
                 // Which palette this row belongs to. The file keeps `layers` order verbatim, so an
                 // older document (no `stack` on its records) decodes as an all-Layers stack.
                 stack: stackOf(l),
@@ -14332,7 +14562,12 @@ async function buildCudBlob() {
                 // 绑定的贴图例外:它的像素走自己的 role='map' 资产(见 cudEffects)。
                 // v4 起蒙版/贴片/链都住在这一串里,顺序就是应用顺序;老文件的三个平字段由读端折算回来。
                 attrs: cudAttrs(l),
-                image: blank ? null : addAsset('image', l.img, n.w, n.h),
+                // 图层盒：只剩**网格**（这一层自己的坐标网格，空白盒也有）。图片一枚都不在盒里 ——
+                // 底位是 `attrs` 最左那一枚 `role:'base'` 的 image，往上加的图是它后面那几枚。
+                // 读端忽略这一段也能开（退回 `image`/`pw`/`ph`），所以版本号不升。
+                box: box ? { id: box.id, grid: { w: box.grid.w, h: box.grid.h } } : null,
+                // 老字段：底位那枚 image 的正身是 `attrs` 里那一格，这一格只为老读端照旧能开。
+                image: baseAsset,
             };
             // v6 的 { buffer, source } 要等哈希算完才补得上（见 hashAssets）。这里先记住
             // 记录与活图层的对应，不去猜。
@@ -14946,9 +15181,15 @@ function routeImportFiles(files, stack) {
 // 文件记录里的 attribute 列表。v4 写成有序的 `attrs`;更早的文件是 mask/decal/effects 三个平字段,
 // 顺序由那条固定管线定死 (decal → 链 → mask)。折算只在这一处,读端后面的代码从此只认一种形状。
 function recAttrEntries(rec) {
-    if (Array.isArray(rec.attrs)) return rec.attrs.filter(a => a && ATTR_TYPES[a.type]);
+    // 老档的 attrs 里写的是 'decal'：**先归一类型名再查表**，否则 `ATTR_TYPES` 认不出，这一条会被
+    // 当场过滤掉 —— 症状就是旧档打开后贴片/笔画全丢（读端静默吞掉，没有报错）。
+    if (Array.isArray(rec.attrs)) {
+        return rec.attrs
+            .filter(a => a && ATTR_TYPES[canonAttrType(a.type)])
+            .map(a => Object.assign({}, a, { type: canonAttrType(a.type) }));
+    }
     const out = [];
-    if (rec.decal !== null && rec.decal !== undefined) out.push({ type: 'decal', surface: rec.decal });
+    if (rec.decal !== null && rec.decal !== undefined) out.push({ type: 'image', surface: rec.decal });
     if (Array.isArray(rec.effects) && rec.effects.length) out.push({ type: 'effects', chain: rec.effects });
     if (rec.mask !== null && rec.mask !== undefined) out.push({ type: 'mask', surface: rec.mask });
     return out;
@@ -14960,10 +15201,18 @@ function attrChainsOf(rec) {
 // 面在文件里是一个资产 id,回来才是画布;链还要过 restoreFxMaps,绑定才接得上这次导入的那份像素。
 // 指不到像素的面 attribute 就地丢掉 (旧文件里那枚空的 Mask 与"没有 Mask"同义),链则连空容器一起留 ——
 // 那是"这条链清过但还挂着"的意思,S5 的 UI 要读它。
-async function resolveRecAttrs(rec, blobs, cache, mapKeys) {
+async function resolveRecAttrs(rec, blobs, cache, mapKeys, opts) {
     const out = [];
+    const skipBase = !!(opts && opts.skipBase);
     for (const a of recAttrEntries(rec)) {
         const key = a.id || null;        // v4 及更早的条目没有标签,那它们本来就该各解一份
+        // 底位那一枚的像素不走 attr 表:同一张图已经由 `image` 那一趟 (decode <img>) 解过 —— 这里
+        // 再解一次等于同一份字节编两遍,还会把那张可共享、可直取原字节的 <img> 换成一张私有画布。
+        // 只留身份 (guid + role),面留空,由 restoreSource 把那张 <img> 补上。
+        if (a.role === 'base' && skipBase) {
+            out.push({ id: key, type: 'image', role: 'base', surface: null });
+            continue;
+        }
         if (cache && key && cache.has(key)) { out.push(cache.get(key)); continue; }
         let e = null;
         if (a.type === 'effects') {
@@ -14975,6 +15224,11 @@ async function resolveRecAttrs(rec, blobs, cache, mapKeys) {
             // 面缺席 = 存档环境没烘过那一步,交给 sync 重算 (装配失败就仍是没面, fail-soft)。
             const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
             if (blob) e.surface = await blobToCanvas(blob);
+        } else if (a.type === 'stash') {
+            // Stash 的面**不进档**（每次 render 从这一层以下那一叠重抄，存下来只会是一张 stale 的
+            // 副本）。所以这一枚回来只有身份与位置 —— 少了这一岔，它会掉进下面那句"没有面就不立
+            // 记录"里，整枚消失，用户的 Stash 步骤开档就没了。
+            e = { id: key, type: 'stash', surface: null };
         } else {
             const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
             const frameTrack = typeof a.frameTrack === 'string' ? a.frameTrack : '';
@@ -15014,7 +15268,7 @@ function cudContext(header, records, maskSurface, setData) {
         maskDecal: maskSurface || null,
         maskLayer: surface,
         mode: ['transform', 'mask', 'zoom', 'pan', 'rotate', 'none'].indexOf(sel.mode) >= 0 ? sel.mode : 'transform',
-        paintTarget: sel.paintTarget === 'decal' ? 'decal' : 'mask',
+        paintTarget: sel.paintTarget === 'image' ? 'image' : 'mask',
         view: { zoom: Number.isFinite(v.zoom) ? v.zoom : 1, rotation: Number.isFinite(v.rotation) ? v.rotation : 0,
             flipX: Number.isFinite(v.flipX) && v.flipX < 0 ? -1 : 1,
             panX: Number.isFinite(v.panX) ? v.panX : 0, panY: Number.isFinite(v.panY) ? v.panY : 0,
@@ -15069,8 +15323,15 @@ async function openCudDocument(file, doc) {
         const buildRecords = async recs => {
             const records = [];
             for (const rec of (Array.isArray(recs) ? recs : [])) {
-                // v6 的图层记录写 { buffer, source }，老字段 image（资产表序号）仍在；两个都认。
-                const imgRef = rec && (rec.buffer !== null && rec.buffer !== undefined ? rec.buffer : rec.image);
+                // 图层记录里有一枚**盒**：`box.base` 是底位，`box.grid` 是这一层自己的网格。
+                // 老文件没有盒，`image` 就是底位；上一版用 `box.images[0]` 说同一件事（两种形状
+                // 由 boxBaseRefOf 统一认）。条带上那些 image 步骤走 attrs，不在这条路上。
+                const boxRaw = rec && rec.box && typeof rec.box === 'object' ? rec.box : null;
+                const gridRaw = boxRaw && boxRaw.grid && typeof boxRaw.grid === 'object' ? boxRaw.grid : null;
+                const boxRef = boxBaseRefOf(rec);
+                // v6 的图层记录写 { buffer, source }，老字段 image（资产表序号）仍在；盒里的那一枚最后才让位。
+                const imgRef = rec && (rec.buffer !== null && rec.buffer !== undefined ? rec.buffer
+                    : (boxRef !== undefined ? boxRef : rec.image));
                 const hasImage = imgRef !== null && imgRef !== undefined;
                 const textDesc = rec && !rec.raster ? sanitizeTextDescriptor(rec.text) : null;
                 // 老字段只当**迁移原料**:文件里真写了姿态才立一枚 Direction。sanitizeDirectionDescriptor 对
@@ -15079,13 +15340,14 @@ async function openCudDocument(file, doc) {
                 const dirDesc = rec && !rec.raster && rec.dir ? sanitizeDirectionDescriptor(rec.dir) : null;
                 let img = null, url = '';
                 if (!hasImage) {
-                    // `image: null` is a layer that has no image — the row shows the red ×. Rebuild the
-                    // blank scratch canvas it was saved from, at the pixel box the file carries, so the
-                    // layer stays "no image yet" across the round trip instead of arriving as a
-                    // transparent (on this dark UI: black) picture. A mask/decal painted on it is a
-                    // separate asset and still lands below.
-                    const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.pw) || 1)));
-                    const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.ph) || 1)));
+                    // `image: null` is a box with nothing in it — the row shows the placeholder. Rebuild
+                    // the blank scratch canvas at the grid the box carries, so an empty box stays an
+                    // empty box across the round trip instead of arriving as a transparent (on this
+                    // dark UI: black) picture. `pw/ph` is the same sentence for a file without a box.
+                    const gw = Number(gridRaw && gridRaw.w) >= 1 ? Number(gridRaw.w) : Number(rec && rec.pw);
+                    const gh = Number(gridRaw && gridRaw.h) >= 1 ? Number(gridRaw.h) : Number(rec && rec.ph);
+                    const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(gw || 1)));
+                    const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(gh || 1)));
                     // 文字/方向/3D 行重建的也是一张空白底:描述符 (或烘好的面) 走 attrs 那张表回来,像素由
                     // 各自的 sync 在第一次折叠前重算 —— 底不再是渲染,它只是格子。
                     img = makeBlankCanvas(pw, ph);
@@ -15112,8 +15374,33 @@ async function openCudDocument(file, doc) {
                     }
                 }
                 const tr = rec.transform || {};
+                // 条带先解:底位那一枚 (role:'base') 只认身份,像素用上面那张 img —— 老文件没有这一枚,
+                // 于是 `srcRef` 是 null,由 restoreSource 现场立一枚 (这就是老工程读进来之后"图片变成
+                // 一枚 image attribute"的那一步)。
+                let attrPayload = await resolveRecAttrs(rec, blobs, attrDecoded, null, { skipBase: hasImage });
+                // 老档迁移：Stash 曾经是一种图层（`rec.stash` + `raster:true`）。那一层自己那枚 image
+                // （底位）是**空的** —— 它只是每帧重抄的临时画布，从来不是这一层的像素。所以搬成
+                // 「普通层 + 条带头上一枚 Stash」：底位丢掉（留着就是一枚 src 为空的假底位），用户
+                // 自己涂过的 Image 步骤照旧留在后面（旧版抄写只重写 img，墨进的是 decal，两者各走各的
+                // 面，所以那一枚 image 步骤在这里本来就该留下）。面不进档 —— 第一次 render 现抄。
+                //
+                // `raster` 也丢掉：用户拍板「Stash 所在的层就是普通层」（能移动/缩放/旋转/编组/
+                // Rasterize/Combine），旧的那种"几何焊死画布"是图层种类的残留，不是这一层要表达的
+                // 意思。网格仍是画布尺寸，所以读进来时它正好盖满画布，与旧观感逐像素相同。
+                if (rec.stash) {
+                    attrPayload = attrPayload.filter(a => !(a && a.role === 'base'));
+                    attrPayload.unshift({ type: 'stash' });
+                }
+                const baseEntry = attrPayload.find(a => a && a.role === 'base') || null;
+                // **没有底位、却有 Stash 步骤**的层不造空白底（与 attachSourceView / restoreSource 里
+                // 同一条）。不这么办，上面那段 `!hasImage` 造出来的那张空白画布会被 restoreSource 认成
+                // "底位有像素"，于是这一层又长出一枚 `src` 为空、没有墨的 image attribute —— 迁完等于
+                // 没迁。只认 Stash：别的"没有底位"的层（例如只挂了一枚蒙版的手画空层）照旧要有那张空白
+                // 画布当格子，那是另一件事。
+                if (!baseEntry && attrPayload.some(a => a && a.type === 'stash')) { img = null; url = ''; }
                 records.push({
                     id: (Number.isInteger(rec.id) && rec.id > 0) ? rec.id : ++layerSeq,
+                    srcRef: baseEntry ? baseEntry.id : null,
                     // 图层自带像素，不绑任何图池 id —— 跨会话导入天然无悬空引用。
                     name: rec.name || 'Layer', src: url, img,
                     // v6：这一层的像素从哪张资产来（staging 拖入 / 文件导入可查）。buffer 是保存那一刻
@@ -15122,9 +15409,11 @@ async function openCudDocument(file, doc) {
                     buffer: typeof rec.buffer === 'string' ? rec.buffer : null,
                     visible: rec.visible !== false,
                     fragment: !!rec.fragment,
-                    raster: !!rec.raster,
-                    // 老文件没这个字段 —— 没有它就不是 Stash,而它存档的那张空面照旧当一张普通栅格层画。
-                    stash: !!rec.stash,
+                    // raster 照旧 —— **除了老 Stash 行**：它当年带 `raster:true` 只因为网格焊在画布上，
+                    // 而那个身份现在归 Stash 那一枚 attribute 自己说（"像素来自下面那一叠"）。这一层
+                    // 已经是普通层了，能移动/缩放/旋转/Rasterize/Combine；网格仍是画布，所以读进来
+                    // 时正好盖满画布，与旧观感逐像素相同。
+                    raster: rec.stash ? false : !!rec.raster,
                     // A document saved before the Guidances stack existed has no `stack` on its rows —
                     // every one of them is a working layer, which is also what it looked like then.
                     stack: rec.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
@@ -15151,7 +15440,7 @@ async function openCudDocument(file, doc) {
                         : null,
                     // attribute 的面在文件里是资产 id,回来才是画布;链过一遍 restoreFxMaps,绑定才接回
                     // 这次导入带来的那份像素。v1 文件里没这些字段 —— 空白链就是「没有特效」,不是「特效坏了」。
-                    attrs: await resolveRecAttrs(rec, blobs, attrDecoded),
+                    attrs: attrPayload,
                 });
                 // 老文件的 text/dir 还是图层字段:strip 里没有同类记录时补一条 (新文件直接读 attrs)。
                     mergeLegacyGenerators(records[records.length - 1]);
@@ -15335,14 +15624,20 @@ async function flattenCudStack(header, blobs, mapKeys) {
     for (let i = recs.length - 1; i >= 0; i--) {
         const rec = recs[i];
         if (!rec || rec.visible === false || rec.stack === GUIDANCE_STACK) continue;
-        if (rec.stash) continue;        // Stash 复读的是它下面的合成 —— 自底向上折到它时那句话已经画在画布上了
         let src = null;
-        const imgRef = rec.buffer !== null && rec.buffer !== undefined ? rec.buffer : rec.image;
+        // 底位在盒里（`box.base`；上一版是 `box.images[0]`）；没有盒的文件只有 `image`。
+        const boxRaw = rec.box && typeof rec.box === 'object' ? rec.box : null;
+        const boxRef = boxBaseRefOf(rec);
+        const imgRef = rec.buffer !== null && rec.buffer !== undefined ? rec.buffer
+            : (boxRef !== undefined ? boxRef : rec.image);
         if (imgRef === null || imgRef === undefined) {
             // 生成器行没有自己的像素 (底就是一张空白格子):按文件里的格子重建,面由 sync 现算。
             if (!rec.raster) {
-                const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec.pw) || 1)));
-                const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec.ph) || 1)));
+                const g = boxRaw && boxRaw.grid ? boxRaw.grid : null;
+                const gw = Number(g && g.w) >= 1 ? Number(g.w) : Number(rec.pw);
+                const gh = Number(g && g.h) >= 1 ? Number(g.h) : Number(rec.ph);
+                const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(gw || 1)));
+                const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(gh || 1)));
                 src = makeBlankCanvas(pw, ph);
             }
         } else {
@@ -15372,6 +15667,13 @@ async function flattenCudStack(header, blobs, mapKeys) {
             attrs: adoptAttrPayloads(payload.attrs, attrAdopted),
             fxCache: null,
         };
+        // 伪层也要有自己那一枚底位：底位现在是条带上**普通的一步**，不再由折叠另外铺一遍，
+        // 所以少了它这一层的像素就没有人接过去 —— 背景层会整层透明。
+        {
+            const b = newImageRecord(src, '', 'base');
+            pseudo.srcRef = b.id;
+            pseudo.attrs.unshift(b.id);
+        }
         // 折叠要读 canvasW/H:ownsGrid 的生成器按它定格子,Canvas 对齐的贴图按它算落点 —— 这里
         // 折的是**文件自己的画布**,不是宿主当下的。swap 只罩住下面这段同步代码,所有 await 都
         // 在窗口之外,不会撞上别的渲染帧。
@@ -15384,7 +15686,7 @@ async function flattenCudStack(header, blobs, mapKeys) {
             const n = nativeSize(pseudo.img);
             if (n.w && n.h) {
                 const surface = fxScratch(n.w, n.h);
-                if (fxDropStrip(pseudo, surface, pseudo.img, -1, FX_CUT_ALL)) folded = surface;
+                if (fxDropStrip(pseudo, surface, null, -1, FX_CUT_ALL)) folded = surface;
             }
         } finally {
             canvasW = saveW; canvasH = saveH; effectsBypass = saveBypass;
@@ -15770,7 +16072,6 @@ const UI_COMMANDS = {
         const o = uiRow(v), st = uiStack(o.stack), kind = String(o.kind);
         if (st !== GUIDANCE_STACK && st !== WORK_STACK) return;
         if (kind === 'default') addDefaultLayer(st);
-        else if (kind === 'stash') { if (st === WORK_STACK) addStashLayer(st); }
         else if (kind === 'dynamic') { if (st === WORK_STACK) dynAutoRun = null; armRectDrag(st); }
         else if (kind === 'cud') addCudLayerFromPick(st);
     },
@@ -16886,27 +17187,22 @@ window.addEventListener('message', event => {
         setStatus(d.note || 'Detailer result added as a new layer below the Mask', 'success');
         return;
     }
-    if (d.type === 'blend-replace-layer') {
-        // A layer-initiated Generate comes back here. An image-less (from-noise) target keeps
-        // the in-place refill — there was nothing to preserve. A target that already carries an
-        // image keeps it: the result lands on a NEW layer above, covering exactly where the source
-        // sits. Either way the result's frame is the SOURCE LAYER's frame — the backend ran at the
-        // layer's own size — narrowed onto `place` when Recover Crop is off (see placeTransform).
-        // Still NOT addLayer: addLayer would fit-to-canvas and throw away that placement.
+    if (d.type === 'blend-append-image' || d.type === 'blend-replace-layer') {
+        // A layer-initiated Generate comes back here. The result is **appended as an Image step** on
+        // the source layer (see appendGeneratedImage): the layer keeps everything it had — base
+        // pixels, mask, chains — and gains one more image on top, in the place the backend drew it.
+        // No second layer, nothing overwritten. The rect the backend ran against is the SOURCE
+        // LAYER's grid (it was sent at native size), narrowed onto `place` when Recover Crop is off.
+        // Still NOT addLayer: addLayer would fit-to-canvas and throw that placement away.
         // The result delivered clears the auto-run's removal watch: the layer earned its pixels.
+        // 旧名 `blend-replace-layer` 一起收着：它说的是"结果覆盖回来"那个旧模型，宿主刷新之前
+        // 还可能发这个名，而两条路今天做的已经是同一件事（追加，不是覆盖）。
         if (autoDynLayerId === d.layer_id) autoDynLayerId = null;
-        const srcLayer = layers.find(x => x.id === d.layer_id);
         const item = d.items && d.items[0];
-        // Enable Fit 只交给新图层：就地填充空图层改的是那一层自己的像素与 mask，没有"框"可缩。
+        // Enable Fit 是一句"把新图层的框缩到蒙版上"，追加这条路没有框可缩：读掉即清，不带下去。
         const fit = pendingGenFit;
         pendingGenFit = false;
-        // A text layer WITH content already carries a picture — it spawns like an image layer.
-        // An empty one is a blank surface and takes the in-place refill (which drops its
-        // descriptor on the way in, see replaceLayerImage).
-        const hasPixels = srcLayer && (hasLayerImage(srcLayer)
-            || (isTextLayer(srcLayer) && !!String(srcLayer.text.content)) || isDirectionLayer(srcLayer));
-        if (hasPixels) spawnGeneratedLayer(d.layer_id, item, { fit });
-        else replaceLayerImage(d.layer_id, item);
+        appendGeneratedImage(d.layer_id, item, { fit });
         return;
     }
     if (d.type === 'blend-insert-image-ids') {

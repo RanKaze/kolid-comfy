@@ -40,7 +40,7 @@ export interface Layer {
     stack: StackId;
     fragment: boolean;
     raster: boolean;
-    stash: boolean;
+    // （`stash` 这一格随图层种类一起删了 —— 它是条带上一枚 attribute，见 attr/stash.js。）
     // The strip: ordered guids into the attribute table. Order IS the execution order, left to right.
     attrs: string[];
     cud: CudLink | null;
@@ -93,7 +93,6 @@ export interface LayerSnapshot {
     visible: boolean;
     fragment: boolean;
     raster: boolean;
-    stash: boolean;
     three: boolean;
     sceneUid: string | null;
     stack: StackId;

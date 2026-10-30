@@ -132,12 +132,95 @@ def main():
     elif not cross:
         print('（golden 里没有同一图层集的捕获，跳过 B 段）')
 
+    # ── C. 图层盒：老文件的那一格像素现在补成 strip 最左那一枚 image ──────────────
+    # 今天这一层自己的图就是条带上 `role:'base'` 那一步，plan 里不再有"单独铺的底"（`base` 恒 null）。
+    # 只有**完全没有条带记录**的老文件要补：像素还住在 `box.base.image` / `box.images[0]` / `image`
+    # 里，不补那一层会整层不出现。四条规矩：新形状优先、上一版照旧、老形状照旧、空盒不补。
+    def _mkdoc(layer):
+        return {'path': '<synthetic>', 'blob': b'',
+                'head': {'canvas': {'w': 64, 'h': 32}, 'layers': [layer]},
+                # 键的类型跟 read_cud 一致：JSON 里的 id 是数字，字典也就按数字索引。
+                'assets': {0: {'id': 0, 'role': 'image', 'md5': 'a' * 32},
+                           1: {'id': 1, 'role': 'image', 'md5': 'b' * 32}}}
+
+    def _layer0(doc):
+        return rp.compile_plan(doc)['layers'][0]
+
+    def _first_image(layer):
+        return next((s for s in layer['strip'] if s.get('type') == 'image'), None)
+
+    boxed = _mkdoc({'id': 7, 'name': 'boxed', 'image': 1,
+                    'box': {'id': 'box_1', 'grid': {'w': 48, 'h': 24},
+                            'base': {'id': 'base', 'type': 'image', 'role': 'base', 'image': 0}}})
+    lb = _layer0(boxed)
+    check(lb['base'] is None, f"plan 不再有单独铺的底，实得 {lb['base']}", fails)
+    check(_first_image(lb) is not None
+          and _first_image(lb)['surface']['resource'] == 'res:' + 'a' * 32,
+          f"新形状：那一格必须变成 strip 最左那枚 image，实得 {lb['strip']}", fails)
+
+    # 上一版的写法：盒里是一个长度恒为 1 的"列表"。旧文件读回来必须还是同一张底图。
+    prev = _mkdoc({'id': 10, 'name': 'prev', 'image': 1,
+                   'box': {'id': 'box_3', 'grid': {'w': 48, 'h': 24},
+                           'images': [{'id': 0, 'type': 'image', 'role': 'base', 'image': 0}]}})
+    lp = _layer0(prev)
+    check(_first_image(lp) is not None
+          and _first_image(lp)['surface']['resource'] == 'res:' + 'a' * 32,
+          f"上一版（box.images[0]）：底图必须照旧读出来，实得 {lp['strip']}", fails)
+
+    legacy = _mkdoc({'id': 8, 'name': 'legacy', 'image': 1})
+    ll = _layer0(legacy)
+    check(_first_image(ll) is not None
+          and _first_image(ll)['surface']['resource'] == 'res:' + 'b' * 32,
+          f"老档（没有 box）：底图仍从 image 读，实得 {ll['strip']}", fails)
+
+    empty = _mkdoc({'id': 9, 'name': 'empty', 'image': None,
+                    'box': {'id': 'box_2', 'grid': {'w': 12, 'h': 6},
+                            'base': {'id': 'base', 'type': 'image', 'role': 'base', 'image': None}}})
+    le = _layer0(empty)
+    check(le['strip'] == [], f"空盒：不该补出任何 image 步，实得 {le['strip']}", fails)
+
+    # ── D. 底位就是条带上普通的一步（位置真的算数）──────────────────────────────
+    # 图层不自带图片：这一层自己的图是条带上的一枚 attribute。以前它被单独交给 `base`，于是必须恒在最左，
+    # 拖到哪都一样（UI 上看着动了，画面没动）；现在它在 strip 自己的位置上，strip 按元组顺序交出去 ——
+    # 这一节的三条就是"拖 image attribute 有用"在编译期的证据。
+    def _resources(doc):
+        return [s.get('surface', {}).get('resource') if s['kind'] == 'surface' else s['type']
+                for s in _layer0(doc)['strip']]
+
+    attrbox = _mkdoc({'id': 11, 'name': 'attrbox', 'box': {'id': 'box_4', 'grid': {'w': 48, 'h': 24}},
+                      'attrs': [{'id': 'img_a', 'type': 'image', 'role': 'base', 'surface': 0}]})
+    la = _layer0(attrbox)
+    check(la['base'] is None, f"底位属性：base 必须恒为 null，实得 {la['base']}", fails)
+    check(_resources(attrbox) == ['res:' + 'a' * 32],
+          f"底位属性：它自己就在 strip 里，实得 {la['strip']}", fails)
+
+    stacked = _mkdoc({'id': 12, 'name': 'stacked',
+                      'attrs': [{'id': 'img_b', 'type': 'image', 'role': 'base', 'surface': 0},
+                                {'id': 'img_c', 'type': 'image', 'surface': 1}]})
+    check(_resources(stacked) == ['res:' + 'a' * 32, 'res:' + 'b' * 32],
+          f"底位 + 一枚叠上去的图：顺序照条带来，实得 {_resources(stacked)}", fails)
+
+    # 底位被拖到另一枚 image 右边时，plan 必须原样交出这个顺序（合成器按这个顺序跑）。
+    flipped = _mkdoc({'id': 13, 'name': 'flipped',
+                      'attrs': [{'id': 'img_d', 'type': 'image', 'surface': 1},
+                                {'id': 'img_e', 'type': 'image', 'role': 'base', 'surface': 0}]})
+    check(_resources(flipped) == ['res:' + 'b' * 32, 'res:' + 'a' * 32],
+          f"底位拖到右边：strip 必须是 [另一枚, 底位]，实得 {_resources(flipped)}", fails)
+
+    # 蒙版在底位之前 = 蒙版跑在还没画出来的图上；这一枚照它自己那个位置说话，不再有"永远先铺底"。
+    masked = _mkdoc({'id': 14, 'name': 'masked',
+                     'attrs': [{'id': 'm', 'type': 'mask', 'surface': 1},
+                               {'id': 'img_f', 'type': 'image', 'role': 'base', 'surface': 0}]})
+    check([s['type'] for s in _layer0(masked)['strip']] == ['mask', 'image'],
+          f"底位拖到蒙版右边：strip 必须是 [mask, image]，实得 {[s['type'] for s in _layer0(masked)['strip']]}", fails)
+
+
     if fails:
         print('FAIL %d 项：' % len(fails))
         for f in fails:
             print('  - ' + f)
         return 1
-    print(f'OK  编译断言 {6} 组，交叉核对 {cross} 份 raw 捕获')
+    print(f'OK  编译断言 6 组 + 图层盒 4 条 + 底位步骤 4 条，交叉核对 {cross} 份 raw 捕获')
     return 0
 
 

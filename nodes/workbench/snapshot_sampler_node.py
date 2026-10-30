@@ -2812,7 +2812,7 @@ class SnapshotDetailerSamplerServer:
                 tensor = tensor[0]
             attrs = spec.get('attrs')
             if attrs is None:
-                attrs = [{'type': 'decal', 'image': spec.get('decal')},
+                attrs = [{'type': 'image', 'image': spec.get('decal')},
                          {'type': 'mask', 'image': spec.get('mask')}]
             # 只认这两种:链类 attribute 只有 WebGL 跑得动,前端烘完才发,永远不会跨这条边界。
             pending = []
@@ -2823,8 +2823,13 @@ class SnapshotDetailerSamplerServer:
                     if a not in table:
                         raise ValueError(f'layer keys attribute {a!r} but the payload carries no such face')
                     a = table[a]
-                if a and a.get('type') in ('decal', 'mask') and a.get('image'):
-                    pending.append({'type': a.get('type'), 'src': a.get('image')})
+                # P0 改名：老负载写 decal、新负载写 image，两种都收，往下统一成 image
+                # （再往后 `a['type'] == 'mask'` 分两条解码路，其余一律走 decal 那条 RGBA 解码）。
+                t = (a.get('type') if isinstance(a, dict) else None)
+                if t == 'decal':
+                    t = 'image'
+                if a and t in ('image', 'mask') and a.get('image'):
+                    pending.append({'type': t, 'src': a.get('image')})
             resolved.append({
                 'image': tensor,        # None = 空白图层，画布尺寸确定后补全透明
                 'transform': spec.get('transform'),

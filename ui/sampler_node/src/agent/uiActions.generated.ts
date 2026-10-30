@@ -76,7 +76,7 @@ export const UI_ACTIONS: UiActionInfo[] = [
   { action: "layer-text-edit", payload: "{ id: number }", kind: "object", doc: "" },
   { action: "layer-combine", payload: "undefined", kind: "none", doc: "" },
   { action: "layer-move", payload: "{ id: number; toId: number | null; above: boolean; stack: BlendStack }", kind: "object", doc: "`toId` 为 null = 落到这一摞的末尾（今天\"拖到空列表\"那一句）；`above` 是宿主量出来的上半还是下半。" },
-  { action: "layer-add", payload: "{ stack: BlendStack; kind: 'default' | 'stash' | 'dynamic' | 'cud' }", kind: "object", doc: "头部那口 Add 菜单：一类一条，落到哪一摞由 `stack` 说。`dynamic` 是画布手势的起点（在画布上拉一个 矩形再问分辨率），所以这一条发的是\"开始那一下\"，不是\"造好一层\"。" },
+  { action: "layer-add", payload: "{ stack: BlendStack; kind: 'default' | 'dynamic' | 'cud' }", kind: "object", doc: "头部那口 Add 菜单：一类一条，落到哪一摞由 `stack` 说。`dynamic` 是画布手势的起点（在画布上拉一个 矩形再问分辨率），所以这一条发的是\"开始那一下\"，不是\"造好一层\"。 `stash` 不在这里 —— 它不再是一种图层，是条带上一枚 attribute（拍下\"这一层以下所有图层的合成\"）， 入口在每一行条带末尾那颗 `+` 的菜单（动作 `attr-add`，与 Image / Mask / Effects 同一条路）。" },
   { action: "layer-clear", payload: "{ stack: BlendStack }", kind: "object", doc: "Clear All：只清点那一摞（Layers 那颗不动 Guidances，反之亦然），落点仍是页面的 clearStack。" },
   { action: "raster-drop", payload: "undefined", kind: "none", doc: "Layers 那一格 Add 菜单里那条 `menuitemcheckbox`（Guidances 的菜单没有这条）：往后的图落成 raster 还是 smart object。它翻的是页面那一份持久偏好（`blend.rasterDrop`），所以这条不带值 —— 菜单里那颗勾的明暗读的是快照 `rasterDrop`，不是这里。" },
   { action: "hover-face", payload: "{ id: number }", kind: "object", doc: "Alt+悬浮那一行的**原分辨率**放大图：发的是\"请给我这一行的那一张\"，像素照旧走面通道 （键 `layer:<id>:hover`，封顶 480）。按需的一张，不进每帧那套可见区 + 预算的算法。" },

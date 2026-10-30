@@ -2,7 +2,7 @@
   "generated_by": "tools/gen_agent_tools.cjs ← ui/sampler_node/src/agent/toolSchemas.ts",
   "note": "构建产物，别手改；执行体在 ui/sampler_node/src/agent/tools.ts，后端只转发到页面。",
   "tool_count": 64,
-  "sha": "7104e09f4f9bb470",
+  "sha": "dafafddab62e8e60",
   "tools": [
     {
       "type": "function",
@@ -319,7 +319,7 @@
       "type": "function",
       "function": {
         "name": "add_layer",
-        "description": "Add a new layer onto a stack: stack=layers|guidances; kind=default|stash.",
+        "description": "Add a new empty layer onto a stack: stack=layers|guidances. To snapshot the layers under it, add a Stash attribute afterwards via ui_action attr-add (type=“stash”).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -328,13 +328,6 @@
               "enum": [
                 "layers",
                 "guidances"
-              ]
-            },
-            "kind": {
-              "type": "string",
-              "enum": [
-                "default",
-                "stash"
               ]
             }
           },

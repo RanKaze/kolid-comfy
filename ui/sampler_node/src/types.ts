@@ -684,6 +684,9 @@ export type BlendPen = { mode: string; size: number; strength: number; center: n
 export type BlendAttrChip = {
   guid: string; type: string; label: string; kind: string; chipClass: string;
   badge: string; badgeClass: string; face: string; glyph: string; enabled: boolean; armed: boolean; title: string;
+  /** `'base'` = 这一层的底位（它自己的像素，条带最左那一枚）。空串 = 叠在它上面的一步。
+   *  只用来措辞/角标，不当判据：摆什么、点了做什么，都还是上面那个 `type` 说了算。 */
+  role: string;
 };
 
 /** 一条特效链里的一步。`icon` 与 `readout` 都由页面的 fx 注册表算好（图标库与那句读数都还在那边）。 */
@@ -719,6 +722,10 @@ export type BlendLayerRow = {
   /** 整体不透明度（0..1，PS 式）—— 行上那根 Opacity 滑杆读写的就是它（动作键 layer-opacity）。 */
   opacity: number;
   native: { w: number; h: number }; orig: string; canvas: string; hover: string;
+  /** 图层盒：层不自带图片 —— `w/h` 是这一层自己的网格（空白盒也有），`images` 是这一层一共几张图
+   *  （底位有像素算一张 + 条带上每枚 image 步骤各一张），`base.image` 说底位到底有没有文件
+   *  （`…` 占位与「能不能 Generate」问的都是它）。条带上那几枚图在 `attrs` 里，type === 'image'。 */
+  box: { id: string; w: number; h: number; images: number; base: { image: boolean; w: number; h: number } } | null;
   menu: BlendRowMenu;
   attrs: BlendAttrChip[]; chains: BlendChainLane[];
 };
@@ -1123,8 +1130,10 @@ export type BlendUiPayloads = {
   /** `from` 说的是按在行的哪一处：缩略图那一下把笔交给变换，行身那一下只换选中。`shift` 按住 = 加进组。 */
   'layer-select': { id: number; from?: 'thumb' | 'row'; shift?: boolean };
   /** 头部那口 Add 菜单：一类一条，落到哪一摞由 `stack` 说。`dynamic` 是画布手势的起点（在画布上拉一个
-   *  矩形再问分辨率），所以这一条发的是"开始那一下"，不是"造好一层"。 */
-  'layer-add': { stack: BlendStack; kind: 'default' | 'stash' | 'dynamic' | 'cud' };
+   *  矩形再问分辨率），所以这一条发的是"开始那一下"，不是"造好一层"。
+   *  `stash` 不在这里 —— 它不再是一种图层，是条带上一枚 attribute（拍下"这一层以下所有图层的合成"），
+   *  入口在每一行条带末尾那颗 `+` 的菜单（动作 `attr-add`，与 Image / Mask / Effects 同一条路）。 */
+  'layer-add': { stack: BlendStack; kind: 'default' | 'dynamic' | 'cud' };
   /** Clear All：只清点那一摞（Layers 那颗不动 Guidances，反之亦然），落点仍是页面的 clearStack。 */
   'layer-clear': { stack: BlendStack };
   /** Layers 那一格 Add 菜单里那条 `menuitemcheckbox`（Guidances 的菜单没有这条）：往后的图落成 raster

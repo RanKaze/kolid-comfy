@@ -33,7 +33,15 @@ const KLayerFold = (function () {
     const VERSION = 1;
     // .cud 的 stack 名 → plan 的 stack 名（与 render_plan.py 的 _STACK 同一张表）
     const STACK = { layer: 'work', guidance: 'guidance' };
-    const SURFACE = { decal: 1, mask: 1 };
+    // stash 与 image/mask 同一档：它是条带上一枚普通的**面**（那一层以下所有图层的合成，每次 render
+    // 现抄）。它曾经是一种图层、由 `capture:'below'` 单独交进 plan —— 那一岔连同图层种类一起删了。
+    // 少了这一格，它会被下面的 else 当成 generator：贴片不叠、还没有报错。
+    const SURFACE = { image: 1, mask: 1, stash: 1 };
+    // P0 改名：这一枚以前叫 decal。**只用这一处归一**，plan 里永远不出现 decal —— 于是 JS 与
+    // Python 两个编译器产出的 step.type 仍逐字段相等（render_plan.py 的 steps_of 里做同一件事）。
+    // 放在折叠这一层而不是靠调用方先改名：喂进来的可能是老档记录、老快照，漏一次就是"贴片被当成
+    // generator 走 baked 面"，症状是贴片不叠、还没有报错。
+    function canonType(t) { return t === 'decal' ? 'image' : t; }
 
     function num(v, d) {
         const n = typeof v === 'number' ? v : parseFloat(v);
@@ -64,7 +72,7 @@ const KLayerFold = (function () {
     /** 一条属性记录 → 一枚 step（三种 kind，与 attr/core.js 的 ATTR_KINDS 一一对应）。
      *  顺序与 Python steps_of 相同：effects → decal/mask → 其余一律 generator。 */
     function stepOf(rec, env, ctx) {
-        const type = rec && rec.type;
+        const type = canonType(rec && rec.type);
         if (!type) return null;
         const enabled = rec.enabled !== false;
 
@@ -164,27 +172,28 @@ const KLayerFold = (function () {
         });
     }
 
-    /** 一层 → plan 的 layer（契约 §2.1）。`base` 允许 null：页面运行时给空白面。
-     *  底像素的引用来源有两套：存档口径（`l.buffer` 的哈希）与运行时口径（`env.base` 给的内存对象）。
-     *  之所以留一个查询口，是因为**同一份 plan schema 要在两种环境里解析** —— 存盘/后端用哈希，
-     *  屏幕上那一趟用活资源；把这件事塞进模块就等于让模块认识页面状态。 */
+    /** 一层 → plan 的 layer（契约 §2.1）。这一层由 strip 自说自话地叠出来：从小一张干净的目标画起，
+     *  条带上每一枚 image 都是一次 source-over —— 于是**第一张图**就是最下面那张，位置该怎么事关
+     *  结果，正是 UI 上"拖一枚 attribute"要的那个语义。底位（`role:'base'`）不再有任何特殊优待。 */
     function layerOf(l, env, ctx) {
         if (!l) return null;
         const tr = env.transform ? env.transform(l) : l.transform;
-        const baseRef = env.base
-            ? env.base(l)
-            : ((l.buffer !== null && l.buffer !== undefined) ? l.buffer : l.image);
         const stackName = env.stack ? env.stack(l) : (STACK[l.stack || 'layer'] || 'work');
         return {
             id: l.id,
             name: l.name || '',
-            base: refOf(baseRef, 'base', env, ctx),
+            // 底位已经变成条带上普通的一步（`strip` 里就有它），所以这里**永远没有单独铺的底**。
+            // 合成器照这个约定来：从一张干净的目标画起，strip 上第一张图自然就是最下面那张。
+            // 留着这个键还给 Python 那条 `render_plan.py` 对着同一个 schema 写 plan（见那里的注）。
+            base: null,
             stack: stackName === 'guidance' ? 'guidance' : 'work',
             visible: l.visible !== false,
             opacity: opacityOf(l, env),
             blend: 'source-over',
-            // Stash 的输入是"以下所有层的合成"，不是它自己的像素
-            capture: l.stash ? 'below' : null,
+            // `capture` 只为旧 Stash **图层**存在（"底像素换成以下所有层的合成"）。Stash 现在是条带上
+            // 一枚普通的面，那一岔连同图层种类一起删了，所以这里恒 null —— 键留着是为了 plan schema
+            // 不变（Python 那一侧 render_plan.py 同样恒为 None）。
+            capture: null,
             transform: transformOf(tr),
             strip: stripOf(l, env, ctx),
             timeMap: (env.timeMap ? env.timeMap(l) : null) || null,
@@ -202,6 +211,7 @@ const KLayerFold = (function () {
     }
 
     function recordsFromRegistry(l) {
+        // 条带上**每一枚**记录都是一步 —— 底位也包括在内（`role` 只说它是这一层自己的图，不说位置）。
         return (typeof attrRecordsOf === 'function') ? attrRecordsOf(l) : [];
     }
 

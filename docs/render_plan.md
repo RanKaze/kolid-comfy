@@ -23,7 +23,7 @@
 |---|---|
 | **Resource** | 一段可被 GPU 采样的字节：图层像素、蒙版、贴片、外部贴图（LUT/深度/法线）、视频。**id = 内容哈希** |
 | **Layer** | 一个可合成的单位：`transform` + 有序 `strip` |
-| **Strip** | 图层内的有序步骤列表。**折叠 = 图层像素**。现有条带顺序：`decal → effects → mask` |
+| **Strip** | 图层内的有序步骤列表。**折叠 = 图层像素**。现有条带顺序：`image → effects → mask` |
 | **Step** | strip 里的一步：`surface`（一块面）/ `chain`（一串特效）/ `generator`（派生：文字、方向、3D、pose、几何） |
 | **Plan** | 某一时刻**整套图层**的不可变描述（`RenderPlan`） |
 | **Clock** | 唯一时间来源（音频主时钟；视频帧只校准） |
@@ -58,7 +58,10 @@
   "visible": true,
   "opacity": 1,                        // 图层整体不透明度 0..1（编辑器图层行的 Opacity 滑杆；缺省 1 = 不透明）
   "blend": "source-over",
-  "capture": null | "below",           // Stash 层：输入是"此刻以下所有层的合成"，不是自己的 img
+  // `capture` 恒为 null（2026-10-30 起）。它曾经是 "below" —— Stash 层"输入是以下所有层的合成"。
+  // 现在 Stash 是条带上一枚 `type:"stash"` 的普通面（§10.3.10），那件事实由 strip 里的步骤说，
+  // 不再由图层上的一个字段说。键留着只为 schema 不飘。
+  "capture": null,
   "transform": { "cx": 0.5, "cy": 0.5, "w": 1, "h": 1, "rotation": 0 },  // 画布归一化，语义见 §3.2
   "strip": [ /* Step，有序 */ ],
   "timeMap": {                         // null = 与时间无关（静态图层）
@@ -71,9 +74,17 @@
 
 ```jsonc
 // surface：一块面，可以"改用某条视频轨当前帧"
-{ "kind": "surface", "type": "decal" | "mask", "enabled": true,
+// type = "image" | "mask" | "stash"。image 以前叫 decal：**读端两种都收，写出去只有 "image"**
+// （页面 attr/core.js 的 ATTR_TYPE_ALIAS、plan 的 steps_of、compose_blend 三处归一）。
+{ "kind": "surface", "type": "image" | "mask" | "stash", "enabled": true,
   "surface": { "resource": "res:<hash>" } | null,
   "frameTrack": "<trackId>" | "" }      // 非空 = 这一枚面在视频模式下从该轨当前帧取像素
+// `stash` 是"这一层以下那一叠的合成"，**面不入档**（每次 render 现抄），所以 `surface` 在文件里
+// 恒为 null；浏览器那一侧由页面把它折进 strip 前先抄好（`stashCapture`），合成器通过 `api.bind`
+// 拿到。后端跑不了它 —— 分界线（§3.1）因此必须落在**最后一枚 Stash** 之后。
+// 底位（`role:'base'` 那一枚 image）**也是 strip 上普通的一步**，位置就是生效位置：
+// 拖到一条链右边 = 那条链跑在图还没画出来的画布上，于是这条链不作用于它。
+// （它曾经被单独交给 `base` 当起始面、又被排除在 strip 之外 —— 那会儿"拖一枚 image"永远不改变画面。）
 
 // chain：一串特效，作用于它左边累积的结果
 { "kind": "chain", "type": "effects", "enabled": true,
@@ -152,12 +163,13 @@ Layer(l, t)    = Fold(l.strip, 输入 = l 的底像素)
 
 - **`layers` 在 plan 里自底向上**。现有 `layers[]` 是"首 = 最上"（`render()` 倒序画），
   所以 `.cud → plan` 那一步**必须反转**。写在这里，免得实现时对齐不上。
-- `stash` 层（`capture: "below"`）的输入是**当前已合成的画布**，不是自己的像素 —— 它抄的是下面的一切。
-  **"一切"= 图层，不含底片帧**。Video 模式下画布上还有一张垫在图层下面的视频帧（`backdrop`），它是
-  `frame` 不是 `layers`，所以不进这本账；没被图层盖住的地方在快照里是**透明**（`α=0`），不是视频画面。
+- `stash` 步骤（2026-10-30 前是 `capture:"below"` 的**图层**）的输入是**当前已合成的画布**，
+  不是自己的像素 —— 它抄的是下面的一切。**"一切"= 图层，不含底片帧**。Video 模式下画布上还有一张垫在
+  图层下面的视频帧（`backdrop`），它是 `frame` 不是 `layers`，所以不进这本账；没被图层盖住的地方在快照
+  里是**透明**（`α=0`），不是视频画面。
   这条必须在实现里照字面做：显示面（`stageCanvas` / `blendCanvas`）永远垫着底片，**不能**当快照的源，
   否则视频帧会被烘进快照、再由上层重画一遍（监视器那一路不铺底片，冒出来就是一块多余的方框）。
-  后端导出同理：先把底片铺进目标，再折图层，`below` 只由图层累积（§3.1）。
+  后端导出同理：先把底片铺进目标，再折图层，快照只由图层累积（§3.1）。
 - `guidance` 栈单独折一张（`GuidanceFrame(plan,t)` = work 合成 + 所有可见 guidance）。
 
 ### 3.2 transform（与 canvas 2D 逐位一致）
@@ -820,3 +832,38 @@ if (typeof v === 'object' && (typeof v.resource === 'string' || typeof v.id === 
 **教训**：plan 里的"引用"永远是**非空字符串**。任何"这个对象是不是资源记录"的判据都不能只看类型 ——
 DOM 元素有一堆 `''` 字段，专治那种宽松判断。
 
+
+## 10.3.11 Stash 从"图层种类"变成"条带上的一枚步骤"（2026-10-30）
+
+**症状**：Stash 曾经是一种图层（`l.stash` + `raster:true` + 几何焊死画布）。它自己那枚 image 记录
+（底位）的 `src` 是空的、每一帧被 `stashResample` 原地重写 —— 也就是用户报的那枚「特殊的 image
+attribute」。为了它，代码里有十几处例外：不能移动/缩放/旋转、不能 bake、不能 Combine、不随编组拖动、
+不进导出、存档时"没有像素可存"、plan 里独一份 `capture:'below'`。
+
+**改法**：Stash 成了一枚 attribute（`nodes/web/attr/stash.js`，`type:'stash'` / `kind:'surface'`）。
+面是**派生**的（每次 render 从"这一层以下那一叠"重抄进它自己那枚记录的 `surface`），所以：
+- 它是条带上**普通的一步**（source-over），位置随便拖 —— 拖到一条链右边，那条链就不作用于它；
+- 所在的层是**普通层**：能移动/缩放/旋转/编组/Rasterize/Combine；
+- **没有底位**、`src` 恒空、面不进档；一层可以挂 0~N 枚；
+- `capture` 这个键从此恒为 `null`（`layer-fold.js` 与 `render_plan.py` 两侧都这么写）。
+
+**连带删掉的东西**：`isStashLayer` / `addStashLayer` / `l.stash` 的全部读写与拒绝分支、
+`compositor.js` 的 `below` 累积账（`scratch`）、`plan.capture`、`image_utils.composite_layers` 里
+"跳过 base"的那一支。
+
+**三处新规矩（改动这一带的人必须知道）**：
+1. **`layerGridOf(l)` 是"这一层的格子"唯一的判据**（`blend_node.html`）：底位有像素听它 → 否则听条带上
+   第一枚自带像素的步骤 → 否则画布。`fxResolved` / `layerSourceViaPlan` / `stashCapture` /
+   存盘的 `pw/ph` 全问这一句。一张图都没有的层（迁移后的老 Stash 层）靠它活着。
+2. **`layerCanDraw(l)` 才是"这一层画不画得出东西"**，不是 `!!l.img`。`drawLayer` / `layerItem` 的
+   早退判据都换成了它 —— 否则"零张图 + 一枚 Stash"的层整层不出现。
+3. **`backendCutIndex(l, recs)` = `max(最后一条链, 最后一枚 Stash)`**：后端跑不了 Stash，所以分界线必须
+   落在它之后。`fxSplitForBackend` 与 `fxDistributedMask` **必须用同一根线**，否则一枚蒙版会在前端被裁
+   一次、后端再乘一次。
+
+**老档迁移**（`buildRecords` 里 `rec.stash` 那一岔）：丢掉底位、条带头上插一枚 Stash、`img` 归
+`null`、`raster` 归 `false`（用户拍板"Stash 所在的层就是普通层"）。`attachSourceView` /
+`restoreSource` 各加一条：**"没有像素 + 条带上已有步骤"时不补底位** —— 补出来的正是要消灭的那一枚。
+
+**闸**：`temporary/_probe_stash_attr.cjs`（A 空层 + Stash 折出下面那一叠、B 位置改变结果、
+C 零张图的层照样出墨且不补底位、D chip 模型、E 读档形状不补空底位）。
