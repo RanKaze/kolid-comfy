@@ -27,12 +27,13 @@
 #include <stdint.h>
 
 #define KA_SHM_MAGIC  0x4B415348u          /* 'KASH' —— 宿主 attach 时先认它，认不出就是旧版/错名 */
-#define KA_SHM_ABI    1
+#define KA_SHM_ABI    3                    /* 3：加 ed_mon（插件窗口开着时暂停也得照渲，否则界面里点了没声） */
 #define KA_SHM_BLOCK  512                  /* 每块帧数，与设备的 KA_FRAMES 对齐 */
 #define KA_SHM_RING   8                    /* ring 里最多压 8 块 ≈ 85ms 的余量 */
 #define KA_SHM_PATH   320
 #define KA_SHM_TEXT   2048
 #define KA_SHM_IV     16
+#define KA_SHM_NOTES  8192                 /* 与宿主那边的 KA_MAX_NOTES 一致 */
 
 /* 命令。编号就是协议版本号的一部分，改了记得一起改 ABI。 */
 #define KA_CMD_NONE    0
@@ -65,12 +66,37 @@
 #define KA_CMD_UNITS   27                  /*                               → text = u|… 与 p|… 两组行 */
 #define KA_CMD_PROGNAME 28                 /* a0 = 列表 id, a1 = 程序下标   → text = 程序名 */
 #define KA_CMD_PROGINFO 29                 /* a0 = 列表 id                  → ret = 程序总数 */
+#define KA_CMD_STATE_LOAD 30               /* path = .vstpreset             → ret = 0/负, iv = comp/ctrl/字节 */
+#define KA_CMD_STATE_SAVE 31               /* path = 输出 .vstpreset        → ret = 字节数或负 */
+#define KA_CMD_NOTES_OFF 32                /* 所有通道收声（拖播放头/换乐器/暂停） */
+#define KA_CMD_AUDITION 33                 /* a0 = pitch, a1 = vel, a2 = ch, a3 = 块数
+                                            * 立即发 note-on，a3 块之后自己收 —— 暂停时点 ♪ 用 */
+#define KA_CMD_EDITOR_OPEN  34             /* 开插件自己的编辑器窗口（worker 的 UI 线程）
+                                            * → ret = 0/负, iv[0] = 是否开着, iv[1..2] = 客户区宽高 */
+#define KA_CMD_EDITOR_CLOSE 35             /* 关编辑器（removed + release view）→ ret = 0/负 */
+#define KA_CMD_EDITOR_STATE 36             /* → ret = 1 开着, iv[0] = 用户点 X 关过几次, iv[1..2] = 宽高 */
 
 /* 错误码（与插件自己的错误码错开，负数段归"通道"这一层） */
 #define KA_SHM_ERR_NO_WORKER  (-91)        /* 还没 attach */
 #define KA_SHM_ERR_DEAD       (-92)        /* 心跳不动了：worker 大概已经崩了 */
 #define KA_SHM_ERR_TIMEOUT    (-93)        /* 等回执超时 */
 #define KA_SHM_ERR_SHAPE      (-94)        /* magic / abi 对不上 */
+
+/* worker 的退出码。**一个名字只能有一个 worker**：两支进程连同一块共享内存就是两件乐器
+ * 同时出同一个声（重复音），而且后起来的那支会 memset 掉先来者的状态。 */
+#define KA_WORKER_EXIT_TAG    5            /* 这个名字已经有活着的 worker 了，拒绝当第二份 */
+
+/* 一条要交给插件（worker 里那个乐器）的音符。**与宿主 ka_note 同宽（32 字节）**，
+ * 区别只在第 4 格：那边是 pad，这边是 MIDI 通道（多声部乐器靠它分槽）。
+ * 升序按 start 排好（宿主排），worker 用二分+游标推进。 */
+typedef struct {
+    int32_t track;
+    int32_t note;
+    int32_t vel;
+    int32_t ch;
+    int64_t start;
+    int64_t len;
+} ka_shm_note;
 
 typedef struct {
     uint32_t magic;
@@ -101,6 +127,24 @@ typedef struct {
      * 音符会晚 85ms 才响，量出来的力度/音高全是上一块的。 */
     float    rout[KA_SHM_BLOCK * 2];
 
+    /* ── 乐器：音符表 + 走带锚点（宿主写、worker 读） ────────────────────────
+     * worker 提前渲一块，所以它必须知道"这一块将来落在时钟的哪一帧"：
+     * 锚点说的是"ring 里第 tr_read 块 = 时钟第 tr_pos 帧"，渲染第 w 块时按
+     * tr_pos + (w - tr_read) * block 外推（误差是块内的几帧漂移，听不出来）。
+     * tr_epoch 变号 = 硬对表（开播 / 拖播放头 / 换乐器）：worker 要重排游标、
+     * 把正在响的音收掉。notes_gen 变号 = 音符表换了，同理重排。
+     * aud_blocks：暂停时点 ♪ 也要出声 —— 宿主把它设成几十块，worker 就照着渲，
+     * 到 0 就停（与走带无关，音符从即时事件队列来）。 */
+    volatile int32_t notes_gen;
+    int32_t note_count;
+    ka_shm_note notes[KA_SHM_NOTES];
+    volatile int32_t tr_playing;
+    volatile int32_t tr_epoch;
+    volatile int32_t tr_read;
+    volatile int32_t tr_pos_lo;
+    volatile int32_t tr_pos_hi;
+    volatile int32_t aud_blocks;
+
     /* ── 音频 ring ────────────────────────────────────────────────────────── */
     volatile int32_t w;                    /* worker 已写块数（单调） */
     volatile int32_t r;                    /* 宿主已读块数（单调） */
@@ -108,6 +152,11 @@ typedef struct {
     volatile int32_t frames_hi;            /* 已渲染帧数（高 32 位） */
     volatile int32_t frames_lo;            /* 已渲染帧数（低 32 位） */
     volatile int32_t underrun;             /* 宿主取空了几次（只有宿主写，给自己看） */
+    volatile int32_t ed_mon;               /* 插件自己的界面开着（宿主写、worker 读）。
+                                            * 界面里的键盘/试听按钮只会从 process() 出声，而暂停时
+                                            * 本来一块都不渲 —— 于是"编辑界面里完全没声音"。
+                                            * 开着窗口 = 用户正在里面试音，照渲；量按 block 压小，
+                                            * 别提前灌满整条 ring（那手感就晚了 85ms）。 */
     /* 紧跟着 ring_blocks × block × 2 个 float（交错立体声） */
 } ka_shm;
 
@@ -185,5 +234,9 @@ __declspec(dllimport) int32_t __stdcall SetEvent(void* h);
 __declspec(dllimport) int32_t __stdcall ResetEvent(void* h);
 __declspec(dllimport) void __stdcall ExitProcess(uint32_t code);
 __declspec(dllimport) uint16_t* __stdcall GetCommandLineW(void);
+/* CreateFileMappingW 认不出"这个名字已经有了"：它照样返回一个有效句柄，只把错误码放这儿。
+ * worker 的单实例闸就靠它（见 ka_worker.c 的 kaMain）。 */
+__declspec(dllimport) uint32_t __stdcall GetLastError(void);
+#define KA_ERROR_ALREADY_EXISTS 183u
 
 #endif /* KA_SHM_H */

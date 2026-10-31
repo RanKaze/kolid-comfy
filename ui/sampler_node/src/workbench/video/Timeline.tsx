@@ -2,9 +2,12 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSy
 import { createPortal } from 'react-dom';
 import {
   type VidClip, type VidClipClipboard, type VidController, type VidPasteResult, type VidTrack, type VidMergeProbe,
-  addLayerClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, moveClip, moveTrack, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
+  addLayerClip, addMidiClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, midiClipWindow, midiNotesInClip, moveClip, moveTrack, musicOf, newVidId, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
   vgenChainPrevOf, vgenSeamsOf, vgenWithDuration,
 } from './model';
+import { nativeEngine } from '../../midi/engine';
+import type { MidiCtl } from '../../midi/types';
+import { MidiInstrumentPopover } from './MidiInstrumentPopover';
 import { onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
 import { hit, isRecording } from '../../keybindings';
 import { getActiveBlendUid, subscribeBlendActive } from '../store';
@@ -31,6 +34,13 @@ function useStrip(src: string, srcDuration: number): string[] | undefined {
   return peekStrip(src);
 }
 
+/** 挂着的乐器叫什么：引擎报的类名优先，其次预设文件名（去掉扩展名）。 */
+const instrumentLabel = (path: string, name?: string): string => {
+  if (name) return name;
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  return (parts[parts.length - 1] || path).replace(/\.(vstpreset|vst3|sfz)$/i, '');
+};
+
 // ── Tracks 窗（时间线）───────────────────────────────────────────────────────────────────────
 // 一根标尺 + 若干轨道。视频轨在上、音频轨在下（tracks 数组序）；标尺上是播放头（红色，当前
 // 播放位置）与一对入/出点（I/O，播放范围）。交互：
@@ -48,14 +58,17 @@ function useStrip(src: string, srcDuration: number): string[] | undefined {
 
 const STAGING_ITEM_TYPE = 'application/x-blend-staging';
 const ASSET_ITEM_TYPE = 'application/x-vid-asset';
-// 标尺 34px，**纵向分三段**：上 10 = 播放头三角，中 14 = 刻度，下 10 = 范围上下界的半三角。
+// 标尺 34px，**纵向分三段**：上 10 = 范围边界线顶端的楔形，中 14 = 刻度，下 10 = 播放头三角。
 // 播放头和范围标记只会在同一列上"上下相遇"，永远不会占同一块命中区 —— 这就是不让它们抢手势的办法。
 const RULER_H = 34;
-const PLAY_H = 10;       // 播放头三角（顶部带）
-const MARK_H = 10;       // 范围半三角（底部带）
-const MARK_TOP = RULER_H - MARK_H;   // 24：范围标记的顶边
-const TICK_TOP = PLAY_H;             // 10：刻度带的上沿
-const TICK_BOTTOM = MARK_H;          // 10：刻度带的下沿（给底部三角让位）
+const MARK_TOP = 0;                  // 范围标记贴着标尺顶边
+const MARK_H = 10;                   // 范围半三角（顶部带）
+const PLAY_H = 10;                   // 播放头三角（底部带）
+const PLAY_TOP = RULER_H - PLAY_H;   // 24：播放头三角的顶边
+const TICK_TOP = MARK_H;             // 10：刻度带的上沿
+const TICK_BOTTOM = PLAY_H;          // 10：刻度带的下沿（给底部三角让位）
+// 范围边界线 / 顶端楔形共用同一个颜色：两者要读成同一条线，不能一个深蓝一个浅蓝。
+const RANGE_LINE_COLOR = 'rgba(120,200,255,0.75)';
 const HEADER_W = 140;
 // 底部横向滚动条：条子（thumb）最窄 28px —— 两端各要放一颗圆把手，再窄就挤成一团。
 // 圆把手直径 11px，骑在 thumb 的左右边缘上（半颗在外），拖它 = 改 thumb 宽。
@@ -69,8 +82,8 @@ const sbKnobStyle = (side: 'l' | 'r'): React.CSSProperties => ({
   background: '#b4b4bc', boxShadow: '0 0 0 0.5px rgba(0,0,0,0.65), 0 0 3px rgba(0,0,0,0.45)',
   cursor: 'ew-resize',
 });
-// 四类轨同一高度：视频轨不再比音频 / Layer / process 高出一截，横向扫过去是一条齐线。
-const TRACK_H: Record<'video' | 'audio' | 'layer' | 'process', number> = { video: 46, audio: 46, layer: 46, process: 46 };
+// 各类轨同一高度：视频轨不再比音频 / Layer / process 高出一截，横向扫过去是一条齐线。
+const TRACK_H: Record<'video' | 'audio' | 'layer' | 'process' | 'midi', number> = { video: 46, audio: 46, layer: 46, process: 46, midi: 46 };
 // 刻度阶梯搬进 model（rulerStep）：Keyframes 窗的标尺必须和这里同一把尺，否则两处对不上时刻。
 // 吸附排除集里的"空集"：播放头 scrub / 入出点拖动每帧都要一个，共用一个常量，不每帧 new。
 const EMPTY_IDS: ReadonlySet<string> = new Set<string>();
@@ -111,6 +124,23 @@ const IconLayers: React.FC = () => (
     <path d="M8 2.4 14 5.6 8 8.8 2 5.6z" />
     <path d="M2.6 8.4 8 11.3l5.4-2.9" />
     <path d="M2.6 11.2 8 14.1l5.4-2.9" />
+  </svg>
+);
+// MIDI 轨：八分音符 + 双符头 —— 它装的不是素材，是"哪一刻按哪个键"。
+const IconMidi: React.FC = () => (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6.2 12V3.9l6-1.3v7.9" />
+    <circle cx="4.4" cy="12" r="1.8" />
+    <circle cx="10.4" cy="10.5" r="1.8" />
+  </svg>
+);
+// 乐器：键盘 —— 轨头上那颗"这一轨装的是哪件乐器"的按钮。
+const IconKeys: React.FC = () => (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="2" y="3.6" width="12" height="8.8" rx="1.4" />
+    <path d="M5.8 3.6v8.8M10.2 3.6v8.8" />
   </svg>
 );
 // process 轨：虚线框里一颗"待跑"的三角 —— 它装的不是画面，是还没跑出来的坑。
@@ -217,6 +247,11 @@ const KIND_UI = {
   process: { fg: '#d7d7dc', chipBg: 'rgba(255,255,255,0.12)', bandA: 'rgba(255,255,255,0.022)',
     bandB: 'rgba(255,255,255,0.010)', clipA: 'rgba(255,255,255,0.17)', clipB: 'rgba(255,255,255,0.08)',
     edge: 'rgba(255,255,255,0.50)', accent: '#c9c9cf' },
+  // MIDI 轨（乐器）用紫：既不是画面（蓝）也不是声轨（绿）——它装的是"要演奏什么"，
+  // 声音由轨头挂的乐器发出来。
+  midi: { fg: '#bf5af2', chipBg: 'rgba(191,90,242,0.16)', bandA: 'rgba(191,90,242,0.030)',
+    bandB: 'rgba(191,90,242,0.012)', clipA: 'rgba(191,90,242,0.40)', clipB: 'rgba(191,90,242,0.22)',
+    edge: 'rgba(191,90,242,0.72)', accent: '#bf5af2' },
 } as const;
 
 
@@ -231,6 +266,9 @@ type DragState =
 
 export const VidTimeline: React.FC<{
   vid: VidController;
+  /** MIDI 宿主的投影与唯一写口 —— MIDI 轨的乐器 / 通道 / 力度、以及"加一段 MIDI 段"之后
+   *  的钢琴卷帘都读同一份工程（与 MIDI 模式共用，不存在第二套轨道）。 */
+  midi: MidiCtl;
   /** 占位段的齿轮（设置入口）：参数 = 这一批要一起改的占位段 id。
    *  点中的段在现有多选里 → 整个多选集合；否则只它自己。 */
   onSettingsPlaceholders?: (clipIds: string[]) => void;
@@ -246,8 +284,13 @@ export const VidTimeline: React.FC<{
   onVGenPrompt?: (clipId: string) => void;
   /** .cud 帧卡预览上的跳转按钮：把那份工程送进 blend 编辑器（已开着就切换过去）。 */
   onVGenCudOpen?: (path: string, name?: string) => void;
-}> = ({ vid, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, onVGenCudOpen }) => {
+}> = ({ vid, midi, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, onVGenCudOpen }) => {
   const { project: p, transport, pps } = vid;
+  // 引擎那头每轨的装载结果（装上了没有、是不是 vst3）：MIDI 轨头的乐器键要读它来标红/点亮 Edit。
+  // 音符拖动会连着推工程但乐器很少变，nativeEngine 只在"每轨乐器"变了时才叫醒订阅者。
+  const [, bumpEngine] = React.useReducer((x: number) => x + 1, 0);
+  useEffect(() => nativeEngine.subscribe(bumpEngine), []);
+  const engineRows = nativeEngine.getStatus().instruments || [];
   // 占位段队列（多选 ▶ 排出的那一队）：还没轮到的段画 ⏸，正在跑的（有填充进度）画 ■。
   // 订阅放在时间线这一层：一条队只敲一次重渲，不按片段各订一遍。
   const procQueue = useSyncExternalStore(subscribeProcQueue, getProcQueue);
@@ -783,8 +826,10 @@ export const VidTimeline: React.FC<{
     note: string;
   };
   const [mergeMenu, setMergeMenu] = useState<MergeMenuState | null>(null);
-  // 轨头右键菜单:加轨的三个入口(Video / Layer / Audio)都从这弹 —— 顶栏撤掉后的去处。
+  // 轨头右键菜单:加轨的四个入口(Video / Layer / Audio / MIDI)都从这弹 —— 顶栏撤掉后的去处。
   const [trackMenu, setTrackMenu] = useState<{ x: number; y: number } | null>(null);
+  // MIDI 轨头的乐器弹窗：锚点是那颗键的屏幕矩形（portal 到 body，不受轨道区裁剪）。
+  const [instPop, setInstPop] = useState<{ trackId: string; x: number; y: number } | null>(null);
   useEffect(() => {
     if (!trackMenu) return;
     const inMenu = (t: EventTarget | null): boolean => {
@@ -1272,9 +1317,9 @@ export const VidTimeline: React.FC<{
             不能因为工程短就在右边留一条空带（首帧 viewW 还没测出来时也靠它兜住）。 */}
         <div ref={contentRef} data-vid-pps={Math.round(pps * 1000) / 1000} style={{ width: contentW, minWidth: '100%', position: 'relative', minHeight: '100%' }}>
 
-          {/* 标尺：整条只认游标（点哪拖哪）。范围的上下界是**顶上那两个三角块**（PR 那种），
-              它们只占标尺顶部 10px，其余高度全是游标的地盘 —— 调范围抓三角、移游标点标尺，
-              两者在空间上错开，不会再互相抢手势。范围本身仍画成贯穿的：
+          {/* 标尺：整条只认游标（点哪拖哪）。范围的上下界是**两条边界线，各自顶端一枚平顶楔形**
+              （竖边压在线上、斜边收回线上），播放头三角在底部 —— 两者各占 10px 的上下带，其余高度全是游标的地盘：
+              调范围抓顶部三角、移游标点标尺，空间上错开，不会互相抢手势。范围本身仍画成贯穿的：
               标尺上的整条覆盖 + 轨道区两条长边界线 + 范围外压暗。 */}
           <div style={{ position: 'sticky', top: 0, zIndex: 5, background: '#141416' }}>
             <div
@@ -1295,42 +1340,121 @@ export const VidTimeline: React.FC<{
                     top: 0, bottom: 0, pointerEvents: 'none',
                     background: 'linear-gradient(180deg, rgba(10,132,255,0.18), rgba(10,132,255,0.34))',
                   }} />
-                  <div style={{ position: 'absolute', left: HEADER_W + p.inPoint * pps - 0.5, top: 0, bottom: 0, width: 1, background: 'rgba(120,200,255,0.75)', pointerEvents: 'none' }} />
-                  <div style={{ position: 'absolute', left: HEADER_W + p.outPoint * pps - 0.5, top: 0, bottom: 0, width: 1, background: 'rgba(120,200,255,0.75)', pointerEvents: 'none' }} />
+                  <div style={{ position: 'absolute', left: HEADER_W + p.inPoint * pps - 0.5, top: 0, bottom: 0, width: 1, background: RANGE_LINE_COLOR, pointerEvents: 'none' }} />
+                  <div style={{ position: 'absolute', left: HEADER_W + p.outPoint * pps - 0.5, top: 0, bottom: 0, width: 1, background: RANGE_LINE_COLOR, pointerEvents: 'none' }} />
                 </>
               )}
-              {/* 入点：**半三角**，竖边压在入点线上、尖端朝右（指向范围内部）—— PR 那种读法。
-                  热区从竖边往外留 2px，好抓。 */}
+              {/* 入点：边界线顶端挂一枚平顶楔形 —— 竖边压在入点线上、上沿贴标尺顶、斜边收回线上，
+                  与出点那枚合起来把"这一段"夹住。颜色跟边界线一致，读成同一条线的一部分。
+                  热区沿边界线左右各留 2px，好抓。 */}
               <div
                 onPointerDown={e => startBound(e, 'in')} onPointerMove={onBoundMove} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}
                 title="In point — drag to set where the range starts"
-                style={{ position: 'absolute', left: HEADER_W + p.inPoint * pps - 2, top: MARK_TOP, width: 10, height: MARK_H, cursor: 'ew-resize', zIndex: 6 }}
+                style={{ position: 'absolute', left: HEADER_W + p.inPoint * pps - 2, top: MARK_TOP, width: 12, height: MARK_H, cursor: 'ew-resize', zIndex: 6 }}
               >
-                <div style={{ position: 'absolute', left: 2, top: 0, width: 8, height: MARK_H, background: '#0a84ff', clipPath: 'polygon(0 0, 0 100%, 100% 50%)', pointerEvents: 'none', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))' }} />
+                <div style={{ position: 'absolute', left: 2, top: 0, width: 10, height: MARK_H, background: RANGE_LINE_COLOR, clipPath: 'polygon(0 0, 100% 0, 0 100%)', pointerEvents: 'none' }} />
               </div>
-              {/* 出点：同款的镜像 —— 竖边压在出点线上、尖端朝左（指向范围内部）。 */}
+              {/* 出点：同款的镜像 —— 竖边压在出点线上、斜边朝左收回到线上。 */}
               <div
                 onPointerDown={e => startBound(e, 'out')} onPointerMove={onBoundMove} onPointerUp={endClipDrag} onPointerCancel={endClipDrag}
                 title="Out point — drag to set where the range ends"
-                style={{ position: 'absolute', left: HEADER_W + (inSet ? p.outPoint : Math.max(dur, p.inPoint + 0.1)) * pps - 8, top: MARK_TOP, width: 10, height: MARK_H, cursor: 'ew-resize', zIndex: 6 }}
+                style={{ position: 'absolute', left: HEADER_W + (inSet ? p.outPoint : Math.max(dur, p.inPoint + 0.1)) * pps - 10, top: MARK_TOP, width: 12, height: MARK_H, cursor: 'ew-resize', zIndex: 6 }}
               >
-                <div style={{ position: 'absolute', left: 0, top: 0, width: 8, height: MARK_H, background: inSet ? '#0a84ff' : 'rgba(255,255,255,0.30)', clipPath: 'polygon(100% 0, 100% 100%, 0 50%)', pointerEvents: 'none', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.55))' }} />
+                <div style={{ position: 'absolute', left: 0, top: 0, width: 10, height: MARK_H, background: inSet ? RANGE_LINE_COLOR : 'rgba(255,255,255,0.30)', clipPath: 'polygon(0 0, 100% 0, 100% 100%)', pointerEvents: 'none' }} />
               </div>
-              {/* 播放头三角（left 只钉基准，逐帧位移交给 transport 订阅者直改 transform）。 */}
-              <div ref={triRef} data-vid-ph="" style={{ position: 'absolute', left: HEADER_W - 5, top: 0, width: 10, height: PLAY_H, background: '#ff453a', clipPath: 'polygon(0 0, 100% 0, 50% 100%)', pointerEvents: 'none', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.6))', zIndex: 7 }} />
+              {/* 播放头三角：落在标尺底部带，尖端朝下指向轨道（left 只钉基准，逐帧位移交给 transport 订阅者直改 transform）。 */}
+              <div ref={triRef} data-vid-ph="" style={{ position: 'absolute', left: HEADER_W - 5, top: PLAY_TOP, width: 10, height: PLAY_H, background: '#ff453a', clipPath: 'polygon(0 0, 100% 0, 50% 100%)', pointerEvents: 'none', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.6))', zIndex: 7 }} />
             </div>
           </div>
 
           {/* 轨道。 */}
           {p.tracks.map((tr, ti) => {
-            // solo：音频/视频分开。Layer / process 轨不接。solo 亮着时这条轨的底色带一点琥珀。
+            // solo：音频/视频分开。Layer / process 轨不接；MIDI 与音频同属"声域"（同一套 solo）。
             const isLayer = tr.kind === 'layer';
             const isProcess = tr.kind === 'process';
-            const soloSet = isLayer || isProcess ? null : (tr.kind === 'audio' ? vid.solo.audio : vid.solo.video);
+            const soloSet = isLayer || isProcess ? null
+              : (tr.kind === 'audio' || tr.kind === 'midi' ? vid.solo.audio : vid.solo.video);
             const isSoloed = soloSet?.has(tr.id) ?? false;
             // mute：**所有轨类型都有**。语义按类型：音频 = 不响；视频 = 监视器不显示；
-            // Layer = 段不合成（露出底下）。mute 优先于 solo。静音时轨道变灰、片段压暗。
+            // Layer = 段不合成（露出底下）；MIDI = 音符不发出去。mute 优先于 solo。
             const isMuted = vid.mute.has(tr.id);
+            const isMidi = tr.kind === 'midi';
+            // 这一轨在引擎里那件（没挂乐器或还没对账上 = undefined）。标签优先用插件自报的类名。
+            const instRow = isMidi && tr.instrument ? engineRows.find(r => r.track === tr.id) : undefined;
+            const instBad = !!instRow && !instRow.open;
+            const instLabel = tr.instrument ? instrumentLabel(tr.instrument, instRow?.name) : '';
+            // 轨头那几颗键提取出来：MIDI 轨排成两行（名字在上、乐器在下），其余轨照旧一行。
+            const typeBadge = (
+              <span style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: KIND_UI[tr.kind].chipBg, color: KIND_UI[tr.kind].fg }}>
+                {tr.kind === 'video' ? <IconFilm /> : tr.kind === 'layer' ? <IconLayers /> : tr.kind === 'process' ? <IconProcess /> : tr.kind === 'midi' ? <IconMidi /> : <IconWave />}
+              </span>
+            );
+            const nameNode = renaming === tr.id ? (
+              <input
+                autoFocus
+                value={renameVal}
+                onChange={e => setRenameVal(e.target.value)}
+                onPointerDown={e => e.stopPropagation()}
+                onKeyDown={e => {
+                  e.stopPropagation();     // 别让 C（剃刀）/ Delete（删片段）那套热键听见
+                  if (e.key === 'Enter') commitRename(tr.id);
+                  else if (e.key === 'Escape') { renamingRef.current = null; setRenaming(null); }
+                }}
+                onBlur={() => commitRename(tr.id)}
+                title="Track name — Enter to apply, Escape to cancel"
+                style={{ flex: 1, minWidth: 0, fontSize: 11, fontWeight: 600, background: 'rgba(0,0,0,0.45)', color: '#fff', border: '1px solid rgba(10,132,255,0.75)', borderRadius: 4, padding: '1px 4px', outline: 'none' }}
+              />
+            ) : (
+              <span
+                style={{ fontSize: 11, fontWeight: 600, color: isMuted ? 'rgba(255,255,255,0.38)' : 'rgba(255,255,255,0.8)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+              >{tr.name}</span>
+            );
+            const muteBtn = !isProcess && (
+              <button
+                data-vid-mute={tr.id}
+                data-vid-mute-on={isMuted ? '1' : '0'}
+                title={`Mute ${tr.kind} track 「${tr.name}」 — ${tr.kind === 'audio' || tr.kind === 'midi' ? 'its notes stop sounding' : tr.kind === 'video' ? 'its clips stop showing on the monitor' : 'its segments stop compositing (what is below shows through)'}. Mute wins over solo. Click again to unmute.`}
+                onClick={() => vid.toggleMute(tr.id)}
+                style={{
+                  flexShrink: 0, width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: isMuted ? '#ff453a' : 'transparent',
+                  border: isMuted ? 'none' : '0.5px solid rgba(255,255,255,0.2)',
+                  borderRadius: 3, color: isMuted ? '#1a1a1a' : 'rgba(255,255,255,0.35)',
+                  cursor: 'pointer', padding: 0, fontSize: 8.5, fontWeight: 800, lineHeight: 1,
+                }}
+              >M</button>
+            );
+            const soloBtn = !isLayer && !isProcess && (
+              <button
+                data-vid-solo={tr.id}
+                data-vid-solo-on={isSoloed ? '1' : '0'}
+                title={`Solo ${tr.kind} track 「${tr.name}」 — only soloed ${tr.kind === 'midi' ? 'MIDI' : tr.kind} tracks ${tr.kind === 'video' ? 'show (direct playback, bypasses the canvas)' : 'play'}. Click again to unsolo.`}
+                onClick={() => vid.toggleSolo(tr.id, tr.kind)}
+                style={{
+                  flexShrink: 0, width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: isSoloed ? '#ff9f0a' : 'transparent',
+                  border: isSoloed ? 'none' : '0.5px solid rgba(255,255,255,0.2)',
+                  borderRadius: 3, color: isSoloed ? '#1a1a1a' : 'rgba(255,255,255,0.35)',
+                  cursor: 'pointer', padding: 0, fontSize: 8.5, fontWeight: 800, lineHeight: 1,
+                }}
+              >S</button>
+            );
+            const delBtn = (
+              <button
+                title={'Delete track 「' + tr.name + '」 (its clips go with it)'}
+                onClick={() => {
+                  const gone = new Set(p.clips.filter(c => c.trackId === tr.id).map(c => c.id));
+                  vid.update(proj => removeTrack(proj, tr.id), 'Delete track');
+                  setSelIds(prev => {
+                    const next = new Set([...prev].filter(id => !gone.has(id)));
+                    return next;
+                  });
+                }}
+                style={{ flexShrink: 0, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 5, color: 'rgba(255,255,255,0.32)', cursor: 'pointer', padding: 0 }}
+              >
+                <IconTrash />
+              </button>
+            );
             return (
             <div key={tr.id} data-vid-trackrow="" style={{
               display: 'flex', height: TRACK_H[tr.kind],
@@ -1359,119 +1483,95 @@ export const VidTimeline: React.FC<{
                 onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setTrackMenu({ x: e.clientX, y: e.clientY }); }}
                 style={{ position: 'sticky', left: 0, width: HEADER_W, flexShrink: 0, zIndex: 4, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px', cursor: trkDrag ? 'grabbing' : 'grab', userSelect: 'none' }}
               >
-                <span style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: KIND_UI[tr.kind].chipBg, color: KIND_UI[tr.kind].fg }}>
-                  {tr.kind === 'video' ? <IconFilm /> : tr.kind === 'layer' ? <IconLayers /> : tr.kind === 'process' ? <IconProcess /> : <IconWave />}
-                </span>
-                {renaming === tr.id ? (
-                  <input
-                    autoFocus
-                    value={renameVal}
-                    onChange={e => setRenameVal(e.target.value)}
-                    onPointerDown={e => e.stopPropagation()}
-                    onKeyDown={e => {
-                      e.stopPropagation();     // 别让 C（剃刀）/ Delete（删片段）那套热键听见
-                      if (e.key === 'Enter') commitRename(tr.id);
-                      else if (e.key === 'Escape') { renamingRef.current = null; setRenaming(null); }
-                    }}
-                    onBlur={() => commitRename(tr.id)}
-                    title="Track name — Enter to apply, Escape to cancel"
-                    style={{ flex: 1, minWidth: 0, fontSize: 11, fontWeight: 600, background: 'rgba(0,0,0,0.45)', color: '#fff', border: '1px solid rgba(10,132,255,0.75)', borderRadius: 4, padding: '1px 4px', outline: 'none' }}
-                  />
+                {isMidi ? (
+                  // MIDI 轨排两行：上行（类型徽章 + 名字 + M/S/删除），下行整行留给乐器键 ——
+                  // HEADER_W 只有 140px，挤进同一行的话名字和乐器名都只剩两三个字。
+                  <div style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 3 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                      {typeBadge}
+                      {nameNode}
+                      {muteBtn}
+                      {soloBtn}
+                      {delBtn}
+                    </div>
+                    <button
+                      data-vid-midi-instrument={tr.id}
+                      title={`Instrument — ${instLabel || 'none loaded'}. Click to pick one from the library, set the MIDI channel or track velocity, or open the plug-in's own editor.${tr.instrument ? '\n' + tr.instrument : ''}${instBad ? '\nNot loaded into the engine yet' : ''}`}
+                      onPointerDown={e => e.stopPropagation()}
+                      onClick={e => {
+                        e.stopPropagation();
+                        const r = e.currentTarget.getBoundingClientRect();
+                        setInstPop({ trackId: tr.id, x: r.left, y: r.bottom + 4 });
+                      }}
+                      style={{
+                        flexShrink: 0, width: '100%', height: 18, padding: '0 5px',
+                        display: 'flex', alignItems: 'center', gap: 4, textAlign: 'left',
+                        background: 'rgba(0,0,0,0.32)', border: '0.5px solid rgba(191,90,242,0.38)', borderRadius: 4,
+                        color: instBad ? '#ff8a80' : instLabel ? 'rgba(255,255,255,0.84)' : 'rgba(255,255,255,0.38)',
+                        cursor: 'pointer', fontSize: 9.5, fontWeight: 600, lineHeight: '16px',
+                      }}
+                    >
+                      <span style={{ flexShrink: 0, display: 'flex', color: '#bf5af2', opacity: instLabel ? 1 : 0.5 }}><IconKeys /></span>
+                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {instLabel || 'No instrument'}
+                      </span>
+                    </button>
+                  </div>
                 ) : (
-                  <span
-                    style={{ fontSize: 11, fontWeight: 600, color: isMuted ? 'rgba(255,255,255,0.38)' : 'rgba(255,255,255,0.8)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                  >{tr.name}</span>
+                  <>
+                    {typeBadge}
+                    {nameNode}
+                    {/* 这颗小标 = 这条轨就是 Video 模式的 Mask 源（顶部那颗下拉绑的）。 */}
+                    {p.maskTrackId === tr.id && (
+                      <span data-vid-mask-badge="" title="This track is the video-mode Mask source — its frames' luminance is the mask for every frame of a preset run."
+                        style={{ flexShrink: 0, fontSize: 8, fontWeight: 800, letterSpacing: 0.3, color: '#0a84ff', background: 'rgba(10,132,255,0.18)', border: '0.5px solid rgba(10,132,255,0.5)', borderRadius: 3, padding: '1px 3px', lineHeight: 1.1 }}>MASK</span>
+                    )}
+                    {/* 输出轨：Processor / Preset 的 process 段跑完，成品固定落在这一条的对应位置。 */}
+                    {tr.role === 'output' && (
+                      <span data-vid-out-badge="" title="Output track — every finished Processor / Preset segment lands here at its placeholder's timeline position. Placeholders stay where they are and can be run again."
+                        style={{ flexShrink: 0, fontSize: 8, fontWeight: 800, letterSpacing: 0.3, color: '#30d158', background: 'rgba(48,209,88,0.16)', border: '0.5px solid rgba(48,209,88,0.5)', borderRadius: 3, padding: '1px 3px', lineHeight: 1.1 }}>OUT</span>
+                    )}
+                    {/* 生成器轨的设置：宽高 / from canvas / scale / fps —— 轨上所有段共享，
+                        段上不再有这些旋钮。fps 只对没开 Fixed FPS 的段生效。 */}
+                    {tr.role === 'vgen' && onVGenTrackSettings && (
+                      <button
+                        data-vid-vgen-track-settings={tr.id}
+                        title={`Generator track settings — the width / height every generator segment on 「${tr.name}」 runs at: fixed values, or the workbench canvas scaled by a factor. Plus a track FPS that overrides the fps parameter of every segment here — segments with Fixed FPS turned on are not affected.`}
+                        onPointerDown={e => e.stopPropagation()}
+                        onClick={e => { e.stopPropagation(); onVGenTrackSettings(tr.id); }}
+                        style={{ flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          background: 'none', border: 'none', borderRadius: 4, color: 'rgba(255,255,255,0.45)', cursor: 'pointer', padding: 0 }}
+                      ><IconGear /></button>
+                    )}
+                    {/* 生成器轨的轨级提示词：点开 prompt 编辑弹窗（prompt block 同一套界面）。
+                        跑的时候渲染成串追加在每段自己的提示词后面 —— 段在前、轨在后。 */}
+                    {tr.role === 'vgen' && onVGenTrackPrompt && (
+                      <button
+                        data-vid-vgen-track-prompt={tr.id}
+                        title={`Track prompt — extra prompt applied to every generator segment on 「${tr.name}」, appended after each segment's own prompt. Edit it in the full prompt UI (same editor as a Pipeline prompt block).`}
+                        onPointerDown={e => e.stopPropagation()}
+                        onClick={e => { e.stopPropagation(); onVGenTrackPrompt(tr.id); }}
+                        style={{ flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          background: 'none', border: 'none', borderRadius: 4, color: tr.vgenPromptPresetId ? '#64d2ff' : 'rgba(255,255,255,0.45)', cursor: 'pointer', padding: 0 }}
+                      ><IconPrompt /></button>
+                    )}
+                    {/* mute：**所有轨类型都有**（Layer 轨也有 —— 它的段不合成）。亮着 = 这条轨不参与
+                        输出（音频/MIDI 不响 / 视频不显示 / Layer 段不合成），且**优先于 solo**。再点一次取消。
+                        process 轨不给（占位段本来就不出声不出画，静音没有意义）。 */}
+                    {muteBtn}
+                    {/* solo：视频/音频各一套（分开记）。亮着 = 只播 solo 的轨；视频 solo 还是**直接播**
+                        （不走画布合成/底片）。再点一次取消。Layer / process 轨不给这个按钮。 */}
+                    {soloBtn}
+                    {delBtn}
+                  </>
                 )}
-                {/* 这颗小标 = 这条轨就是 Video 模式的 Mask 源（顶部那颗下拉绑的）。 */}
-                {p.maskTrackId === tr.id && (
-                  <span data-vid-mask-badge="" title="This track is the video-mode Mask source — its frames' luminance is the mask for every frame of a preset run."
-                    style={{ flexShrink: 0, fontSize: 8, fontWeight: 800, letterSpacing: 0.3, color: '#0a84ff', background: 'rgba(10,132,255,0.18)', border: '0.5px solid rgba(10,132,255,0.5)', borderRadius: 3, padding: '1px 3px', lineHeight: 1.1 }}>MASK</span>
-                )}
-                {/* 输出轨：Processor / Preset 的 process 段跑完，成品固定落在这一条的对应位置。 */}
-                {tr.role === 'output' && (
-                  <span data-vid-out-badge="" title="Output track — every finished Processor / Preset segment lands here at its placeholder's timeline position. Placeholders stay where they are and can be run again."
-                    style={{ flexShrink: 0, fontSize: 8, fontWeight: 800, letterSpacing: 0.3, color: '#30d158', background: 'rgba(48,209,88,0.16)', border: '0.5px solid rgba(48,209,88,0.5)', borderRadius: 3, padding: '1px 3px', lineHeight: 1.1 }}>OUT</span>
-                )}
-                {/* 生成器轨的设置：宽高 / from canvas / scale / fps —— 轨上所有段共享，
-                    段上不再有这些旋钮。fps 只对没开 Fixed FPS 的段生效。 */}
-                {tr.role === 'vgen' && onVGenTrackSettings && (
-                  <button
-                    data-vid-vgen-track-settings={tr.id}
-                    title={`Generator track settings — the width / height every generator segment on 「${tr.name}」 runs at: fixed values, or the workbench canvas scaled by a factor. Plus a track FPS that overrides the fps parameter of every segment here — segments with Fixed FPS turned on are not affected.`}
-                    onPointerDown={e => e.stopPropagation()}
-                    onClick={e => { e.stopPropagation(); onVGenTrackSettings(tr.id); }}
-                    style={{ flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      background: 'none', border: 'none', borderRadius: 4, color: 'rgba(255,255,255,0.45)', cursor: 'pointer', padding: 0 }}
-                  ><IconGear /></button>
-                )}
-                {/* 生成器轨的轨级提示词：点开 prompt 编辑弹窗（prompt block 同一套界面）。
-                    跑的时候渲染成串追加在每段自己的提示词后面 —— 段在前、轨在后。 */}
-                {tr.role === 'vgen' && onVGenTrackPrompt && (
-                  <button
-                    data-vid-vgen-track-prompt={tr.id}
-                    title={`Track prompt — extra prompt applied to every generator segment on 「${tr.name}」, appended after each segment's own prompt. Edit it in the full prompt UI (same editor as a Pipeline prompt block).`}
-                    onPointerDown={e => e.stopPropagation()}
-                    onClick={e => { e.stopPropagation(); onVGenTrackPrompt(tr.id); }}
-                    style={{ flexShrink: 0, width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      background: 'none', border: 'none', borderRadius: 4, color: tr.vgenPromptPresetId ? '#64d2ff' : 'rgba(255,255,255,0.45)', cursor: 'pointer', padding: 0 }}
-                  ><IconPrompt /></button>
-                )}
-                {/* mute：**所有轨类型都有**（Layer 轨也有 —— 它的段不合成）。亮着 = 这条轨不参与
-                    输出（音频不响 / 视频不显示 / Layer 段不合成），且**优先于 solo**。再点一次取消。
-                    process 轨不给（占位段本来就不出声不出画，静音没有意义）。 */}
-                {!isProcess && (
-                  <button
-                    data-vid-mute={tr.id}
-                    data-vid-mute-on={isMuted ? '1' : '0'}
-                    title={`Mute ${tr.kind} track 「${tr.name}」 — ${tr.kind === 'audio' ? 'its clips stop sounding' : tr.kind === 'video' ? 'its clips stop showing on the monitor' : 'its segments stop compositing (what is below shows through)'}. Mute wins over solo. Click again to unmute.`}
-                    onClick={() => vid.toggleMute(tr.id)}
-                    style={{
-                      flexShrink: 0, width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      background: isMuted ? '#ff453a' : 'transparent',
-                      border: isMuted ? 'none' : '0.5px solid rgba(255,255,255,0.2)',
-                      borderRadius: 3, color: isMuted ? '#1a1a1a' : 'rgba(255,255,255,0.35)',
-                      cursor: 'pointer', padding: 0, fontSize: 8.5, fontWeight: 800, lineHeight: 1,
-                    }}
-                  >M</button>
-                )}
-                {/* solo：视频/音频各一套（分开记）。亮着 = 只播 solo 的轨；视频 solo 还是**直接播**
-                    （不走画布合成/底片）。再点一次取消。Layer / process 轨不给这个按钮。 */}
-                {!isLayer && !isProcess && (
-                  <button
-                    data-vid-solo={tr.id}
-                    data-vid-solo-on={isSoloed ? '1' : '0'}
-                    title={`Solo ${tr.kind} track 「${tr.name}」 — only soloed ${tr.kind} tracks ${tr.kind === 'video' ? 'show (direct playback, bypasses the canvas)' : 'play'}. Click again to unsolo.`}
-                    onClick={() => vid.toggleSolo(tr.id, tr.kind as 'video' | 'audio')}
-                    style={{
-                      flexShrink: 0, width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      background: isSoloed ? '#ff9f0a' : 'transparent',
-                      border: isSoloed ? 'none' : '0.5px solid rgba(255,255,255,0.2)',
-                      borderRadius: 3, color: isSoloed ? '#1a1a1a' : 'rgba(255,255,255,0.35)',
-                      cursor: 'pointer', padding: 0, fontSize: 8.5, fontWeight: 800, lineHeight: 1,
-                    }}
-                  >S</button>
-                )}
-                <button
-                  title={'Delete track 「' + tr.name + '」 (its clips go with it)'}
-                  onClick={() => {
-                    const gone = new Set(p.clips.filter(c => c.trackId === tr.id).map(c => c.id));
-                    vid.update(proj => removeTrack(proj, tr.id), 'Delete track');
-                    setSelIds(prev => {
-                      const next = new Set([...prev].filter(id => !gone.has(id)));
-                      return next;
-                    });
-                  }}
-                  style={{ flexShrink: 0, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 5, color: 'rgba(255,255,255,0.32)', cursor: 'pointer', padding: 0 }}
-                >
-                  <IconTrash />
-                </button>
               </div>
               {/* lane：片段落在这里。Layer 轨不接素材（它装的是图层，不是文件），
-                  process 轨也不接（它只装 Run 摆下的占位段），所以拖放一律回绝。 */}
+                  process 轨也不接（它只装 Run 摆下的占位段），MIDI 轨只装音符段 —— 拖放一律回绝。 */}
               <div
                 data-vid-track={tr.id}
                 onDragOver={e => {
-                  if (tr.kind === 'layer' || tr.kind === 'process') return;   // 合成轨 / process 轨不收素材
+                  if (tr.kind === 'layer' || tr.kind === 'process' || tr.kind === 'midi') return;   // 合成轨 / process 轨 / MIDI 轨不收素材
                   const ts = e.dataTransfer.types;
                   if (ts.includes(ASSET_ITEM_TYPE) || ts.includes('application/x-asset') || ts.includes(GLOBAL_ITEM_TYPE) || ts.includes(STAGING_ITEM_TYPE) || Array.from(ts).includes('Files')) {
                     e.preventDefault();
@@ -1482,7 +1582,7 @@ export const VidTimeline: React.FC<{
                   }
                 }}
                 onDragLeave={() => { setDropLane(l => (l === tr.id ? null : l)); clearSnap(); }}
-                onDrop={e => { if (tr.kind !== 'layer' && tr.kind !== 'process') laneDrop(e, tr.id); }}
+                onDrop={e => { if (tr.kind !== 'layer' && tr.kind !== 'process' && tr.kind !== 'midi') laneDrop(e, tr.id); }}
                 onClick={() => {
                   // Shift 框选松手后紧跟着的 click 不要清掉刚框出来的那批。
                   if (laneClickBlocked.current) { laneClickBlocked.current = false; return; }
@@ -1493,13 +1593,24 @@ export const VidTimeline: React.FC<{
                 onPointerUp={() => endMarquee(true)}
                 onPointerCancel={() => endMarquee(false)}
                 onDoubleClick={e => {
+                  // 双击 MIDI 轨 = 在指针处造一段空段（4 小节），并**当场选中**它 ——
+                  // MIDI 模式的钢琴卷帘编辑的就是"当前选中的那一段"，不选中就等于白造。
+                  if (tr.kind === 'midi') {
+                    e.stopPropagation();
+                    const id = newVidId('mcl');
+                    vid.update(proj => addMidiClip(proj, tr.id, timeAt(e.clientX), 16, id), 'Add MIDI segment');
+                    selectOnly(id);
+                    return;
+                  }
                   // 双击 Layer 轨 = 在指针处造一段（默认 5s）。段之间由 snapPlace 吸附，不会叠。
                   if (tr.kind !== 'layer') return;
                   e.stopPropagation();
                   vid.update(proj => addLayerClip(proj, tr.id, timeAt(e.clientX)), 'Add layer segment');
                 }}
                 title={tr.kind === 'layer' ? 'Layer track — double-click to add a Layer segment. Each segment owns its own layers; it composites over the video below and only takes effect while this track sits above every video track.'
-                  : tr.kind === 'process' ? 'Process track — holds the Processor / Preset segment placeholders. Placeholders never play; each finished segment lands on the output track above at the same timeline position, and a placeholder can be run again any time (its previous result is replaced).' : undefined}
+                  : tr.kind === 'process' ? 'Process track — holds the Processor / Preset segment placeholders. Placeholders never play; each finished segment lands on the output track above at the same timeline position, and a placeholder can be run again any time (its previous result is replaced).'
+                    : tr.kind === 'midi' ? 'MIDI track — double-click to add a MIDI segment (4 bars). Its notes are edited in the MIDI window; drag / trim / split the segment like any clip. The instrument, channel and track velocity live on the track header.'
+                      : undefined}
                 style={{ position: 'relative', flex: 1, minWidth: 0, background: dropLane === tr.id ? 'rgba(10,132,255,0.08)' : 'transparent' }}
               >
                 {p.clips.filter(c => c.trackId === tr.id).map(c => {
@@ -1553,7 +1664,8 @@ export const VidTimeline: React.FC<{
                       onVGenPrompt={onVGenPrompt}
                       onVGenCudOpen={onVGenCudOpen}
                       chainPrev={chainPrev}
-                      chainOut={chainOut} />
+                      chainOut={chainOut}
+                      tempo={musicOf(p).tempo} />
                   );
                 })}
                 {/* Layer 段上的关键帧菱形：画在**泳道坐标**里（不是片段内部）—— 片段是 overflow:hidden，
@@ -1639,8 +1751,8 @@ export const VidTimeline: React.FC<{
               纯视觉（pointerEvents:none），改范围只能去上面的范围带拖把手。 */}
           {inSet && (
             <>
-              <div style={{ position: 'absolute', left: HEADER_W + p.inPoint * pps - 0.5, top: RULER_H, bottom: 0, width: 1, background: 'rgba(120,200,255,0.72)', zIndex: 3, pointerEvents: 'none' }} />
-              <div style={{ position: 'absolute', left: HEADER_W + p.outPoint * pps - 0.5, top: RULER_H, bottom: 0, width: 1, background: 'rgba(120,200,255,0.72)', zIndex: 3, pointerEvents: 'none' }} />
+              <div style={{ position: 'absolute', left: HEADER_W + p.inPoint * pps - 0.5, top: RULER_H, bottom: 0, width: 1, background: RANGE_LINE_COLOR, zIndex: 3, pointerEvents: 'none' }} />
+              <div style={{ position: 'absolute', left: HEADER_W + p.outPoint * pps - 0.5, top: RULER_H, bottom: 0, width: 1, background: RANGE_LINE_COLOR, zIndex: 3, pointerEvents: 'none' }} />
               {/* 范围外压暗：I/O 之间才是"要用的那一段" */}
               <div style={{ position: 'absolute', left: HEADER_W, width: Math.max(0, p.inPoint * pps), top: RULER_H, bottom: 0, background: 'rgba(0,0,0,0.28)', zIndex: 2, pointerEvents: 'none' }} />
               <div style={{ position: 'absolute', left: HEADER_W + p.outPoint * pps, right: 0, top: RULER_H, bottom: 0, background: 'rgba(0,0,0,0.28)', zIndex: 2, pointerEvents: 'none' }} />
@@ -1666,8 +1778,9 @@ export const VidTimeline: React.FC<{
             );
           })()}
 
-          {/* 播放头竖线：横穿标尺与所有轨道（时间 0 = 轨道头右缘；逐帧位移走 transport）。 */}
-          <div ref={lineRef} style={{ position: 'absolute', left: HEADER_W - 0.5, top: 0, bottom: 0, width: 1, background: '#ff453a', zIndex: 6, pointerEvents: 'none', opacity: 0.85 }} />
+          {/* 播放头竖线：从播放头三角所在的底部带开始往下穿所有轨道，不越过刻度与范围带
+              （时间 0 = 轨道头右缘；逐帧位移走 transport）。 */}
+          <div ref={lineRef} style={{ position: 'absolute', left: HEADER_W - 0.5, top: PLAY_TOP, bottom: 0, width: 1, background: '#ff453a', zIndex: 6, pointerEvents: 'none', opacity: 0.85 }} />
 
           {/* 对齐吸附指示：吸住时在**靶子**上拉一条琥珀竖线，顶端标签写明吸的是谁
               （Playhead / In point / 片段名 · head/tail / Timeline start）。位置和文字都由
@@ -1724,7 +1837,8 @@ export const VidTimeline: React.FC<{
             ['video', 'Add Video Track', 'Add a video track on top'],
             ['layer', 'Add Layer Track', 'Add a Layer track on top — it holds Layer segments, each with its own set of layers, composited over the video below. Only a Layer track that sits above every video track takes effect.'],
             ['audio', 'Add Audio Track', 'Add an audio track at the bottom'],
-          ] as ['video' | 'layer' | 'audio', string, string][]).map(([kind, label, tip]) => (
+            ['midi', 'Add MIDI Track', 'Add a MIDI track at the bottom — pick its instrument on the track header; its segments hold notes edited in the MIDI window.'],
+          ] as ['video' | 'layer' | 'audio' | 'midi', string, string][]).map(([kind, label, tip]) => (
             <button
               key={kind}
               onClick={() => { vid.update(p2 => addTrack(p2, kind), 'Add track'); setTrackMenu(null); }}
@@ -1742,6 +1856,13 @@ export const VidTimeline: React.FC<{
         </div>,
         document.body,
       )}
+      {/* MIDI 轨头的乐器弹窗：轨头那颗键说是"这条轨装什么"，挑音色/开插件窗/通道/力度都在里面。 */}
+      {instPop && (() => {
+        const tr = p.tracks.find(t => t.id === instPop.trackId);
+        return tr
+          ? <MidiInstrumentPopover track={tr} x={instPop.x} y={instPop.y} midi={midi} onClose={() => setInstPop(null)} />
+          : null;
+      })()}
 
       {mergeMenu && createPortal((() => {
         const m = mergeMenu;
@@ -1888,11 +2009,14 @@ const Clip: React.FC<{
   chainPrev?: VidClip | null;
   /** 前一段已经跑出来的产物（末帧预览取它的最后一帧；没跑过 = null）。 */
   chainOut?: VidClip | null;
-  /** Layer 段面上的关键帧菱形被点：把播放头送到那一刻（段内秒）。编辑都在 Keyframes 窗里做，这里只跳转。 */
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onVGenCudOpen, chainPrev, chainOut }) => {
+  /** 工程速度（BPM）—— MIDI 段的窗口与音符缩略图按它把拍换成段内比例。 */
+  tempo?: number;
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onVGenCudOpen, chainPrev, chainOut, tempo }) => {
   const isAudio = c.kind === 'audio';
-  // 缺失：只有"真有来源"的段才可能缺（Layer 段、占位段、生成器段都没有仓库来源）。
-  const gone = !!missing && c.kind !== 'layer' && !c.pending && !c.vgen;
+  // MIDI 段：没有源文件，画面/波形都没有；段面画的是"这一窗里有哪些音符"。
+  const isMidi = c.kind === 'midi';
+  // 缺失：只有"真有来源"的段才可能缺（Layer 段、占位段、生成器段、MIDI 段都没有仓库来源）。
+  const gone = !!missing && c.kind !== 'layer' && c.kind !== 'midi' && !c.pending && !c.vgen;
   // Layer 段没有源文件：不抽条、不取首尾帧，只画一块"合成区间"。
   const isLayer = c.kind === 'layer';
   // Processor 占位段同样没有源（等跑完才有）：不抽条不取帧，画一块带快照的"待跑坑"。
@@ -1900,8 +2024,8 @@ const Clip: React.FC<{
   // Video Generator 段：与占位段同一条 process 轨、同一套"产物落到输出轨"的规矩，但装的是
   // 生成器自己的一套（提示词 / 宽高 / 时长 / 帧率 / 首末帧），段面因此多几个控件。
   const isVGen = !!c.vgen;
-  // 两者都没有播放源 —— 抽条 / 取帧那几条路对它们一律不接。
-  const noMedia = isLayer || isPending || isVGen;
+  // 两者都没有播放源 —— 抽条 / 取帧那几条路对它们一律不接。MIDI 段同样没有源文件。
+  const noMedia = isLayer || isPending || isVGen || isMidi;
   // 普通视频段不画名字/时长：画面本身就是标识，文字只留给 tooltip。
   const isVideoClip = c.kind === 'video' && !isPending;
   // 占位段的宽度命运：一段常常只有几十像素（1 秒 @ 60px/s），名字 + 段号 + ▶ Run 挤不下。
@@ -1922,6 +2046,23 @@ const Clip: React.FC<{
   // 占位段一律用 process 轨的浅灰白 —— 旧存档里的占位段可能还躺在视频轨上（kind='video'），
   // 颜色也必须一眼认出"这是个待跑的坑"，不能跟着脚下轨道变蓝。
   const PK = KIND_UI.process;
+  // MIDI 段的"画面"就是音符本身：段窗口里看得见的那几颗按拍换算成百分比画成小横条。
+  // 纵轴按这一窗实际用到的音高取带（上下各留一个半音），空段给中央 C 附近两八度 ——
+  // 固定画 0..127 的话，几颗音符只会挤成一条线，段面上什么也认不出来。
+  const bpm = tempo && tempo > 0 ? tempo : 120;
+  const midiWin = isMidi ? midiClipWindow(c, bpm) : null;
+  const midiShown = isMidi ? midiNotesInClip(c, bpm) : [];
+  const midiSpan = midiWin ? Math.max(1e-6, midiWin.to - midiWin.from) : 1;
+  let midiLo = 60, midiHi = 72;
+  if (midiShown.length) {
+    midiLo = Math.min(...midiShown.map(n => n.pitch)) - 1;
+    midiHi = Math.max(...midiShown.map(n => n.pitch)) + 1;
+    if (midiHi - midiLo < 12) {
+      const mid = (midiLo + midiHi) / 2;
+      midiLo = mid - 6;
+      midiHi = mid + 6;
+    }
+  }
   const hideImg = (e: React.SyntheticEvent<HTMLImageElement>) => { e.currentTarget.style.display = 'none'; };
   // 视频段头/尾帧：t 是**片段自己的**第一帧/最后一帧（源内 offset 与 offset+duration 处）——
   // 裁剪改了 offset/duration，要的帧就变了，于是重新取一张。
@@ -2008,6 +2149,8 @@ const Clip: React.FC<{
       onDoubleClick={e => e.stopPropagation()}
       title={isVGen && c.vgen
         ? `${c.name} — video generator segment for 「${c.vgen.iface}」 (${fmtTime(c.duration)}${c.vgen.fixed_fps ? ', fixed fps' : ''}). ${chainPrev ? `Linked to 「${chainPrev.name}」 — its last frame is this segment's first frame (Ctrl-click the seam to disconnect). ` : ''}${c.vgen.ports.first_frame ? 'The left frame card binds the first frame; ' : ''}${c.vgen.ports.last_frame ? 'the right frame card binds the last frame; ' : ''}Width / height / fps are the track settings (the gear on the track header) and the track prompt is the speech bubble next to it; ▶ sends the segment's values into the interface and the finished video lands on the output track above at this position. The segment stays, so it can be run again.`
+        : isMidi
+        ? `${c.name} — MIDI segment, ${midiShown.length} note${midiShown.length === 1 ? '' : 's'} in view (${fmtTime(c.duration)}). Its notes are edited in the MIDI window — select this segment and switch to MIDI. Trimming only hides the notes outside the segment; they stay on it. The instrument, MIDI channel and track velocity live on the track header. Drag / trim / split / copy like any clip.`
         : isPending && c.pending
         ? `${c.name} — ${c.pending.kind === 'preset' ? 'Pipeline Preset' : 'Processor'} placeholder, segment ${c.pending.segIndex + 1}/${c.pending.segCount} of 「${c.pending.iface}」 (nothing to show until it runs). Click ▶ Run to execute just this segment from its stored snapshot; the result lands on the output track above and this placeholder stays, so it can be run again. Drag/trim/delete like any clip.`
         : `${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}${gone ? ' · MEDIA MISSING from the asset store — pick the original file in the Assets window (Project scope) to relink' : ''}`}
@@ -2054,6 +2197,28 @@ const Clip: React.FC<{
           width: `${(c.srcDuration / Math.max(c.duration, 0.001)) * 100}%`,
           marginLeft: `${-(c.offset / Math.max(c.duration, 0.001)) * 100}%`,
           objectFit: 'fill', opacity: 0.5, pointerEvents: 'none' }} />
+      )}
+      {/* MIDI 段：音符就是段面内容。横向按拍落在段窗口里的比例，纵向按这一窗的音高带 ——
+          裁掉的那部分音符仍留在段上（拉回来就能看见），所以这里只画窗口里的。 */}
+      {isMidi && midiShown.length > 0 && (
+        <span style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+          {midiShown.map(n => {
+            const h = 100 / Math.max(1, midiHi - midiLo);
+            return (
+              <span key={n.id} style={{
+                position: 'absolute',
+                left: `${((n.start - midiWin!.from) / midiSpan) * 100}%`,
+                width: `${(n.dur / midiSpan) * 100}%`,
+                minWidth: 2,
+                top: `${(1 - (n.pitch - midiLo) / (midiHi - midiLo)) * 100}%`,
+                height: `max(2px, ${h}%)`,
+                borderRadius: 1.5,
+                background: `rgba(255,255,255,${0.42 + 0.45 * Math.min(1, n.vel / 127)})`,
+                boxShadow: '0 0 0 0.5px rgba(30,10,45,0.55)',
+              }} />
+            );
+          })}
+        </span>
       )}
       {isLayer && !micro && (
         <span style={{ display: 'flex', alignItems: 'center', color: '#ffd9a8', flexShrink: 0, position: 'relative', pointerEvents: 'none' }}><IconLayers /></span>

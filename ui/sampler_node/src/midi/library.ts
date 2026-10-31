@@ -6,7 +6,8 @@
 // 后端两条路自己选，这里只看 `source` 报的实话：
 //   catalog = 那颗库里有 catalog.json（原项目那种入库清单），条目已经是验证过的；
 //   scan    = 没有清单，按目录树扫出来的。
-// `playable` 是"**这个程序**播得出来"，不是"这个音色好不好" —— VST3 现在只列不能放。
+// `playable` 是"**这个程序**播得出来"：.sfz 走样本引擎，.vstpreset 走真插件（Kontakt/HALion
+// 那类封闭库就靠用户导出的预设出声，见 settings.presetsLibrary）。
 import { useSyncExternalStore } from 'react';
 import { getMidiSettings, subscribeMidiSettings, type LibraryState } from './settings';
 
@@ -24,6 +25,8 @@ export type InstrumentItem = {
   playable: boolean;
   /** 入库时真发过声（catalog 里那条 audio_verified）。 */
   verified: boolean;
+  /** **这一条**的根目录（乐器和预设可能住在两棵根里）；空 = 用 lib.root。 */
+  root: string;
   /** 库内相对路径，只给悬停看。 */
   where: string;
 };
@@ -31,6 +34,9 @@ export type InstrumentItem = {
 export type InstrumentLibrary = {
   ok: boolean;
   root: string;
+  /** 预设根（.vstpreset 住在哪儿）与它的状态。 */
+  presetsRoot: string;
+  presetsState: LibraryState;
   source: 'catalog' | 'scan' | 'none';
   items: InstrumentItem[];
   total: number;
@@ -68,6 +74,7 @@ const item = (raw: unknown): InstrumentItem | null => {
     source: str(r.source),
     playable: r.playable === true,
     verified: r.verified === true,
+    root: str(r.root),
     where: str(r.where),
   };
 };
@@ -77,26 +84,31 @@ const adopt = (data: unknown): InstrumentLibrary | null => {
   // 形状闸：这一档的核心是 items 数组；没有它说明这不是本路由的答案（老后端 404 / `{}`）。
   if (!d || typeof d !== 'object' || !Array.isArray(d.items)) return null;
   const st = d.state as Partial<LibraryState> | undefined;
+  const pst = d.presets_state as Partial<LibraryState> | undefined;
+  const readState = (v: Partial<LibraryState> | undefined, set: boolean, ok: boolean): LibraryState =>
+    v && typeof v.ok === 'boolean' ? { set: !!v.set, ok: !!v.ok, reason: str(v.reason) } : { set, ok, reason: '' };
   return {
     ok: d.ok === true,
     root: str(d.root),
+    presetsRoot: str(d.presets_root),
+    presetsState: readState(pst, !!str(d.presets_root), false),
     source: d.source === 'catalog' || d.source === 'scan' ? d.source : 'none',
     items: d.items.map(item).filter((x): x is InstrumentItem => x !== null),
     total: num(d.total, d.items.length),
     truncated: d.truncated === true,
     error: str(d.error),
     elapsedMs: num(d.elapsed_ms, 0),
-    state: st && typeof st.ok === 'boolean'
-      ? { set: !!st.set, ok: !!st.ok, reason: str(st.reason) }
-      : { set: !!str(d.root), ok: d.ok === true, reason: '' },
+    state: readState(st, !!str(d.root), d.ok === true),
   };
 };
 
 /** 拉一次。`force` = 用户按了刷新（路径没变也重扫）。 */
 export const reloadInstruments = (force = false): Promise<void> => {
   if (inflight) return inflight;
-  const root = getMidiSettings().instrumentsLibrary;
-  if (!force && loadedFor === root && snap.lib) return Promise.resolve();
+  const s0 = getMidiSettings();
+  const root = s0.instrumentsLibrary;
+  const key = root + '|' + s0.presetsLibrary;
+  if (!force && loadedFor === key && snap.lib) return Promise.resolve();
   snap = { ...snap, loading: true, error: '' };
   emit();
   inflight = fetch('/api/instruments')
@@ -105,7 +117,7 @@ export const reloadInstruments = (force = false): Promise<void> => {
       const lib = adopt(data);
       if (!lib) { snap = { ...snap, loading: false, error: 'Instrument list unavailable — the backend may not have been restarted since this was added.' }; return; }
       snap = { lib, loading: false, error: '' };
-      loadedFor = lib.root;
+      loadedFor = lib.root + '|' + lib.presetsRoot;
     })
     .catch(() => { snap = { ...snap, loading: false, error: 'Instrument list unavailable — the backend may not have been restarted since this was added.' }; })
     .finally(() => { inflight = null; emit(); });
@@ -113,6 +125,16 @@ export const reloadInstruments = (force = false): Promise<void> => {
 };
 
 export const getInstrumentLibrary = () => snap;
+
+/** 一条库条目的绝对路径：`where` 本身就是绝对路径（catalog 那种）就原样用，否则拼它自己的
+ *  `root`（乐器和预设住在两棵根里），没有 root 才回收落根。Assets 的列表与 agent 工具共用
+ *  这一条 —— 两边各写一遍，迟早一边认 root 一边不认，装到轨上的路径就对不上了。 */
+export const instrumentAbsPath = (it: InstrumentItem, fallbackRoot: string): string => {
+  const w = it.where;
+  if (/^[A-Za-z]:[\\/]/.test(w) || w.startsWith('/') || w.startsWith('\\\\')) return w;
+  const base = (it.root || fallbackRoot).replace(/[\\/]+$/, '');
+  return base ? base + '/' + w : w;
+};
 
 export const subscribeInstruments = (fn: () => void): (() => void) => {
   subs.add(fn);
@@ -124,10 +146,13 @@ export const subscribeInstruments = (fn: () => void): (() => void) => {
  *  状态行与清单应当当场变，而不是等用户再去点一次 Rescan。
  *  `reloadInstruments` 自己有 inflight 合并与"同一条路径且已有清单就不重复"的判断，
  *  所以 mount 时的那一次和这里的这一次撞上也不会扫两趟。 */
-let lastKey = (() => { const s = getMidiSettings(); return s.instrumentsLibrary + '|' + s.scanDepth; })();
+let lastKey = (() => {
+  const s = getMidiSettings();
+  return s.instrumentsLibrary + '|' + s.presetsLibrary + '|' + s.scanDepth;
+})();
 subscribeMidiSettings(() => {
   const s = getMidiSettings();
-  const key = s.instrumentsLibrary + '|' + s.scanDepth;
+  const key = s.instrumentsLibrary + '|' + s.presetsLibrary + '|' + s.scanDepth;
   if (key === lastKey) return;
   lastKey = key;
   loadedFor = '';

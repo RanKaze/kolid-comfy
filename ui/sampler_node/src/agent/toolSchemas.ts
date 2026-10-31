@@ -357,6 +357,59 @@ export const TOOLS = [
     description: "Link / unlink two Video Generator segments at their seam (what Ctrl+click on the seam does): the second segment then takes the first one's last frame. Needs same track, both generator segments, touching start/end, and the second one binding first_frame. Already linked to `prev` ⇒ unlinks.",
     parameters: { type: 'object', properties: { prev_clip_id: { type: 'string' }, next_clip_id: { type: 'string' } }, required: ['prev_clip_id', 'next_clip_id'] },
   },
+
+  // ── MIDI 乐器：每条轨一件（路径住工程里，引擎那头按轨各开一支实例）──
+  // 这一组就是 MIDI 模式下"乐器"那一列能做的事：看、找、装/换、开插件窗挑音色、关窗自动存成
+  // .vstpreset、卸、试听。窗口是真的系统窗口，开在插件自己的进程里 —— 这里只是替用户按那几个键。
+  {
+    name: 'get_midi_state',
+    description: '[READ] Snapshot of the MIDI half of the active document: tempo / time signature / transport (playing, seconds), the selected track, the preview slot, and every MIDI track with channel, instrument path, velocity base, mute/solo, note count, plus what the native engine reports for it (loaded? open? editor window? error). Read this first to get real track ids.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'instrument_library',
+    description: "[DISCOVERY, read-only] List the instruments found under the Instruments Library folder (Settings → MIDI): name, model, format, source, absolute path, and whether this engine can play it. Pass a returned `path` to set_track_instrument. `force` re-scans the folders — use it after the user adds files on disk.",
+    parameters: { type: 'object', properties: {
+      q: { type: 'string', description: 'case-insensitive filter over name / model / source / path' },
+      playable_only: { type: 'boolean', description: 'only rows this engine can actually play (default false)' },
+      force: { type: 'boolean', description: 're-scan the folders first (default false)' },
+      limit: { type: 'number', description: 'max rows to print, 1..500 (default 80)' },
+    }, required: [] },
+  },
+  {
+    name: 'set_track_instrument',
+    description: "[WRITE] Load an instrument onto a MIDI track — this is what the track then plays. With `track_id` it replaces that track's instrument; without it a new MIDI track named after the instrument is created. `path` must be absolute (.sfz samples, a .vst3 plug-in, or a .vstpreset) — call instrument_library to get one. Loading a .vst3 plug-in itself also opens its own window so a sound can be picked (close_instrument_window saves it). On failure the track keeps its previous sound and the error says why.",
+    parameters: { type: 'object', properties: {
+      path: { type: 'string', description: 'absolute path to a .sfz / .vst3 / .vstpreset' },
+      track_id: { type: 'string', description: 'existing MIDI track to load into (omit = add a new track)' },
+      name: { type: 'string', description: 'name for the new track (default: the file name)' },
+    }, required: ['path'] },
+  },
+  {
+    name: 'unload_track_instrument',
+    description: '[WRITE] Remove the instrument from a MIDI track — the track stays (its notes stay), it just stops sounding. Any plug-in window open for it is closed without saving.',
+    parameters: { type: 'object', properties: { track_id: { type: 'string' } }, required: ['track_id'] },
+  },
+  {
+    name: 'open_instrument_window',
+    description: "[WRITE] Open the instrument's own plug-in window (its real UI, a system window) for a track — how HALion / Kontakt sounds get picked: the user chooses a sound there, then closes the window (or you call close_instrument_window) and it is saved as a .vstpreset that becomes this track's instrument. Only VST3 instruments have a window; SFZ instruments do not.",
+    parameters: { type: 'object', properties: { track_id: { type: 'string' } }, required: ['track_id'] },
+  },
+  {
+    name: 'close_instrument_window',
+    description: "[WRITE] Close the plug-in window opened by open_instrument_window and save its current state as a .vstpreset into the preset folder; the track's instrument switches to that preset in place (no reload, sound does not stop). Returns the saved path. Exactly what the user's window X does — if the user already closed it, nothing is saved twice.",
+    parameters: { type: 'object', properties: { track_id: { type: 'string' } }, required: ['track_id'] },
+  },
+  {
+    name: 'audition_note',
+    description: '[ACTION] Play one note to hear it, without touching the transport or the project notes. `track_id` auditions the instrument loaded on that track (its own channel); `path` auditions a library item in the preview slot (it does not enter the project). Returns the engine peak measured right after: 0 means nothing came out — the sound may not map that key (drum kits and split programs do not cover every pitch).',
+    parameters: { type: 'object', properties: {
+      pitch: { type: 'number', description: 'MIDI pitch 0..127 (60 = C4)' },
+      vel: { type: 'number', description: 'velocity 1..127 (default 100)' },
+      track_id: { type: 'string', description: 'audition the instrument on this track' },
+      path: { type: 'string', description: 'audition this library item in the preview slot instead' },
+    }, required: ['pitch'] },
+  },
 ] as const satisfies readonly AgentToolSchema[];
 
 export type AgentToolName = (typeof TOOLS)[number]['name'];

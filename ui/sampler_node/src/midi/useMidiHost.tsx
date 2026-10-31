@@ -1,184 +1,141 @@
 // ── MIDI 模式的宿主 ──────────────────────────────────────────────────────────────────────────
 //
-// 一段 hook，把"按文档分桶 / 撤销栈 / 随 .cud 走 / 循环回绕 / 把事件喂给外部音源"这几件事
-// 从 EditPhase 那四万行里隔出来。EditPhase 只需要：
-//   const midi = useMidiHost({...});          ← 一次
-//   ...midi.bodies                            ← 塞进 dock 的 bodies
-//   存盘时 project: midi.withMidi(proj, uid)  ← 一行
-//   读档时 midi.restore(uid, d.project?.midi) ← 一行
+// 一段 hook，把"工程投影 / 选中段 / 循环回绕 / 把事件喂给外部音源"这几件事从 EditPhase 那
+// 四万行里隔出来。**它不再自己存工程**：乐器轨与乐器段住在视频工程里（`VidTrack.kind ===
+// 'midi'` / `VidClip.notes`），随时间线一起按文档分桶、一起撤销、一起随 .cud 走。
 //
-// 这样做的理由和视频那一半一样：状态必须住在**页面**（关掉一扇窗不该丢东西、切文档要换一份），
-// 但页面不该再多出第五条撤销栈的手写实现。
+// 宿主（EditPhase）只需要：
+//   const midi = useMidiHost({ activeUid, project, update, projectOf, updateIn, ... });
+//   ...midi.ctl          ← 塞给工作区 / Assets / agent
+//   存盘时 project 原样交给页面 ← 没有第二个键要拼了
 //
 // 时间一律来自 clock（见 midi/clock.ts）。这里**不存秒数**，只存拍与 BPM。
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { clock } from './clock';
 import { useClockFrame } from './hooks';
+import { startNativeMonitor } from './nativeMonitor';
 import { midiOut } from './output';
+import { setEditorHost } from './soundWindow';
+import { type MidiProject, type MidiTrack, beatToSeconds, secondsToBeat } from './model';
 import {
-  type MidiNote, type MidiProject, activeTrackOf, beatToSeconds, defaultMidiProject,
-  normalizeMidiProject, secondsToBeat,
-} from './model';
+  applyEditorNotes, applyMidiProject, midiEditorOf, midiProjectOf,
+} from '../workbench/video/model';
+import type { VidProject } from '../workbench/video/model';
+import { getVidSelection, subscribeVidSelection } from '../workbench/video/selection';
 import type { MidiCtl } from './types';
-
-const MIDI_STORE = 'sampler.midiProject';
-const HIST_MAX = 80;
-const COALESCE_MS = 650;
-
-type HistRec = { p: MidiProject; label: string; at: number };
-
-const loadSeed = (): MidiProject => {
-  try {
-    const raw = localStorage.getItem(MIDI_STORE);
-    if (!raw) return defaultMidiProject();
-    return normalizeMidiProject(JSON.parse(raw));
-  } catch { return defaultMidiProject(); }
-};
 
 export type MidiHost = {
   ctl: MidiCtl;
-  /** 存盘用：把这一份文档的 MIDI 挂到视频工程上（`.cud` 的 header.video 是个黑盒，多一个键不碍事）。 */
-  withMidi: <T extends object>(proj: T, uid: number) => T & { midi?: MidiProject };
-  /** 读档用：文件里带 midi 就落进桶里；不带就给它一份空的（别把上一份的轨带过来）。 */
-  restore: (uid: number, raw: unknown) => void;
-  /** 文档关了：桶清掉，免得 uid 被复用后认领了别人的工程。 */
-  drop: (uid: number) => void;
-  undo: () => void;
-  redo: () => void;
-  canUndo: boolean;
-  canRedo: boolean;
+  /** 某份文档的轨（存盘前认"哪几条开着音色窗"用；不必是屏幕上这份）。 */
+  tracksOf: (uid: number) => { id: string; name: string }[];
+  /** 写**某份**文档，不必是屏幕上这份（存盘时收别处的音色窗）。 */
+  updateIn: (uid: number, fn: (p: MidiProject) => MidiProject, label?: string) => void;
+  /** 这条轨住在哪份文档（null = 找不到）。 */
+  docOf: (trackId: string) => number | null;
 };
 
 export const useMidiHost = (opts: {
   activeUid: number | null;
+  /** 屏幕上这份视频工程 —— 乐器轨/段都在里面。 */
+  project: VidProject;
+  /** 改屏幕上这份（视频工程的唯一写口：撤销、置脏、落盘都在它那边）。 */
+  update: (fn: (p: VidProject) => VidProject, label?: string) => void;
+  /** 取某份文档的视频工程（桶里那份，不必是屏幕上这份）。 */
+  projectOf: (uid: number) => VidProject | null;
+  /** 改某份文档的视频工程。 */
+  updateIn: (uid: number, fn: (p: VidProject) => VidProject, label?: string) => void;
+  /** 视频撤销摞（MIDI 不再自己记一支：一次编辑 = 时间线上的一步）。 */
+  undo: () => void;
+  redo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  /** 有哪些文档的桶（音色窗按轨反查归属用）。 */
+  docIds: () => number[];
   /** 置脏（tab 上的 ●、关前询问）。 */
   onDirty: (uid: number) => void;
-  /** 找机会落盘（去抖在宿主那边）。 */
-  saveSoon: (uid: number) => void;
 }): MidiHost => {
-  const { activeUid, onDirty, saveSoon } = opts;
+  const {
+    activeUid, project, update: updateVid, projectOf, updateIn: updateInVid,
+    undo, redo, canUndo, canRedo, docIds, onDirty,
+  } = opts;
 
-  const seed = useRef<MidiProject | null>(null);
-  if (seed.current === null) seed.current = loadSeed();
-
-  const [project, setProject] = useState<MidiProject>(seed.current);
   const projectRef = useRef(project);
   projectRef.current = project;
-
-  // 屏幕上这份**属于哪份文档**：切 tab 那一帧 state 还停在上一份上，写桶必须按归属判。
-  const owner = useRef<number | null>(null);
-  const byDoc = useRef(new Map<number, MidiProject>());
-  const hist = useRef(new Map<number, { undo: HistRec[]; redo: HistRec[] }>());
-  const [, bump] = useReducer((x: number) => x + 1, 0);
+  const projectOfRef = useRef(projectOf);
+  projectOfRef.current = projectOf;
+  const docIdsRef = useRef(docIds);
+  docIdsRef.current = docIds;
   const activeUidRef = useRef(activeUid);
   activeUidRef.current = activeUid;
 
-  const histOf = useCallback((uid: number) => {
-    let h = hist.current.get(uid);
-    if (!h) { h = { undo: [], redo: [] }; hist.current.set(uid, h); }
-    return h;
-  }, []);
+  /** 喂给引擎/外部端口的投影：所有 MIDI 轨，音符在**全局拍**上。 */
+  const midiProj = useMemo(() => midiProjectOf(project), [project]);
+  const midiProjRef = useRef(midiProj);
+  midiProjRef.current = midiProj;
 
-  /** 唯一写口。`label` 同时是撤销栈里那一步的名字和合并键（拖动每帧都来 ⇒ 并成一步）。 */
-  const update = useCallback((fn: (p: MidiProject) => MidiProject, label = 'Edit') => {
-    const uid = owner.current;
-    const prev = projectRef.current;
-    const next = fn(prev);
-    if (next === prev) return;
-    projectRef.current = next;
-    setProject(next);
-    if (uid == null) return;
-    byDoc.current.set(uid, next);
-    const h = histOf(uid);
-    const now = Date.now();
-    const top = h.undo[h.undo.length - 1];
-    if (top && top.label === label && now - top.at < COALESCE_MS) top.at = now;
-    else {
-      h.undo.push({ p: prev, label, at: now });
-      while (h.undo.length > HIST_MAX) h.undo.shift();
-    }
-    h.redo.length = 0;
-    onDirty(uid);
-    saveSoon(uid);
-    bump();
-  }, [histOf, onDirty, saveSoon]);
+  // ── 选中哪一段：时间线的选中是跨窗 store；没有选中 MIDI 段时退回第一段 ────────────────
+  // 退回而不是空，是因为 MIDI 模式的正文就是卷帘 —— 工程里有段却画一片空白会像"坏了"。
+  const sel = useSyncExternalStore(subscribeVidSelection, getVidSelection);
+  const clipId = useMemo(() => {
+    for (const c of project.clips) if (c.kind === 'midi' && sel.has(c.id)) return c.id;
+    return project.clips.find(c => c.kind === 'midi')?.id ?? null;
+  }, [project.clips, sel]);
+  const clipIdRef = useRef<string | null>(clipId);
+  clipIdRef.current = clipId;
 
-  const applyState = useCallback((uid: number, p: MidiProject) => {
-    byDoc.current.set(uid, p);
-    projectRef.current = p;
-    owner.current = uid;
-    setProject(p);
-    onDirty(uid);
-    bump();
-  }, [onDirty]);
+  const editor = useMemo(() => midiEditorOf(project, clipId), [project, clipId]);
+  const track = editor?.track ?? null;
 
-  const undo = useCallback(() => {
-    const uid = activeUidRef.current;
-    if (uid == null) return;
-    const h = histOf(uid);
-    const rec = h.undo.pop();
-    if (!rec) return;
-    h.redo.push({ p: projectRef.current, label: rec.label, at: Date.now() });
-    applyState(uid, rec.p);
-    bump();
-  }, [applyState, histOf]);
+  // 音符选中（给 agent 报 selection 用）。换段就清掉 —— 上一段的 id 在新段里不存在。
+  const [selNote, setSelNote] = useState('');
+  useEffect(() => { setSelNote(''); }, [clipId]);
+  const note = track?.notes.find(n => n.id === selNote) ?? null;
 
-  const redo = useCallback(() => {
-    const uid = activeUidRef.current;
-    if (uid == null) return;
-    const h = histOf(uid);
-    const rec = h.redo.pop();
-    if (!rec) return;
-    h.undo.push({ p: projectRef.current, label: rec.label, at: Date.now() });
-    applyState(uid, rec.p);
-    bump();
-  }, [applyState, histOf]);
+  // ── 投影级写回：轨级动作（装/卸乐器、改名、通道、力度、M/S、BPM/循环）──────────────
+  const update = useCallback((fn: (p: MidiProject) => MidiProject, label = 'MIDI edit') => {
+    updateVid(p => {
+      const prev = midiProjectOf(p);
+      const next = fn(prev);
+      return next === prev ? p : applyMidiProject(p, prev, next);
+    }, label);
+  }, [updateVid]);
 
-  // 本机引擎：进页面探一次（既不弹权限也不开设备）。探到就把它摆进端口表并默认选中 ——
-  // 这是"装了就能听"的那条路，不用先去找 loopMIDI 或宿主。
+  const updateIn = useCallback((uid: number, fn: (p: MidiProject) => MidiProject, label = 'MIDI edit') => {
+    updateInVid(uid, p => {
+      const prev = midiProjectOf(p);
+      const next = fn(prev);
+      return next === prev ? p : applyMidiProject(p, prev, next);
+    }, label);
+  }, [updateInVid]);
+
+  /** 卷帘写回：只认选中的那一段，音符是段内拍；窗口外的音符原样留着。 */
+  const updateEditor = useCallback((fn: (t: MidiTrack) => MidiTrack, label = 'Edit notes') => {
+    updateVid(p => {
+      const ed = midiEditorOf(p, clipIdRef.current);
+      if (!ed) return p;
+      const next = fn(ed.track);
+      return next === ed.track ? p : applyEditorNotes(p, ed, next);
+    }, label);
+  }, [updateVid]);
+
+  // 本机引擎：进页面探一次（既不弹权限也不开设备）。探到就把它摆进端口表并默认选中。
   useEffect(() => {
     void midiOut.probeNative();
   }, []);
 
+  // 引擎的声音也要进 Audio Monitor（独占音频槽在 workbench/video/audioFocus.ts）。
+  useEffect(() => startNativeMonitor(() => midiOut.isNative()), []);
+
   // 工程变了：直接推一次整表（不等 rAF 发现）。拖音符时 120ms 合一次，见 engine.ts。
   useEffect(() => {
-    midiOut.rebuild(project);
-  }, [project]);
-
-  // ── 换文档 = 换一份工程 ───────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (activeUid == null) { owner.current = null; return; }
-    const mine = byDoc.current.get(activeUid);
-    if (mine) {
-      owner.current = activeUid;
-      projectRef.current = mine;
-      setProject(mine);
-    } else {
-      // 这份文档还没有 MIDI：给它一份空的，而不是把上一份的轨搬过来。
-      const fresh = defaultMidiProject();
-      byDoc.current.set(activeUid, fresh);
-      owner.current = activeUid;
-      projectRef.current = fresh;
-      setProject(fresh);
-    }
-  }, [activeUid]);
-
-  // 页面存档：只在"还没有任何文档"时作起手工程用（和视频那半边同一口径）。
-  useEffect(() => {
-    if (activeUid == null) return;
-    const t = setTimeout(() => {
-      try { localStorage.setItem(MIDI_STORE, JSON.stringify(project)); } catch { /* in-memory only */ }
-    }, 400);
-    return () => clearTimeout(t);
-  }, [project, activeUid]);
-
-  // 工程变了：输出队列由 tick 自己发现（`lastProj !== proj` 就重建），不必在这里推第二次。
+    midiOut.rebuild(midiProj);
+  }, [midiProj]);
 
   // ── 每帧：循环回绕 + 把事件喂出去 ─────────────────────────────────────────────────────────
   // 这两个动作必须在**页面**里跑，而不是某扇窗里 —— 用户把卷帘关了，音乐还得继续走。
   useClockFrame(() => {
-    const p = projectRef.current;
+    const p = midiProjRef.current;
     if (clock.isPlaying() && p.loop.on) {
       const endSec = beatToSeconds(p.loop.b, p.tempo);
       const startSec = beatToSeconds(p.loop.a, p.tempo);
@@ -199,53 +156,55 @@ export const useMidiHost = (opts: {
     });
   }, []);
 
-  const ctl = useMemo<MidiCtl>(() => {
-    const track = activeTrackOf(project);
-    const note: MidiNote | null = track ? (track.notes.find(n => n.id === project.selNote) ?? null) : null;
-    return {
-      project,
-      update,
-      select: (trackId, noteId) => update(p => ({ ...p, selTrack: trackId, selNote: noteId ?? p.selNote }), 'Select'),
-      playing: playingNow,
-      play: () => { void clock.play(); midiOut.pushPrograms(project); },
-      pause: () => { void clock.pause(); },
-      seekBeat: (beat: number) => { void clock.seek(beatToSeconds(Math.max(0, beat), project.tempo)); },
-      undo,
-      redo,
-      canUndo: activeUid != null && (hist.current.get(activeUid)?.undo.length ?? 0) > 0,
-      canRedo: activeUid != null && (hist.current.get(activeUid)?.redo.length ?? 0) > 0,
-      track: track ?? null,
-      note,
-    };
-  }, [project, update, undo, redo, activeUid, playingNow]);
+  const ctl = useMemo<MidiCtl>(() => ({
+    project: { ...midiProj, selTrack: editor?.trackId ?? midiProj.selTrack, selNote },
+    editor,
+    clipId,
+    update,
+    updateEditor,
+    select: (_trackId, noteId) => setSelNote(noteId ?? ''),
+    playing: playingNow,
+    play: () => { void clock.play(); },
+    pause: () => { void clock.pause(); },
+    seekBeat: (beat: number) => { void clock.seek(beatToSeconds(Math.max(0, beat), midiProj.tempo)); },
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    track,
+    note,
+  }), [midiProj, editor, clipId, selNote, update, updateEditor, playingNow, undo, redo, canUndo, canRedo, track, note]);
 
-  const withMidi = useCallback(<T extends object>(proj: T, uid: number): T & { midi?: MidiProject } => {
-    const mine = byDoc.current.get(uid) ?? (owner.current === uid ? projectRef.current : null);
-    return mine ? { ...proj, midi: mine } : proj;
+  // ── 音色窗的宿主：它只借"当前这份工程"和唯一写口 ─────────────────────────────────────
+  const tracksOf = useCallback((uid: number) => {
+    const p = projectOfRef.current(uid);
+    return p ? midiProjectOf(p).tracks.map(t => ({ id: t.id, name: t.name })) : [];
   }, []);
 
-  const restore = useCallback((uid: number, raw: unknown) => {
-    const p = normalizeMidiProject(raw);
-    byDoc.current.set(uid, p);
-    hist.current.delete(uid);
-    if (uid === activeUidRef.current) {
-      owner.current = uid;
-      projectRef.current = p;
-      setProject(p);
+  const docOf = useCallback((trackId: string): number | null => {
+    const here = activeUidRef.current;
+    if (here != null && midiProjectOf(projectRef.current).tracks.some(t => t.id === trackId)) return here;
+    for (const uid of docIdsRef.current()) {
+      if (uid === here) continue;
+      const p = projectOfRef.current(uid);
+      if (p && midiProjectOf(p).tracks.some(t => t.id === trackId)) return uid;
     }
-    bump();
+    return null;
   }, []);
 
-  const drop = useCallback((uid: number) => {
-    byDoc.current.delete(uid);
-    hist.current.delete(uid);
-    bump();
-  }, []);
+  useEffect(() => {
+    setEditorHost({
+      getProject: () => midiProjRef.current,
+      update,
+      updateIn,
+      tracksOf,
+      docOf,
+      dirty: onDirty,
+    });
+    return () => setEditorHost(null);
+  }, [update, updateIn, tracksOf, docOf, onDirty]);
 
-  return {
-    ctl, withMidi, restore, drop, undo, redo,
-    canUndo: ctl.canUndo, canRedo: ctl.canRedo,
-  };
+  return { ctl, tracksOf, updateIn, docOf };
 };
 
 /** 播放头现在第几拍 —— 标尺与卷帘共用（别各写一遍换算）。 */

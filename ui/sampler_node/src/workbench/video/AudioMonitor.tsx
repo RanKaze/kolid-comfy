@@ -9,6 +9,9 @@ import { currentAudioHolder, subscribeAudioFocus, type AudioHolder } from './aud
 // 20·log10 折成 dB,落在线性 dB 刻度(-60..0,每 3dB 一格,与图中标尺同款)上。表体是 canvas
 // 直改(与时间线播放头同一手法),rAF 只在有人持槽时转。两只 S 键拨持有者探头里的 gainL/gainR
 // —— 哑掉的那个声道,表和耳朵一起哑(探头在闸之后)。
+//
+// 原生引擎(MIDI 的采样乐器/插件)没有 analyser,持有者改用 `levels()` 报线性峰值;那条路上
+// 没有闸节点,所以底排的两枚 M 键整排不画(不做"装了但按不动的按钮")。
 
 const MIN_DB = -60;
 const PEAK_FALL = 0.42;        // 峰值保持线每帧回落(dB/帧 @60fps ≈ 25dB/s)
@@ -36,28 +39,28 @@ export const VidAudioMonitor: React.FC = () => {
   const [silenced, setSilenced] = useState<{ l: boolean; r: boolean }>({ l: false, r: false });
   useEffect(() => {
     setSilenced({ l: false, r: false });
-    const h = holderRef.current;
-    if (h) {
-      try { h.probe.gainL.gain.value = 1; h.probe.gainR.gain.value = 1; } catch { /* 节点已散 */ }
+    const p = holderRef.current?.probe;
+    if (p) {
+      try { p.gainL.gain.value = 1; p.gainR.gain.value = 1; } catch { /* 节点已散 */ }
     }
   }, [holder]);
 
   const toggle = (which: 'l' | 'r') => {
-    const h = holderRef.current;
-    if (!h) return;
+    const p = holderRef.current?.probe;
+    if (!p) return;
     setSilenced(s => {
       const next = { ...s, [which]: !s[which] };
       try {
-        h.probe.gainL.gain.value = next.l ? 0 : 1;
-        h.probe.gainR.gain.value = next.r ? 0 : 1;
+        p.gainL.gain.value = next.l ? 0 : 1;
+        p.gainR.gain.value = next.r ? 0 : 1;
       } catch { /* 节点已散 */ }
       return next;
     });
   };
   // 卸载时把手上的哑放掉 —— 闸是声明方的节点,别把哑留给下一家。
   useEffect(() => () => {
-    const h = holderRef.current;
-    if (h) { try { h.probe.gainL.gain.value = 1; h.probe.gainR.gain.value = 1; } catch { /* 已散 */ } }
+    const p = holderRef.current?.probe;
+    if (p) { try { p.gainL.gain.value = 1; p.gainR.gain.value = 1; } catch { /* 已散 */ } }
   }, []);
 
   // ── 表的绘制循环 ── 持槽才转;AnalyserNode 的 getFloatTimeDomainData 是只读快照,不碰图。
@@ -89,13 +92,29 @@ export const VidAudioMonitor: React.FC = () => {
       return g;
     };
 
+    const linearToDb = (peak: number): number => {
+      if (!(peak > 1e-6)) return MIN_DB;
+      return Math.max(MIN_DB, Math.min(0, 20 * Math.log10(peak)));
+    };
     const readDb = (a: AnalyserNode | undefined): number => {
       if (!a) return MIN_DB;
       a.getFloatTimeDomainData(buf);
       let peak = 0;
       for (let i = 0; i < buf.length; i++) { const x = Math.abs(buf[i]); if (x > peak) peak = x; }
-      if (peak < 1e-6) return MIN_DB;
-      return Math.max(MIN_DB, Math.min(0, 20 * Math.log10(peak)));
+      return linearToDb(peak);
+    };
+    // 持有者可能同时带两路声源(时间线 = WebAudio 音频段 + 本机引擎的 MIDI 轨,见 audioFocus.ts):
+    // 两路各取峰值、**取大的那条**画 —— 同一只表上看到的就是"此刻最响的那一路"。
+    const levelOf = (h: AudioHolder | null) => {
+      if (!h) return { l: MIN_DB, r: MIN_DB };
+      if (h.levels) {
+        const v = h.levels();
+        const l = linearToDb(v.l), r = linearToDb(v.r);
+        if (!h.probe) return { l, r };
+        return { l: Math.max(l, readDb(h.probe.analyserL)), r: Math.max(r, readDb(h.probe.analyserR)) };
+      }
+      if (h.probe) return { l: readDb(h.probe.analyserL), r: readDb(h.probe.analyserR) };
+      return { l: MIN_DB, r: MIN_DB };
     };
 
     const draw = () => {
@@ -104,9 +123,7 @@ export const VidAudioMonitor: React.FC = () => {
       ctx2d.fillStyle = '#0b0b0d';
       ctx2d.fillRect(0, 0, w, h);
       const m = meter.current;
-      const level = cur
-        ? { l: readDb(cur.probe.analyserL), r: readDb(cur.probe.analyserR) }
-        : { l: MIN_DB, r: MIN_DB };
+      const level = levelOf(cur);
       // 表针:快攻(直接跟)慢放(每帧 1.2dB);峰值保持线:到顶站 HOLD_FRAMES 帧,然后按
       // PEAK_FALL 落 —— 每声道独立一套,落到底(MIN_DB)就不再画线 = 消失。
       m.lvlL = Math.max(level.l, m.lvlL - 1.2);
@@ -167,7 +184,7 @@ export const VidAudioMonitor: React.FC = () => {
     background: on ? 'rgba(224,49,49,0.28)' : 'rgba(255,255,255,0.05)',
     border: `0.5px solid ${on ? 'rgba(224,49,49,0.75)' : 'rgba(255,255,255,0.14)'}`,
     color: on ? '#ff8787' : 'rgba(255,255,255,0.5)',
-    cursor: holder ? 'pointer' : 'default', padding: 0,
+    cursor: 'pointer', padding: 0,
   });
 
   return (
@@ -184,16 +201,19 @@ export const VidAudioMonitor: React.FC = () => {
         <canvas ref={canvasRef} style={{ position: 'absolute', inset: 0 }} />
       </div>
       {/* 底排:两枚 M 各自居中在**自己那条声道**的下方 —— 布局镜像 canvas 的分格
-          (左右各 flex:1 + 右侧 26px 让给 dB 标尺),不再挤在正中间。 */}
-      <div style={{ display: 'flex', alignItems: 'center', padding: '0 8px 6px', flexShrink: 0 }}>
-        <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
-          <button title="Mute the left channel" onClick={() => toggle('l')} style={sBtn(silenced.l)}>M</button>
+          (左右各 flex:1 + 右侧 26px 让给 dB 标尺),不再挤在正中间。原生引擎的源没有闸节点
+          (见 audioFocus 的 levels),整排不画。 */}
+      {holder?.probe && (
+        <div style={{ display: 'flex', alignItems: 'center', padding: '0 8px 6px', flexShrink: 0 }}>
+          <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+            <button title="Mute the left channel" onClick={() => toggle('l')} style={sBtn(silenced.l)}>M</button>
+          </div>
+          <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+            <button title="Mute the right channel" onClick={() => toggle('r')} style={sBtn(silenced.r)}>M</button>
+          </div>
+          <div style={{ width: 26, flexShrink: 0 }} />
         </div>
-        <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
-          <button title="Mute the right channel" onClick={() => toggle('r')} style={sBtn(silenced.r)}>M</button>
-        </div>
-        <div style={{ width: 26, flexShrink: 0 }} />
-      </div>
+      )}
     </div>
   );
 };

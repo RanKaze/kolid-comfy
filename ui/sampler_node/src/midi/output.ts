@@ -156,9 +156,6 @@ class MidiOut {
   noteOff(ch: number, pitch: number, at?: number): void {
     this.raw([0x80 | (ch & 0x0f), pitch & 0x7f, 0], at);
   }
-  programChange(ch: number, program: number, at?: number): void {
-    this.raw([0xc0 | (ch & 0x0f), program & 0x7f], at);
-  }
   controlChange(ch: number, cc: number, value: number, at?: number): void {
     this.raw([0xb0 | (ch & 0x0f), cc & 0x7f, value & 0x7f], at);
   }
@@ -175,13 +172,19 @@ class MidiOut {
    *
    * 选了本机引擎就走它；**一个端口都没连上时也走它** —— 否则在 Assets 里点 ♪ 会一声不出，
    * 看起来像坏了。只有"明确选了外部端口且它开着"才发 MIDI 出去。
+   *
+   * 知道是哪一轨就传 `trackId`：2b 之后每条轨各有一支实例，同通道的两条轨是两件乐器，
+   * 按通道反查会把试听打到别人的乐器上。
    */
-  audition(ch: number, pitch: number, vel: number): void {
+  audition(ch: number, pitch: number, vel: number, trackId?: string): void {
     const native = this.selectedId === NATIVE_PORT_ID;
     if (native || !this.out) {
       if (nativeEngine.available) {
-        // 引擎按「第几条轨道」认音色，按通道反查一次（同通道多条轨时取第一条）。
-        const idx = this.lastProj ? this.lastProj.tracks.findIndex(t => t.channel === ch) : -1;
+        // 引擎按「第几条轨道」认乐器，按轨 id 反查；没有 id 的老调用方按通道反查（取第一条）。
+        const idx = this.lastProj
+          ? (trackId ? this.lastProj.tracks.findIndex(t => t.id === trackId)
+            : this.lastProj.tracks.findIndex(t => t.channel === ch))
+          : -1;
         void nativeEngine.audition(pitch, vel, idx >= 0 ? idx : 0);
       }
       if (native || !this.out) return;
@@ -288,11 +291,6 @@ class MidiOut {
       if (this.evs[mid].sec < sec) lo = mid + 1; else hi = mid;
     }
     return lo;
-  }
-
-  /** 轨道音量/音色变了：给每一轨补一次 program change（外部音源靠它换音色）。 */
-  pushPrograms(proj: MidiProject): void {
-    for (const t of proj.tracks) this.programChange(t.channel, t.program);
   }
 
   /** 切轨时只想停某一轨的音（别的轨还在响）。 */

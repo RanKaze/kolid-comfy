@@ -1,38 +1,29 @@
-// ── MIDI 界面（一扇窗，三块）─────────────────────────────────────────────────────────────────
-//
-// 布局是固定的三块，不再拆成四扇可以乱摆的窗：
+// ── MIDI 界面（一扇窗）──────────────────────────────────────────────────────────────────────
 //
 //   ┌───────────────────────────────────────────────────────────┐
-//   │ Transport  ⏮ ■ ▶   0:12.480   3.2.220   BPM 拍号  LOOP  ⏱ │  ← 横贯顶部
-//   ├──────────────╫───────────╫────────────────────────────────┤
-//   │ INSTRUMENTS  ║           ║ Piano Roll                     │  ← 两条分隔条都能拖
-//   │ 轨 / 音色     ║           ║ 音符                           │
-//   │              ║           ╠════════════════════════════════╣
-//   │              ║           ║ 力度泳道                        │
-//   └──────────────╨───────────╨────────────────────────────────┘
+//   │ 标尺：范围游标（入/出楔形把手）+ 播放头三角              │  ← 与 Tracks 同一套画法
+//   ├───────────────────────────────────────────────────────────┤
+//   │ Piano Roll                                                │
+//   │ 音符 + 力度泳道                                            │
+//   ├───────────────────────────────────────────────────────────┤
+//   │ Transport  ⏮ ■ ▶  0:12.480  3.2.220  BPM 拍号  LOOP  GRID  ZOOM │  ← 横贯底部
+//   └───────────────────────────────────────────────────────────┘
 //
-// 为什么不再让它们各占一扇 dock 窗：编曲是"改音色 → 看音符 → 压力度 → 再听一遍"这种来回，
-// 窗一多，手就在窗口管理上跑掉了，还会把卷帘挤成一条缝。所以整件事只有一个落点：
-// **模式主窗的正文**（与 Video 模式把播放器放进主窗同一个道理，见 EditPhase 的 docBodies）。
+// 轨与段的列表**不在这里**：乐器轨就是 Tracks 窗里的轨，乐器段就是时间线上的段 ——
+// 选哪一段，"卷帘"就编哪一段（见 useMidiHost 的 editor）。这样乐器轨和音频轨天生同住一排，
+// 不会再出现"MIDI 窗里一套轨、Tracks 里另一套"的两份真相。
 //
-// 比例全可拖（这是这个界面的硬要求）：左栏宽度在 Splitter 上左右拖、力度泳道高度在卷帘
-// 下面那条横线上上下拖，两处都双击回默认。宽度/高度是**视图态**，按 origin 存在
-// localStorage（layoutPrefs.ts），不属工程也不进撤销栈。
+// 走带条贴底：正文（卷帘）才是这一窗的主体，播放控制是"随时按一下"的把手，不该占标题下面
+// 第一条最显眼的位置 —— 视频那边的 Transport 也在底部，两处读法一致。
+// 比例里只剩一条横线（力度泳道），双击回默认。横向比例（pps）与吸附网格住在底部 Transport。
+// 这些是**视图态**，不属工程也不进撤销栈。
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { DEFAULT_LAYOUT, readLayout, writeLayout } from './layoutPrefs';
-import { MidiPianoRoll } from './PianoRoll';
-import { Splitter } from './Splitter';
-import { MidiTracks } from './TrackList';
+import React, { useCallback, useRef, useState } from 'react';
+import { DEFAULT_PPS, KEY_W, MidiPianoRoll, ZOOM_MAX, ZOOM_MIN } from './PianoRoll';
 import { MidiTransport } from './Transport';
 import type { MidiCtl } from './types';
 
-const TRACK_MIN = 160;
-const TRACK_MAX = 620;
-/** 卷帘至少留这么宽 —— 拖到头等于把卷帘关掉，那不叫调比例。 */
-const ROLL_MIN = 260;
-
-/** MIDI 里的滑杆（卷帘 zoom、轨力度）—— 与 Tracks 窗那根 Opacity 同一族，一字不差地照搬它的
+/** MIDI 里的滑杆（底部 Transport 的 zoom）—— 与 Tracks 窗那根 Opacity 同一族，一字不差地照搬它的
  *  三条结论：**方角**（这排控件里没有药丸）、**槽底不透明中性色**（半透明会染上旁边的高亮底色）、
  *  **拇指平时藏起来**（一块白方块放在这么窄的一行里等于第二枚高亮徽章，比数值还抢眼）。
  *  两条量过像素的坑照抄：轨道**不许写 border** —— 0.5px 边框会让渐变图块平铺出右边缘溢色、
@@ -60,21 +51,12 @@ const MIDI_CSS = `
 .midi-slider:hover::-moz-range-thumb { background: rgba(255,255,255,0.9); }
 `;
 
-/** 这一刻允许的最大栏宽：既要给卷帘留够，也不许吃掉整窗的一半以上。
- *  主窗被 dock 拖窄时它会自动跟着缩 —— 否则左栏 330 会把卷帘压成 0（实测过）。 */
-const capFor = (hostW: number) =>
-  Math.max(TRACK_MIN, Math.min(TRACK_MAX, Math.min(hostW - ROLL_MIN, hostW * 0.6)));
-
 const S = {
   wrap: {
     display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
     background: '#101114', color: 'rgba(255,255,255,0.85)',
   } as React.CSSProperties,
   body: { display: 'flex', flex: 1, minHeight: 0 } as React.CSSProperties,
-  left: {
-    display: 'flex', flexDirection: 'column', minWidth: 0, flexShrink: 0,
-    background: '#16171a',
-  } as React.CSSProperties,
   right: { flex: 1, minWidth: 0, position: 'relative', display: 'flex', flexDirection: 'column' } as React.CSSProperties,
   empty: {
     position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -83,63 +65,49 @@ const S = {
 };
 
 export const MidiWorkspace: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
-  const [trackW, setTrackW] = useState(() => readLayout().trackW);
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  // 拖动是**增量**式的：按下时记住当时的宽度，之后只加位移。宽度还要一份 ref ——
-  // onStart 里读 state 会读到上一次渲染的值，而它正是在被改的那个。
-  const wRef = useRef(trackW);
-  wRef.current = trackW;
-  const baseW = useRef(trackW);
+  // 卷帘的视图态（吸附刻度、横向比例）住在这一层：控件在底部 Transport，消费在卷帘里。
+  const [gridBeats, setGridBeats] = useState(0.25);
+  const [pps, setPps] = useState(DEFAULT_PPS);
+  // 卷帘的滚动容器 —— 缩放要把视口中心那一拍钉住。
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const ppsRef = useRef(pps);
+  ppsRef.current = pps;
 
-  const startLeft = useCallback(() => { baseW.current = wRef.current; }, []);
-
-  // 夹在 [TRACK_MIN, TRACK_MAX]，再夹到"卷帘还剩得下 ROLL_MIN"。窗口窄的时候
-  // 后一条先命中 —— 不然拖出来的左栏会把卷帘压成一条缝。
-  const dragLeft = useCallback((x: number, x0: number) => {
-    const el = bodyRef.current;
-    if (!el) return;
-    const cap = capFor(el.getBoundingClientRect().width);
-    setTrackW(Math.round(Math.max(TRACK_MIN, Math.min(cap, baseW.current + (x - x0)))));
+  /** 缩放：**把视口中心那一拍钉在原地**。只改 pps 的话内容宽度变了而 scrollLeft 不动，
+   *  用户一拖滑杆视野就跑到别处、还得再找回来 —— 这是缩放"不好用"的最大来源。
+   *  中心必须在改之前按旧值记下：变窄时浏览器会先把 scrollLeft 夹回去，那之后还原不出来。 */
+  const zoomTo = useCallback((next: number) => {
+    const prev = ppsRef.current;
+    const v = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(next)));
+    if (v === prev) return;
+    const host = scrollRef.current;
+    const span = host ? Math.max(1, host.clientWidth - KEY_W) : 0;
+    const centerBeat = host ? (host.scrollLeft + span / 2) / prev : 0;
+    ppsRef.current = v;
+    setPps(v);
+    // 内容宽度要等这一帧的布局，所以挪 scrollLeft 放到下一帧。
+    if (host) requestAnimationFrame(() => { host.scrollLeft = Math.max(0, centerBeat * v - span / 2); });
   }, []);
 
-  const commitLeft = useCallback(() => setTrackW(w => { writeLayout({ trackW: w }); return w; }), []);
-  const resetLeft = useCallback(() => {
-    const el = bodyRef.current;
-    const w = el ? Math.min(DEFAULT_LAYOUT.trackW, capFor(el.getBoundingClientRect().width)) : DEFAULT_LAYOUT.trackW;
-    setTrackW(Math.round(w));
-    // 记的是**默认值**，不是被窄窗挤出来的那个数 —— 否则下次开在大屏上还是窄的。
-    writeLayout({ trackW: DEFAULT_LAYOUT.trackW });
-  }, []);
-
-  // 窗自己变小（dock 拖窄、分屏）时把左栏收回来 —— 存的 px 是上次那扇窗的，不能一直信。
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => {
-      const cap = capFor(el.getBoundingClientRect().width);
-      setTrackW(prev => (prev > cap ? Math.round(cap) : prev));
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+  const hasTracks = ctl.project.tracks.length > 0;
 
   return (
     <div style={S.wrap}>
       <style>{MIDI_CSS}</style>
-      <MidiTransport ctl={ctl} />
-      <div ref={bodyRef} style={S.body}>
-        <div style={{ ...S.left, width: trackW }}>
-          <MidiTracks ctl={ctl} />
-        </div>
-        <Splitter axis="x" onStart={startLeft} onDrag={dragLeft} onEnd={commitLeft} onReset={resetLeft}
-          title="拖动改变乐器栏宽度（双击复位）" />
+      <div style={S.body}>
         <div style={S.right}>
-          <MidiPianoRoll ctl={ctl} />
-          {ctl.project.tracks.length === 0 && (
-            <div style={S.empty}>No instrument yet — press “+ Instrument” on the left.</div>
-          )}
+          {ctl.editor
+            ? <MidiPianoRoll ctl={ctl} gridBeats={gridBeats} pps={pps} scrollRef={scrollRef} />
+            : (
+              <div style={S.empty}>
+                {hasTracks
+                  ? 'No MIDI segment yet — double-click a MIDI lane in Tracks to add one.'
+                  : 'No MIDI tracks yet — add one from the instrument library, or right-click Tracks.'}
+              </div>
+            )}
         </div>
       </div>
+      <MidiTransport ctl={ctl} gridBeats={gridBeats} onGrid={setGridBeats} pps={pps} onZoom={zoomTo} />
     </div>
   );
 };

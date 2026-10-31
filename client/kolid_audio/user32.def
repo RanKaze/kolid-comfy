@@ -1,0 +1,26 @@
+LIBRARY user32.dll
+EXPORTS
+RegisterClassW
+CreateWindowExW
+DefWindowProcW
+DestroyWindow
+ShowWindow
+UpdateWindow
+PostMessageW
+GetMessageW
+PeekMessageW
+MsgWaitForMultipleObjects
+TranslateMessage
+DispatchMessageW
+GetClientRect
+AdjustWindowRect
+SetWindowPos
+SetForegroundWindow
+GetForegroundWindow
+GetWindowThreadProcessId
+AttachThreadInput
+BringWindowToTop
+IsIconic
+SendMessageW
+LoadImageW
+LoadCursorW

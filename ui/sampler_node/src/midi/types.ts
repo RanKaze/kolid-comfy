@@ -4,28 +4,61 @@
 // 宿主（EditPhase）负责：工程按文档分桶、撤销栈、随 .cud 存盘、以及**唯一那个**时钟循环。
 //
 // 这么切的好处是"关掉一扇窗"永远不会弄丢东西：状态在宿主，面板只是画。
+//
+// 乐器轨与乐器段住在**视频工程**里（`VidTrack.kind === 'midi'` / `VidClip.notes`），
+// 所以这里有两份读数：
+//   * `project` —— 整份工程里所有 MIDI 轨的**投影**（音符在全局拍上）。引擎、资产库、
+//     agent 工具读它；写回的只有轨级动作（装/卸乐器、改名、通道、力度、静音/独奏）。
+//   * `editor`  —— 时间线上**选中那一段**的编辑视图：音符换成段内拍（0 = 段窗口第一拍）。
+//     钢琴卷帘只认它，写回也只写那一段（窗口外的音符原样留着，见 applyEditorNotes）。
 
-import type { MidiNote, MidiProject, MidiTrack } from './model';
+import type { MidiLoop, MidiNote, MidiProject, MidiTrack } from './model';
+
+/** 钢琴卷帘的编辑视图：一条轨 + 选中那一段的窗口。 */
+export type MidiEditor = {
+  /** 正在编辑的段（时间线上的 VidClip.id）。 */
+  clipId: string;
+  trackId: string;
+  /** 这一轨，`notes` 已经换成**段内拍**（0 = 窗口第一拍），只含窗口里看得见的那部分。 */
+  track: MidiTrack;
+  /** 窗口长度（拍）= 段在时间线上的时长。音符不许画到它外面。 */
+  length: number;
+  /** 窗口第一拍在全局拍轴上的位置（seek / 播放头换算用）。 */
+  baseBeat: number;
+  /** 窗口前面被裁掉的拍数（段内容的 offset）；写回时用它折算回内容拍。 */
+  contentOffset: number;
+  tempo: number;
+  timeSig: [number, number];
+  ppq: number;
+  /** 循环区间（已换算成段内拍，可能落在 [0, length] 外面）。 */
+  loop: MidiLoop;
+};
 
 export type MidiCtl = {
-  /** 当前文档的那一份工程（已归一化）。 */
+  /** 当前文档里所有 MIDI 轨的投影（音符在全局拍上）。 */
   project: MidiProject;
-  /** 改工程。`label` 是撤销栈里那一步的名字，也是**合并键** —— 拖动时每帧都会调一次，
-   *  同一个 label 连着来的会并成一步（一次拖动 = 一步撤销）。 */
+  /** 时间线上选中那一段的编辑视图；没有选中 MIDI 段 = null。 */
+  editor: MidiEditor | null;
+  /** 选中段的 id（= editor?.clipId，方便只关心"有没有、是哪一段"的调用方）。 */
+  clipId: string | null;
+  /** 改整份工程（轨级动作与音乐时间基）。`label` 是撤销栈里那一步的名字，也是**合并键** ——
+   *  拖动时每帧都会调一次，同一个 label 连着来的会并成一步（一次拖动 = 一步撤销）。 */
   update: (fn: (p: MidiProject) => MidiProject, label?: string) => void;
-  /** 选中（轨道 / 音符）。写进工程里，跟着文档走。 */
+  /** 改选中那一段的音符（段内拍进、段内拍出）。 */
+  updateEditor: (fn: (t: MidiTrack) => MidiTrack, label?: string) => void;
+  /** 选中音符（给 agent 报 selection 用）；不改选中段。 */
   select: (trackId: string, noteId?: string) => void;
   /** 公共时钟的播放态与三个动词。位置一律由 clock 给，这里不缓存秒数。 */
   playing: boolean;
   play: () => void;
   pause: () => void;
-  /** 跳到某一拍（会换算成秒交给时钟）。 */
+  /** 跳到某一拍（全局拍，会换算成秒交给时钟）。 */
   seekBeat: (beat: number) => void;
   undo: () => void;
   redo: () => void;
   canUndo: boolean;
   canRedo: boolean;
-  /** 当前轨（= project.selTrack 指的那一轨），省得每个面板各找一遍。 */
+  /** 编辑视图里那条轨（= editor.track），省得每个面板各找一遍。 */
   track: MidiTrack | null;
   /** 当前选中的音符（可能没有）。 */
   note: MidiNote | null;

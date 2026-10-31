@@ -14356,7 +14356,10 @@ function requestHostVid(uid) {
                 resolve(d.project && typeof d.project === 'object' ? d.project : null);
             }
         };
-        const timer = setTimeout(() => { window.removeEventListener('message', onMsg); resolve(null); }, 600);
+        // 6s 不是给人等的：宿主回这一包之前可能要把还开着的音色窗先存成 .vstpreset
+        // （HALion/Kontakt 写整块状态要几百毫秒到几秒）。老宿主不认识这条消息，
+        // 超时后照样当"文件里不带 video 字段"处理 —— 只是那一下要等满。
+        const timer = setTimeout(() => { window.removeEventListener('message', onMsg); resolve(null); }, 6000);
         window.addEventListener('message', onMsg);
         window.parent.postMessage({ type: 'blend-request-vid', uid: uid | 0 }, '*');
     });

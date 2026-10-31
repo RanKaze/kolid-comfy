@@ -123,6 +123,19 @@ static const char KA_IID_IPARAMETERCHANGES[16] =
 static const char KA_IID_IPARAMVALUEQUEUE[16] =
     { 0x18,0x3A,0x26,0x01, 0x07,(char)0xED,0x6F,0x4F,
       (char)0x98,(char)0xC9,(char)0xD3,0x56, 0x46,(char)0x86,(char)0xF9,(char)0xBA };
+/* IBStream C3B5020A-8957-4E90-A4FC-1D13B7F1F4EF：.vstpreset 的状态块就是交给它读的。
+ * 我们自己实现这一头（插件在 setState 里只调 read/seek/tell）。 */
+static const char KA_IID_IBSTREAM[16] =
+    { 0x0A,0x02,(char)0xB5,(char)0xC3, 0x57,(char)0x89,(char)0x90,0x4E,
+      (char)0xA4,(char)0xFC,0x1D,0x13, (char)0xB7,(char)0xF1,(char)0xF4,(char)0xEF };
+/* IPlugView 5BC32507-D060-49EA-A615-1B522B755B29；IPlugFrame 367FAF01-AFA9-4693-8D4D-A2A0ED0882A3
+ * （照 temporary/vst3ref/gui_iplugview.h 的 DECLARE_CLASS_IID 展开）。 */
+static const char KA_IID_IPLUGVIEW[16] =
+    { 0x07,0x25,(char)0xC3,0x5B, (char)0xEA,0x49,0x60,(char)0xD0,
+      (char)0xA6,0x15,0x1B,0x52, 0x2B,0x75,0x5B,0x29 };
+static const char KA_IID_IPLUGFRAME[16] =
+    { 0x01,(char)0xAF,0x7F,0x36, (char)0x93,0x46,(char)0xA9,(char)0xAF,
+      (char)0x8D,0x4D,(char)0xA2,(char)0xA0, (char)0xED,0x08,(char)0x82,(char)0xA3 };
 
 static int ka_iid_is(const char* a, const char* b) {
     int i;
@@ -688,6 +701,8 @@ static uint32_t g_v3_tls_sz = 0;
 static int32_t g_v3_ctrl_step = 0;
 static void ka_v3_trace(int32_t v) { if (g_v3_shm) g_v3_shm->iv[KA_SHM_IV - 1] = v; }
 static void ka_v3_trace2(int32_t v) { if (g_v3_shm) g_v3_shm->iv[KA_SHM_IV - 2] = v; }
+/* 建编辑器走到哪一步。iv[9] 不在崩溃现场那七格里，超时之后还能读（out[1] of ka_vst3_fault）。 */
+static void ka_v3_stage(int32_t v) { if (g_v3_shm) g_v3_shm->iv[9] = v; }
 /* 插件模块基址的低/高 32 位 —— AV 之后拿故障地址减它就知道炸在插件的第几个字节。 */
 static void ka_v3_trace_mod(void* h) {
     uint64_t v = (uint64_t)h;
@@ -737,6 +752,7 @@ static void ka_v3_markhex(const char* tag, uint32_t v) {
 #else
 static void ka_v3_trace(int32_t v) { (void)v; }
 static void ka_v3_trace2(int32_t v) { (void)v; }
+static void ka_v3_stage(int32_t v) { (void)v; }
 static void ka_v3_trace_mod(void* h) { (void)h; }
 static void ka_v3_hostnote(char tag, const char* iid) { (void)tag; (void)iid; }
 static void ka_v3_mark(const char* s) { (void)s; }
@@ -1203,27 +1219,34 @@ static ka_tresult ka_v3_qicp(void* obj, const char* iid, void** out) {
 static void ka_v3_ctrl_free(void) {
     const ka_connpoint_vtbl* cpv;
     g_pchanges.count = 0;
+    ka_v3_trace(321);
     if (g_cp_comp_proxy.dst) {
         if (g_v3.cp_comp) { cpv = KA_VT(g_v3.cp_comp, ka_connpoint_vtbl); cpv->disconnect(g_v3.cp_comp, &g_cp_comp_proxy); }
         g_cp_comp_proxy.dst = 0;
     }
+    ka_v3_trace(322);
     if (g_cp_ctrl_proxy.dst) {
         if (g_v3.cp_ctrl) { cpv = KA_VT(g_v3.cp_ctrl, ka_connpoint_vtbl); cpv->disconnect(g_v3.cp_ctrl, &g_cp_ctrl_proxy); }
         g_cp_ctrl_proxy.dst = 0;
     }
+    ka_v3_trace(323);
     if (g_v3.cp_comp) { cpv = KA_VT(g_v3.cp_comp, ka_connpoint_vtbl); cpv->release(g_v3.cp_comp); g_v3.cp_comp = 0; }
     if (g_v3.cp_ctrl) { cpv = KA_VT(g_v3.cp_ctrl, ka_connpoint_vtbl); cpv->release(g_v3.cp_ctrl); g_v3.cp_ctrl = 0; }
+    ka_v3_trace(324);
     if (g_v3.unitinfo) {
         const ka_unitinfo_vtbl* uv = KA_VT(g_v3.unitinfo, ka_unitinfo_vtbl);
         uv->release(g_v3.unitinfo);
         g_v3.unitinfo = 0;
     }
+    ka_v3_trace(325);
     if (g_v3.ctrl) {
         const ka_controller_vtbl* cvt = KA_VT(g_v3.ctrl, ka_controller_vtbl);
         cvt->terminate(g_v3.ctrl);
+        ka_v3_trace(326);
         cvt->release(g_v3.ctrl);
         g_v3.ctrl = 0;
     }
+    ka_v3_trace(327);
     g_v3.ctrl_ok = 0;
     g_v3.n_params = -1;
 }
@@ -1431,35 +1454,227 @@ static int32_t ka_v3_program_name(int32_t list_id, int32_t index, char* utf8, in
     return rc;
 }
 
+/* ── 编辑器（IPlugView / IPlugFrame）────────────────────────────────────────────────────────
+ * 插件的界面只认一个父 HWND。这里只做"造 view / 挂上去 / 按尺寸通知它"；窗口与消息泵在
+ * ka_worker.c 的 UI 线程里 —— 音频与界面必须分线程，否则拖旋钮时 ring 喂不上。
+ * 尺寸单位是物理像素（kPlatformTypeHWND 的约定）。 */
+
+typedef struct ka_view_rect { int32_t left, top, right, bottom; } ka_view_rect;
+
+typedef struct ka_plugview_vtbl {
+    ka_tresult (*queryInterface)(void* self, const char* iid, void** obj);
+    uint32_t   (*addRef)(void* self);
+    uint32_t   (*release)(void* self);
+    ka_tresult (*isPlatformTypeSupported)(void* self, const char* type);
+    ka_tresult (*attached)(void* self, void* parent, const char* type);
+    ka_tresult (*removed)(void* self);
+    ka_tresult (*onWheel)(void* self, float distance);
+    ka_tresult (*onKeyDown)(void* self, uint16_t key, int16_t keyCode, int16_t modifiers);
+    ka_tresult (*onKeyUp)(void* self, uint16_t key, int16_t keyCode, int16_t modifiers);
+    ka_tresult (*getSize)(void* self, ka_view_rect* size);
+    ka_tresult (*onSize)(void* self, ka_view_rect* size);
+    ka_tresult (*onFocus)(void* self, ka_tbool state);
+    ka_tresult (*setFrame)(void* self, void* frame);
+    ka_tresult (*canResize)(void* self);
+    ka_tresult (*checkSizeConstraint)(void* self, ka_view_rect* rect);
+} ka_plugview_vtbl;
+
+typedef struct ka_plugframe_vtbl {
+    ka_tresult (*queryInterface)(void* self, const char* iid, void** obj);
+    uint32_t   (*addRef)(void* self);
+    uint32_t   (*release)(void* self);
+    ka_tresult (*resizeView)(void* self, void* view, ka_view_rect* size);
+} ka_plugframe_vtbl;
+
+typedef struct ka_plugframe { const void** vtbl; int32_t refs; } ka_plugframe;
+
+/* 窗口层（ka_worker.c 的 UI 线程）：改父窗尺寸，随后的 WM_SIZE 里回调 onSize。 */
+static void wk_editor_resize(int32_t w, int32_t h);
+static void ka_v3_view_on_size(int32_t w, int32_t h);
+
+static void* g_v3_view = 0;               /* IPlugView*（createView 给的，只在 UI 线程碰） */
+static void* g_v3_view_parent = 0;        /* attached() 期间的那个 HWND */
+static ka_view_rect g_v3_view_size;
+static int32_t g_v3_view_stage = 0;       /* 负数 = 在哪一步失败（排障用） */
+static ka_plugframe g_plugframe;
+
+static ka_tresult ka_frame_qi(void* self, const char* iid, void** obj) {
+    if (!obj || !iid) { if (obj) *obj = 0; return KA_ERR; }
+    if (ka_iid_is(iid, KA_IID_FUNKNOWN) || ka_iid_is(iid, KA_IID_IPLUGFRAME)) {
+        *obj = self;
+        return KA_OK;
+    }
+    *obj = 0;
+    return KA_ERR;
+}
+static uint32_t ka_frame_addref(void* self) { return (uint32_t)(++((ka_plugframe*)self)->refs); }
+static uint32_t ka_frame_release(void* self) {
+    int32_t n = --((ka_plugframe*)self)->refs;
+    if (n < 0) ((ka_plugframe*)self)->refs = 0;
+    return (uint32_t)((n < 0) ? 0 : n);
+}
+/** 插件要改窗口大小：先改窗（WM_SIZE 里回调 onSize），同一调用栈里完成，符合 SDK 的顺序。 */
+static ka_tresult ka_frame_resize(void* self, void* view, ka_view_rect* size) {
+    (void)self;
+    if (!size) return KA_ERR;
+    if (view && view == g_v3_view) {
+        g_v3_view_size = *size;
+        wk_editor_resize(size->right - size->left, size->bottom - size->top);
+    }
+    return KA_OK;
+}
+static const void* g_plugframe_vtbl[4] = {
+    (const void*)ka_frame_qi, (const void*)ka_frame_addref,
+    (const void*)ka_frame_release, (const void*)ka_frame_resize
+};
+
+/** 造 view（controller 必须已经在）。0 = 成了；-1 没控制器 / -2 createView 失败 /
+ *  -3 不认 HWND / -4 getSize 失败。只在 UI 线程上调。 */
+static int32_t ka_v3_view_create(void) {
+    const ka_controller_vtbl* cvt;
+    const ka_plugview_vtbl* vv;
+    void* v;
+
+    if (g_v3_view) return 0;
+    ka_v3_stage(0);
+    if (!g_v3.ctrl) { ka_v3_stage(-1); return -1; }
+    cvt = KA_VT(g_v3.ctrl, ka_controller_vtbl);
+    if (!cvt->createView) { ka_v3_stage(-2); return -2; }
+    ka_v3_stage(-10);
+    v = cvt->createView(g_v3.ctrl, "editor");
+    ka_v3_stage(-11);
+    if (!v) { ka_v3_stage(-2); return -2; }
+    g_v3_view = v;
+    vv = KA_VT(v, ka_plugview_vtbl);
+    if (vv->isPlatformTypeSupported(v, "HWND") != KA_OK) {
+        ka_v3_stage(-3);
+        vv->release(v);
+        g_v3_view = 0;
+        return -3;
+    }
+    ka_v3_stage(-12);
+    g_plugframe.vtbl = g_plugframe_vtbl;
+    g_plugframe.refs = 1;
+    memset(&g_v3_view_size, 0, sizeof(g_v3_view_size));
+    if (vv->getSize(v, &g_v3_view_size) != KA_OK
+        || g_v3_view_size.right <= g_v3_view_size.left
+        || g_v3_view_size.bottom <= g_v3_view_size.top) {
+        g_v3_view_size.left = 0; g_v3_view_size.top = 0;
+        g_v3_view_size.right = 720; g_v3_view_size.bottom = 520;
+    }
+    ka_v3_stage(-13);
+    vv->setFrame(v, &g_plugframe);
+    ka_v3_stage(1);
+    return 0;
+}
+
+/** view 想要的客户区尺寸。 */
+static void ka_v3_view_wanted(int32_t* w, int32_t* h) {
+    if (w) *w = g_v3_view_size.right - g_v3_view_size.left;
+    if (h) *h = g_v3_view_size.bottom - g_v3_view_size.top;
+}
+
+/** 挂到宿主窗口上。0 = 成了。 */
+static int32_t ka_v3_view_attach(void* parent) {
+    const ka_plugview_vtbl* vv;
+    if (!g_v3_view || !parent) return -1;
+    vv = KA_VT(g_v3_view, ka_plugview_vtbl);
+    g_v3_view_parent = parent;
+    ka_v3_stage(2);
+    if (vv->attached(g_v3_view, parent, "HWND") != KA_OK) {
+        g_v3_view_parent = 0;
+        ka_v3_stage(-20);
+        return -2;
+    }
+    ka_v3_stage(3);
+    {   int32_t w, h;
+        ka_v3_view_wanted(&w, &h);
+        ka_v3_view_on_size(w, h);
+    }
+    ka_v3_stage(4);
+    return 0;
+}
+
+static void ka_v3_view_on_size(int32_t w, int32_t h) {
+    const ka_plugview_vtbl* vv;
+    ka_view_rect r;
+    if (!g_v3_view || !g_v3_view_parent || w <= 0 || h <= 0) return;
+    vv = KA_VT(g_v3_view, ka_plugview_vtbl);
+    r.left = 0; r.top = 0; r.right = w; r.bottom = h;
+    g_v3_view_size = r;
+    vv->onSize(g_v3_view, &r);
+}
+
+static void ka_v3_view_focus(int32_t on) {
+    const ka_plugview_vtbl* vv;
+    if (!g_v3_view || !g_v3_view_parent) return;
+    vv = KA_VT(g_v3_view, ka_plugview_vtbl);
+    vv->onFocus(g_v3_view, on ? KA_TRUE_ : KA_FALSE_);
+}
+
+/** 从父窗上摘下来（父窗销毁之前必须走这一步）。 */
+static void ka_v3_view_detach(void) {
+    const ka_plugview_vtbl* vv;
+    if (!g_v3_view) return;
+    vv = KA_VT(g_v3_view, ka_plugview_vtbl);
+    if (g_v3_view_parent) vv->removed(g_v3_view);
+    g_v3_view_parent = 0;
+}
+
+static void ka_v3_view_destroy(void) {
+    const ka_plugview_vtbl* vv;
+    if (!g_v3_view) return;
+    ka_v3_view_detach();
+    vv = KA_VT(g_v3_view, ka_plugview_vtbl);
+    vv->release(g_v3_view);
+    g_v3_view = 0;
+    g_v3_view_stage = 0;
+}
+
 /* ── 打开 / 关闭 ──────────────────────────────────────────────────────────────────────────── */
 
 static void ka_v3_close(void) {
     const ka_component_vtbl* cvt;
     const ka_processor_vtbl* pvt;
 
+    ka_v3_view_destroy();        /* view 挂在 controller 上，必须先于 ctrl_free */
     ka_v3_ctrl_free();
+    ka_v3_trace(301);
     if (g_v3.proc && g_v3.comp) {
         pvt = KA_VT(g_v3.proc, ka_processor_vtbl);
         /* 顺序不能倒：先停处理、再停用、最后 terminate。倒着来会让插件在拆线程的同时
          * 还在被调 process。 */
         pvt->setProcessing(g_v3.proc, KA_FALSE_);
+        ka_v3_trace(302);
         pvt->release(g_v3.proc);
         g_v3.proc = 0;
     }
+    ka_v3_trace(303);
     if (g_v3.comp) {
         cvt = KA_VT(g_v3.comp, ka_component_vtbl);
         cvt->setActive(g_v3.comp, KA_FALSE_);
+        ka_v3_trace(304);
         cvt->terminate(g_v3.comp);
+        ka_v3_trace(305);
         cvt->release(g_v3.comp);
         g_v3.comp = 0;
     }
+    ka_v3_trace(306);
     if (g_v3.factory) {
         const ka_factory_vtbl* fvt = KA_VT(g_v3.factory, ka_factory_vtbl);
         fvt->release(g_v3.factory);
         g_v3.factory = 0;
     }
+    ka_v3_trace(307);
     ka_v3_free_arena();
-    if (g_v3.handle) { FreeLibrary(g_v3.handle); g_v3.handle = 0; }
+    ka_v3_trace(308);
+    /* **不 FreeLibrary**：HALion 7 的 DllMain(PROCESS_DETACH) 会一直卡住（实测 >120s，
+     * 进程还活着但不吭声）—— 它自己起的线程要拿 loader 锁，而 FreeLibrary 正握着那把锁，
+     * 经典死锁。Cubase 同样从不在插件实例关闭时卸载模块（模块活到进程结束）：
+     * 实例本身已经在上面 terminate/release 掉了，留下来的只是一份代码映射。
+     * 下一次打开走 LoadLibraryW 拿回同一个句柄（引用计数 +1），实例是新的。 */
+    g_v3.handle = 0;
+    ka_v3_trace(309);
     g_v3.alive = 0;
 }
 
@@ -1641,6 +1856,302 @@ static int32_t ka_v3_open(const uint16_t* path, int32_t cls_index, int32_t flags
     return 0;
 }
 
+/* ══ 状态：.vstpreset ═══════════════════════════════════════════════════════════════════════
+ *
+ * 插件自己**没有**"给我加载这个 .nki / 这个音色"的接口：程序列表是空的（Kontakt 的 16 个
+ * MIDI 通道程序槽全是占位、HALion 一条程序列表都没有），选程序这条路走不通。Cubase 保存
+ * 音色用的也是这一条 —— 把组件的整块状态（含采样引用）写进 IComponent::getState。
+ * 所以"换乐器"在这里 = 把用户从 Cubase/Kontakt 导出的 .vstpreset 交给 setState。
+ *
+ * 文件布局（SDK 的 PresetFile）：
+ *   0   "VST3"      4  版本 int32      8  组件类 ID（16 字节）
+ *   24  块表：{ char id[4]; int64 offset; int64 size; } …，最后一条 id 全 0（只占 4 字节）
+ *   之后是块数据：'Comp' = 组件状态，'Cont' = 控制器状态。offset 是文件绝对偏移。
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+#define KA_ST_SEEK_SET 0
+#define KA_ST_SEEK_CUR 1
+#define KA_ST_SEEK_END 2
+
+typedef struct ka_stream {
+    const void** vtbl;
+    int32_t refs;
+    unsigned char* data;
+    int64_t size;      /* 有效长度（写流 = 已写到的位置） */
+    int64_t cap;
+    int64_t pos;
+} ka_stream;
+
+static ka_tresult ka_st_qi(void* self, const char* iid, void** obj) {
+    if (!obj || !iid) { if (obj) *obj = 0; return KA_NO_INTERFACE; }
+    if (ka_iid_is(iid, KA_IID_FUNKNOWN) || ka_iid_is(iid, KA_IID_IBSTREAM)) {
+        *obj = self;
+        return KA_OK;
+    }
+    *obj = 0;
+    return KA_NO_INTERFACE;
+}
+static uint32_t ka_st_addref(void* self) { return (uint32_t)(++((ka_stream*)self)->refs); }
+static uint32_t ka_st_release(void* self) { return (uint32_t)(--((ka_stream*)self)->refs); }
+
+static ka_tresult ka_st_read(void* self, void* buf, int32_t n, int32_t* got) {
+    ka_stream* s = (ka_stream*)self;
+    int64_t left = s->size - s->pos;
+    if (n < 0) n = 0;
+    if (left < 0) left = 0;
+    if ((int64_t)n > left) n = (int32_t)left;
+    if (buf && n > 0) memcpy(buf, s->data + s->pos, (uint64_t)n);
+    s->pos += n;
+    if (got) *got = n;
+    return KA_OK;
+}
+static ka_tresult ka_st_write(void* self, void* buf, int32_t n, int32_t* put) {
+    ka_stream* s = (ka_stream*)self;
+    int64_t room = s->cap - s->pos;
+    if (n < 0) n = 0;
+    if (room < 0) room = 0;
+    if ((int64_t)n > room) n = (int32_t)room;
+    if (buf && n > 0) memcpy(s->data + s->pos, buf, (uint64_t)n);
+    s->pos += n;
+    if (s->pos > s->size) s->size = s->pos;
+    if (put) *put = n;
+    return KA_OK;
+}
+static ka_tresult ka_st_seek(void* self, int64_t pos, int32_t mode, int64_t* result) {
+    ka_stream* s = (ka_stream*)self;
+    int64_t p = pos;
+    if (mode == KA_ST_SEEK_CUR) p = s->pos + pos;
+    else if (mode == KA_ST_SEEK_END) p = s->size + pos;
+    if (p < 0) p = 0;
+    s->pos = p;
+    if (result) *result = p;
+    return KA_OK;
+}
+static ka_tresult ka_st_tell(void* self, int64_t* pos) {
+    if (pos) *pos = ((ka_stream*)self)->pos;
+    return KA_OK;
+}
+
+static const void* g_st_vtbl[7] = {
+    (const void*)ka_st_qi, (const void*)ka_st_addref, (const void*)ka_st_release,
+    (const void*)ka_st_read, (const void*)ka_st_write, (const void*)ka_st_seek,
+    (const void*)ka_st_tell
+};
+
+static int32_t ka_rd32(const unsigned char* p) {
+    return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8)
+                   | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
+}
+static int64_t ka_rd64(const unsigned char* p) {
+    return (int64_t)((uint64_t)(uint32_t)ka_rd32(p)
+                   | ((uint64_t)(uint32_t)ka_rd32(p + 4) << 32));
+}
+static void ka_wr32(unsigned char* p, int32_t v) {
+    p[0] = (unsigned char)(v & 255); p[1] = (unsigned char)((v >> 8) & 255);
+    p[2] = (unsigned char)((v >> 16) & 255); p[3] = (unsigned char)((v >> 24) & 255);
+}
+static void ka_wr64(unsigned char* p, int64_t v) {
+    ka_wr32(p, (int32_t)(v & 0xFFFFFFFF)); ka_wr32(p + 4, (int32_t)(v >> 32));
+}
+static int32_t ka_id4(const unsigned char* p, const char* id) {
+    return p[0] == (unsigned char)id[0] && p[1] == (unsigned char)id[1]
+        && p[2] == (unsigned char)id[2] && p[3] == (unsigned char)id[3];
+}
+
+/* 这一趟 setState 每一步的结果（宿主排障要看"卡在组件还是控制器"）。 */
+static int32_t g_v3_state_rc[4] = { 0, 0, 0, 0 };
+
+/** 把 .vstpreset 里的状态交给已打开的插件。返回 0 或负错误码。 */
+static int32_t ka_v3_state_set(const unsigned char* buf, int64_t size) {
+    const ka_component_vtbl* cvt;
+    const ka_controller_vtbl* ctrlv;
+    const unsigned char* comp_chunk = 0;
+    const unsigned char* cont_chunk = 0;
+    int64_t comp_size = 0, cont_size = 0;
+    int64_t off = 24;
+    int32_t n_entries = 0;
+
+    g_v3_state_rc[0] = g_v3_state_rc[1] = g_v3_state_rc[2] = 0;
+    if (!g_v3.alive || !g_v3.comp) return -1;
+    if (!buf || size < 68) return -2;
+    if (!(buf[0] == 'V' && buf[1] == 'S' && buf[2] == 'T' && buf[3] == '3')) return -3;
+    g_v3_state_rc[3] = ka_rd32(buf + 4);              /* 版本号，只是回执 */
+
+    while (off + 4 <= size) {
+        int64_t co, cs;
+        if (buf[off] == 0 && buf[off + 1] == 0 && buf[off + 2] == 0 && buf[off + 3] == 0) break;
+        if (off + 20 > size) return -4;
+        co = ka_rd64(buf + off + 4);
+        cs = ka_rd64(buf + off + 12);
+        if (co < 0 || cs < 0 || co + cs > size) return -5;
+        if (ka_id4(buf + off, "Comp")) { if (cs > 0) { comp_chunk = buf + co; comp_size = cs; } }
+        else if (ka_id4(buf + off, "Cont")) { if (cs > 0) { cont_chunk = buf + co; cont_size = cs; } }
+        off += 20;
+        if (++n_entries > 64) return -6;
+    }
+    if (!comp_chunk && !cont_chunk) return -7;
+
+    cvt = KA_VT(g_v3.comp, ka_component_vtbl);
+    if (comp_chunk) {
+        ka_stream s = { g_st_vtbl, 1, (unsigned char*)comp_chunk, comp_size, comp_size, 0 };
+        g_v3_state_rc[0] = cvt->setState(g_v3.comp, &s);
+    }
+    if (g_v3.ctrl) {
+        ctrlv = KA_VT(g_v3.ctrl, ka_controller_vtbl);
+        /* 合并式插件（Kontakt 7：控制器就是组件自己）上面那一步已经吃下整块状态了；
+         * 分开的（HALion）先让控制器同步组件状态，再吃它自己那一块（参数/界面）。 */
+        if (g_v3.ctrl != g_v3.comp && comp_chunk) {
+            ka_stream sc = { g_st_vtbl, 1, (unsigned char*)comp_chunk, comp_size, comp_size, 0 };
+            g_v3_state_rc[1] = ctrlv->setComponentState(g_v3.ctrl, &sc);
+        }
+        if (cont_chunk) {
+            ka_stream s2 = { g_st_vtbl, 1, (unsigned char*)cont_chunk, cont_size, cont_size, 0 };
+            g_v3_state_rc[2] = ctrlv->setState(g_v3.ctrl, &s2);
+        }
+    }
+    return 0;
+}
+
+/* ── 文件读 ──────────────────────────────────────────────────────────────── */
+
+#define KA_FILE_OPEN_EXISTING 3
+#define KA_FILE_CREATE_ALWAYS 2
+#define KA_GENERIC_READ       0x80000000u
+#define KA_GENERIC_WRITE      0x40000000u
+#define KA_FILE_SHARE_READ    1
+#define KA_FILE_SHARE_WRITE   2
+
+static int32_t ka_file_read(const uint16_t* path, unsigned char** out, int64_t* out_size) {
+    void* h;
+    int64_t sz = 0, got = 0, total = 0;
+    int32_t put;
+    unsigned char* buf;
+
+    *out = 0; *out_size = 0;
+    if (!path) return -1;
+    h = CreateFileW(path, KA_GENERIC_READ, KA_FILE_SHARE_READ | KA_FILE_SHARE_WRITE,
+                    0, KA_FILE_OPEN_EXISTING, 0, 0);
+    if (!h || h == (void*)(int64_t)-1) return -2;
+    if (!GetFileSizeEx(h, &sz) || sz <= 0 || sz > (int64_t)256 * 1024 * 1024) {
+        CloseHandle(h);
+        return -3;
+    }
+    buf = (unsigned char*)VirtualAlloc(0, (uint64_t)sz, KA_MEM_COMMIT | KA_MEM_RESERVE,
+                                       KA_PAGE_READWRITE);
+    if (!buf) { CloseHandle(h); return -4; }
+    while (total < sz) {
+        int32_t want = (int32_t)((sz - total > 0x100000) ? 0x100000 : (sz - total));
+        if (!ReadFile(h, buf + total, want, &put, 0) || put <= 0) {
+            VirtualFree(buf, 0, KA_MEM_RELEASE);
+            CloseHandle(h);
+            return -5;
+        }
+        total += put;
+    }
+    CloseHandle(h);
+    *out = buf;
+    *out_size = total;
+    return 0;
+}
+
+static int32_t ka_file_write(const uint16_t* path, const unsigned char* buf, int64_t size) {
+    void* h;
+    int64_t total = 0;
+    int32_t put;
+    if (!path || !buf || size <= 0) return -1;
+    h = CreateFileW(path, KA_GENERIC_WRITE, 0, 0, KA_FILE_CREATE_ALWAYS, 0, 0);
+    if (!h || h == (void*)(int64_t)-1) return -2;
+    while (total < size) {
+        int32_t want = (int32_t)((size - total > 0x100000) ? 0x100000 : (size - total));
+        if (!WriteFile(h, buf + total, want, &put, 0) || put <= 0) {
+            CloseHandle(h);
+            return -3;
+        }
+        total += put;
+    }
+    CloseHandle(h);
+    return (int32_t)total;
+}
+
+/** 读 .vstpreset 并交给插件。ret = 0 / 负；字节数写进 out_bytes。 */
+static int32_t ka_v3_state_load(const uint16_t* path, int64_t* out_bytes) {
+    unsigned char* buf = 0;
+    int64_t sz = 0;
+    int32_t rc;
+    if (out_bytes) *out_bytes = 0;
+    rc = ka_file_read(path, &buf, &sz);
+    if (rc != 0) return -10 + rc;                 /* -11 打不开 / -12 太大 … */
+    if (out_bytes) *out_bytes = sz;
+    rc = ka_v3_state_set(buf, sz);
+    VirtualFree(buf, 0, KA_MEM_RELEASE);
+    return rc;
+}
+
+/** 把当前状态写成 .vstpreset（Cubase 同款布局）。返回字节数或负错误码。 */
+static int32_t ka_v3_state_save(const uint16_t* path) {
+    const ka_component_vtbl* cvt;
+    const ka_controller_vtbl* ctrlv;
+    int64_t cap = 68 + (int64_t)64 * 1024 * 1024;
+    unsigned char* out;
+    ka_stream comp, ctrl;
+    int64_t total;
+    int32_t rc, comp_size, ctrl_size, has_ctrl;
+
+    if (!g_v3.alive || !g_v3.comp) return -1;
+    out = (unsigned char*)VirtualAlloc(0, (uint64_t)cap, KA_MEM_COMMIT | KA_MEM_RESERVE,
+                                       KA_PAGE_READWRITE);
+    if (!out) return -2;
+
+    memset(out, 0, 68);
+    out[0] = 'V'; out[1] = 'S'; out[2] = 'T'; out[3] = '3';
+    ka_wr32(out + 4, 1);                              /* 版本 1 */
+    memcpy(out + 8, g_v3.cid, 16);
+
+    comp.vtbl = g_st_vtbl; comp.refs = 1;
+    comp.data = out + 68; comp.size = 0; comp.cap = cap - 68; comp.pos = 0;
+    cvt = KA_VT(g_v3.comp, ka_component_vtbl);
+    rc = cvt->getState(g_v3.comp, &comp);
+    comp_size = (int32_t)comp.size;
+
+    ctrl_size = 0;
+    has_ctrl = 0;
+    if (g_v3.ctrl) {
+        ctrlv = KA_VT(g_v3.ctrl, ka_controller_vtbl);
+        ctrl.vtbl = g_st_vtbl; ctrl.refs = 1;
+        ctrl.data = out + 68 + comp_size; ctrl.size = 0;
+        ctrl.cap = comp.cap - comp_size; ctrl.pos = 0;
+        if (ctrlv->getState(g_v3.ctrl, &ctrl) == KA_OK && ctrl.size > 0) {
+            ctrl_size = (int32_t)ctrl.size;
+            has_ctrl = 1;
+        }
+    }
+    if (rc != KA_OK && comp_size <= 0) { VirtualFree(out, 0, KA_MEM_RELEASE); return -3; }
+    if (comp_size <= 0 && !has_ctrl) { VirtualFree(out, 0, KA_MEM_RELEASE); return -4; }
+
+    /* 块表：有数据才写那一行（HALion 7 的组件 getState 是 0 字节，状态全在控制器）。
+     * 空位天然是终止符（4 个 0）。 */
+    {
+        int32_t base = 24, nchunks = 0;
+        if (comp_size > 0) {
+            memcpy(out + base, "Comp", 4);
+            ka_wr64(out + base + 4, 68);
+            ka_wr64(out + base + 12, comp_size);
+            base += 20;
+            ++nchunks;
+        }
+        if (has_ctrl) {
+            memcpy(out + base, "Cont", 4);
+            ka_wr64(out + base + 4, 68 + comp_size);
+            ka_wr64(out + base + 12, ctrl_size);
+            ++nchunks;
+        }
+    }
+    total = 68 + comp_size + ctrl_size;
+    rc = ka_file_write(path, out, total);
+    VirtualFree(out, 0, KA_MEM_RELEASE);
+    return (rc < 0) ? rc - 100 : rc;
+}
+
 /* ── 事件与渲染 ──────────────────────────────────────────────────────────────────────────── */
 
 /** 排障：把所有总线列成多行 "a|in|0|ch=2|flags=1"（a=audio e=event），返回行数。
@@ -1677,15 +2188,22 @@ static int32_t ka_v3_buses(char* buf, int cap) {
     return lines;
 }
 
-/** 塞一个音符事件。on=1 开、on=0 关；vel 0..127。事件落在下一块的偏移 0 上。 */
-static int32_t ka_v3_note(int32_t on, int32_t ch, int32_t pitch, int32_t vel) {
+/** 塞一个音符事件。on=1 开、on=0 关；vel 0..127；offset = 落在这一块的第几帧。
+ *  走带里按时钟排出来的音符带真实 offset（不然整块都挤在块首，听感是"一抖一抖"）。 */
+static int32_t ka_v3_note(int32_t on, int32_t ch, int32_t pitch, int32_t vel, int32_t offset) {
     ka_event* e;
     if (!g_v3.alive) return -1;
     if (g_v3.evq.count >= KA_V3_MAX_EVENTS) return -2;
+    if (ch < 0) ch = 0;
+    if (ch > 15) ch = 15;
+    if (pitch < 0) pitch = 0;
+    if (pitch > 127) pitch = 127;
+    if (offset < 0) offset = 0;
+    if (offset > KA_V3_MAX_BLOCK - 1) offset = KA_V3_MAX_BLOCK - 1;
     e = g_v3.ev_items + g_v3.evq.count;
     memset(e, 0, sizeof(ka_event));
     e->busIndex = 0;
-    e->sampleOffset = 0;
+    e->sampleOffset = offset;
     e->flags = 0;
     if (on) {
         e->type = KA_EV_NOTEON;
@@ -1708,8 +2226,9 @@ static int32_t ka_v3_note(int32_t on, int32_t ch, int32_t pitch, int32_t vel) {
 }
 
 /** 渲染一块到内部缓冲。dst 非空时同时拷出交错立体声（LRLR…），供测试与导出用。
+ *  pos = 这一块第一帧在时间线上的绝对位置（插件用它做自己的时间/琶音器）。
  *  返回 0 成功；负数是没打开或插件拒绝（-1 未打开 / -2 process 返回失败）。 */
-static int32_t ka_v3_render(float* dst, int32_t frames) {
+static int32_t ka_v3_render(float* dst, int32_t frames, int64_t pos) {
     const ka_processor_vtbl* pvt;
     ka_process_data pd;
     ka_process_context ctx;
@@ -1735,11 +2254,11 @@ static int32_t ka_v3_render(float* dst, int32_t frames) {
     memset(&ctx, 0, sizeof(ctx));
     ctx.state = KA_CTX_PLAYING | KA_CTX_TEMPO_VALID | KA_CTX_PROJECTTIME_VALID;
     ctx.sampleRate = g_v3.setup.sampleRate;
-    ctx.projectTimeSamples = g_v3.frames_done;
-    ctx.continousTimeSamples = g_v3.frames_done;
+    ctx.projectTimeSamples = pos;
+    ctx.continousTimeSamples = pos;
     ctx.tempo = 120.0;
     ctx.projectTimeMusic = (g_v3.setup.sampleRate > 0.0)
-        ? (double)g_v3.frames_done / g_v3.setup.sampleRate * 2.0 : 0.0;
+        ? (double)pos / g_v3.setup.sampleRate * 2.0 : 0.0;
     pd.processContext = &ctx;
 
     /* 输出先清零：插件可以选择"不写"某一路，那时留下的就是我们上一次的内容。 */

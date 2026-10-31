@@ -47,6 +47,15 @@ __declspec(dllimport) int32_t __stdcall VirtualFree(void* addr, uint64_t size, u
 __declspec(dllimport) uint32_t __stdcall WaitForSingleObject(void* handle, uint32_t ms);
 __declspec(dllimport) void __stdcall Sleep(uint32_t ms);
 __declspec(dllimport) int32_t __stdcall CloseHandle(void* h);
+/* .vstpreset 的读/写（状态块是文件，不是命令槽） */
+__declspec(dllimport) void* __stdcall CreateFileW(const uint16_t* path, uint32_t access,
+                                                  uint32_t share, void* sa, uint32_t disp,
+                                                  uint32_t flags, void* tmpl);
+__declspec(dllimport) int32_t __stdcall ReadFile(void* h, void* buf, uint32_t want,
+                                                 int32_t* got, void* ov);
+__declspec(dllimport) int32_t __stdcall WriteFile(void* h, const void* buf, uint32_t want,
+                                                  int32_t* put, void* ov);
+__declspec(dllimport) int32_t __stdcall GetFileSizeEx(void* h, int64_t* size);
 /* 排障：插件里 AV 时把"哪条指令炸的"留给宿主（正常路径不走这里）。 */
 __declspec(dllimport) void* __stdcall AddVectoredExceptionHandler(uint32_t first,
                                                                  int32_t (__stdcall* handler)(void* info));
@@ -67,6 +76,430 @@ unsigned __int64 __readgsqword(unsigned long offset);
 
 #define KA_VST3_TLS_PROBE 1
 #include "ka_vst3.h"
+
+/* ══ 编辑器窗口（UI 线程） ═══════════════════════════════════════════════════════════════════
+ *
+ * HALion/Kontakt 的音色只能由它们自己的界面挑 —— 没有"选音色"的 API（程序列表全是占位）。
+ * 所以宿主这边给它们一个真窗口：界面一开，用户在里面挑一次音色，关窗后宿主把整块状态存成
+ * .vstpreset，以后就是全自动加载。
+ *
+ * 为什么单起一条 UI 线程而不是在主循环里顺手泵消息：
+ *   · 主循环要持续往 ring 里渲块，拖旋钮时消息一多就会饿死音频（ring 只有 8 块 ≈ 85ms）；
+ *   · 插件界面内部也有自己的定时器/模态框，泵在主线程上就等于让它们坐在音频线程上。
+ * 这条线程只碰 IPlugView 与窗口；组件的 process 仍只在主线程。VST3 本来就允许两线程
+ * 各自调自己那一半（音频线程 process / UI 线程 view）。
+ *
+ * 协议：主线程 PostMessage 给下面这个隐藏窗口，UI 线程做完敲 g_ui_done。
+ * 用户点 X 关窗时 UI 线程直接拆（并记一次 g_ed_closed），宿主轮询 EDITOR_STATE 就能发现
+ * "音色挑完了"，随后发 STATE_SAVE。
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+/* 无 windows.h，照旧手写声明（导入库由 user32.def 造）。 */
+__declspec(dllimport) void* __stdcall GetModuleHandleW(const uint16_t* name);
+__declspec(dllimport) uint16_t __stdcall RegisterClassW(const void* wc);
+__declspec(dllimport) void* __stdcall CreateWindowExW(uint32_t exStyle, const uint16_t* cls,
+                                                      const uint16_t* title, uint32_t style,
+                                                      int32_t x, int32_t y, int32_t w, int32_t h,
+                                                      void* parent, void* menu, void* inst, void* param);
+__declspec(dllimport) int64_t __stdcall DefWindowProcW(void* hwnd, uint32_t msg, uint64_t wp, int64_t lp);
+__declspec(dllimport) int32_t __stdcall DestroyWindow(void* hwnd);
+__declspec(dllimport) int32_t __stdcall ShowWindow(void* hwnd, int32_t cmd);
+__declspec(dllimport) int32_t __stdcall UpdateWindow(void* hwnd);
+__declspec(dllimport) int32_t __stdcall PostMessageW(void* hwnd, uint32_t msg, uint64_t wp, int64_t lp);
+__declspec(dllimport) int32_t __stdcall GetMessageW(void* msg, void* hwnd, uint32_t lo, uint32_t hi);
+__declspec(dllimport) int32_t __stdcall PeekMessageW(void* msg, void* hwnd, uint32_t lo, uint32_t hi, uint32_t remove);
+__declspec(dllimport) uint32_t __stdcall MsgWaitForMultipleObjects(uint32_t n, const void** hs,
+                                                                  int32_t waitAll, uint32_t ms,
+                                                                  uint32_t mask);
+__declspec(dllimport) uint32_t __stdcall GetTickCount(void);
+__declspec(dllimport) int32_t __stdcall TranslateMessage(const void* msg);
+__declspec(dllimport) int64_t __stdcall DispatchMessageW(const void* msg);
+__declspec(dllimport) int32_t __stdcall GetClientRect(void* hwnd, int32_t* rect);
+__declspec(dllimport) int32_t __stdcall AdjustWindowRect(int32_t* rect, uint32_t style, int32_t menu);
+__declspec(dllimport) int32_t __stdcall SetWindowPos(void* hwnd, void* after, int32_t x, int32_t y,
+                                                     int32_t cx, int32_t cy, uint32_t flags);
+__declspec(dllimport) int32_t __stdcall SetForegroundWindow(void* hwnd);
+__declspec(dllimport) void* __stdcall GetForegroundWindow(void);
+__declspec(dllimport) uint32_t __stdcall GetWindowThreadProcessId(void* hwnd, uint32_t* pid);
+__declspec(dllimport) int32_t __stdcall AttachThreadInput(uint32_t id_attach, uint32_t id_attach_to,
+                                                          int32_t attach);
+__declspec(dllimport) int32_t __stdcall BringWindowToTop(void* hwnd);
+__declspec(dllimport) int32_t __stdcall IsIconic(void* hwnd);
+__declspec(dllimport) int64_t __stdcall SendMessageW(void* hwnd, uint32_t msg, uint64_t wp, int64_t lp);
+__declspec(dllimport) void* __stdcall LoadImageW(void* inst, const uint16_t* name, uint32_t type,
+                                                 int32_t cx, int32_t cy, uint32_t flags);
+__declspec(dllimport) uint32_t __stdcall GetModuleFileNameW(void* mod, uint16_t* out, uint32_t cap);
+__declspec(dllimport) void* __stdcall LoadCursorW(void* inst, const uint16_t* name);
+__declspec(dllimport) void* __stdcall CreateThread(void* sa, uint64_t stack,
+                                                   uint32_t (__stdcall* fn)(void*), void* arg,
+                                                   uint32_t flags, uint32_t* id);
+
+typedef struct ka_wndclass {
+    uint32_t style;
+    int64_t  (__stdcall* lpfnWndProc)(void*, uint32_t, uint64_t, int64_t);
+    int32_t  cbClsExtra;
+    int32_t  cbWndExtra;
+    void*    hInstance;
+    void*    hIcon;
+    void*    hCursor;
+    void*    hbrBackground;
+    const uint16_t* lpszMenuName;
+    const uint16_t* lpszClassName;
+} ka_wndclass;
+
+typedef struct ka_msg {
+    void*    hwnd;
+    uint32_t message;
+    uint32_t pad;
+    uint64_t wParam;
+    int64_t  lParam;
+    uint32_t time;
+    int32_t  pt_x;
+    int32_t  pt_y;
+    uint32_t lPrivate;
+    uint32_t pad2;
+} ka_msg;
+
+#define KA_WM_ED_OPEN   0x0411u        /* WM_APP+17 */
+#define KA_WM_ED_CLOSE  0x0412u
+#define KA_WM_JOB       0x0413u        /* 让 UI 线程替主线程跑一段插件 API */
+#define KA_WM_CLOSE     0x0010u
+#define KA_WM_SIZE      0x0005u
+#define KA_WM_SETFOCUS  0x0007u
+#define KA_WM_KILLFOCUS 0x0008u
+#define KA_WS_OVERLAPPED 0x00CF0000u
+#define KA_WS_CLIPCHILD  0x02000000u
+#define KA_WS_VISIBLE    0x10000000u
+#define KA_CW_USEDEFAULT ((int32_t)0x80000000u)
+#define KA_SW_SHOW       5
+#define KA_SW_RESTORE    9
+#define KA_SWP_NOMOVE    0x0002u
+#define KA_SWP_NOZORDER  0x0004u
+#define KA_SWP_NOACTIVATE 0x0010u
+#define KA_HWND_MESSAGE  ((void*)(int64_t)-3)
+#define KA_WM_SETICON    0x0080u
+#define KA_IMAGE_ICON    1u
+#define KA_LR_LOADFROMFILE 0x0010u
+#define KA_ICON_SMALL    0
+#define KA_ICON_BIG      1
+#define KA_PATH_MAX      512
+
+static uint16_t g_ed_class[48];
+static uint16_t g_ed_title[48];
+static uint16_t g_ui_title[48];
+static void* g_ui_ready = 0;          /* UI 线程起好了 */
+static volatile uint32_t g_ui_tid = 0;    /* UI 线程 id（判断"我现在是不是站在 UI 线程上"） */
+static void (*volatile g_ui_job)(void) = 0;  /* 交给 UI 线程去跑的那件事 */
+static void* g_ui_done = 0;           /* 一次开/关做完 */
+static void* g_ui_hidden = 0;         /* UI 线程的隐藏窗口（消息入口） */
+static void* g_ed_wnd = 0;            /* 可见的插件窗口 */
+static int32_t g_ui_started = 0;
+static int32_t g_ed_attached = 0;
+static volatile int32_t g_ui_rc = 0;     /* 最近一次开/关的结果（UI 线程写、主线程读） */
+static volatile int32_t g_ed_open = 0;
+static volatile int32_t g_ed_closed = 0; /* 用户点 X 关掉几次 */
+static int32_t g_ed_w = 0, g_ed_h = 0;
+
+/** 改父窗尺寸。插件在 resizeView 里调进来时已经站在 UI 线程上，SetWindowPos 同步发
+ *  WM_SIZE，那边再回调 onSize —— 与 SDK 要求的"同一调用栈"一致。 */
+static void wk_editor_resize(int32_t w, int32_t h) {
+    int32_t r[4];
+    if (!g_ed_wnd || w <= 0 || h <= 0) return;
+    r[0] = 0; r[1] = 0; r[2] = w; r[3] = h;
+    AdjustWindowRect(r, KA_WS_OVERLAPPED | KA_WS_CLIPCHILD, 0);
+    SetWindowPos(g_ed_wnd, 0, 0, 0, r[2] - r[0], r[3] - r[1],
+                 KA_SWP_NOMOVE | KA_SWP_NOZORDER | KA_SWP_NOACTIVATE);
+}
+
+/* ── 图标：与 Kolid Desktop 同一枚 ────────────────────────────────────────────────────────────
+ * worker 就住在 client/kolid_audio/ 下，图标是 client/icon.ico —— 从自己的 exe 路径退两级
+ * 取，不额外传参、也不看 cwd（宿主拉起它时的 cwd 是 ComfyUI 的）。取不到就留系统默认图标，
+ * 不为一个装饰失败影响开窗。 */
+static uint16_t g_ed_icon_path[KA_PATH_MAX];
+
+static void wk_icon_file(uint16_t* out, int32_t cap) {
+    static const char tail[] = "kolid_audio";
+    static const char name[] = "icon.ico";
+    int32_t n = GetModuleFileNameW(0, out, (uint32_t)cap);
+    int i, k, j;
+
+    if (n <= 0 || n >= cap) { out[0] = 0; return; }
+    for (i = n - 1; i >= 0 && out[i] != (uint16_t)'\\'; --i) { }
+    if (i < 0) { out[0] = 0; return; }
+    k = i;                                          /* exe 名之前那个反斜杠 */
+    /* 目录名是 kolid_audio 就再退一级（k 指向 client 后面那个反斜杠）。 */
+    if (k >= 12 && out[k - 12] == (uint16_t)'\\') {
+        int same = 1;
+        for (j = 0; j < 11; ++j) if (out[k - 11 + j] != (uint16_t)tail[j]) { same = 0; break; }
+        if (same) k -= 12;
+    }
+    for (j = 0; j < 8 && k + 1 + j < cap - 1; ++j) out[k + 1 + j] = (uint16_t)name[j];
+    out[k + 1 + j] = 0;
+}
+
+static void wk_editor_icon(void* hwnd) {
+    void* big;
+    void* small;
+    wk_icon_file(g_ed_icon_path, KA_PATH_MAX);
+    if (!g_ed_icon_path[0]) return;
+    big = LoadImageW(0, g_ed_icon_path, KA_IMAGE_ICON, 32, 32, KA_LR_LOADFROMFILE);
+    if (!big) return;
+    small = LoadImageW(0, g_ed_icon_path, KA_IMAGE_ICON, 16, 16, KA_LR_LOADFROMFILE);
+    SendMessageW(hwnd, KA_WM_SETICON, KA_ICON_SMALL, (int64_t)(small ? small : big));
+    SendMessageW(hwnd, KA_WM_SETICON, KA_ICON_BIG, (int64_t)big);
+}
+
+/* ── 前台 ────────────────────────────────────────────────────────────────────────────────────
+ * 后台进程直接 SetForegroundWindow 会被前台锁静默拒绝（别的窗口刚吃过用户输入时，
+ * 客户端那边实测 6/6 被拒）。配方与 client/kolid_client.py::_bring_to_front 一字不差：
+ * 把自己的输入队列临时挂到当前前台线程上，借它的"拥有最近输入"身份设前台，随即解除。 */
+static void wk_editor_front(void* hwnd) {
+    void* fg;
+    uint32_t cur, fg_tid;
+    if (!hwnd) return;
+    if (IsIconic(hwnd)) ShowWindow(hwnd, KA_SW_RESTORE);
+    ShowWindow(hwnd, KA_SW_SHOW);
+    if (GetForegroundWindow() == hwnd) return;
+    SetForegroundWindow(hwnd);
+    if (GetForegroundWindow() == hwnd) return;
+    cur = GetCurrentThreadId();
+    fg = GetForegroundWindow();
+    fg_tid = fg ? GetWindowThreadProcessId(fg, 0) : 0;
+    if (!fg_tid || fg_tid == cur) return;
+    AttachThreadInput(cur, fg_tid, 1);
+    BringWindowToTop(hwnd);
+    SetForegroundWindow(hwnd);
+    AttachThreadInput(cur, fg_tid, 0);
+}
+
+static void wk_editor_open_now(void) {
+    int32_t rc, w = 0, h = 0, r[4];
+    void* hinst;
+    if (g_ed_wnd) { wk_editor_front(g_ed_wnd); g_ui_rc = 0; return; }
+    rc = ka_v3_view_create();
+    if (rc != 0) { g_ui_rc = rc - 100; return; }
+    ka_v3_view_wanted(&w, &h);
+    if (w < 240) w = 720;
+    if (h < 160) h = 520;
+    ka_v3_stage(5);
+    r[0] = 0; r[1] = 0; r[2] = w; r[3] = h;
+    AdjustWindowRect(r, KA_WS_OVERLAPPED | KA_WS_CLIPCHILD, 0);
+    hinst = GetModuleHandleW(0);
+    g_ed_wnd = CreateWindowExW(0, g_ed_class, g_ed_title,
+                               KA_WS_OVERLAPPED | KA_WS_CLIPCHILD | KA_WS_VISIBLE,
+                               KA_CW_USEDEFAULT, KA_CW_USEDEFAULT,
+                               r[2] - r[0], r[3] - r[1], 0, 0, hinst, 0);
+    if (!g_ed_wnd) { ka_v3_view_destroy(); g_ui_rc = -7; return; }
+    wk_editor_icon(g_ed_wnd);
+    if (ka_v3_view_attach(g_ed_wnd) != 0) {
+        DestroyWindow(g_ed_wnd);
+        g_ed_wnd = 0;
+        ka_v3_view_destroy();
+        g_ui_rc = -8;
+        return;
+    }
+    g_ed_attached = 1;
+    ka_v3_stage(7);
+    {   int32_t cr[4];
+        g_ed_w = w;
+        g_ed_h = h;
+        if (GetClientRect(g_ed_wnd, cr)) { g_ed_w = cr[2]; g_ed_h = cr[3]; }
+    }
+    ka_v3_stage(8);
+    ShowWindow(g_ed_wnd, KA_SW_SHOW);
+    wk_editor_front(g_ed_wnd);
+    /* **不要**在这里 UpdateWindow。它会同步强发 WM_PAINT，跑到插件自己还没处理完的
+     * 初始化任务前面去 —— Kontakt 7 的绘制就此死等那些任务，窗口永远白着、开窗调用也
+     * 永远等不到回执（实测 15 秒超时，stage 卡在 9）。WM_PAINT 是队列里没别的消息时
+     * 才合成的低优先级消息，交给 UI 线程的消息泵自然去画就对了。 */
+    ka_v3_stage(6);
+    g_ed_open = 1;
+    g_ui_rc = 0;
+}
+
+static void wk_editor_close_now(int32_t by_user) {
+    if (!g_ed_wnd) return;
+    g_ed_attached = 0;
+    ka_v3_view_detach();         /* removed() 必须早于父窗销毁 */
+    ka_v3_view_destroy();
+    DestroyWindow(g_ed_wnd);
+    g_ed_wnd = 0;
+    g_ed_open = 0;
+    if (by_user) g_ed_closed = g_ed_closed + 1;
+}
+
+static int64_t __stdcall ka_ed_proc(void* hwnd, uint32_t msg, uint64_t wp, int64_t lp) {
+    /* 排障：iv[6] = 正在处理的消息，iv[5] = 上一条处理完的。UI 线程卡死时读这两格。 */
+    if (g_v3_shm) g_v3_shm->iv[6] = (int32_t)msg;
+    if (hwnd == g_ed_wnd) {
+        switch (msg) {
+        case KA_WM_CLOSE:
+            wk_editor_close_now(1);
+            return 0;
+        case KA_WM_SIZE:
+            if (g_ed_attached && wp != 1) {          /* 1 = SIZE_MINIMIZED */
+                int32_t r[4];
+                if (GetClientRect(hwnd, r)) {
+                    g_ed_w = r[2];
+                    g_ed_h = r[3];
+                    ka_v3_stage(20);
+                    ka_v3_view_on_size(r[2], r[3]);
+                    ka_v3_stage(21);
+                }
+            }
+            return 0;
+        case KA_WM_SETFOCUS:
+            if (g_ed_attached) ka_v3_view_focus(1);
+            return 0;
+        case KA_WM_KILLFOCUS:
+            if (g_ed_attached) ka_v3_view_focus(0);
+            return 0;
+        default: break;
+        }
+    } else if (hwnd == g_ui_hidden) {
+        switch (msg) {
+        case KA_WM_ED_OPEN:  wk_editor_open_now();  SetEvent(g_ui_done); return 0;
+        case KA_WM_ED_CLOSE: ka_v3_stage(-30); wk_editor_close_now(0); ka_v3_stage(-31); SetEvent(g_ui_done); return 0;
+        case KA_WM_JOB: {
+            void (*fn)(void) = g_ui_job;
+            ka_v3_stage(-40);
+            if (fn) fn();
+            ka_v3_stage(-41);
+            SetEvent(g_ui_done);
+            return 0;
+        }
+        default: break;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static uint32_t __stdcall ka_ui_main(void* arg) {
+    static const uint16_t k_ole32[] = {'o','l','e','3','2','.','d','l','l',0};
+    ka_wndclass wc;
+    void* ole, *fn, *hinst;
+    (void)arg;
+    /* 插件界面会碰系统对象（剪贴板/字体/拖放）。OleInitialize = STA + OLE 服务；
+     * 没有它就退回 CoInitializeEx(APARTMENTTHREADED)。 */
+    ole = LoadLibraryW(k_ole32);
+    if (ole) {
+        fn = GetProcAddress(ole, "OleInitialize");
+        if (fn) ((int32_t (__stdcall*)(void*))fn)(0);
+        else {
+            fn = GetProcAddress(ole, "CoInitializeEx");
+            if (fn) ((int32_t (__stdcall*)(void*, uint32_t))fn)(0, 2);
+        }
+    }
+    ka_shm_wstr(g_ed_class, "KolidKaEditor");
+    ka_shm_wstr(g_ed_title, "Kolid Instrument");
+    ka_shm_wstr(g_ui_title, "Kolid Editor Host");
+    hinst = GetModuleHandleW(0);
+    memset(&wc, 0, sizeof(wc));
+    wc.style = 0x0020;                                  /* CS_OWNDC */
+    wc.lpfnWndProc = ka_ed_proc;
+    wc.hInstance = hinst;
+    wc.hCursor = LoadCursorW(0, (const uint16_t*)(int64_t)32512);   /* IDC_ARROW */
+    wc.hbrBackground = (void*)(int64_t)6;               /* COLOR_WINDOW + 1 */
+    wc.lpszClassName = g_ed_class;
+    if (!RegisterClassW(&wc)) { SetEvent(g_ui_ready); return 0; }
+    g_ui_hidden = CreateWindowExW(0, g_ed_class, g_ui_title, 0,
+                                  0, 0, 0, 0, KA_HWND_MESSAGE, 0, hinst, 0);
+    g_ui_tid = GetCurrentThreadId();
+    SetEvent(g_ui_ready);
+    for (;;) {
+        ka_msg m;
+        int32_t got = GetMessageW(&m, 0, 0, 0);
+        if (got <= 0) break;
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+    return 0;
+}
+
+/** 起 UI 线程（一次）。0 = 隐藏窗口已就绪。 */
+static int32_t ka_ed_ensure(void) {
+    if (g_ui_started) return g_ui_hidden ? 0 : -4;
+    if (!g_ui_ready) {
+        g_ui_ready = CreateEventW(0, 0, 0, 0);
+        g_ui_done = CreateEventW(0, 0, 0, 0);
+        if (!g_ui_ready || !g_ui_done) return -1;
+    }
+    {   void* th = CreateThread(0, 0, ka_ui_main, 0, 0, 0);
+        if (!th) return -2;
+        CloseHandle(th);
+    }
+    g_ui_started = 1;
+    if (WaitForSingleObject(g_ui_ready, 5000) != KA_WAIT_OBJECT_0) return -3;
+    if (!g_ui_hidden) return -4;
+    return 0;
+}
+
+/** 等 UI 线程做完一次开/关。0 = 做完了，-1 = 超时。 */
+static int32_t ka_wait_ui_done(uint32_t ms) {
+    return WaitForSingleObject(g_ui_done, ms) == 0 ? 0 : -1;
+}
+
+/** 开编辑器。0 = 窗口已经显示；负数见各步（-21 超时 = 插件界面造不出来）。
+ *  已经开着的再点一次 = 抬到前台（用户点 Edit 的意图就是"让我看见它"）。 */
+static int32_t ka_ed_open(void) {
+    int32_t rc;
+    uint32_t ms;
+    if (!g_v3.ctrl) return -5;
+    /* 已经站在 UI 线程上（插件 API 都跑在这条线程）就直接干，别给自己发消息等自己。 */
+    if (g_ui_tid && g_ui_tid == GetCurrentThreadId()) {
+        g_ui_rc = -100;
+        wk_editor_open_now();
+        return (int32_t)g_ui_rc;
+    }
+    rc = ka_ed_ensure();
+    if (rc != 0) return rc - 10;
+    g_ui_rc = -100;
+    ResetEvent(g_ui_done);
+    if (!PostMessageW(g_ui_hidden, KA_WM_ED_OPEN, 0, 0)) return -20;
+    /* 只是抬前台是瞬时的，给 2 秒就够；真造窗口才等满 15 秒 —— 别让"抬一下"卡住宿主。 */
+    ms = g_ed_open ? 2000 : 15000;
+    if (ka_wait_ui_done(ms) != 0) return -21;
+    return (int32_t)g_ui_rc;
+}
+
+static int32_t ka_ed_close(void) {
+    if (!g_ed_open) return 0;
+    if (g_ui_tid && g_ui_tid == GetCurrentThreadId()) {
+        wk_editor_close_now(0);
+        return 0;
+    }
+    if (!g_ui_hidden) return -1;
+    ResetEvent(g_ui_done);
+    if (!PostMessageW(g_ui_hidden, KA_WM_ED_CLOSE, 0, 0)) return -2;
+    if (ka_wait_ui_done(5000) != 0) return -3;
+    return 0;
+}
+
+/** 让 UI 线程替我们跑一段插件 API。0 = 跑完了，-1 = 超时，-2/-3 = UI 线程起不来/投递失败。
+ *
+ * 为什么插件 API 必须压在 UI 线程：Kontakt 7 的界面是 Qt 6，createView 建出来的子窗口
+ * 绑着实例化它的那个线程的事件分发器。实例化在 worker 主线程、createView 在 UI 线程时，
+ * 界面画不出来（强制 UpdateWindow 直接死锁），关闭也永远等不到回执。真宿主都把实例化
+ * 和界面放在同一条"主线程"上，只有 process() 走音频线程 —— 这里照做。
+ *
+ * 等待期间主线程替它拍心跳：宿主靠 s->beat 不变来判 -92（DEAD）。 */
+static int32_t ka_ui_run(void (*fn)(void), uint32_t ms) {
+    uint32_t t0;
+    if (g_ui_tid && g_ui_tid == GetCurrentThreadId()) { fn(); return 0; }
+    if (ka_ed_ensure() != 0) return -2;
+    g_ui_job = fn;
+    ResetEvent(g_ui_done);
+    if (!PostMessageW(g_ui_hidden, KA_WM_JOB, 0, 0)) return -3;
+    t0 = GetTickCount();
+    for (;;) {
+        uint32_t used = GetTickCount() - t0;
+        uint32_t left = used >= ms ? 0 : ms - used;
+        if (WaitForSingleObject(g_ui_done, left) == 0) return 0;
+        if (g_v3_shm) g_v3_shm->beat = g_v3_shm->beat + 1;
+        if (used >= ms) return -1;
+    }
+}
+
 
 /* ── 文本回执的拼装（原来在 KolidAudio 的导出里，现在宿主不碰插件了，搬到这里） ─────────────── */
 
@@ -202,12 +635,164 @@ static void wk_text_units(char* b, int cap) {
 static ka_shm* g_shm = 0;
 static void*   g_ev_done = 0;
 
+/* ── 乐器音符：走带里排好的音，按锚点落进正在渲的那一块 ─────────────────────────────────────
+ *
+ * 宿主的音符表和走带锚点在共享内存里（ka_shm.h）。这里的表是**私有副本**：宿主用
+ * notes_gen 当 seqlock（奇 = 正在写），读的时候前后各看一次，不一致就下一圈再来 ——
+ * 直接读共享内存会读到"写了一半的表"，表现是偶尔冒出一个不存在的高音。
+ * ──────────────────────────────────────────────────────────────────────────────────────────── */
+
+static ka_shm_note wk_notes[KA_SHM_NOTES];
+static int32_t wk_note_count = 0;
+static int32_t wk_notes_gen_seen = -1;
+static int32_t wk_note_sched = 0;
+static int32_t wk_epoch_seen = -1;
+static int32_t wk_resched = 1;
+/* 调度**已经处理到**的时间线位置。锚点是从"宿主读到第几块"外推出来的，会抖；
+ * 换表时若从抖出来的 pos 重排，上一块刚发过的音就会被当成"还没发过"再来一遍。
+ * 与宿主那边的 g_sched_end 同一个办法：换表只准把游标往前挪。 */
+static int64_t wk_sched_end = 0;
+
+#define WK_OFF_MAX 512
+typedef struct { int32_t pitch, ch; int64_t end; } wk_off;
+static wk_off wk_offs[WK_OFF_MAX];
+static int32_t wk_noff = 0;
+
+/* 试听音（暂停时点 ♪）：note-on 当场发，wk_aud_life 数到 0 再发 note-off。
+ * 倒计时按"渲了几块"走 —— 宿主音频线程那条路上只准填事件，不能等命令回执。 */
+static int32_t wk_aud_life = -1;
+static int32_t wk_aud_ch = 0, wk_aud_pitch = 0;
+
+static int32_t wk_note_at(int64_t pos) {
+    int32_t lo = 0, hi = wk_note_count, mid;
+    while (lo < hi) {
+        mid = (lo + hi) / 2;
+        if (wk_notes[mid].start < pos) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/** 把正在响的音全部收掉，并丢掉排队里还没发出去的（拖播放头 / 换乐器 / 停播都要）。 */
+static void wk_flush_notes(void) {
+    int i;
+    g_v3.evq.count = 0;
+    for (i = 0; i < wk_noff; ++i) ka_v3_note(0, wk_offs[i].ch, wk_offs[i].pitch, 0, 0);
+    wk_noff = 0;
+}
+
+/** 读共享内存里的音符表（seqlock）。变了就重排游标。返回 1 = 表换了。 */
+static int32_t wk_sync_notes(ka_shm* s) {
+    int32_t g0 = s->notes_gen, n, i;
+    if (g0 == wk_notes_gen_seen || (g0 & 1)) return 0;
+    n = s->note_count;
+    if (n < 0) n = 0;
+    if (n > KA_SHM_NOTES) n = KA_SHM_NOTES;
+    for (i = 0; i < n; ++i) wk_notes[i] = s->notes[i];
+    if (s->notes_gen != g0) return 0;
+    wk_note_count = n;
+    wk_notes_gen_seen = g0;
+    wk_resched = 1;
+    return 1;
+}
+
+/** 这一块 [pos, pos+block) 里要响/要收的音。off 先发、on 后发：同一个音重触发时
+ *  不会被自己的 note-off 吃掉。 */
+static void wk_note_block(int32_t block, int64_t pos) {
+    int64_t end = pos + block;
+    int32_t i = 0;
+    while (i < wk_noff) {
+        if (wk_offs[i].end < end) {
+            int64_t off = wk_offs[i].end - pos;
+            if (off < 0) off = 0;
+            ka_v3_note(0, wk_offs[i].ch, wk_offs[i].pitch, 0, (int32_t)off);
+            wk_offs[i] = wk_offs[--wk_noff];
+        } else ++i;
+    }
+    while (wk_note_sched < wk_note_count) {
+        const ka_shm_note* n = &wk_notes[wk_note_sched];
+        int64_t off;
+        if (n->start >= end) break;
+        ++wk_note_sched;
+        if (n->start + n->len <= pos) continue;      /* 整条已经过去了 */
+        off = n->start - pos;
+        if (off < 0) off = 0;
+        ka_v3_note(1, n->ch, n->note, n->vel, (int32_t)off);
+        if (wk_noff < WK_OFF_MAX) {
+            wk_offs[wk_noff].pitch = n->note;
+            wk_offs[wk_noff].ch = n->ch;
+            wk_offs[wk_noff].end = n->start + n->len;
+            ++wk_noff;
+        }
+    }
+}
+
+/** 这一块落在时钟的哪一帧：锚点（第 tr_read 块 = tr_pos 帧）往后外推。 */
+static int64_t wk_block_pos(ka_shm* s) {
+    int32_t k, r = s->tr_read;
+    int64_t base = 0;
+    for (k = 0; k < 3; ++k) {
+        int32_t r2;
+        base = ((int64_t)s->tr_pos_hi << 32) | (uint32_t)s->tr_pos_lo;
+        r2 = s->tr_read;
+        if (r2 == r) break;
+        r = r2;
+    }
+    return base + (int64_t)(s->w - r) * (int64_t)s->block;
+}
+
 static void wk_render(ka_shm* s) {
-    int32_t rc;
-    int64_t fr;
+    int32_t rc, playing, aud, mon;
+    int64_t fr, pos;
+
     if (!s->live || !s->opened) return;
     if (ka_shm_pending(s) <= 0) return;                  /* ring 满了：宿主没在取，别白干 */
-    rc = ka_v3_render(ka_shm_block_at(s, s->w), s->block);
+
+    playing = s->tr_playing ? 1 : 0;
+    aud = (s->aud_blocks > 0);
+    /* 插件窗口开着（宿主写的 ed_mon）= 用户正在它自己的界面里试音。那边的键盘/试听按钮
+     * 不会经过我们，声音只从 process() 出来 —— 暂停时不渲，界面里点了就是一片安静。 */
+    mon = (!playing && s->ed_mon) ? 1 : 0;
+    if (!playing && !aud && !mon) {
+        if (wk_noff > 0) wk_flush_notes();               /* 停播：把还挂着的声音收掉 */
+        s->peak = 0;                                     /* 电平表要跟着停（与内置合成器那条一致） */
+        return;
+    }
+    /* 界面里试音要跟手：暂停时最多压 3 块（≈32ms）待取，别像播放那样提前塞满 8 块。
+     * 满了就回去等宿主取走一块（外面那圈本来就会等）。 */
+    if (mon && ka_shm_ready(s) >= 3) return;
+    if (!playing && aud) s->aud_blocks = s->aud_blocks - 1;
+    if (wk_aud_life > 0) {
+        if (--wk_aud_life == 0) ka_v3_note(0, wk_aud_ch, wk_aud_pitch, 0, 0);
+    }
+
+    wk_sync_notes(s);
+    if (playing) {
+        pos = wk_block_pos(s);
+        if (s->tr_epoch != wk_epoch_seen) {
+            /* 硬对表：开播 / 拖播放头 / 换乐器。位置可能往回跳，所以要收声并重排。 */
+            wk_epoch_seen = s->tr_epoch;
+            wk_resched = 0;
+            wk_flush_notes();
+            wk_note_sched = wk_note_at(pos);
+            wk_sched_end = pos;
+        } else if (wk_resched) {
+            /* 软对表：只是音符表换了（重推工程 / 改选择 / 装乐器）。**不收声** —— 在响的音
+             * 自己会按 wk_offs 收尾；游标从"已处理到哪"接着走，不回到 pos，否则这一句
+             * 每推一次表就把上一块的音再发一遍（听感就是重复音、越叠越厚）。 */
+            int64_t at = pos;
+            wk_resched = 0;
+            if (at < wk_sched_end) at = wk_sched_end;
+            wk_note_sched = wk_note_at(at);
+            wk_sched_end = at;
+        }
+        wk_note_block(s->block, pos);
+        if (pos + (int64_t)s->block > wk_sched_end) wk_sched_end = pos + (int64_t)s->block;
+    } else {
+        pos = g_v3.frames_done;                          /* 试听：用自己已经渲到的位置 */
+    }
+
+    rc = ka_v3_render(ka_shm_block_at(s, s->w), s->block, pos);
     if (rc != 0) return;                                 /* 没开/插件拒绝：这一块不推进 w */
     s->peak = (int32_t)g_v3.peak;
     fr = (int64_t)g_v3.frames_done;
@@ -296,8 +881,50 @@ static int32_t __stdcall wk_veh(void* info) {
     return 0;                                   /* EXCEPTION_CONTINUE_SEARCH */
 }
 
+/* 这些命令碰的是插件对象模型（实例化、参数、状态、界面），必须和实例化跑在同一条线程上。
+ * 见 ka_ui_run 的注释。其余命令只读写我们自己缓存的结构 / 音频线程那套，留在主线程。 */
+static int32_t wk_cmd_on_ui(int32_t c) {
+    switch (c) {
+    case KA_CMD_SCAN:      case KA_CMD_OPEN:      case KA_CMD_CLOSE:
+    case KA_CMD_PROBE:     case KA_CMD_BUSES:     case KA_CMD_PCOUNT:
+    case KA_CMD_PINFO:     case KA_CMD_PSET:      case KA_CMD_PGET:
+    case KA_CMD_PSCAN:     case KA_CMD_UNITS:     case KA_CMD_PROGNAME:
+    case KA_CMD_PROGINFO:  case KA_CMD_STATE_LOAD: case KA_CMD_STATE_SAVE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int wk_cmd_body(ka_shm* s);
+
+static void wk_shutdown_job(void) {
+    if (g_ed_open) ka_ed_close();
+    if (g_v3.ctrl) ka_v3_close();
+}
+
+static ka_shm* g_job_shm = 0;
+static int32_t g_job_rc = 1;
+static void wk_cmd_job(void) { g_job_rc = wk_cmd_body(g_job_shm); }
+
 /* 返回 0 = 收到 QUIT，该退了。 */
 static int wk_cmd(ka_shm* s) {
+    int32_t c = s->cmd, rc, ms;
+    if (!wk_cmd_on_ui(c)) return wk_cmd_body(s);
+    ms = (c == KA_CMD_OPEN || c == KA_CMD_SCAN
+          || c == KA_CMD_STATE_LOAD || c == KA_CMD_STATE_SAVE) ? 55000 : 4000;
+    g_job_shm = s;
+    g_job_rc = 1;
+    rc = ka_ui_run(wk_cmd_job, (uint32_t)ms);
+    if (rc == 0) return g_job_rc;
+    /* 超时：UI 线程还卡在里面。把命令位收掉，否则下一条命令会和它抢同一块共享内存。 */
+    s->ret = (rc == -1) ? -93 : -91;
+    s->cmd = KA_CMD_NONE;
+    SetEvent(g_ev_done);
+    return 1;
+}
+
+static int wk_cmd_body(ka_shm* s) {
     int32_t c = s->cmd;
     int i;
     s->ret = 0;
@@ -312,8 +939,15 @@ static int wk_cmd(ka_shm* s) {
         s->ret = ka_v3_scan(s->has_path ? s->path : 0);
         break;
     case KA_CMD_OPEN:
+        ka_ed_close();               /* 编辑器挂在旧 controller 上，必须先拆 */
         if (s->rate > 0) g_rate = s->rate;
         g_veh_seen = 0;
+        wk_noff = 0;
+        wk_aud_life = -1;
+        s->aud_blocks = 0;
+        wk_epoch_seen = -1;
+        wk_notes_gen_seen = -1;
+        wk_resched = 1;
         s->ret = ka_v3_open(s->has_path ? s->path : 0, s->a0, s->a1);
         s->opened = (s->ret == 0) ? 1 : 0;
         /* 帧计数要跟着归零：它只在渲染时才被推进，不开这一下宿主会一直读到上一轮的旧值
@@ -322,6 +956,10 @@ static int wk_cmd(ka_shm* s) {
         s->frames_hi = 0; s->frames_lo = 0;
         break;
     case KA_CMD_CLOSE:
+        ka_ed_close();
+        wk_flush_notes();
+        wk_aud_life = -1;
+        s->aud_blocks = 0;
         ka_v3_close();
         s->opened = 0;
         s->live = 0;
@@ -330,7 +968,7 @@ static int wk_cmd(ka_shm* s) {
         s->frames_hi = 0; s->frames_lo = 0;
         break;
     case KA_CMD_NOTE:
-        s->ret = ka_v3_note(s->a0 ? 1 : 0, s->a1, s->a2, s->a3);
+        s->ret = ka_v3_note(s->a0 ? 1 : 0, s->a1, s->a2, s->a3, 0);
         break;
     case KA_CMD_CLASS:
         wk_text_class(s->text, KA_SHM_TEXT, s->a0);
@@ -392,7 +1030,7 @@ static int wk_cmd(ka_shm* s) {
         int64_t fr;
         if (n <= 0) n = s->block;
         if (n > KA_SHM_BLOCK) n = KA_SHM_BLOCK;
-        s->ret = ka_v3_render(s->rout, n);
+        s->ret = ka_v3_render(s->rout, n, g_v3.frames_done);
         if (s->ret == 0) {
             s->peak = (int32_t)g_v3.peak;
             fr = (int64_t)g_v3.frames_done;
@@ -473,6 +1111,61 @@ static int wk_cmd(ka_shm* s) {
     }
     case KA_CMD_LIVE:
         s->live = s->a0 ? 1 : 0;
+        if (!s->live) {
+            wk_flush_notes();
+            wk_aud_life = -1;
+            s->aud_blocks = 0;
+            s->w = 0; s->r = 0;
+        } else { wk_epoch_seen = -1; wk_resched = 1; }
+        break;
+    case KA_CMD_STATE_LOAD: {
+        int64_t bytes = 0;
+        s->ret = ka_v3_state_load(s->has_path ? s->path : 0, &bytes);
+        s->iv[0] = g_v3_state_rc[0];
+        s->iv[1] = g_v3_state_rc[1];
+        s->iv[2] = g_v3_state_rc[2];
+        s->iv[3] = (int32_t)bytes;
+        /* 换了音色 = 换了一次"时间"：插件内部的采样流全变了，正在响的音必须收掉。 */
+        wk_flush_notes();
+        wk_aud_life = -1;
+        s->aud_blocks = 0;
+        wk_epoch_seen = -1;
+        break;
+    }
+    case KA_CMD_STATE_SAVE:
+        s->ret = ka_v3_state_save(s->has_path ? s->path : 0);
+        break;
+    case KA_CMD_NOTES_OFF:
+        wk_flush_notes();
+        s->ret = 1;
+        break;
+    case KA_CMD_AUDITION: {
+        int32_t blocks = s->a3;
+        if (blocks <= 0) blocks = 1;
+        if (wk_aud_life > 0) ka_v3_note(0, wk_aud_ch, wk_aud_pitch, 0, 0);   /* 连点 ♪：前一个先收 */
+        wk_aud_ch = s->a2 < 0 ? 0 : (s->a2 > 15 ? 15 : s->a2);
+        wk_aud_pitch = s->a0 < 0 ? 0 : (s->a0 > 127 ? 127 : s->a0);
+        ka_v3_note(1, wk_aud_ch, wk_aud_pitch, s->a1, 0);
+        s->aud_blocks = blocks;
+        wk_aud_life = blocks;
+        s->ret = 1;
+        break;
+    }
+    case KA_CMD_EDITOR_OPEN:
+        s->ret = ka_ed_open();
+        s->iv[0] = g_ed_open;
+        s->iv[1] = g_ed_w;
+        s->iv[2] = g_ed_h;
+        break;
+    case KA_CMD_EDITOR_CLOSE:
+        s->ret = ka_ed_close();
+        s->iv[0] = g_ed_open;
+        break;
+    case KA_CMD_EDITOR_STATE:
+        s->ret = g_ed_open;
+        s->iv[0] = g_ed_closed;
+        s->iv[1] = g_ed_w;
+        s->iv[2] = g_ed_h;
         break;
     case KA_CMD_QUIT:
         break;
@@ -525,6 +1218,11 @@ int __stdcall kaMain(void) {
     hm = CreateFileMappingW((void*)(int64_t)-1, 0, KA_PAGE_READWRITE,
                             (uint32_t)(bytes >> 32), (uint32_t)(bytes & 0xFFFFFFFFu), nm);
     if (!hm) ExitProcess(2);
+    /* **一个名字只准有一支 worker。** 两支进程连同一块共享内存 = 两件乐器同时弹同一串音
+     * （听感就是重复音），而且后起身的那支马上会把共享内存 memset 掉，先来者的命令槽、
+     * 走带锚点全被踩平。CreateFileMappingW 不为此报错：名字已存在时它返回的仍是有效句柄，
+     * 只在 GetLastError 里留一句 —— 所以这一行必须紧跟创建，且必须排在 memset 之前。 */
+    if (GetLastError() == KA_ERROR_ALREADY_EXISTS) ExitProcess(KA_WORKER_EXIT_TAG);
     s = (ka_shm*)MapViewOfFile(hm, KA_FILE_MAP_ALL_ACCESS, 0, 0, bytes);
     if (!s) ExitProcess(3);
 
@@ -553,7 +1251,15 @@ int __stdcall kaMain(void) {
             if (wk_cmd(s) == 0) break;
             continue;
         }
-        wk_render(s);
+        /* 一圈把 ring 能塞的都塞满。只渲一块就回去等的话，WaitForSingleObject(1) 实际按
+         * 系统定时器粒度（本机实测 ~15.6ms）睡，产能只有 ~63 块/秒 —— 顶不住 93.75 块/秒，
+         * ring 永远见底（underrun 一路涨、播放时插件没声）。 */
+        for (;;) {
+            int32_t w0 = s->w;
+            if (ka_shm_pending(s) <= 0) break;       /* 满了：等宿主取 */
+            wk_render(s);
+            if (s->w == w0) break;                   /* 没渲出东西（未播/未开/插件拒绝），别空转 */
+        }
 
         /* 宿主没了就自己退：不留孤儿进程占着插件。5 秒没动静算走人了。 */
         if (s->host_beat == hb) {
@@ -562,7 +1268,11 @@ int __stdcall kaMain(void) {
         } else { hb = s->host_beat; stall = 0; }
     }
 
-    if (s->opened) ka_v3_close();
+    /* 插件的拆解也得在实例化那条线程上做（Kontakt 的 Qt 对象过线程就崩）。 */
+    if (s->opened || g_ed_open) {
+        g_job_shm = s;
+        ka_ui_run(wk_shutdown_job, 8000);
+    }
     UnmapViewOfFile(s);
     CloseHandle(hm);
     ExitProcess(0);

@@ -9,7 +9,10 @@
 //     offset 起播；扫出去就停。AudioContext 惰性创建（第一次按播放 = 一次用户手势，不踩
 //     autoplay 政策）。
 
+import { audioAudible, type VidClip } from './model';
+
 let ctx: AudioContext | null = null;
+
 export const audioCtx = (): AudioContext => {
   if (!ctx) ctx = new AudioContext();
   if (ctx.state === 'suspended') void ctx.resume();
@@ -69,6 +72,7 @@ type Voice = { node: AudioBufferSourceNode; gain: GainNode; into: number; at: nu
 
 export class VidAudio {
   private master: GainNode | null = null;
+  private detached = false;
   private voices = new Map<string, Voice>();
 
   private ensure(): GainNode {
@@ -101,6 +105,14 @@ export class VidAudio {
    *  一只探头就能代表整个播放器的电平。 */
   node(): GainNode { return this.ensure(); }
 
+  /** 交出输出腿：探头接上来之后由探头的 `gain → analyser → destination` 负责出声，
+   *  这条直连必须撤掉 —— 两条腿同时接到 destination 就是同一路声 +6dB（听着是"播放比预览响"）。 */
+  detachOutput(): void {
+    if (this.detached) return;
+    this.detached = true;
+    try { this.ensure().disconnect(); } catch { /* 已经断了 */ }
+  }
+
   /** 这路声源现在播到 buffer 内的第几秒（未播 = null）。播放循环拿它跟游标该在的位置对表，
    *  差得多了就重新起播 —— 回绕、拖动、片段被搬动，全都是「想听的位置变了」这一种病。 */
   pos(id: string): number | null {
@@ -121,3 +133,54 @@ export class VidAudio {
 
 /** 播放引擎的音频半边是全局单例 —— 两扇窗（Player 的 tick、将来的 scrub 预听）共享同一套声源。 */
 export const vidAudio = new VidAudio();
+
+// ── 音频段调度 ────────────────────────────────────────────────────────────────────────────
+//
+// 播放头扫到哪段音频就把它从正确的 offset 起播，扫出去就停，已经在播的每帧对表 ——
+// 回绕、拖动、片段被搬动/裁剪，全都是"该听的位置变了"，偏差超 80ms 就重新起播。
+//
+// **一份实现，两种宿主**：视频模式的 Player 与整页的 headless 调度（见 timelineAudio.ts）
+// 都走这里。两边各写一遍迟早一边忘了 mute/solo 或忘了"段尾停声"，听起来就是"某个模式下
+// 声音乱了"。`isPlaying` / `now` 是回调而不是快照：buffer 解码是异步的，回来那一刻要按
+// **那时**的游标算源内位置（等它回来游标早走了）。
+
+export type AudioSched = {
+  clips: readonly VidClip[];
+  /** 播放头（秒）。 */
+  t: number;
+  playing: boolean;
+  /** 音频 solo（视频 solo 不挡声音）。 */
+  solo: ReadonlySet<string>;
+  /** 所有轨共用的 mute；mute 优先于 solo。 */
+  mute: ReadonlySet<string>;
+  /** 刚跳过头（回绕 / seek）：在播的也重新起播对表。 */
+  jumped?: boolean;
+  isPlaying: () => boolean;
+  now: () => number;
+};
+
+export const scheduleAudioClips = (s: AudioSched): void => {
+  /** 异步起播：buffer 回来时再问一次"还在播、还覆盖游标吗"。 */
+  const start = (c: VidClip): void => {
+    void decodeAudio(c.src).then(buf => {
+      if (!buf || !s.isPlaying()) return;
+      const cur = s.now();
+      if (!(cur >= c.start && cur < c.start + c.duration)) return;
+      vidAudio.start(c.id, buf, c.offset + (cur - c.start));
+    });
+  };
+  for (const c of s.clips) {
+    if (c.kind !== 'audio') continue;
+    if (!s.playing || !audioAudible(c.trackId, s.solo, s.mute)) {
+      if (vidAudio.has(c.id)) vidAudio.stop(c.id);
+      continue;
+    }
+    const covers = s.t >= c.start && s.t < c.start + c.duration;
+    if (!covers) { if (vidAudio.has(c.id)) vidAudio.stop(c.id); continue; }
+    const want = c.offset + (s.t - c.start);
+    if (!vidAudio.has(c.id)) { start(c); continue; }
+    const got = vidAudio.pos(c.id);
+    if (s.jumped || got == null || Math.abs(got - want) > 0.08) start(c);
+  }
+};
+

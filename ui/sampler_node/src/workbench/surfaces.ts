@@ -86,6 +86,12 @@ export const TOOL_SURFACE: Record<AgentToolName, AgentSurface> = {
   // ── Video Generator ──
   add_vgen_segment: 'videogen', add_continue_segment: 'videogen', toggle_vgen_chain: 'videogen',
 
+  // ── MIDI 乐器 ── MIDI 模式的轨道窗/卷帘不吃脉冲（它们不住在 dock 的单元表里），
+  // 与其点亮一扇错的窗，不如不点。窗口本身的出现就是用户看到的结果。
+  get_midi_state: 'none', instrument_library: 'none',
+  set_track_instrument: 'none', unload_track_instrument: 'none',
+  open_instrument_window: 'none', close_instrument_window: 'none', audition_note: 'none',
+
   // ── 文档 ──
   document: 'toolbar',
 

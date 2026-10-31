@@ -20,10 +20,12 @@ import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 // MIDI 模式：按文档分桶的工程 + "每帧一次"的循环守卫，都在 useMidiHost 里；界面是**一整块**
-// （Transport 在顶、左乐器右卷帘，见 midi/Workspace），放进模式主窗的正文，不占 dock 窗。
+// （卷帘在上、Transport 贴底，见 midi/Workspace），放进模式主窗的正文，不占 dock 窗。
 import { useMidiHost } from '../midi/useMidiHost';
+import { clock } from '../midi/clock';
+import { flushEditorSaves } from '../midi/soundWindow';
 import { MidiWorkspace } from '../midi/Workspace';
-import { patchMidiSettings, useMidiSettings } from '../midi/settings';
+import { patchMidiSettings, useMidiSettings, type LibraryState } from '../midi/settings';
 import { reloadInstruments, useInstrumentLibrary } from '../midi/library';
 import { unitIcon } from '../workbench/icons';
 import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
@@ -47,6 +49,7 @@ import { VidInspector, type InspectSel } from '../workbench/video/Inspector';
 import { VidAudioMonitor } from '../workbench/video/AudioMonitor';
 import { VidKeyframes } from '../workbench/video/Keyframes';
 import { VidPlayer } from '../workbench/video/Player';
+import { useTimelineAudio } from '../workbench/video/timelineAudio';
 import { AgentPanel } from '../agent/AgentPanel';
 import type { AgentCtx } from '../agent/tools';
 
@@ -79,7 +82,8 @@ const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', '
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
 // 标题条上有一颗 Image/Video/Midi 切换（见 heads）。
 // MIDI 模式**不占任何 dock 窗**：它是模式主窗（文档窗）的正文，一整块铺在那里面
-// （Transport 横贯顶部、左 INSTRUMENTS 右 Piano Roll）。窗一多，编曲就变成窗口管理。
+// （卷帘在上、Transport 横贯底部）。乐器/轨道/片段都在 Tracks 窗里选 ——
+// 乐器挂在轨道头上，MIDI 段与音频段是同一条时间线上的兄弟。窗一多，编曲就变成窗口管理。
 const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'];
 // 工具窗的标识色:Log / Debug / Probe 三扇"看现场"的窗,图标与 tab 名同穿一件颜色的衣服,
 // 与内容窗(素色)一眼分开。icon 的着色与 titleColor 都从这里来 —— 一处定色,两处生效。
@@ -779,12 +783,28 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [vidTransport] = useState(createVidTransport);
   // seek 走合流器：标尺拖动每发指针事件都进这里，合到 rAF 一帧一落（见 createSeekCoalescer）。
   // interactive 也在这一并带上 —— 上一版在这里丢了标记，拖标尺完全不走缩略条路径。
-  const [vidSeek] = useState(() => createSeekCoalescer(vidTransport));
-  const [vidPlaying, setVidPlaying] = useState(false);
+  // **同一发也交给公共时钟**（midi/clock）：视频与 MIDI 的播放头从此是同一个数（时钟内部把
+  // 网络那一趟去抖，拖动不会打出几十个请求）。
+  const [vidSeek] = useState(() => {
+    const go = createSeekCoalescer(vidTransport);
+    return (t: number) => { go(t); void clock.seek(t); };
+  });
+  // 播放态跟公共时钟走：视频与 MIDI 是同一台传输，谁按的播放都算数。
+  const [vidPlaying, setVidPlayingState] = useState(clock.isPlaying());
   // 播放态的 ref:关键帧录制的触发回路(transport 订阅闭包)要在回调里读到"此刻在不在播",
   // 读 state 会拿 stale —— 走 ref。
   const vidPlayingRef = useRef(false);
   vidPlayingRef.current = vidPlaying;
+  // 播放头 = 时钟的投影：时钟每帧广播一次，就把位置抄进 transport（时间线 / 关键帧录制 / 播放器
+  // 的读数都读它）。暂停时广播降到 100ms 一次，位置没变时 set 直接早退 —— 不会盖掉用户刚拖到的
+  // 位置（拖动同时也把时钟 seek 到了同一处）。
+  useEffect(() => clock.subscribe(() => {
+    const now = clock.isPlaying();
+    setVidPlayingState(prev => (prev === now ? prev : now));
+    vidTransport.set(clock.seconds(), false);
+  }), [vidTransport]);
+  /** 播放/暂停 = 对公共时钟说的那一句；按钮上的状态由上面的订阅翻新，不在这里抢先改。 */
+  const setVidPlaying = useCallback((v: boolean) => { void (v ? clock.play() : clock.pause()); }, []);
   const [vidPps, setVidPps] = useState(60);
   // ── Inspector 的选中 ── Assets 窗点卡片产生,Inspector 窗照它放大看(图/音/视频都收,
   // 视频与音频用自己那条独立播放头,与主 transport 互不相识)。选中指向的是**那一份工程/那一次
@@ -841,7 +861,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, [markVidDirty, saveVidSoon]);
   const toggleSolo = useCallback((trackId: string, kind: VidTrackKind) => {
     if (kind === 'layer' || kind === 'process') return;   // Layer / process 轨不接 solo
-    const key = kind === 'audio' ? 'soloAudioIds' : 'soloVideoIds';
+    // MIDI 与音频同住声域：S 走 audio solo（8.a），不碰视频 solo。
+    const key = kind === 'audio' || kind === 'midi' ? 'soloAudioIds' : 'soloVideoIds';
     updateVidMeta(p => {
       const cur = p[key] ?? [];
       return { ...p, [key]: cur.includes(trackId) ? cur.filter(id => id !== trackId) : [...cur, trackId] };
@@ -854,15 +875,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     });
   }, [updateVidMeta]);
 
-  // ── MIDI 模式 ── 一份 .cud 里除了图层与视频，还装得下一套 MIDI。它跟视频工程走**同一套规矩**：
-  // 按文档分桶、脏了置脏、去抖落盘、随 header.video 一起进出文件（多一个 midi 键，iframe 那边
-  // 只当黑盒）。差别只在模型与撤销栈 —— 那些都在 midi/useMidiHost 里，这儿只装一次。
+  // ── MIDI 模式 ── 乐器轨、乐器段就是时间线上的轨与段（`VidTrack.kind === 'midi'` /
+  // `VidClip.notes`），所以这里没有第二份工程、也没有第二支撤销摞：midiHost 只做投影与
+  // "选中那一段"的编辑视图，写回全部走下面这两个视频工程的写口。
   // 时间这件事这里一个字都不存：位置归 clock，拍归工程。
-  const midiHost = useMidiHost({
-    activeUid: activeUid ?? null,
-    onDirty: markVidDirty,
-    saveSoon: saveVidSoon,
-  });
+  // （调用点挪到 vidUpdate 之后 —— hook 要拿它当唯一写口。）
 
   // ── Video 的撤销摞 ── 工程住在宿主，工作台那两支摞（undoStack/redoStack）只认识图层，
   //  所以视频这一半得宿主自己记：Ctrl+Z 才撤得动片段、轨道、范围。
@@ -979,6 +996,40 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       if (next.inPoint !== prev.inPoint || next.outPoint !== prev.outPoint) saveVidSoon(uid);
     }
   }, [pushVidHist, markVidDirty, saveVidSoon]);
+  // 写**某份**文档（不必是屏幕上这份）：音色窗关掉时要把挑好的预设写回它自己那一桶。
+  const vidUpdateIn = useCallback((uid: number, fn: (p: VidProject) => VidProject, label?: string) => {
+    const prev = vidByDoc.current.get(uid);
+    if (!prev) return;
+    const next = pruneVgenChains(fn(prev));
+    if (next === prev) return;
+    vidByDoc.current.set(uid, next);
+    if (uid === activeUidRef.current) {
+      vidProjectOwner.current = uid;
+      vidProjectRef.current = next;
+      setVidProject(next);
+    }
+    pushVidHist(uid, prev, label || 'Video edit');
+    markVidDirty(uid);
+  }, [pushVidHist, markVidDirty]);
+  // MIDI 的宿主：投影 + 选中段的编辑视图，写回全在 vidUpdate / vidUpdateIn 上。
+  // 撤销、脏标记、随 .cud 存盘都跟时间线共用一套 —— 一次音符编辑 = 时间线的一步。
+  const midiHost = useMidiHost({
+    activeUid: activeUid ?? null,
+    project: vidProject,
+    update: vidUpdate,
+    projectOf: uid => vidByDoc.current.get(uid) ?? null,
+    updateIn: vidUpdateIn,
+    undo: () => { vidUndo(); },
+    redo: () => { vidRedo(); },
+    canUndo: activeUid != null && (vidHist.current.get(activeUid)?.undo.length ?? 0) > 0,
+    canRedo: activeUid != null && (vidHist.current.get(activeUid)?.redo.length ?? 0) > 0,
+    docIds: () => [...vidByDoc.current.keys()],
+    onDirty: markVidDirty,
+  });
+  // ── 整页的时间线声音（常驻）── 音频段的 WebAudio 调度 + 走带范围 + 独占音频槽，都挂在
+  // 公共时钟上（见 timelineAudio.ts）。**不能挂在 Player 上**：Player 只在 Video 模式里存在，
+  // 切到 MIDI 模式音频轨就哑了 —— 而这三样是全模式共用的。
+  useTimelineAudio(vidProject, soloAudio, mute);
   // ── 换 .cud 的唯一入口 ────────────────────────────────────────────────────────────────
   // 从前每一扇窗各自 `useEffect(..., [activeUid])`：谁漏一手，谁就把上一份的读数带到下一份上
   // （时间线选中了不存在的段、Inspector 对着别人的资产说话、预览桶里还挂着上一份的图……）。
@@ -1054,7 +1105,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         vidByDoc.current.delete(uid);
         vidDirty.current.delete(uid);
         vidHist.current.delete(uid);       // uid 会被复用：旧步留着就会串到下一份文档上
-        midiHost.drop(uid);                // MIDI 那一桶同理（uid 从 1 重发，留着就串号）
       }
     }
     if (blendDocs.activeUid == null) {
@@ -1157,18 +1207,25 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         const own = vidByDoc.current.get(uid);
         const screen = vidProjectOwner.current === uid ? vidProjectRef.current : null;
         const proj = own ?? screen;
-        // MIDI 挂在同一个对象上一起走：iframe 只把 header.video 当黑盒存，多一个 key 不碍事，
-        // 于是"一份 .cud = 图层 + 视频 + MIDI"这件事不用动页面那边的存盘代码。
-        (e.source as Window | null)?.postMessage(
-          { type: 'blend-vid', uid, project: proj ? midiHost.withMidi(proj, uid) : proj }, '*');
+        // 乐器轨/段就住在 header.video 这份工程里，没有第二个键要拼：MIDI 跟着时间线
+        // 一起进出文件。
+        //
+        // 音色窗还开着就先收一次：关窗才是"另存音色"那个动作（见 soundWindow），
+        // 挑好却没关窗就保存的话，文件里留下的还是上一次的路径 —— 所以这一趟要等
+        // 存盘完成再回话（页面那头为此把等待放宽到 6s，见 blend_node 的 requestHostVid）。
+        const src = e.source as Window | null;
+        void (async () => {
+          try { await flushEditorSaves(uid); } catch { /* 收不下来不挡存盘 */ }
+          // flushEditorSaves 走 vidUpdateIn 改的是桶；这里重取一次，别送出收尾前那份。
+          const fresh = vidByDoc.current.get(uid) ?? proj;
+          src?.postMessage({ type: 'blend-vid', uid, project: fresh }, '*');
+        })();
       } else if (d.type === 'blend-vid-restore') {
         const uid = Math.round(Number(d.uid) || 0);
         const proj = normalizeVidProject(d.project);
         vidByDoc.current.set(uid, proj);
         vidDirty.current.delete(uid);      // 刚从文件里读出来的 = 与盘上一致
-        // MIDI 跟视频同一份文件：这里把它从同一个对象里摘出来，落进它自己的桶。
-        // 文件里没有 midi 键（老档 / 只做过图）→ 给它一份空的，别把上一份的轨带过来。
-        midiHost.restore(uid, (proj as { midi?: unknown }).midi);
+        // 老档的 `midi` 键由 normalizeVidProject 迁进 MIDI 轨与 MIDI 段，这里不用再摘。
         // 从文件里读出来的这份是**新基线**：之前那支撤销摞属于另一份内容，留着就能
         // "撤销到上一个工程"，那是没有人想要的结果。
         vidHist.current.delete(uid);
@@ -2580,10 +2637,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const t = setTimeout(() => saveVidProject(vidProject), 400);
     return () => clearTimeout(t);
   }, [vidProject, blendDocs.activeUid]);
-  // 切回 Image 模式就停播（Player 对 visible 也停了一遍，这里兜底 —— 两扇窗那时已不在树里）。
-  useEffect(() => {
-    if (vidMode !== 'video') setVidPlaying(false);
-  }, [vidMode]);
+  // 切模式**不停播**：传输是整页共用的（midi/clock）。Player 只活在 Video 模式里、被卸载时
+  // 自然收掉画面与解码器；声音与 MIDI 照旧按时钟走（见 useTimelineAudio）。
   // 模式切换的分段控件：**只钉在工程画布大窗（文档窗）标题条右上**、toolbar 化按钮的左边 ——
   // 那扇窗就是 Video 模式的播放器宿主。其它任何窗上都不出现。
   const vidModeSeg = (
@@ -2674,6 +2729,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     docCommand: onDocCommand,
     setFps: setVidFps,
     vgen: { list: videoGenList, add: addVideoGenSegment, cont: continueSel, addContinue: addContinueVgenSegment },
+    // MIDI 乐器工具（装/换/开窗/存音色/卸/试听）要的：当前文档那份工程 + 唯一写口。
+    midi: { project: midiHost.ctl.project, update: midiHost.ctl.update },
     promptBridge: (type: string, payload?: unknown) =>
       new Promise<{ ok: boolean; value?: unknown; error?: string }>((resolve) => {
         const win = promptIframeRef.current?.contentWindow;
@@ -2699,7 +2756,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         win.postMessage({ type: type + '-req', reqId, payload }, '*');
       }),
   }), [uiSend, vidCtl, blendDocs.activeUid, vidMode, agentCudDir, blockSets, activeBlockSetId, runPresetFromRow,
-    cancelActiveRun, onDocCommand, setVidFps, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment]);
+    cancelActiveRun, onDocCommand, setVidFps, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment,
+    midiHost.ctl.project, midiHost.ctl.update]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
   // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
   // 所以：**空列表在启动期是歧义的**，要等它至少说过一次"我有文档"，此后再说空才算关闭。
@@ -3684,7 +3742,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               // 一句空态，不能把刚关掉那份的轨道/资产继续摆着（它们属于文档，不属于页面）。
               vtracks: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — Tracks belong to a document.</div>
-                : <VidTimeline vid={vidCtl} onSettingsPlaceholders={setProcSettingsIds}
+                : <VidTimeline vid={vidCtl} midi={midiHost.ctl} onSettingsPlaceholders={setProcSettingsIds}
                     onRunVGen={id => { void runVideoGenSegment(id); }}
                     onPickVGenFrame={(id, which) => setVgenFramePick({ clipId: id, which })}
                     onVGenTrackSettings={setVgenTrackSettingsId}
@@ -4929,56 +4987,62 @@ const SettingsTab: React.FC<{
 }) => {
   const [ruleMenu, setRuleMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [ui, setUi] = useState<SettingsUI>(loadSettingsUI);
-  // ── MIDI 屏：乐器库那条路径（真源在后端 data/sampler/midi.json，见 midi/settings.ts）──
+  // ── MIDI 屏：两棵根（乐器库 + 预设库）。真源在后端 data/sampler/midi.json（见 midi/settings.ts）──
   const midi = useMidiSettings();
   const instr = useInstrumentLibrary();
   const [pathDraft, setPathDraft] = useState<string | null>(null);
-  const [picking, setPicking] = useState(false);
+  const [presetDraft, setPresetDraft] = useState<string | null>(null);
+  const [picking, setPicking] = useState<'' | 'instrumentsLibrary' | 'presetsLibrary'>('');
   const [pickErr, setPickErr] = useState('');
   // 进这一屏才去问一次"这底下有什么"（Assets 窗自己也会拉，两边共用同一份缓存）。
   useEffect(() => {
     if (ui.screen !== 'midi') return;
     void reloadInstruments();
-  }, [ui.screen, midi.instrumentsLibrary]);
+  }, [ui.screen, midi.instrumentsLibrary, midi.presetsLibrary]);
 
   // 目录只有原生对话框拿得到真实路径（浏览器给不了）。挑中即写 —— 没有"再按一次保存"。
-  const pickLibraryFolder = async () => {
-    setPicking(true); setPickErr('');
+  const pickFolder = async (which: 'instrumentsLibrary' | 'presetsLibrary') => {
+    setPicking(which); setPickErr('');
     try {
       const r = await fetch('/api/io_pick', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'open', kind: 'folder', suggested: midi.instrumentsLibrary }),
+        body: JSON.stringify({ mode: 'open', kind: 'folder', suggested: midi[which] }),
       }).then(r => r.json());
       if (r?.unavailable) { setPickErr('The native folder dialog needs tkinter in this Python build.'); return; }
       const picks = (r?.picks || []) as { path?: string }[];
       const path = picks[0]?.path;
       if (!path) return;                                  // 用户取消
-      setPathDraft(null);
-      await patchMidiSettings({ instrumentsLibrary: path });
+      if (which === 'instrumentsLibrary') setPathDraft(null); else setPresetDraft(null);
+      await patchMidiSettings(which === 'instrumentsLibrary'
+        ? { instrumentsLibrary: path } : { presetsLibrary: path });
       void reloadInstruments(true);
     } catch (e) {
       setPickErr(e instanceof Error ? e.message : String(e));
-    } finally { setPicking(false); }
+    } finally { setPicking(''); }
   };
 
   // 手填的那一行：落焦点/回车才提交（途中不打断 —— 用户可能正一个字一个字打一条长路径）。
-  const commitPath = () => {
-    const draft = pathDraft;
+  const commitPath = (which: 'instrumentsLibrary' | 'presetsLibrary') => {
+    const draft = which === 'instrumentsLibrary' ? pathDraft : presetDraft;
     if (draft === null) return;
-    setPathDraft(null);
+    if (which === 'instrumentsLibrary') setPathDraft(null); else setPresetDraft(null);
     const next = draft.trim();
-    if (next === midi.instrumentsLibrary) return;
-    void patchMidiSettings({ instrumentsLibrary: next }).then(() => reloadInstruments(true));
+    if (next === midi[which]) return;
+    void patchMidiSettings(which === 'instrumentsLibrary'
+      ? { instrumentsLibrary: next } : { presetsLibrary: next }).then(() => reloadInstruments(true));
   };
 
-  // "What it finds" 那两行：状态（读得到 / 读不到，为什么）与数量（能在这里出声的有几件）。
+  // "What it finds" 那几行：状态（读得到 / 读不到，为什么）与数量（能在这里出声的有几件）。
   const libState = instr.lib;
   const libBad = !!instr.error || (!!libState && !libState.ok);
+  /** 一条根的实话。两棵根可以只设一棵 —— 没设的那条说 'Not set'，不是 'No folder chosen'。 */
+  const stateLine = (st: LibraryState | undefined, otherSet: boolean): string =>
+    !st ? 'Not read yet'
+      : !st.set ? (otherSet ? 'Not set' : 'No folder chosen')
+        : st.ok ? 'Readable' : (st.reason || 'Unreadable');
   const statusText = instr.loading ? 'Scanning…'
     : instr.error ? instr.error
-      : !libState ? 'Not read yet'
-        : !libState.state.set ? 'No folder chosen'
-          : libState.ok ? 'Readable' : (libState.state.reason || 'Unreadable');
+      : stateLine(libState?.state, libState?.presetsState.set === true);
   const foundText = !libState || !libState.ok ? '—'
     : `${libState.total}${libState.truncated ? '+' : ''} · `
       + `${libState.items.filter(i => i.playable).length} playable here`;
@@ -5073,10 +5137,10 @@ const SettingsTab: React.FC<{
                 <span style={styles.iosLabel}>Library folder</span>
                 <button
                   data-midi-pick=""
-                  disabled={picking}
-                  onClick={() => void pickLibraryFolder()}
+                  disabled={!!picking}
+                  onClick={() => void pickFolder('instrumentsLibrary')}
                   style={{ ...iosBtn, opacity: picking ? 0.5 : 1 }}
-                >{picking ? 'Choosing…' : 'Choose…'}</button>
+                >{picking === 'instrumentsLibrary' ? 'Choosing…' : 'Choose…'}</button>
               </div>
               <div style={styles.iosSep} />
               <div style={{ padding: '6px 16px' }}>
@@ -5086,9 +5150,9 @@ const SettingsTab: React.FC<{
                   placeholder="e.g. H:\music\Sound Library"
                   spellCheck={false}
                   onChange={e => setPathDraft(e.target.value)}
-                  onBlur={commitPath}
+                  onBlur={() => commitPath('instrumentsLibrary')}
                   onKeyDown={e => {
-                    if (e.key === 'Enter') { e.preventDefault(); commitPath(); }
+                    if (e.key === 'Enter') { e.preventDefault(); commitPath('instrumentsLibrary'); }
                     else if (e.key === 'Escape') { setPathDraft(null); }
                   }}
                   style={iosPathInput}
@@ -5105,12 +5169,58 @@ const SettingsTab: React.FC<{
             <div style={{ ...styles.iosFooter, ...(pickErr ? { color: '#ff453a' } : null) }}>
               {pickErr || 'The folder is read in place — nothing is copied and nothing is indexed in the background.'}
             </div>
-            
+
+            {/* 预设根：Kontakt / HALion 那种封闭库本身解不了，出声靠宿主里导出的一份 .vstpreset。
+                同名的 .vstpreset 就躺在 .nki 旁边时不用设这一条也能认出来。 */}
+            <div style={styles.iosGroupTitle}>Plug-in Presets</div>
+            <div style={styles.iosCard}>
+              <div style={styles.iosRow}
+                title={'Where the .vstpreset files exported from Kontakt / HALion / Cubase live. '
+                  + 'Those instruments are loaded through the real plug-in with the exported state, so this is what makes them sound here.'}>
+                <span style={styles.iosLabel}>Presets folder</span>
+                <button
+                  data-midi-preset-pick=""
+                  disabled={!!picking}
+                  onClick={() => void pickFolder('presetsLibrary')}
+                  style={{ ...iosBtn, opacity: picking ? 0.5 : 1 }}
+                >{picking === 'presetsLibrary' ? 'Choosing…' : 'Choose…'}</button>
+              </div>
+              <div style={styles.iosSep} />
+              <div style={{ padding: '6px 16px' }}>
+                <input
+                  data-midi-preset-path=""
+                  value={presetDraft ?? midi.presetsLibrary}
+                  placeholder="e.g. C:\Users\me\Documents\VST3 Presets"
+                  spellCheck={false}
+                  onChange={e => setPresetDraft(e.target.value)}
+                  onBlur={() => commitPath('presetsLibrary')}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); commitPath('presetsLibrary'); }
+                    else if (e.key === 'Escape') { setPresetDraft(null); }
+                  }}
+                  style={iosPathInput}
+                />
+              </div>
+            </div>
+            <div style={styles.iosFooter}>
+              Kontakt (NKI) and HALion (vstsound) libraries cannot be read directly. Export one
+              .vstpreset per sound from the plug-in, and it is played here through the plug-in itself.
+              A same-name .vstpreset next to the .nki is picked up without this folder.
+            </div>
+
             <div style={styles.iosGroupTitle}>What It Finds</div>
             <div style={styles.iosCard}>
               <div style={styles.iosRow} title={libState?.root || undefined}>
                 <span style={styles.iosLabel}>Status</span>
                 <span style={{ fontSize: 12, color: libBad ? '#ff453a' : 'rgba(255,255,255,0.62)' }}>{statusText}</span>
+              </div>
+              <div style={styles.iosSep} />
+              <div style={styles.iosRow} title={libState?.presetsRoot || undefined}>
+                <span style={styles.iosLabel}>Presets</span>
+                <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.62)' }}>
+                  {instr.loading ? 'Scanning…'
+                    : stateLine(libState?.presetsState, libState?.state.set === true)}
+                </span>
               </div>
               <div style={styles.iosSep} />
               <div style={styles.iosRow}>
@@ -5124,7 +5234,7 @@ const SettingsTab: React.FC<{
             </div>
             <div style={styles.iosFooter}>
               A catalog.json at the root wins when present (it carries a per-preset verification record).
-              Without one, the folder is scanned for .sfz and .vst3.
+              Without one, the folders are scanned for .sfz, .nki, .vstsound and .vstpreset.
             </div>
           </>
         )}

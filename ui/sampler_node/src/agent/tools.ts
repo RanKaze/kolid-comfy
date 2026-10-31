@@ -8,6 +8,15 @@ import { getBlendUi } from '../workbench/store';
 import { pulseForTool } from '../workbench/surfaces';
 import { UI_ACTIONS, UI_ACTION_IDS } from './uiActions.generated';
 import { AGENT_TOOL_NAMES, type AgentToolName } from './toolSchemas';
+import { clock } from '../midi/clock';
+import { nativeEngine, type NativeInstrument } from '../midi/engine';
+import { midiOut } from '../midi/output';
+import { closeSoundWindow, editorState, openSoundWindow } from '../midi/soundWindow';
+import { getInstrumentLibrary, instrumentAbsPath, reloadInstruments } from '../midi/library';
+import { ensureMidiSettings, getMidiSettings } from '../midi/settings';
+import { loadInstrumentOnTrack } from '../midi/instrumentOps';
+import { updateTrack } from '../midi/model';
+import type { MidiCtl } from '../midi/types';
 
 // ── Agent 工具的执行体(全部住在浏览器)────────────────────────────────────────────────────────
 // 工具面的唯一真源是同目录的 `toolSchemas.ts`(名字/说明/参数表);这份文件按名字分发执行。
@@ -59,6 +68,9 @@ export type AgentCtx = {
   /** 把一次 Prompt tab 的读写请求转成跨源 postMessage 发给 prompt_node iframe,等它回
    *  `agent-prompt-result`。iframe 没挂载 / 没加载 → 返回 {ok:false,error}。 */
   promptBridge: (type: string, payload?: unknown) => Promise<{ ok: boolean; value?: unknown; error?: string }>;
+  /** MIDI 那一半：当前文档的工程（读）与唯一写口（改）。乐器工具全从这两样出发，
+   *  和面板里双击一行走的是同一条路（`midi/instrumentOps.ts`）。 */
+  midi: Pick<MidiCtl, 'project' | 'update'>;
 };
 
 const num = (v: unknown, d = 0): number => {
@@ -127,9 +139,48 @@ export const getAgentAppState = (ctx: AgentCtx): string => {
   return JSON.stringify(snap);
 };
 
+/** MIDI 那一半的快照。**只看**这个页面知道的事实：工程字段 + 引擎回报（装没装上、开着没有、
+ *  插件窗口）。不在这里开窗/装乐器 —— 那些是写动作，各自有工具。 */
+export const getMidiAppState = (ctx: AgentCtx): string => {
+  const p = ctx.midi.project;
+  const st = nativeEngine.getStatus();
+  const ed = editorState();
+  const byTrack = new Map((st.instruments || []).map(r => [String(r.track || ''), r]));
+  const row = (r: NativeInstrument | undefined) => r ? ({
+    open: r.open === true, kind: r.kind || '', zones: r.zones, kb: r.kb,
+    name: r.name || '', editor: r.editor === true, peak: r.peak || 0,
+    error: r.error || undefined,
+  }) : null;
+  const preview = st.plugin || st.instrument;
+  return JSON.stringify({
+    doc_open: ctx.docOpen,
+    tempo: p.tempo,
+    time_sig: p.timeSig,
+    transport: { seconds: r3(clock.seconds()), playing: clock.isPlaying() },
+    selection: { track: p.selTrack || null, note: p.selNote || null },
+    engine: { available: st.available, open: st.open, rate: st.rate, peak: st.peak || 0 },
+    preview_slot: preview && preview.path
+      ? { path: preview.path, kind: preview.kind || '', kb: preview.kb, error: preview.error || undefined }
+      : null,
+    tracks: p.tracks.map(t => ({
+      id: t.id, name: t.name, channel: t.channel,
+      instrument: t.instrument || null,
+      vel_scale: t.velScale, mute: t.mute, solo: t.solo, notes: t.notes.length,
+      engine: row(byTrack.get(t.id)),
+      editor_open: ed.open.includes(t.id) || byTrack.get(t.id)?.editor === true,
+    })),
+  });
+};
+
 type ToolResult = { ok: boolean; content: string };
 const sent = (what: string): ToolResult => ({ ok: true, content: `done: ${what}` });
 const fail = (content: string): ToolResult => ({ ok: false, content });
+const wait = (ms: number): Promise<void> => new Promise(resolve => { window.setTimeout(resolve, ms); });
+/** 默认轨名：文件名的最后一段去扩展名（`HALion 7.vst3` → `HALion 7`）。 */
+const pathStem = (p: string): string => {
+  const base = p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
+  return base.replace(/\.[^.]+$/, '') || base;
+};
 
 const TOOL_NAME_SET: ReadonlySet<string> = new Set(AGENT_TOOL_NAMES);
 
@@ -657,6 +708,139 @@ export const runAgentTool = async (name: string, rawArgs: unknown, ctx: AgentCtx
       }
       update(p => toggleVgenChain(p, prevId, nextId), 'Link generator segments (agent)');
       return sent(linked ? `unlinked ${nextId} from ${prevId}` : `linked ${nextId} ← ${prevId}`);
+    }
+
+    // ── MIDI 乐器：看 / 找 / 装换 / 开窗 / 关窗存音色 / 卸 / 试听 ──────────────────────
+    // 窗口是插件自己的真系统窗口（开在 worker 里）：这里只替用户按那几个键，声音本身在引擎那头。
+    case 'get_midi_state':
+      return { ok: true, content: getMidiAppState(ctx) };
+
+    case 'instrument_library': {
+      await ensureMidiSettings();
+      await reloadInstruments(a.force === true);
+      const s = getInstrumentLibrary();
+      if (s.error) return fail(s.error);
+      const lib = s.lib;
+      if (!lib) return fail('the instrument list has not been scanned yet — set the folder in Settings → MIDI first');
+      if (!lib.ok) return fail(`could not read the instrument library: ${lib.state.reason || lib.error || 'unknown error'}`);
+      const root = lib.root || getMidiSettings().instrumentsLibrary;
+      const needle = str(a.q).trim().toLowerCase();
+      const playableOnly = a.playable_only === true;
+      const limit = clampInt(a.limit, 1, 500, 80);
+      const all = lib.items
+        .filter(it => !playableOnly || it.playable)
+        .filter(it => !needle
+          || [it.name, it.model, it.source, it.where].join(' ').toLowerCase().includes(needle))
+        // 能出声的排前面 —— 这一档的用处就是"挑一件现在能用的"。
+        .sort((x, y) => (x.playable === y.playable ? x.name.localeCompare(y.name) : (x.playable ? -1 : 1)));
+      const rows = all.slice(0, limit);
+      const lines = rows.map(it => {
+        const meta = [it.model && it.model !== it.name ? it.model : '', it.source].filter(Boolean).join(' · ');
+        return `${instrumentAbsPath(it, root)} | ${it.name}${meta ? ' · ' + meta : ''} [${it.backend || '?'}]`
+          + (it.playable ? '' : ' (cannot play)');
+      });
+      const head = `${all.length}/${lib.items.length} instrument(s)`
+        + `, source ${lib.source}, root ${root || '(unset)'}`
+        + (all.length > rows.length ? `; showing the first ${rows.length}` : '')
+        + (lib.truncated ? '; the scan hit its 4000-row cap' : '');
+      return { ok: true, content: head + (lines.length ? '\n' + lines.join('\n') : '\n(none)') };
+    }
+
+    case 'set_track_instrument': {
+      const path = str(a.path).trim();
+      if (!path) return fail('path is required — an absolute .sfz / .vst3 / .vstpreset (call instrument_library for one)');
+      const tid = a.track_id ? str(a.track_id) : '';
+      if (tid && !ctx.midi.project.tracks.some(x => x.id === tid)) return fail(`no track ${tid}`);
+      // 换乐器前先把那扇窗关掉（**不存**旧的）：槽要重装，窗口跟着 worker 一起死，
+      // 会话还在轮询就会在底栏留下一句假错误。
+      if (tid) await closeSoundWindow(tid, { save: false });
+      const r = await loadInstrumentOnTrack(ctx.midi, {
+        path, trackId: tid || undefined, name: a.name ? str(a.name) : pathStem(path),
+      });
+      if (!r.ok) return fail(`${r.created ? `added track ${r.trackId} but` : 'could not load'} ${path}: ${r.error}`);
+      const size = r.kb >= 1024 ? (r.kb / 1024).toFixed(1) + ' MB' : r.kb + ' KB';
+      const what = r.kind === 'vst3'
+        ? (/\.vst3$/i.test(path)
+          ? 'plug-in loaded — its window is open so a sound can be picked'
+          : 'plug-in preset loaded')
+        : `sample instrument loaded (${r.zones} zone${r.zones === 1 ? '' : 's'})`;
+      return sent(`${r.created ? `new track ${r.trackId}` : `track ${r.trackId} now plays`} — ${what}`
+        + (r.kb ? `, ${size}` : '')
+        + (r.failed ? `, ${r.failed} sample${r.failed === 1 ? '' : 's'} skipped` : ''));
+    }
+
+    case 'unload_track_instrument': {
+      const tid = str(a.track_id);
+      const tr = ctx.midi.project.tracks.find(x => x.id === tid);
+      if (!tr) return fail(`no track ${tid}`);
+      if (!tr.instrument) return sent(`track ${tr.name || tid} has no instrument`);
+      await closeSoundWindow(tid, { save: false });
+      await nativeEngine.trackUnload(tid);
+      ctx.midi.update(p => updateTrack(p, tid, { instrument: '' }), 'Unload instrument');
+      return sent(`unloaded ${tr.name || tid} — the track stays and is silent now`);
+    }
+
+    case 'open_instrument_window': {
+      const tid = str(a.track_id);
+      const tr = ctx.midi.project.tracks.find(x => x.id === tid);
+      if (!tr) return fail(`no track ${tid}`);
+      if (!tr.instrument) return fail(`track ${tr.name || tid} has no instrument — call set_track_instrument first`);
+      const before = editorState().note;
+      await openSoundWindow(tid);
+      const ed = editorState();
+      if (ed.open.includes(tid)) {
+        return sent(`plug-in window open for "${tr.name || tid}" — the user picks a sound there; `
+          + `call close_instrument_window when done to save it`);
+      }
+      // 开不出来时 openSoundWindow 只把原因写进会话底栏（同一句也显示给用户）—— 这里把它交回模型。
+      return fail(ed.note && ed.note !== before ? ed.note.text : 'the plug-in window did not open');
+    }
+
+    case 'close_instrument_window': {
+      const tid = str(a.track_id);
+      const tr = ctx.midi.project.tracks.find(x => x.id === tid);
+      if (!tr) return fail(`no track ${tid}`);
+      const r = await closeSoundWindow(tid, { save: true });
+      if (!r.ok) return fail(r.error || 'could not close the plug-in window');
+      if (r.alreadyClosed) {
+        return sent(`the window for "${tr.name || tid}" is already closed — nothing to save`);
+      }
+      return sent(`saved "${r.name || 'sound'}" as ${r.path} (${r.kb} KB) — this track now uses that preset`);
+    }
+
+    case 'audition_note': {
+      const pitch = clampInt(a.pitch, 0, 127, 60);
+      const vel = clampInt(a.vel, 1, 127, 100);
+      const tid = a.track_id ? str(a.track_id) : '';
+      const path = a.path ? str(a.path).trim() : '';
+      if (!tid && !path) return fail('pass track_id (audition that track\'s instrument) or path (a library item in the preview slot)');
+      if (tid) {
+        const tr = ctx.midi.project.tracks.find(x => x.id === tid);
+        if (!tr) return fail(`no track ${tid}`);
+        if (!tr.instrument) return fail(`track ${tr.name || tid} has no instrument`);
+        if (!midiOut.canAudition())
+          return fail('nothing can play it — the native engine is not running and no MIDI out port is connected');
+        midiOut.audition(tr.channel, pitch, vel, tr.id);
+        // 选的是外部 MIDI 端口时声音出在这台机器之外 —— 引擎的峰值量不到它，别报成"没响"。
+        if (!midiOut.isNative() && midiOut.isOpen()) {
+          const port = midiOut.getPorts().find(p => p.id === midiOut.getSelected());
+          return sent(`sent pitch ${pitch} (vel ${vel}) to MIDI port "${port?.name || midiOut.getSelected()}"`
+            + ` for "${tr.name || tid}" — the engine peak does not measure external ports`);
+        }
+        await wait(300);                       // 试听长 0.7s，等它把声音渲染出来
+        await nativeEngine.probe();
+        const row = (nativeEngine.getStatus().instruments || []).find(x => x.track === tid);
+        const peak = row?.peak || 0;
+        return sent(`played pitch ${pitch} (vel ${vel}) on "${tr.name || tid}"; engine peak ${peak}/1000`
+          + (peak ? '' : ' — nothing came out: this sound may not map that key'));
+      }
+      const inst = await nativeEngine.preview(path, pitch, vel);
+      if (inst.error) return fail(`could not load ${path} — ${inst.error}`);
+      await wait(300);
+      await nativeEngine.probe();
+      const peak = nativeEngine.getStatus().plugin?.peak || 0;
+      return sent(`played pitch ${pitch} (vel ${vel}) on ${path} in the preview slot; engine peak ${peak}/1000`
+        + (peak ? '' : ' — nothing came out: this sound may not map that key'));
     }
 
     // ── 界面动作键：把"用户能按的"整张表交出去 ──────────────────────────────────────

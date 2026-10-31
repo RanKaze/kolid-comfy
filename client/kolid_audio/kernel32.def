@@ -10,6 +10,7 @@ FreeLibrary
 GetProcAddress
 CreateFileW
 ReadFile
+WriteFile
 GetFileSizeEx
 CloseHandle
 VirtualAlloc
@@ -24,6 +25,10 @@ SetEvent
 ResetEvent
 ExitProcess
 GetCommandLineW
+GetLastError
 AddVectoredExceptionHandler
 GetCurrentThreadId
+GetTickCount
 TlsGetValue
+GetModuleHandleW
+GetModuleFileNameW

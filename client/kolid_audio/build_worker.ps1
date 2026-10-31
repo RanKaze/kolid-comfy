@@ -35,8 +35,11 @@ try {
     & (Join-Path $binDir 'lib.exe') /nologo /def:kernel32.def /machine:x64 /out:"$build\kernel32.lib"
     if ($LASTEXITCODE -ne 0) { throw "lib kernel32 exited with $LASTEXITCODE" }
 
+    & (Join-Path $binDir 'lib.exe') /nologo /def:user32.def /machine:x64 /out:"$build\user32.lib"
+    if ($LASTEXITCODE -ne 0) { throw "lib user32 exited with $LASTEXITCODE" }
+
     & $cl.FullName /nologo /utf-8 /O2 /W3 /GS- /TC ka_worker.c /link `
-        /NODEFAULTLIB /ENTRY:kaMain /SUBSYSTEM:CONSOLE /LIBPATH:"$build" kernel32.lib /OUT:KaPluginWorker.exe
+        /NODEFAULTLIB /ENTRY:kaMain /SUBSYSTEM:CONSOLE /LIBPATH:"$build" kernel32.lib user32.lib /OUT:KaPluginWorker.exe
     if ($LASTEXITCODE -ne 0) { throw "cl exited with $LASTEXITCODE" }
 
     Write-Host ''

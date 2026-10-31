@@ -768,7 +768,7 @@ _INSTRUMENT_DEPTH_MAX = 6
 _INSTRUMENT_DEPTH_DEFAULT = 3
 # 只有**这个程序播得出来**的才算 playable。SFZ 是纯文本 + wav，引擎里读得动；VST3 与 .fxp 现在
 # 只知道它们在哪儿，播不动 —— 列出来但标暗，别让人以为点了会响。
-_INSTRUMENT_PLAYABLE = {'sfz': True, 'vst3-preset': False, 'surge-fxp': False,
+_INSTRUMENT_PLAYABLE = {'sfz': True, 'vst3-preset': True, 'surge-fxp': False,
                         'kontakt': False, 'vstsound': False}
 
 # ── 一颗库里"一件乐器"是哪种文件 ───────────────────────────────────────────────────────────────
@@ -780,6 +780,7 @@ _INSTRUMENT_PLAYABLE = {'sfz': True, 'vst3-preset': False, 'surge-fxp': False,
 # .nksn（Kontakt 快照 = 预设，不是独立乐器）、.nicnt（库许可证描述）。
 _INSTRUMENT_FILE_KINDS = {
     '.sfz': ('sfz', 'SFZ', True),
+    '.vstpreset': ('vst3-preset', 'VST3 Preset', True),
     '.nki': ('kontakt', 'Kontakt', False),
     '.vstsound': ('vstsound', 'HALion', False),
 }
@@ -787,7 +788,7 @@ _INSTRUMENT_FILE_KINDS = {
 
 def _midi_read():
     """读 MIDI 设置。形状不认识就退回默认 —— 一份坏设置不该让这一屏打不开。"""
-    out = {'instruments_library': '', 'scan_depth': _INSTRUMENT_DEPTH_DEFAULT}
+    out = {'instruments_library': '', 'presets_library': '', 'scan_depth': _INSTRUMENT_DEPTH_DEFAULT}
     try:
         with open(_workbench_file('midi.json'), 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -797,6 +798,9 @@ def _midi_read():
         lib = data.get('instruments_library')
         if isinstance(lib, str):
             out['instruments_library'] = lib[:1024]
+        pres = data.get('presets_library')
+        if isinstance(pres, str):
+            out['presets_library'] = pres[:1024]
         depth = data.get('scan_depth')
         if isinstance(depth, (int, float)) and not isinstance(depth, bool):
             out['scan_depth'] = max(0, min(_INSTRUMENT_DEPTH_MAX, int(depth)))
@@ -804,7 +808,7 @@ def _midi_read():
 
 
 def _midi_write(patch):
-    """合并写。**只认这两个键** —— 页面送来的别的一律不收（这不是一个通用设置抽屉）。"""
+    """合并写。**只认这三个键** —— 页面送来的别的一律不收（这不是一个通用设置抽屉）。"""
     if not isinstance(patch, dict):
         raise ValueError('settings must be an object')
     with _MIDI_LOCK:
@@ -814,6 +818,11 @@ def _midi_write(patch):
             if not isinstance(lib, str):
                 raise ValueError('instruments_library must be a string')
             cur['instruments_library'] = lib.strip()[:1024]
+        if 'presets_library' in patch:
+            pres = patch.get('presets_library')
+            if not isinstance(pres, str):
+                raise ValueError('presets_library must be a string')
+            cur['presets_library'] = pres.strip()[:1024]
         if 'scan_depth' in patch:
             depth = patch.get('scan_depth')
             if not isinstance(depth, (int, float)) or isinstance(depth, bool):
@@ -847,6 +856,7 @@ def _scan_instruments(root, depth):
         是**目录**）也是一件，bundle 里面不再往下走 —— 那里是二进制，不是音色。
     """
     catalog = os.path.join(root, 'catalog.json')
+    base = os.path.abspath(root)
     if os.path.isfile(catalog):
         try:
             if os.path.getsize(catalog) <= 64 * 1024 * 1024:
@@ -876,13 +886,13 @@ def _scan_instruments(root, depth):
                             'playable': bool(_INSTRUMENT_PLAYABLE.get(backend, False)),
                             'verified': bool(p.get('audio_verified')),
                             'where': where[:400],
+                            'root': base,
                         })
                     return 'catalog', items, len(presets) > len(items)
         except Exception:
             pass  # 读不动就当没有 catalog，退回扫目录（一颗坏清单不该让整档空着）
     items = []
     truncated = False
-    base = os.path.abspath(root)
     for dirpath, dirnames, filenames in os.walk(base):
         rel = os.path.relpath(dirpath, base)
         level = 0 if rel == '.' else rel.count(os.sep) + 1
@@ -896,9 +906,10 @@ def _scan_instruments(root, depth):
                     'id': os.path.relpath(full, base).replace(os.sep, '/'),
                     'name': d[:-5],
                     'model': '' if rel == '.' else rel.split(os.sep)[-1],
-                    'family': '', 'backend': 'vst3-preset', 'source': 'VST3',
-                    'playable': False, 'verified': False,
+                    'family': '', 'backend': 'vst3-plugin', 'source': 'VST3 Plug-in',
+                    'playable': True, 'verified': False,
                     'where': os.path.relpath(full, base).replace(os.sep, '/'),
+                    'root': base,
                 })
             else:
                 keep.append(d)
@@ -916,6 +927,7 @@ def _scan_instruments(root, depth):
                 'family': '', 'backend': backend, 'source': label,
                 'playable': playable, 'verified': playable,
                 'where': os.path.relpath(full, base).replace(os.sep, '/'),
+                'root': base,
             })
         if len(items) >= _INSTRUMENT_SCAN_LIMIT:
             truncated = True
@@ -925,26 +937,222 @@ def _scan_instruments(root, depth):
     return 'scan', items, truncated
 
 
+def _scan_presets(root, depth):
+    """预设根：`.vstpreset` → (by_stem, items, truncated)。
+
+    这里是**唯一**能让 Kontakt / HALion 那类库出声的东西：.nki/.vstsound 是封闭容器，
+    本引擎解不了；用户在宿主里把音色导成 `.vstpreset`，引擎就靠它把整份状态灌进真插件。
+    by_stem 只用来给同名的 .nki 找出声的钥匙（见 _pair_presets），不参与界面。
+    """
+    by_stem = {}
+    items = []
+    truncated = False
+    base = os.path.abspath(root)
+    for dirpath, dirnames, filenames in os.walk(base):
+        rel = os.path.relpath(dirpath, base)
+        level = 0 if rel == '.' else rel.count(os.sep) + 1
+        if level >= depth:
+            dirnames[:] = []
+        dirnames[:] = [d for d in sorted(dirnames) if not d.lower().endswith('.vst3')]
+        for fn in sorted(filenames):
+            if not fn.lower().endswith('.vstpreset'):
+                continue
+            where = os.path.relpath(os.path.join(dirpath, fn), base).replace(os.sep, '/')
+            by_stem.setdefault(os.path.splitext(fn)[0].casefold(), where)
+            items.append({
+                'id': 'preset:' + where,
+                'name': os.path.splitext(fn)[0],
+                'model': '' if rel == '.' else rel.split(os.sep)[-1],
+                'family': '', 'backend': 'vst3-preset', 'source': 'VST3 Preset',
+                'playable': True, 'verified': False,
+                'where': where, 'root': base,
+            })
+        if len(items) >= _INSTRUMENT_SCAN_LIMIT:
+            truncated = True
+            items = items[:_INSTRUMENT_SCAN_LIMIT]
+            break
+    return by_stem, items, truncated
+
+
+def _pair_presets(items, inst_root, presets_root, by_stem):
+    """给 .nki/.vstsound 找同一件乐器的 `.vstpreset`：先看同目录同 stem，再按名字在预设根里找。
+
+    找到就把 `where` 指到预设、`root` 指到它所在的那棵根 —— 界面拿 (root, where) 拼绝对路径，
+    双击/试听才会真的装上那件乐器，而不是对着一份 .nki 说"播不动"。
+    返回 (预设根里被用掉的相对路径, 同目录被用掉的绝对路径) —— 两条都别在界面上再列一遍。
+    """
+    used_rel = set()
+    used_abs = set()
+    for it in items:
+        if it.get('backend') not in ('kontakt', 'vstsound') or it.get('playable'):
+            continue
+        stem = os.path.splitext(it['name'])[0].casefold()
+        sibling = os.path.splitext(os.path.join(inst_root, it['where'].replace('/', os.sep)))[0] + '.vstpreset'
+        if os.path.isfile(sibling):
+            it.update(where=os.path.relpath(sibling, inst_root).replace(os.sep, '/'),
+                      root=inst_root, playable=True)
+            used_abs.add(os.path.normcase(sibling))
+            continue
+        rel = by_stem.get(stem)
+        if rel and presets_root:
+            it.update(where=rel, root=presets_root, playable=True)
+            used_rel.add(rel)
+    return used_rel, used_abs
+
+
+def _installed_plugin_items():
+    """本机装着的 VST3 插件（标准 VST3 目录）—— 一条轨可以**从插件开始**。
+
+    为什么要有这一档：HALion / Kontakt 的音色库是封闭容器，声音只能由插件自己挑；而"挑"的
+    前提是这一轨先有一支跑着的实例。装上插件 = 它的默认音色，之后用轨道行的音色窗开它的界面。
+    名字取 bundle 文件名；不为了列表去逐个实例化（一支要几百毫秒到几秒）。
+    """
+    try:
+        from . import vst3_registry
+        bundles = vst3_registry.list_bundles()
+    except Exception:
+        return []
+    out = []
+    for full in bundles:
+        name = os.path.basename(full.rstrip('\\/'))
+        if name.lower().endswith('.vst3'):
+            name = name[:-5]
+        out.append({
+            'id': 'plugin:' + full, 'name': name, 'model': 'Plug-in',
+            'family': '', 'backend': 'vst3-plugin', 'source': 'Installed plug-in',
+            'playable': True, 'verified': False, 'where': full, 'root': '',
+        })
+    return out
+
+
 def _instruments_payload():
-    """给 Assets 窗的 Instruments 档：路径 + 状态 + 清单，一次给全，页面不用再问第二遍。"""
+    """给 Assets 窗的 Instruments 档：路径 + 状态 + 清单，一次给全，页面不用再问第二遍。
+
+    两棵根：乐器库（.sfz/.nki/.vstsound/.vstpreset）与预设库（用户从宿主导出的 .vstpreset）。
+    两棵都能只设一棵 —— 只设预设库照样能挑能放（VST3 那类库的正确用法）。
+    另外本机装着的 VST3 插件总是列出来：它不是"某个文件夹里的东西"，是这台机器的事实。
+    """
     settings = _midi_read()
     path = settings['instruments_library']
+    presets_path = settings['presets_library']
     state = _library_state(path)
-    payload = {'ok': state['ok'], 'root': path, 'state': state, 'scan_depth': settings['scan_depth'],
+    presets_state = _library_state(presets_path)
+    plugin_items = _installed_plugin_items()
+    payload = {'ok': state['ok'], 'root': path, 'state': state,
+               'presets_root': presets_path, 'presets_state': presets_state,
+               'scan_depth': settings['scan_depth'],
                'source': 'none', 'items': [], 'total': 0, 'truncated': False, 'error': '',
                'elapsed_ms': 0}
-    if not state['ok']:
+    if not state['ok'] and not presets_state['ok'] and not plugin_items:
         return payload
     started = time.time()
     try:
-        source, items, truncated = _scan_instruments(path, settings['scan_depth'])
-        payload.update({'source': source, 'items': items, 'total': len(items), 'truncated': truncated})
+        source, items, truncated = 'none', [], False
+        by_stem, preset_items = {}, []
+        if state['ok']:
+            source, items, truncated = _scan_instruments(path, settings['scan_depth'])
+        if presets_state['ok']:
+            by_stem, preset_items, more = _scan_presets(presets_path, settings['scan_depth'])
+            truncated = truncated or more
+            if source == 'none':
+                source = 'scan'
+        used_rel, used_abs = _pair_presets(items, path, presets_path, by_stem)
+        items = [it for it in items
+                 if it.get('backend') != 'vst3-preset'
+                 or os.path.normcase(os.path.join(it.get('root') or '',
+                                                  it['where'].replace('/', os.sep))) not in used_abs]
+        items.extend(p for p in preset_items if p['where'] not in used_rel)
+        items.extend(plugin_items)
+        items.sort(key=lambda it: (it['model'].casefold(), it['name'].casefold()))
+        payload.update({'ok': True, 'source': source, 'items': items,
+                        'total': len(items), 'truncated': truncated})
     except Exception as e:
         # 盘被拔了、没有权限 —— 如实报，别把整档画成"空库"（空库和读不到是两件事）。
         payload.update({'ok': False, 'error': str(e)[:300],
                         'state': {'set': True, 'ok': False, 'reason': str(e)[:200]}})
     payload['elapsed_ms'] = int((time.time() - started) * 1000)
     return payload
+
+
+def _editor_preset_folder():
+    """自动存的 `.vstpreset` 落到哪：预设库；没设就落 data/sampler/presets 并把它设成预设库。
+
+    为什么不设就悄悄写进 data/：存了而列表里看不见 = 用户以为存丢了。顺手把设置写上，
+    下一趟扫库就能看见这一份（`auto_set` 让界面知道这条设置是这次替它补的）。
+    返回 (目录, 是否刚补的设置, 提示)。设了却用不了（盘没挂/没权限）时退到本地，
+    提示里说明 —— 这份音色是用户刚挑的，不能因为设置指错地方就丢掉。
+    """
+    settings = _midi_read()
+    wanted = (settings.get('presets_library') or '').strip()
+    if wanted:
+        folder = os.path.abspath(wanted)
+        try:
+            os.makedirs(folder, exist_ok=True)
+            return folder, False, ''
+        except OSError:
+            note = 'the presets folder "%s" is not usable; saved next to the app instead' % wanted
+    else:
+        note = ''
+    folder = os.path.join(data_dir('sampler'), 'presets')
+    os.makedirs(folder, exist_ok=True)
+    if not wanted:
+        _midi_write({'presets_library': folder})
+        return folder, True, ''
+    return folder, False, note
+
+
+def _editor_preset_target(folder, stem, current=''):
+    """这一份写哪个文件名：同名已在、且**就是这一轨现在挂的那份** → 覆盖（调音色不该多一份）；
+    否则加序号。返回 (路径, 名字)。"""
+    cur = os.path.normcase(os.path.abspath(current)) if current else ''
+    name, n = stem, 2
+    while True:
+        path = os.path.join(folder, name + '.vstpreset')
+        if not os.path.exists(path):
+            return path, name
+        if cur and os.path.normcase(os.path.abspath(path)) == cur:
+            return path, name
+        if n > 200:
+            return path, name            # 极端重名：覆盖最后这一份，别把存盘卡死
+        name = '%s %d' % (stem, n)
+        n += 1
+
+
+def _audio_editor_save(data):
+    """编辑器关窗 → 把这一槽**现在**的状态存成 .vstpreset 并入乐器库。
+
+    用户不导出任何东西：窗口里挑完、关掉，这一下就是"另存音色"。名字默认取轨名，
+    所以同一条轨反复调就是同一份文件在更新，不会一次一份堆满预设库。
+    """
+    if audio_bridge is None:
+        return {'ok': False, 'error': 'audio bridge unavailable'}
+    engine = audio_bridge.get_engine()
+    track = data.get('track')
+    rows = engine.track_instrument_state()
+    row = next((r for r in rows if str(r.get('track')) == str(track)), None)
+    name = str(data.get('name') or '').strip()
+    if not name and row:
+        name = str(row.get('name') or '') or os.path.splitext(
+            os.path.basename(str(row.get('path') or '')))[0]
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', ' ', name)
+    stem = re.sub(r'\s+', ' ', stem).strip()[:64].strip().strip('.') or 'Instrument'
+    try:
+        folder, auto_set, note = _editor_preset_folder()
+    except OSError as e:
+        return {'ok': False, 'error': 'the presets folder is not usable: %s' % e}
+    current = str((row or {}).get('preset') or '')
+    if not current and (row or {}).get('path', '').lower().endswith('.vstpreset'):
+        current = str(row.get('path'))
+    target, saved_name = _editor_preset_target(folder, stem, current)
+    res = engine.editor_save(track, target)
+    if not res.get('ok'):
+        return res
+    res.update({'folder': folder, 'name': saved_name,
+                'presets_root': _midi_read().get('presets_library') or folder,
+                'autoPresetsFolder': auto_set})
+    if note:
+        res['warning'] = note
+    return res
 
 
 def _layouts_boot_payload():
@@ -4164,6 +4372,11 @@ class SnapshotDetailerSamplerServer:
                 if audio_bridge is None:
                     self._send_json({'available': False, 'error': 'audio bridge unavailable'})
                     return
+                # 电平表的快读口：Monitor 持槽期间 33ms 问一次，只回一个峰值（千分比）。
+                # status() 那一大坨（每槽 worker 状态、乐器清单、debug 计数）不该跟着这么问。
+                if (parse_qs(urlparse(self.path).query).get('levels') or [''])[0] == '1':
+                    self._send_json(audio_bridge.get_engine().levels())
+                    return
                 self._send_json(audio_bridge.get_engine().status())
                 return
 
@@ -4185,7 +4398,8 @@ class SnapshotDetailerSamplerServer:
             if self.path == '/api/midi_settings':
                 settings = _midi_read()
                 self._send_json({'ok': True, **settings,
-                                 'state': _library_state(settings['instruments_library'])})
+                                 'state': _library_state(settings['instruments_library']),
+                                 'presets_state': _library_state(settings['presets_library'])})
                 return
 
             if self.path == '/api/instruments':
@@ -4445,6 +4659,10 @@ class SnapshotDetailerSamplerServer:
                 _len = int(self.headers.get('Content-Length', 0))
                 _data = json.loads(self.rfile.read(_len)) if _len else {}
                 try:
+                    # 存音色要落盘到乐器库：文件名/预设根由这边定（见 _audio_editor_save）
+                    if str(_data.get('op') or '') == 'editor_save':
+                        self._send_json(_audio_editor_save(_data))
+                        return
                     self._send_json(audio_bridge.get_engine().apply(
                         str(_data.get('op') or ''), _data))
                 except ValueError as _exc:
@@ -5291,14 +5509,15 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'ok': False, 'error': str(e)}, 500)
                 return
 
-            # MIDI 设置：只认 instruments_library / scan_depth 两个键（见 _midi_write）。
+            # MIDI 设置：只认 instruments_library / presets_library / scan_depth 三个键（见 _midi_write）。
             if self.path == '/api/midi_settings':
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
                     settings = _midi_write(body)
                     self._send_json({'ok': True, **settings,
-                                     'state': _library_state(settings['instruments_library'])})
+                                     'state': _library_state(settings['instruments_library']),
+                                     'presets_state': _library_state(settings['presets_library'])})
                 except Exception as e:
                     self._send_json({'ok': False, 'error': str(e)}, 400)
                 return

@@ -1,17 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  type VidController, type VidClip, audioAudible, clipAt, clipAtSolo, fmtTime, kfSample, kfU, vidDuration,
+  type VidController, type VidClip, clipAt, clipAtSolo, fmtTime, kfSample, kfU, vidDuration,
 } from './model';
 import { compositePlanAt, sourceTime, warmSweepAt, type VidCompositePlan } from './composite';
-import { decodeAudio, vidAudio } from './audio';
 import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame } from './previews';
-import { acquireAudioSlot, buildStereoProbe, releaseAudioSlot, type AudioProbe } from './audioFocus';
 import { markRender } from './perf';
 import { useCudScope } from '../cudScope';
-
-// 播放器的电平探头:全部声源在 vidAudio.master 汇流,一只探头管整条时间线,缓存会话级一份。
-let playerProbe: AudioProbe | null = null;
-const probeOfPlayer = (): AudioProbe => (playerProbe ??= buildStereoProbe(vidAudio.node()));
+import { clock } from '../../midi/clock';
 
 // ── Player 窗（监视器）───────────────────────────────────────────────────────────────────────
 // 播放头落在哪，画面就是最上层视频轨命中的那一段（合成口径"最上层优先"）。声音不走 <video>：
@@ -19,10 +14,10 @@ const probeOfPlayer = (): AudioProbe => (playerProbe ??= buildStereoProbe(vidAud
 // 这样画面与声音各走各的、互不抢设备。
 //
 // 播放头走外置 transport（vid.transport）：读数/scrub 条每帧直改 DOM，活片段只在**换段**那一刻
-// 走 React（换 src）。播放循环是这里的一支 rAF：播放头按墙上时钟前进，出界（入/出点圈了范围
-// 就在出点绕回入点，没圈就在片尾停）→ 每帧顺手对一遍音频（扫进来的片段起播、扫出去的停）与
-// 画面漂移（>0.25s 才纠，<video> 自己的时钟在短片段上会抖）。scrub / 换段都把 <video> 拉回
-// 正确的源内时刻。
+// 走 React（换 src）。**走带归公共时钟**（midi/clock，见 EditPhase 的投影与 timelineAudio.ts）：
+// 这扇窗自己不再推进时间，只订阅时钟做画面纠偏 —— 播放中 <video> 用自己的时钟出帧，
+// 漂移超 0.25s 才拉回去（<video> 自己在短片段上会抖）。scrub / 换段都把 <video> 拉回正确的
+// 源内时刻。
 
 export const VidPlayer: React.FC<{
   vid: VidController;
@@ -35,7 +30,6 @@ export const VidPlayer: React.FC<{
 }> = ({ vid, visible, onCompLayer, stageCovers }) => {
   markRender('VidPlayer');
   const { project: p, transport, playing } = vid;
-  const setPlaying = vid.setPlaying;      // useState setter,引用恒稳 —— 放进 effect 依赖不会抖
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const readRef = useRef<HTMLSpanElement | null>(null);
   const projectRef = useRef(p);
@@ -130,24 +124,10 @@ export const VidPlayer: React.FC<{
     if (v) v.style.opacity = '1';
   }, []);
   const seek = useCallback((t: number) => {
-    // 播放中不去动声源：播放循环每帧都会按游标校正（跳跃 = 大偏差 = 自动重起），
-    // 让它自己接手，比这儿每帧 stop 再 start 顺得多。暂停态才立刻消声。
-    if (!playingRef.current) vidAudio.stopAll();
-    // vid.seek 是合流版（rAF 一帧一落 + interactive 标记），scrub 条与按钮都从这走。
+    // 声源不在这里管：暂停/播放对公共时钟说一句，整条时间线的音频由 timelineAudio 收摊
+    // （一处调度，切模式也不会漏停）。这里只把播放头落过去。
     vid.seek(Math.max(0, t));
   }, [vid]);
-
-  // 起播一段音频：buffer 解码是异步的，等它回来游标早走了 —— 用**回来那一刻**的游标算源内
-  // 位置；那一段要是不再覆盖游标就作罢（下一帧自会接手）。
-  const startVoice = useCallback(async (id: string, src: string) => {
-    const buf = await decodeAudio(src);
-    if (!buf || !playingRef.current) return;
-    const c = projectRef.current.clips.find(x => x.id === id);
-    if (!c) return;
-    const cur = transport.get();
-    if (!(cur >= c.start && cur < c.start + c.duration)) return;
-    vidAudio.start(id, buf, c.offset + (cur - c.start));
-  }, [transport]);
 
   // 一包「这一帧该看什么」：同一个 reqId 绑一次回图。发包是**同步**的（帧从这里过不了界了）。
   // 发得比页面画得快不要紧 —— 页面把合成与回图都并到同一口 rAF，一帧最多画一次、只认最新的
@@ -782,18 +762,12 @@ export const VidPlayer: React.FC<{
       hideStrip();
       graceRef.current = performance.now() + 900;   // 起跑宽限：解码器热身期不纠偏
       holdDecoder();                                 // 播放期间后台抽条全程挂起 —— 解码器是正播的
-      // ── 独占音频槽 ── 时间线在放,槽就得在手;被抢占(Inspector 抢走)时 onRevoked 把
-      // playing 拨回 false —— 下面的 else 分支照常收摊(暂停/stopAll/还解码器)。
-      acquireAudioSlot(
-        { id: 'player', label: 'Player — timeline', probe: probeOfPlayer() },
-        () => setPlaying(false),
-      );
       void v.play().catch(() => { /* autoplay guards */ });
     } else {
-      v.pause(); vidAudio.stopAll(); releaseDecoder();
-      releaseAudioSlot('player');
+      v.pause();
+      releaseDecoder();
     }
-  }, [playing, activeId, hideStrip, setPlaying]);
+  }, [playing, activeId, hideStrip]);
 
   // ── 播放态变化要**立刻**报到工作台页 ──
   // 画布上的画面现在是页面自己播的镜像视频（底片一只、源帧若干只）。播放头一停就不会再有
@@ -822,50 +796,25 @@ export const VidPlayer: React.FC<{
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p]);
   // 卸载(Image 模式换走正文)时槽不该悬着。
-  useEffect(() => () => releaseAudioSlot('player'), []);
+  // 卸载（切模式换走正文）时把解码器与 <video> 收干净。**不动时钟、不停声音**：传输是
+  // 整页共用的，音频/视频的调度住在 timelineAudio.ts —— 切到 MIDI 模式，音频轨照样响。
+  useEffect(() => () => {
+    videoRef.current?.pause();
+    releaseDecoder();
+  }, []);
 
-  // ── 播放循环 ── 墙上时钟推进播放头（transport.set，不碰 React）；每帧对音频与画面。
+  // ── 画面跟时钟 ── 走带归公共时钟（位置由 EditPhase 抄进 transport）；这里只订阅，做画面纠偏。
+  // 音频不在这儿调度（timelineAudio 一处管全部）。
   useEffect(() => {
     if (!playing) return;
-    let raf = 0;
-    let last = performance.now();
-    const step = (now: number) => {
-      const dt = (now - last) / 1000;
-      last = now;
+    let prevT = transport.get();
+    const step = () => {
+      const np = transport.get();
+      // 回绕 / 用户 seek：不跟漂移容差，立刻拉过去（否则要等宽限期过完才纠）。
+      const jumped = np < prevT - 0.05 || np > prevT + 0.5;
+      prevT = np;
       const proj = projectRef.current;
-      const total = vidDuration(proj);
-      const inP = proj.inPoint;
-      const outP = proj.outPoint > proj.inPoint ? proj.outPoint : total;
-      let np = transport.get() + dt;
-      let jumped = false;
-      if (outP > inP && np >= outP) { np = inP; jumped = true; }   // 范围内回绕
-      else if (np >= total) {                                     // 片尾停
-        vidAudio.stopAll();
-        transport.set(total);
-        vid.setPlaying(false);
-        return;
-      }
-      transport.set(np);
-      // 音频：覆盖游标的段要播在**游标对应的源内位置**上。已经在播的也要每帧对表 ——
-      // 回绕、拖动、片段被搬动/裁剪，全都是"该听的位置变了"，偏差超 80ms 就重新起播。
-      // **mute / 音频 solo**：静音的轨一律不响（mute 优先）；有 solo 时非 solo 轨也不响
-      // （与视频 solo 无关，两边分开）。
-      const soloA = soloRef.current.audio;
       const muted = muteRef.current;
-      for (const c of proj.clips) {
-        if (c.kind !== 'audio') continue;
-        if (!audioAudible(c.trackId, soloA, muted)) {
-          if (vidAudio.has(c.id)) vidAudio.stop(c.id);
-          continue;
-        }
-        const covers = np >= c.start && np < c.start + c.duration;
-        if (!covers) { if (vidAudio.has(c.id)) vidAudio.stop(c.id); continue; }
-        if (!vidAudio.has(c.id)) { void startVoice(c.id, c.src); continue; }
-        const got = vidAudio.pos(c.id);
-        if (jumped || got == null || Math.abs(got - (c.offset + (np - c.start))) > 0.08) {
-          void startVoice(c.id, c.src);
-        }
-      }
       // 画面：只在片段自己的范围内跟。越过片段尾就停在末帧 —— 否则 <video> 会顺着源继续往下
       // 放，画面播的是这段之外的内容，声音却按片段停了，看着就是"声画对不上"。
       // 纠偏只认**精确 currentTime**（fastSeek 在播放中会拽回一个 GOP，越拽越落后），
@@ -885,19 +834,18 @@ export const VidPlayer: React.FC<{
           try { v.currentTime = expected; } catch { /* not seekable */ }
         }
       }
-      raf = requestAnimationFrame(step);
     };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
+    const off = clock.subscribe(step);
+    step();
+    return off;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, startVoice]);
+  }, [playing]);
 
-  // ── 收摊：这扇窗被藏起来（切模式 / 切 tab）就停干净。 ──
+  // ── 这扇窗被藏起来（切 tab）就停画面；**时钟与声音继续走**（切模式不算停止播放）。 ──
   useEffect(() => {
     if (visible) return;
-    vid.setPlaying(false);
-    vidAudio.stopAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    videoRef.current?.pause();
+    releaseDecoder();
   }, [visible]);
 
   const inSet = p.outPoint > p.inPoint;

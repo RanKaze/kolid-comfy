@@ -238,6 +238,13 @@ static volatile int64_t g_sched_end = 0; /* 调度已经处理到的时间线位
 static int64_t g_pos = 0;         /* 下一个要渲染的帧（音频自己的推进位置） */
 static int64_t g_free_pos = 0;    /* 没绑时钟时的自由计数 */
 
+/* 装了 VST3 乐器就让内置合成器闭嘴：两边吃的是同一张音符表，开着就是两层声音叠在一起。 */
+static volatile int32_t g_synth_off = 0;
+
+/* SFZ 引擎在整个进程里只有一套采样内存（见 ka_sfz.h 的 AB 双槽），所以它一次只能属于
+ * 一条轨（2b）。-1 = 还没绑（按老语义谁都能用）；>=0 = 只有这条轨采样，别的轨走合成器。 */
+static volatile int32_t g_sfz_track = -1;
+
 /* 试听：界面点 ♪ 时塞一枚音符进来，由音频线程在下一块开头接手。
  * 不在调用方直接改声部 —— 那是跨线程写渲染状态，会抢锁或撕裂。 */
 static volatile int32_t g_pend_note = -1;
@@ -629,8 +636,12 @@ static void ka_trigger(const ka_note* n, int delay, int aud) {
     v->amp = amp;
 
     /* 采样优先：装了 SFZ 就先问它。鼓也一样 —— 一套鼓的 sfz 本来就是按音符分 zone 的，
-     * 这时候再叠一层"GM 鼓合成"只会把采样盖掉。 */
-    {
+     * 这时候再叠一层"GM 鼓合成"只会把采样盖掉。
+     * 2b 之后采样内存只能属于一个主人（g_sfz_track）：
+     *   >=0 = 那条轨的时间轴音符与试听都这里出声；
+     *   -2  = 只给试听槽用（工程里的音符不许拿到这套采样）；
+     *   -1  = 没绑（谁都不采样）。 */
+    if (aud ? (g_sfz_track == -2 || g_sfz_track == track) : (g_sfz_track == track)) {
         ka_zone* z = sfz_pick(n->note, n->vel);
         if (z) {
             float cents = (float)(n->note - z->keycenter) * 100.0f + z->tune;
@@ -668,6 +679,10 @@ static void ka_trigger(const ka_note* n, int delay, int aud) {
     }
 
     v->zone = 0;
+
+    /* 到这儿还走合成器的，就是"这条轨没装乐器"。合成器关着时这里不再出声 ——
+     * 声音只来自乐器，没装就安静（采样分支在上面已经返回，这根闸不挡 SFZ 与试听槽）。 */
+    if (g_synth_off) { v->active = 0; return; }
 
     if (g_tn[g_tlive] > trackN && g_tracks[g_tlive][trackN].channel == 9) {
         /* 鼓：按音高分四族，全是噪声或扫频正弦，不吃 program。 */
@@ -737,19 +752,52 @@ static void ka_trigger(const ka_note* n, int delay, int aud) {
  * 音频反方向不进这条通道：worker 有空就把块推进 ring，宿主按自己的节奏取。
  * 音频路径上谁等谁，谁就是下一处爆音。
  * ──────────────────────────────────────────────────────────────────────────────────────────── */
-static ka_shm* g_plug = 0;
-static void*   g_plug_map = 0;
-static void*   g_plug_evc = 0;
-static void*   g_plug_evd = 0;
+/* ── 实例槽（2b：一条轨 = 一支插件实例）──────────────────────────────────────────────────────
+ *
+ * 一个槽 = 一个 KaPluginWorker.exe + 一块共享内存 + 一条命令通道。**worker 本身没改**：
+ * 它一直就是"一个进程一支插件"，多实例就是把它的那套再起一份，名字靠 tag 分开。
+ *
+ * 两条路分开走，别混：
+ *   · **命令路**（scan / open / setState / 参数 / 试听…）走"选中槽"。Python 桥是唯一调用者，
+ *     而且每一条插件命令都在 `Engine._lock` 里，所以 `ka_plug_select(slot)` 之后再调老函数
+ *     就够了 —— 导出名一个没变，老脚本照跑。
+ *   · **音频路**（每块混音、按轨裁音符表）走 g_plugs[] 全表，音频线程**从不**读选中槽。
+ *     它只看 g_plug_on / g_plug_track_of 两个纯整数快照：attach/close 时整型写，
+ *     所以就算主线程正在开关插件，音频线程也不会摸到一个半建的指针。 */
+#define KA_MAX_PLUG 16
+typedef struct {
+    ka_shm* shm;
+    void*   map;
+    void*   evc;
+    void*   evd;
+} ka_plug_slot;
+static ka_plug_slot g_plugs[KA_MAX_PLUG];
+static int32_t g_plug_cur = 0;
+#define g_plug (g_plugs[g_plug_cur].shm)
+
+/* 音频线程只读这两个。g_plug_on = 这支实例开着（open 成功过、还没 close）；
+ * g_plug_track_of = 它吃哪条轨（-1 = 不喂任何轨）。 */
+static volatile int32_t g_plug_on[KA_MAX_PLUG];
+static volatile int32_t g_plug_track_of[KA_MAX_PLUG];
 static float   g_plug_gain = 1.0f;
+
+/** 这条轨是不是由插件发声（内置合成器要闭嘴的那几轨）。音频线程调，只读整数快照。 */
+static int ka_track_has_plugin(int track) {
+    int i;
+    for (i = 0; i < KA_MAX_PLUG; ++i) {
+        if (g_plug_on[i] && g_plug_track_of[i] == track) return 1;
+    }
+    return 0;
+}
 
 static void ka_plug_beat(void) { if (g_plug) g_plug->host_beat = g_plug->host_beat + 1; }
 
 static int32_t ka_plug_call(int32_t cmd, int32_t a0, int32_t a1, int32_t a2, int32_t a3,
                             const uint16_t* path, uint32_t ms) {
     ka_shm* s = g_plug;
+    ka_plug_slot* p = &g_plugs[g_plug_cur];
     int32_t beat0, i;
-    if (!s) return KA_SHM_ERR_NO_WORKER;
+    if (!s || !p->evc || !p->evd) return KA_SHM_ERR_NO_WORKER;
     if (s->cmd != KA_CMD_NONE) return -95;                 /* 上一次还没做完 */
     if (path) {
         for (i = 0; i < KA_SHM_PATH - 1 && path[i]; ++i) s->path[i] = path[i];
@@ -759,12 +807,12 @@ static int32_t ka_plug_call(int32_t cmd, int32_t a0, int32_t a1, int32_t a2, int
     s->a0 = a0; s->a1 = a1; s->a2 = a2; s->a3 = a3;
     s->ret = 0;
     s->text[0] = 0;
-    ResetEvent(g_plug_evd);
+    ResetEvent(p->evd);
     s->cmd = cmd;
     beat0 = s->beat;
     ka_plug_beat();
-    SetEvent(g_plug_evc);
-    if (WaitForSingleObject(g_plug_evd, ms) != KA_WAIT_OBJECT_0) {
+    SetEvent(p->evc);
+    if (WaitForSingleObject(p->evd, ms) != KA_WAIT_OBJECT_0) {
         if (s->beat == beat0) { s->cmd = KA_CMD_NONE; return KA_SHM_ERR_DEAD; }
         return KA_SHM_ERR_TIMEOUT;
     }
@@ -780,30 +828,57 @@ static int ka_plug_text(char* buf, int cap) {
     return i;
 }
 
-/** 插件总线混进设备输出。取不到就当这一块没插件 —— 宁可静音，也不能等（等 = 爆音）。 */
-static void ka_plug_mix(int16_t* out, int frames, int playing) {
-    ka_shm* s = g_plug;
-    const float* blk;
+/** 走带锚点：ring 里第 r 块 = 时钟第 pos 帧。worker 拿它算出"我正在渲的这一块落在哪"，
+ *  音符才能落在块内的正确帧上（不然整块都挤在块首，听感一抖一抖）。 */
+static void ka_plug_anchor(ka_shm* s, int64_t pos, int playing) {
+    s->tr_pos_lo = (int32_t)(pos & 0x7FFFFFFF);
+    s->tr_pos_hi = (int32_t)(pos >> 32);
+    s->tr_read = s->r;
+    s->tr_playing = playing ? 1 : 0;
+}
+
+/** 硬对表：开播 / 拖播放头。所有实例的游标一起重排 —— 它们跟的是同一只钟。 */
+static void ka_plug_epoch(void) {
     int i;
-    if (!s || !s->live || !s->opened) return;
-    if (!playing) {
-        /* 停了就把 ring 抽干：不然恢复播放时先甩出一段几秒前的旧块。 */
-        while (ka_shm_ready(s) > 0) s->r = s->r + 1;
-        ka_plug_beat();
-        return;
+    for (i = 0; i < KA_MAX_PLUG; ++i) {
+        ka_shm* s = g_plugs[i].shm;
+        if (s) s->tr_epoch = s->tr_epoch + 1;
     }
-    if (ka_shm_ready(s) <= 0) { s->underrun = s->underrun + 1; return; }
-    blk = ka_shm_block_at(s, s->r);
-    for (i = 0; i < frames && i < s->block; ++i) {
-        int32_t vl = (int32_t)out[i * 2]     + (int32_t)(blk[i * 2]     * 30000.0f * g_plug_gain);
-        int32_t vr = (int32_t)out[i * 2 + 1] + (int32_t)(blk[i * 2 + 1] * 30000.0f * g_plug_gain);
-        if (vl > 32767) vl = 32767; if (vl < -32768) vl = -32768;
-        if (vr > 32767) vr = 32767; if (vr < -32768) vr = -32768;
-        out[i * 2]     = (int16_t)vl;
-        out[i * 2 + 1] = (int16_t)vr;
+}
+
+/** 所有实例混进设备输出。一个取不到块不影响别的 —— 宁可这一件静音，也不能等（等 = 爆音）。
+ *
+ *  每块都要给每个**连着**的槽敲一次心跳，不只是出声的那些：worker 靠心跳认出"宿主还在"，
+ *  一个暂时没音符的实例若被漏掉，它会以为宿主没了，自己退出。 */
+static void ka_plug_mix(int16_t* out, int frames, int playing, int64_t pos) {
+    int si;
+    for (si = 0; si < KA_MAX_PLUG; ++si) {
+        ka_shm* s = g_plugs[si].shm;
+        const float* blk;
+        int i;
+        if (!s) continue;
+        s->host_beat = s->host_beat + 1;
+        if (!s->live || !s->opened) continue;
+        ka_plug_anchor(s, pos, playing);
+        if (!playing && s->aud_blocks <= 0 && !s->ed_mon) {
+            /* 停了就把 ring 抽干：不然恢复播放时先甩出一段几秒前的旧块。
+             * 但这儿要放试听音过去 —— 暂停时点 ♪ 也要出声；插件窗口开着时同理，
+             * 用户是在里面试音（ed_mon），抽干就等于静音。 */
+            while (ka_shm_ready(s) > 0) s->r = s->r + 1;
+            continue;
+        }
+        if (ka_shm_ready(s) <= 0) { s->underrun = s->underrun + 1; continue; }
+        blk = ka_shm_block_at(s, s->r);
+        for (i = 0; i < frames && i < s->block; ++i) {
+            int32_t vl = (int32_t)out[i * 2]     + (int32_t)(blk[i * 2]     * 30000.0f * g_plug_gain);
+            int32_t vr = (int32_t)out[i * 2 + 1] + (int32_t)(blk[i * 2 + 1] * 30000.0f * g_plug_gain);
+            if (vl > 32767) vl = 32767; if (vl < -32768) vl = -32768;
+            if (vr > 32767) vr = 32767; if (vr < -32768) vr = -32768;
+            out[i * 2]     = (int16_t)vl;
+            out[i * 2 + 1] = (int16_t)vr;
+        }
+        s->r = s->r + 1;                 /* 最后一步才公布，worker 才知道这块空出来了 */
     }
-    s->r = s->r + 1;                 /* 最后一步才公布，worker 才知道这块空出来了 */
-    ka_plug_beat();
 }
 
 /** 从 ring 里取一块（测试/离线用）。这边不是音频线程，等得起 —— 但也不能无限等，
@@ -830,9 +905,54 @@ static int ka_plug_pull(float* dst, int frames) {
     return 0;
 }
 
+/** 把音符表按**槽的绑定**裁好，一槽一份交下去（2b：一条轨 = 一支实例）。
+ *
+ *  每个槽只收到"自己那条轨"的音符：别的轨在别的实例里，混进来就是两件乐器叠在一起。
+ *  通道统一写 0（MIDI 第 1 通道）—— 一支实例只持一件乐器，它默认就听第 1 通道
+ *  （Kontakt 是 omni、HALion Sonic 的槽默认 ch1）；轨自己的通道号留给外部 MIDI 与内置合成器。
+ *
+ *  静音/独奏在这里落地：被掐掉的轨干脆不给插件 —— 插件那边就少一个同时发声的声部，
+ *  CPU 也省。力度缩放同理（在宿主里就算好，插件只认 1..127）。
+ *  notes_gen 当 seqlock：奇数 = 正在写，worker 看到奇数就不读。 */
+static void ka_plug_push_notes(void) {
+    int nl, tn, si, i, any_solo = 0;
+    nl = g_nlive;
+    tn = g_tn[g_tlive];
+    if (tn > KA_MAX_TRACKS) tn = KA_MAX_TRACKS;
+    for (i = 0; i < tn; ++i) if (g_tracks[g_tlive][i].solo) { any_solo = 1; break; }
+
+    for (si = 0; si < KA_MAX_PLUG; ++si) {
+        ka_shm* s = g_plugs[si].shm;
+        int n = g_nn[nl], out = 0, want = g_plug_track_of[si];
+        if (!s) continue;
+        if (n > KA_SHM_NOTES) n = KA_SHM_NOTES;
+        s->notes_gen = s->notes_gen + 1;
+        for (i = 0; i < n && want >= 0; ++i) {
+            const ka_note* nt = &g_notes[nl][i];
+            const ka_track* tr;
+            int t = nt->track, vel;
+            if (t != want) continue;
+            if (t >= tn) continue;              /* 绑到了一条已经不存在的轨 */
+            tr = &g_tracks[g_tlive][t];
+            if (tr->mute || (any_solo && !tr->solo)) continue;
+            vel = (int)((float)nt->vel * (tr->vel_scale > 0.0f ? tr->vel_scale : 1.0f) + 0.5f);
+            if (vel > 127) vel = 127;
+            if (vel < 1) vel = 1;
+            s->notes[out].track = t;
+            s->notes[out].note = nt->note;
+            s->notes[out].vel = vel;
+            s->notes[out].ch = 0;
+            s->notes[out].start = nt->start;
+            s->notes[out].len = nt->len;
+            ++out;
+        }
+        s->note_count = out;
+        s->notes_gen = s->notes_gen + 1;
+    }
+}
+
 /* 二分到第一个 start >= pos 的音符（表按 start 升序）。换表 / seek 后恢复调度用它。 */
-static int32_t ka_note_index_at(const ka_note* notes, int count, int64_t pos) {
-    int lo = 0, hi = count, mid;
+static int32_t ka_note_index_at(const ka_note* notes, int count, int64_t pos) {    int lo = 0, hi = count, mid;
     if (count <= 0) return 0;
     while (lo < hi) {
         mid = (lo + hi) / 2;
@@ -883,6 +1003,9 @@ static void ka_render_block(int16_t* out, int frames, int64_t pos, int playing) 
      * 于是暂停时点 ♪ 一声不出。试听不该看传输的脸色：它是"我想听一下这个音色"，
      * 跟播不播放头没关系。 */
     if (!playing) {
+        /* 待触发的试听音一律算"在工作"，**不看合成器开关**：ka_trigger 里采样分支
+         * 排在合成器那道闸之前（见 SFZ 那一段），关了合成器正是 SFZ 试听的常态。
+         * 老写法带着 !g_synth_off，于是暂停时点 ♪ 会被下面整块短路吞掉。 */
         int k, live = (g_pend_note >= 0);
         if (g_was_playing) {
             /* 播放 → 暂停：收声，但**不是**把波形一步砍到 0 —— 那一下就是一个宽带咔哒。
@@ -904,9 +1027,21 @@ static void ka_render_block(int16_t* out, int frames, int64_t pos, int playing) 
             for (k = 0; k < frames; ++k) { out[k * 2] = 0; out[k * 2 + 1] = 0; }
             /* 停了也要把包络走完，否则恢复时一片残响突然冒出。 */
             for (k = 0; k < KA_VOICES; ++k) if (g_voice[k].active) { g_voice[k].env *= 0.9f; if (g_voice[k].env < 0.001f) g_voice[k].active = 0; }
-            ka_lock();
-            g_peak = 0;          /* 峰值要跟着停 —— 否则界面上的电平会停在最后一帧不动 */
-            ka_unlock();
+            ka_plug_mix(out, frames, playing, pos);   /* 暂停时的试听音从这里出去 */
+            /* 混完再量：插件试听、以及插件窗口开着时界面里试的音，都只从这条小路出声。
+             * 以前这里硬写 0（"峰值要跟着停"），于是明明有声音，电平表却是死的。 */
+            {
+                int32_t pk = 0;
+                for (k = 0; k < frames; ++k) {
+                    int32_t a = out[k * 2] < 0 ? -(int32_t)out[k * 2] : out[k * 2];
+                    int32_t b = out[k * 2 + 1] < 0 ? -(int32_t)out[k * 2 + 1] : out[k * 2 + 1];
+                    if (a > pk) pk = a;
+                    if (b > pk) pk = b;
+                }
+                ka_lock();
+                g_peak = (pk * 1000) / 32768;
+                ka_unlock();
+            }
             return;
         }
     } else {
@@ -927,7 +1062,10 @@ static void ka_render_block(int16_t* out, int frames, int64_t pos, int playing) 
             delay = (int)(n->start - pos);
             if (delay < 0) { delay = 0; g_late = g_late + 1; }
             if (delay >= frames) delay = frames - 1;
-            ka_trigger(n, delay, 0);
+            /* 这条轨装着插件 → 声音在 worker 那边，合成器别跟着响（2b：每轨一个实例）。
+             * 合成器整体关着的时候（现在就是：声音只来自乐器）这里照样进 ka_trigger ——
+             * 采样分支还要走，只把合成器那半截挡在里面。 */
+            if (!ka_track_has_plugin(n->track)) ka_trigger(n, delay, 0);
             g_fired = g_fired + 1;
             sched = sched + 1;
         }
@@ -1086,7 +1224,7 @@ static void ka_render_block(int16_t* out, int frames, int64_t pos, int playing) 
         ka_unlock();
 
         /* 插件那一层在另一个进程里，它的声音从 ring 回来 —— 混在这儿，而不是让它自己出声。 */
-        ka_plug_mix(out, frames, playing);
+        ka_plug_mix(out, frames, playing, pos);
     }
 }
 
@@ -1111,7 +1249,7 @@ static uint32_t __stdcall ka_audio_thread(void* arg) {
             playing = g_kc_playing();
             /* 注意别用 g_was_playing —— 那是渲染块里判"播放→暂停"边沿的，语义不同。
              * 这里是音频线程自己的上一圈状态。 */
-            if (playing && !g_thr_playing_prev) g_need_sync = 1;   /* 0→1：重新对表 */
+            if (playing && !g_thr_playing_prev) { g_need_sync = 1; ka_plug_epoch(); }   /* 0→1：重新对表 */
             g_thr_playing_prev = playing;
         } else {
             want = g_free_pos;
@@ -1179,6 +1317,7 @@ static uint32_t __stdcall ka_audio_thread(void* arg) {
                 g_win_played = -1;
                 g_win_n = 0;
                 g_drift_max = 0;
+                ka_plug_epoch();                 /* 位置跳过了：插件的游标也要跟着跳 */
             }
             /* ── 真速率测量（每约 1 秒结算一次） ──────────────────────────────────
              * 拿"设备实际播了多少输入帧"比"权威时钟走了多少时间线帧"，两者之比就是要的
@@ -1239,6 +1378,17 @@ static uint32_t __stdcall ka_audio_thread(void* arg) {
                 g_win_n = 0;
                 ka_voice_off_all();
                 g_seeks = g_seeks + 1;
+                ka_plug_epoch();
+                /* ring 里压着的是**旧位置**的块（最多 8 块 ≈ 85ms）。不清掉的话，新位置
+                 * 的头几十毫秒会和旧位置的尾巴叠在一起 —— 循环回卷时听感就是"重复音"。
+                 * 游标一并丢掉，worker 才有空位按新锚点重新渲。 */
+                {
+                    int pi;
+                    for (pi = 0; pi < KA_MAX_PLUG; ++pi) {
+                        ka_shm* ps = g_plugs[pi].shm;
+                        if (ps) ps->r = ps->w;
+                    }
+                }
                 g_drift_max = 0;
                 /* 音符指针重新二分到 pos（表按 start 升序）。 */
                 {
@@ -1533,11 +1683,37 @@ __declspec(dllexport) int ka_render_offline(int16_t* out, int frames, int64_t po
     return frames;
 }
 
-/** 整张音符表推过来（必须按 start 升序，前端那边排好）。 */
+/* 两张表是不是一模一样。重推同一份工程是常态（拖界面、切选择、开音色窗），
+ * 表没变就不该叫醒 worker —— 每一次 notes_gen 变号都等于让它重排一次调度。 */
+static int ka_notes_same(const ka_note* a, int an, const ka_note* b, int bn) {
+    int i;
+    if (an != bn) return 0;
+    for (i = 0; i < an; ++i) {
+        if (a[i].track != b[i].track || a[i].note != b[i].note || a[i].vel != b[i].vel
+            || a[i].pad != b[i].pad || a[i].start != b[i].start || a[i].len != b[i].len) return 0;
+    }
+    return 1;
+}
+
+static int ka_tracks_same(const ka_track* a, int an, const ka_track* b, int bn) {
+    int i;
+    if (an != bn) return 0;
+    for (i = 0; i < an; ++i) {
+        if (a[i].program != b[i].program || a[i].channel != b[i].channel
+            || a[i].vel_scale != b[i].vel_scale || a[i].gain != b[i].gain
+            || a[i].pan != b[i].pan || a[i].mute != b[i].mute || a[i].solo != b[i].solo) return 0;
+    }
+    return 1;
+}
+
+/** 整张音符表推过来（必须按 start 升序，前端那边排好）。
+ *  `notes == NULL && count == 0` 是**清空**（工程里的音全删了）—— 早先这里把 NULL 一律
+ *  当坏参数挡掉，于是清空的表从来没落到引擎里，旧音符会一直在后台响。 */
 __declspec(dllexport) int ka_set_notes(const ka_note* notes, int count) {
     int nl, i;
     int64_t prev = -1;
-    if (!notes || count < 0) return -1;
+    if (count < 0) return -1;
+    if (!notes && count > 0) return -1;
     if (count > KA_MAX_NOTES) count = KA_MAX_NOTES;
     nl = g_nlive ? 0 : 1;
     for (i = 0; i < count; ++i) {
@@ -1548,6 +1724,7 @@ __declspec(dllexport) int ka_set_notes(const ka_note* notes, int count) {
         if (g_notes[nl][i].start < prev) g_notes[nl][i].start = prev;
         prev = g_notes[nl][i].start;
     }
+    if (ka_notes_same(g_notes[nl], count, g_notes[g_nlive], g_nn[g_nlive])) return count;
     g_nn[nl] = count;
     /* 调度指针落在**新表**的"当前位置"上，不能归零：
      * 播放途中改工程 / 换选择会把整张谱重新推一遍，归零 = 从第 0 帧开始把
@@ -1559,6 +1736,7 @@ __declspec(dllexport) int ka_set_notes(const ka_note* notes, int count) {
      * 音频线程要么看到「旧表 + 旧下标」，要么看到「新表 + 新下标」。 */
     g_sched[nl] = ka_note_index_at(g_notes[nl], count, g_sched_end);
     g_nlive = nl;
+    ka_plug_push_notes();
     return count;
 }
 
@@ -1572,8 +1750,12 @@ __declspec(dllexport) int ka_set_tracks(const ka_track* tracks, int count) {
         if (g_tracks[tl][i].gain <= 0.0f) g_tracks[tl][i].gain = 1.0f;
         if (g_tracks[tl][i].vel_scale <= 0.0f) g_tracks[tl][i].vel_scale = 1.0f;
     }
+    /* 一字不差就别换表：下面那次 ka_plug_push_notes 会让每个槽的音符表 generation 变号，
+     * worker 于是把调度重排一遍 —— 表没变的时候这纯属白叫醒。 */
+    if (ka_tracks_same(g_tracks[tl], count, g_tracks[g_tlive], g_tn[g_tlive])) return count;
     g_tn[tl] = count;
     g_tlive = tl;
+    ka_plug_push_notes();          /* 通道/静音/独奏/力度都在这张表里 */
     return count;
 }
 
@@ -1586,9 +1768,28 @@ __declspec(dllexport) void ka_all_notes_off(void) {
 /** 试听一个音（界面点 ♪ 用的）。下一块开头由音频线程接手，0.7 秒后自然结束。 */
 __declspec(dllexport) void ka_audition(int note, int vel, int track) {
     if (note < 0 || note > 127 || vel <= 0) return;
+    /* 这条轨的乐器在插件里 —— 合成器这条路上没有它的音色，敲下去只会是假的 GM 钢琴。
+     * track < 0 = 试听槽（采样乐器专用），不对应工程里的任何一条轨，别拿第 0 条去挡它。 */
+    if (track >= 0 && ka_track_has_plugin(track)) return;
     g_pend_track = (track < 0) ? 0 : track;
     g_pend_vel = (vel > 127) ? 127 : vel;
     g_pend_note = note;
+}
+
+/** 内置合成器闭嘴/开嘴。**界面侧常闭**（audio_bridge 开设备时调 ka_synth_off(1)）：
+ *  声音只来自乐器，没装乐器的轨就该安静，不再拿 GM 合成音顶替。
+ *  这根闸只挡合成器那半截（ka_trigger 里采样分支已经在它上面返回），
+ *  SFZ、VST3 槽、试听槽都不受影响。
+ *  打开开关时把还在响的合成器声部当场收掉。 */
+__declspec(dllexport) int ka_synth_off(int off) {
+    int prev = g_synth_off;
+    g_synth_off = off ? 1 : 0;
+    if (!prev && g_synth_off) {
+        ka_lock();
+        ka_voice_off_all();
+        ka_unlock();
+    }
+    return g_synth_off;
 }
 
 /* ── SFZ 乐器 ─────────────────────────────────────────────────────────────────────────────── */
@@ -1645,6 +1846,15 @@ __declspec(dllexport) void ka_unload_sfz(void) {
     ka_voice_fade_out_and_wait();
     ka_wait_blocks(1);
     sfz_unload();
+    g_sfz_track = -1;
+}
+
+/** 把这套采样绑给一条轨（2b）。track >= 0 = 那条轨；-1 = 解绑；-2 = 只给试听。
+ *  只决定"谁问 sfz_pick"，不动已装载的采样内存。 */
+__declspec(dllexport) int ka_sfz_bind(int track) {
+    if (track < -2 || track >= KA_MAX_TRACKS) return -1;
+    g_sfz_track = track;
+    return track;
 }
 
 /** 当前乐器：zone 数 / 解码失败的采样数 / 驻留 KB。没装乐器时三个都是 0。
@@ -1724,55 +1934,115 @@ __declspec(dllexport) void ka_test_tone(int hz, int amp) {
 #define KA_PLUG_MS_FAST  5000
 #define KA_PLUG_MS_SLOW  60000      /* 开插件/扫清单：大插件一秒很正常，给足 */
 
-/** 连上 worker。tag 是共享内存名的后半段。返回 0 / 1=已经连着 / 负数=连不上。 */
-__declspec(dllexport) int ka_plug_attach(const uint16_t* tag) {
+/** 命令路选一个槽。之后的 ka_vst3_* / ka_plug_* 都打在这个槽上。
+ *  越界就返回 -1 且**不改**选中槽 —— 打错槽比报错可怕得多。 */
+__declspec(dllexport) int ka_plug_select(int slot) {
+    if (slot < 0 || slot >= KA_MAX_PLUG) return -1;
+    g_plug_cur = slot;
+    return slot;
+}
+
+static int ka_plug_attach_one(int slot, const uint16_t* tag) {
     uint16_t nm[160], evc[176], evd[176];
+    ka_plug_slot* p = &g_plugs[slot];
     if (!tag) return -1;
-    if (g_plug) return 1;
+    if (p->shm) return 1;
     ka_shm_names(tag, nm, evc, evd);
-    g_plug_map = OpenFileMappingW(KA_FILE_MAP_ALL_ACCESS, 0, nm);
-    if (!g_plug_map) return -2;                       /* worker 还没建好 / 名字不对 */
-    g_plug = (ka_shm*)MapViewOfFile(g_plug_map, KA_FILE_MAP_ALL_ACCESS, 0, 0, 0);
-    if (!g_plug) { CloseHandle(g_plug_map); g_plug_map = 0; return -3; }
-    if (g_plug->magic != KA_SHM_MAGIC || g_plug->abi != KA_SHM_ABI) {
-        UnmapViewOfFile(g_plug); g_plug = 0;
-        CloseHandle(g_plug_map); g_plug_map = 0;
+    p->map = OpenFileMappingW(KA_FILE_MAP_ALL_ACCESS, 0, nm);
+    if (!p->map) return -2;                           /* worker 还没建好 / 名字不对 */
+    p->shm = (ka_shm*)MapViewOfFile(p->map, KA_FILE_MAP_ALL_ACCESS, 0, 0, 0);
+    if (!p->shm) { CloseHandle(p->map); p->map = 0; return -3; }
+    if (p->shm->magic != KA_SHM_MAGIC || p->shm->abi != KA_SHM_ABI) {
+        UnmapViewOfFile(p->shm); p->shm = 0;
+        CloseHandle(p->map); p->map = 0;
         return KA_SHM_ERR_SHAPE;
     }
-    g_plug_evc = OpenEventW(KA_EVENT_ALL_ACCESS, 0, evc);
-    g_plug_evd = OpenEventW(KA_EVENT_ALL_ACCESS, 0, evd);
-    if (!g_plug_evc || !g_plug_evd) {
-        if (g_plug_evc) CloseHandle(g_plug_evc);
-        if (g_plug_evd) CloseHandle(g_plug_evd);
-        g_plug_evc = 0; g_plug_evd = 0;
-        UnmapViewOfFile(g_plug); g_plug = 0;
-        CloseHandle(g_plug_map); g_plug_map = 0;
+    p->evc = OpenEventW(KA_EVENT_ALL_ACCESS, 0, evc);
+    p->evd = OpenEventW(KA_EVENT_ALL_ACCESS, 0, evd);
+    if (!p->evc || !p->evd) {
+        if (p->evc) CloseHandle(p->evc);
+        if (p->evd) CloseHandle(p->evd);
+        p->evc = 0; p->evd = 0;
+        UnmapViewOfFile(p->shm); p->shm = 0;
+        CloseHandle(p->map); p->map = 0;
         return -4;
     }
-    g_plug->rate = g_rate;
-    ka_plug_beat();
+    p->shm->rate = g_rate;
+    p->shm->host_beat = p->shm->host_beat + 1;
+    /* 新连上的槽默认不喂任何轨。静态数组初值是 0，不写这一句的话它就会去认第 0 条轨 ——
+     * 试听槽（15）没人绑它，一装上就会把第 0 轨的音弹两遍。 */
+    g_plug_track_of[slot] = -1;
+    g_plug_on[slot] = 0;
     return 0;
 }
 
-/** 断开。worker 自己会因为"宿主心跳停了"而退出，这里只是把这一侧的映射放掉。 */
-__declspec(dllexport) int ka_plug_detach(void) {
-    if (!g_plug) return 0;
-    if (g_plug_evc) CloseHandle(g_plug_evc);
-    if (g_plug_evd) CloseHandle(g_plug_evd);
-    UnmapViewOfFile(g_plug);
-    CloseHandle(g_plug_map);
-    g_plug = 0; g_plug_map = 0; g_plug_evc = 0; g_plug_evd = 0;
+/** 连上第 slot 个 worker。tag 是共享内存名的后半段（每个 worker 一个，互不打架）。
+ *  返回 0 / 1=已经连着 / 负数=连不上。 */
+__declspec(dllexport) int ka_plug_attach_s(int slot, const uint16_t* tag) {
+    if (slot < 0 || slot >= KA_MAX_PLUG) return -1;
+    return ka_plug_attach_one(slot, tag);
+}
+
+/** 老签名 = 槽 0。 */
+__declspec(dllexport) int ka_plug_attach(const uint16_t* tag) {
+    return ka_plug_attach_one(0, tag);
+}
+
+/** 断开一个槽。worker 自己会因为"宿主心跳停了"而退出，这里只是把这一侧的映射放掉。 */
+__declspec(dllexport) int ka_plug_detach_s(int slot) {
+    ka_plug_slot* p;
+    if (slot < 0 || slot >= KA_MAX_PLUG) return -1;
+    p = &g_plugs[slot];
+    g_plug_on[slot] = 0;
+    g_plug_track_of[slot] = -1;
+    if (!p->shm) return 0;
+    p->shm->ed_mon = 0;                      /* worker 要退出了，界面监视没有意义 */
+    if (p->evc) CloseHandle(p->evc);
+    if (p->evd) CloseHandle(p->evd);
+    UnmapViewOfFile(p->shm);
+    CloseHandle(p->map);
+    p->shm = 0; p->map = 0; p->evc = 0; p->evd = 0;
     return 0;
 }
 
-/** 已连上？ */
-__declspec(dllexport) int ka_plug_ready(void) { return g_plug ? 1 : 0; }
+__declspec(dllexport) int ka_plug_detach(void) { return ka_plug_detach_s(0); }
+
+/** 已连上？（按槽 / 选中槽） */
+__declspec(dllexport) int ka_plug_ready_s(int slot) {
+    if (slot < 0 || slot >= KA_MAX_PLUG) return 0;
+    return g_plugs[slot].shm ? 1 : 0;
+}
+__declspec(dllexport) int ka_plug_ready(void) { return ka_plug_ready_s(0); }
 
 /** worker 心跳值。连着两次取到同一个值 = 它死了（崩在插件里的典型下场）。未连上返回 -1。 */
-__declspec(dllexport) int ka_plug_heartbeat(void) { return g_plug ? (int)g_plug->beat : -1; }
+__declspec(dllexport) int ka_plug_heartbeat_s(int slot) {
+    if (slot < 0 || slot >= KA_MAX_PLUG || !g_plugs[slot].shm) return -1;
+    return (int)g_plugs[slot].shm->beat;
+}
+__declspec(dllexport) int ka_plug_heartbeat(void) { return ka_plug_heartbeat_s(0); }
 
 /** ring 取空了几块。一直在涨 = worker 供不上，或者宿主压根没在取。 */
-__declspec(dllexport) int ka_plug_underruns(void) { return g_plug ? (int)g_plug->underrun : -1; }
+__declspec(dllexport) int ka_plug_underruns_s(int slot) {
+    if (slot < 0 || slot >= KA_MAX_PLUG || !g_plugs[slot].shm) return -1;
+    return (int)g_plugs[slot].shm->underrun;
+}
+__declspec(dllexport) int ka_plug_underruns(void) { return ka_plug_underruns_s(0); }
+
+/** 把一条轨绑到某个槽：那个 worker 从此只收这条轨的音符。
+ *  track < 0 = 解绑（槽还留着，只是不喂东西）。改完立刻重推一遍音符表。 */
+__declspec(dllexport) int ka_vst3_bind(int slot, int track) {
+    if (slot < 0 || slot >= KA_MAX_PLUG) return -1;
+    if (track < -1 || track >= KA_MAX_TRACKS) return -1;
+    g_plug_track_of[slot] = track;
+    ka_plug_push_notes();
+    return track;
+}
+
+/** 一个槽上开着的那件插件的峰值（千分比）。没开 = 0。 */
+__declspec(dllexport) int ka_vst3_peak_s(int slot) {
+    if (slot < 0 || slot >= KA_MAX_PLUG || !g_plugs[slot].shm) return 0;
+    return (int)g_plugs[slot].shm->peak;
+}
 
 /** 插件总线的音量（混进设备输出时用）。 */
 __declspec(dllexport) void ka_plug_gain(float g) {
@@ -1828,20 +2098,29 @@ __declspec(dllexport) int ka_vst3_class_cid(int idx, char* out) {
     return 16;
 }
 
-/** 打开一个插件（UTF-16 路径 + 扫描清单里的类下标）。返回 0 或见 ka_v3_open 的负数表。 */
+/** 打开一个插件（UTF-16 路径 + 扫描清单里的类下标）。返回 0 或见 ka_v3_open 的负数表。
+ *  打开成功就是"这条轨由插件发声"—— g_plug_on 立刻置位，内置合成器在那条轨上闭嘴。 */
 __declspec(dllexport) int ka_vst3_open(const uint16_t* path, int cls_index) {
+    int rc;
     if (g_plug) g_plug->rate = g_rate;
-    return (int)ka_plug_call(KA_CMD_OPEN, cls_index, 0, 0, 0, path, KA_PLUG_MS_SLOW);
+    rc = (int)ka_plug_call(KA_CMD_OPEN, cls_index, 0, 0, 0, path, KA_PLUG_MS_SLOW);
+    if (rc == 0) g_plug_on[g_plug_cur] = 1;
+    return rc;
 }
 
 /** 带开关的打开：flags 见 KA_V3_OPEN_*（1 = 不建控制器）。 */
 __declspec(dllexport) int ka_vst3_open_ex(const uint16_t* path, int cls_index, int flags) {
+    int rc;
     if (g_plug) g_plug->rate = g_rate;
-    return (int)ka_plug_call(KA_CMD_OPEN, cls_index, flags, 0, 0, path, KA_PLUG_MS_SLOW);
+    rc = (int)ka_plug_call(KA_CMD_OPEN, cls_index, flags, 0, 0, path, KA_PLUG_MS_SLOW);
+    if (rc == 0) g_plug_on[g_plug_cur] = 1;
+    return rc;
 }
 
 __declspec(dllexport) void ka_vst3_close(void) {
     (void)ka_plug_call(KA_CMD_CLOSE, 0, 0, 0, 0, 0, KA_PLUG_MS_FAST);
+    g_plug_on[g_plug_cur] = 0;
+    if (g_plug) g_plug->ed_mon = 0;          /* 实例没了，那扇窗跟着没了 */
 }
 
 /** 排障：上次打开走到第几步 + 那一步的原始 tresult。 */
@@ -1997,6 +2276,72 @@ __declspec(dllexport) int ka_vst3_note(int on, int ch, int pitch, int vel) {
     return (int)ka_plug_call(KA_CMD_NOTE, on ? 1 : 0, ch, pitch, vel, 0, KA_PLUG_MS_FAST);
 }
 
+/** 试听：立即 note-on，blocks 块之后 worker 自己发 note-off（暂停时也照渲）。
+ *  连点会先把上一个收掉，不会叠出一串挂着的音。 */
+__declspec(dllexport) int ka_vst3_audition(int note, int vel, int ch, int blocks) {
+    return (int)ka_plug_call(KA_CMD_AUDITION, note, vel, ch, blocks, 0, KA_PLUG_MS_FAST);
+}
+
+/** 所有通道收声（拖播放头 / 换乐器 / 暂停时宿主调用）。 */
+__declspec(dllexport) int ka_vst3_notes_off(void) {
+    return (int)ka_plug_call(KA_CMD_NOTES_OFF, 0, 0, 0, 0, 0, KA_PLUG_MS_FAST);
+}
+
+/** 装一个 .vstpreset（IComponent::setState + IEditController::setComponentState/setState）。
+ *  返回 0 = 成功，其余见 ka_v3_state_load 的负数表（-10 段是文件错）。
+ *  out[0..3] = component rc / setComponentState rc / controller rc / 文件字节数。 */
+__declspec(dllexport) int ka_vst3_state_load(const uint16_t* path, int* out, int n) {
+    int i, r;
+    r = (int)ka_plug_call(KA_CMD_STATE_LOAD, 0, 0, 0, 0, path, KA_PLUG_MS_SLOW);
+    if (out && n > 0 && g_plug) {
+        int m = n < KA_SHM_IV ? n : KA_SHM_IV;
+        for (i = 0; i < m; ++i) out[i] = (int)g_plug->iv[i];
+    }
+    return r;
+}
+
+/** 把当前音色存成 .vstpreset（整个 bundle 的状态，不用编辑器）。返回总字节数或负错误码。 */
+__declspec(dllexport) int ka_vst3_state_save(const uint16_t* path) {
+    return (int)ka_plug_call(KA_CMD_STATE_SAVE, 0, 0, 0, 0, path, KA_PLUG_MS_SLOW);
+}
+
+/** 开插件自己的编辑器窗口（worker 起了条 UI 线程来管窗口与消息泵，音频照跑）。
+ *  0 = 窗口已经显示；负数是哪一步失败（-21 = 插件界面造不出来/超时）。
+ *  out[0..2] = 是否开着 / 客户区宽 / 高。 */
+__declspec(dllexport) int ka_vst3_editor_open(int* out, int n) {
+    int i, r;
+    r = (int)ka_plug_call(KA_CMD_EDITOR_OPEN, 0, 0, 0, 0, 0, KA_PLUG_MS_SLOW);
+    if (out && n > 0 && g_plug) {
+        int m = n < KA_SHM_IV ? n : KA_SHM_IV;
+        for (i = 0; i < m; ++i) out[i] = (int)g_plug->iv[i];
+    }
+    /* 窗口开着 = 用户要在插件自己的界面里试音（见 ka_plug_mix / wk_render）。
+     * 那边的键盘只从 process() 出声，不把这条告诉他们，界面里点了就是没声音。 */
+    if (g_plug) g_plug->ed_mon = (out && n > 0 && out[0]) ? 1 : 0;
+    return r;
+}
+
+__declspec(dllexport) int ka_vst3_editor_close(void) {
+    int r = (int)ka_plug_call(KA_CMD_EDITOR_CLOSE, 0, 0, 0, 0, 0, KA_PLUG_MS_SLOW);
+    if (r == 0 && g_plug) g_plug->ed_mon = 0;
+    return r;
+}
+
+/** ret = 1 开着。out[0] = 用户点 X 关过几次 —— 变过就说明"音色挑完了"，
+ *  宿主这时该把状态存成 .vstpreset（out[1..2] = 客户区宽高）。 */
+__declspec(dllexport) int ka_vst3_editor_state(int* out, int n) {
+    int i, r;
+    r = (int)ka_plug_call(KA_CMD_EDITOR_STATE, 0, 0, 0, 0, 0, KA_PLUG_MS_FAST);
+    if (out && n > 0 && g_plug) {
+        int m = n < KA_SHM_IV ? n : KA_SHM_IV;
+        for (i = 0; i < m; ++i) out[i] = (int)g_plug->iv[i];
+    }
+    /* 用户点 X 关掉窗口时这里才第一次知道 —— 监视跟着停，别再白渲。
+     * 别的地方（卸载/换实例）也会清，见 ka_vst3_close / ka_plug_detach_s。 */
+    if (g_plug) g_plug->ed_mon = (r == 1) ? 1 : 0;
+    return r;
+}
+
 /** 开/关"往 ring 里渲染"。开之前取不到块（ka_vst3_render 会一直等到超时），
  *  所以要先开这个再取 —— 关掉是为了不让它白占 CPU。 */
 __declspec(dllexport) int ka_vst3_live(int on) {
@@ -2027,8 +2372,16 @@ __declspec(dllexport) int ka_plug_pull_block(float* dst, int frames) {
     return ka_plug_pull(dst, frames);
 }
 
-/** 上一块的峰值（千分比），和采样器那边同一个口径。 */
-__declspec(dllexport) int ka_vst3_peak(void) { return g_plug ? (int)g_plug->peak : 0; }
+/** 所有实例里最大的那个峰值（千分比），和采样器那边同一个口径。
+ *  单个实例的峰看 `ka_vst3_peak_s` —— 界面那条电平表要的是"现在有没有声"。 */
+__declspec(dllexport) int ka_vst3_peak(void) {
+    int i, v = 0;
+    for (i = 0; i < KA_MAX_PLUG; ++i) {
+        if (!g_plugs[i].shm) continue;
+        if ((int)g_plugs[i].shm->peak > v) v = (int)g_plugs[i].shm->peak;
+    }
+    return v;
+}
 
 /** 已渲染的帧数。 */
 __declspec(dllexport) int ka_vst3_frames(void) {

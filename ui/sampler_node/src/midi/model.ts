@@ -28,10 +28,12 @@ export type MidiNote = {
 export type MidiTrack = {
   id: string;
   name: string;
-  /** General MIDI program 0..127。鼓轨用 channel 9，program 无所谓。 */
-  program: number;
   /** MIDI 通道 0..15（9 = 第十通道 = 鼓，MIDI 的惯例，改不了）。 */
   channel: number;
+  /** 这一轨挂的乐器（绝对路径：.vstpreset / .sfz）。空 = 这一轨不出声 ——
+   *  声音只来自乐器，没有"按号挑 GM 音色"这回事。
+   *  路径住在这里而不是引擎里 —— 引擎会重启、会崩，工程不该跟着丢。 */
+  instrument: string;
   /** 力度基线 0.1..2：整轨的乘数，不动音符自己的 vel。 */
   velScale: number;
   mute: boolean;
@@ -84,41 +86,11 @@ export const pitchName = (pitch: number): string => {
 /** C4 = 60 那一套（Yamaha / 大多数 DAW 的默认）。 */
 export const isBlackKey = (pitch: number): boolean => [1, 3, 6, 8, 10].includes(((pitch % 12) + 12) % 12);
 
-// ── General MIDI 音色（0..127）────────────────────────────────────────────────────────────────
-// 只做"挑一个能认的名字"，不做资源管理：真正发出去的是 program change，音色由外部音源决定。
-export const GM_PROGRAMS: string[] = [
-  'Acoustic Grand', 'Bright Acoustic', 'Electric Grand', 'Honky-tonk', 'Electric Piano 1', 'Electric Piano 2',
-  'Harpsichord', 'Clavinet', 'Celesta', 'Glockenspiel', 'Music Box', 'Vibraphone', 'Marimba', 'Xylophone',
-  'Tubular Bells', 'Dulcimer',
-  'Drawbar Organ', 'Percussive Organ', 'Rock Organ', 'Church Organ', 'Reed Organ', 'Accordion', 'Harmonica',
-  'Tango Accordion',
-  'Acoustic Guitar (nylon)', 'Acoustic Guitar (steel)', 'Electric Guitar (jazz)', 'Electric Guitar (clean)',
-  'Electric Guitar (muted)', 'Overdriven Guitar', 'Distortion Guitar', 'Guitar Harmonics',
-  'Acoustic Bass', 'Electric Bass (finger)', 'Electric Bass (pick)', 'Fretless Bass', 'Slap Bass 1', 'Slap Bass 2',
-  'Synth Bass 1', 'Synth Bass 2',
-  'Violin', 'Viola', 'Cello', 'Contrabass', 'Tremolo Strings', 'Pizzicato Strings', 'Orchestral Harp', 'Timpani',
-  'String Ensemble 1', 'String Ensemble 2', 'Synth Strings 1', 'Synth Strings 2', 'Choir Aahs', 'Voice Oohs',
-  'Synth Voice', 'Orchestra Hit',
-  'Trumpet', 'Trombone', 'Tuba', 'Muted Trumpet', 'French Horn', 'Brass Section', 'Synth Brass 1', 'Synth Brass 2',
-  'Soprano Sax', 'Alto Sax', 'Tenor Sax', 'Baritone Sax', 'Oboe', 'English Horn', 'Bassoon', 'Clarinet',
-  'Piccolo', 'Flute', 'Recorder', 'Pan Flute', 'Blown Bottle', 'Shakuhachi', 'Whistle', 'Ocarina',
-  'Lead 1 (square)', 'Lead 2 (sawtooth)', 'Lead 3 (calliope)', 'Lead 4 (chiff)', 'Lead 5 (charang)',
-  'Lead 6 (voice)', 'Lead 7 (fifths)', 'Lead 8 (bass + lead)',
-  'Pad 1 (new age)', 'Pad 2 (warm)', 'Pad 3 (polysynth)', 'Pad 4 (choir)', 'Pad 5 (bowed)', 'Pad 6 (metallic)',
-  'Pad 7 (halo)', 'Pad 8 (sweep)',
-  'FX 1 (rain)', 'FX 2 (soundtrack)', 'FX 3 (crystal)', 'FX 4 (atmosphere)', 'FX 5 (brightness)', 'FX 6 (goblins)',
-  'FX 7 (echoes)', 'FX 8 (sci-fi)',
-  'Sitar', 'Banjo', 'Shamisen', 'Koto', 'Kalimba', 'Bag pipe', 'Fiddle', 'Shanai',
-  'Tinkle Bell', 'Agogo', 'Steel Drums', 'Woodblock', 'Taiko Drum', 'Melodic Tom', 'Synth Drum', 'Reverse Cymbal',
-  'Guitar Fret Noise', 'Breath Noise', 'Seashore', 'Bird Tweet', 'Telephone Ring', 'Helicopter', 'Applause', 'Gunshot',
-];
-
-export const programName = (program: number): string => GM_PROGRAMS[clampInt(program, 0, 127)] ?? 'Program';
 
 /** 第十通道（index 9）在 MIDI 里恒为鼓，这是协议规定的，不是我们的偏好。 */
 export const DRUM_CHANNEL = 9;
 
-const TRACK_COLORS = ['#0a84ff', '#30d158', '#ff9f0a', '#bf5af2', '#ff453a', '#64d2ff', '#ffd60a', '#ff375f'];
+export const TRACK_COLORS = ['#0a84ff', '#30d158', '#ff9f0a', '#bf5af2', '#ff453a', '#64d2ff', '#ffd60a', '#ff375f'];
 
 // ── 小工具 ───────────────────────────────────────────────────────────────────────────────────
 export const clampInt = (v: unknown, lo: number, hi: number): number => {
@@ -141,11 +113,11 @@ export const effectiveVelocity = (note: MidiNote, track: MidiTrack): number =>
   clampInt(note.vel * clampNum(track.velScale, 0.1, 2), MIN_VEL, MAX_VEL);
 
 // ── 默认工程 ─────────────────────────────────────────────────────────────────────────────────
-const track = (name: string, program: number, channel: number, colorIdx: number): MidiTrack => ({
+const track = (name: string, channel: number, colorIdx: number): MidiTrack => ({
   id: newMidiId('mtrk'),
   name,
-  program,
   channel,
+  instrument: '',
   velScale: 1,
   mute: false,
   solo: false,
@@ -155,10 +127,10 @@ const track = (name: string, program: number, channel: number, colorIdx: number)
 
 export const defaultMidiProject = (): MidiProject => {
   const tracks = [
-    track('Piano', 0, 0, 0),
-    track('Strings', 48, 1, 1),
-    track('Bass', 33, 2, 2),
-    track('Drums', 0, DRUM_CHANNEL, 3),
+    track('Piano', 0, 0),
+    track('Strings', 1, 1),
+    track('Bass', 2, 2),
+    track('Drums', DRUM_CHANNEL, 3),
   ];
   return {
     version: 1,
@@ -208,8 +180,8 @@ export const normalizeMidiProject = (raw: unknown): MidiProject => {
     tracks.push({
       id: typeof r.id === 'string' && r.id ? r.id : newMidiId('mtrk'),
       name: typeof r.name === 'string' && r.name ? r.name : 'Track',
-      program: clampInt(r.program, 0, 127),
       channel: clampInt(r.channel, 0, 15),
+      instrument: typeof r.instrument === 'string' ? r.instrument : '',
       velScale: clampNum(r.velScale, 0.1, 2),
       mute: !!r.mute,
       solo: !!r.solo,
@@ -217,14 +189,16 @@ export const normalizeMidiProject = (raw: unknown): MidiProject => {
       notes,
     });
   }
-  if (!tracks.length) tracks.push(...base.tracks);
+  // 空工程是合法状态（轨可以删光）。只有"根本没有 tracks 这一栏"的老文档才补默认几条；
+  // 存下来的 [] 就照 [] 打开。
+  if (!tracks.length && (!Array.isArray(o.tracks) || o.tracks.length > 0)) tracks.push(...base.tracks);
 
   const loopRaw = (o.loop && typeof o.loop === 'object' ? o.loop : {}) as Record<string, unknown>;
   const a = Math.max(0, Number(loopRaw.a) || 0);
   const b = Math.max(a + 1, Number(loopRaw.b) || 16);
 
   const selTrack = typeof o.selTrack === 'string' && tracks.some(t => t.id === o.selTrack)
-    ? o.selTrack : tracks[0].id;
+    ? o.selTrack : (tracks[0]?.id ?? '');
 
   return {
     version: 1,
@@ -270,34 +244,45 @@ export const pitchInUse = (p: MidiProject): Set<number> => {
 const mapTrack = (p: MidiProject, id: string, fn: (t: MidiTrack) => MidiTrack): MidiProject =>
   ({ ...p, tracks: p.tracks.map(t => (t.id === id ? fn(t) : t)) });
 
+// 编辑动作本体住在这几个**轨级**函数里：钢琴卷帘现在编的是"时间线上选中那一段"
+// （见 midi/types.ts 的 MidiEditor），它手里只有一条轨、没有整份工程。工程级的老函数
+// （addNote / updateNote / removeNotes / quantize）只剩同一套实现的外壳。
+
 /** id 是可选的：卷帘上"按下就落音、不松手拖着变长"那条手势必须**当场拿到这枚音的 id**
  *  才能在同一个手势里 updateNote 它 —— 让 addNote 自己生成 id 的话，调用方只能再去猜哪条是新的。
  *  不传就照旧自动生成。 */
+export const addNoteToTrack = (t: MidiTrack, note: Omit<MidiNote, 'id'>, id?: string): MidiTrack => ({
+  ...t,
+  notes: [...t.notes, { ...note, id: id || newMidiId('mn') }].sort((a, b) => a.start - b.start || a.pitch - b.pitch),
+});
+
+export const updateNoteInTrack = (t: MidiTrack, noteId: string, patch: Partial<Omit<MidiNote, 'id'>>): MidiTrack => ({
+  ...t,
+  notes: t.notes
+    .map(n => (n.id === noteId ? {
+      ...n,
+      ...patch,
+      pitch: patch.pitch === undefined ? n.pitch : clampInt(patch.pitch, 0, 127),
+      start: patch.start === undefined ? n.start : Math.max(0, patch.start),
+      dur: patch.dur === undefined ? n.dur : Math.max(MIN_DUR, patch.dur),
+      vel: patch.vel === undefined ? n.vel : clampInt(patch.vel, MIN_VEL, MAX_VEL),
+    } : n))
+    .sort((a, b) => a.start - b.start || a.pitch - b.pitch),
+});
+
+export const removeNotesFromTrack = (t: MidiTrack, noteIds: readonly string[]): MidiTrack => {
+  const drop = new Set(noteIds);
+  return { ...t, notes: t.notes.filter(n => !drop.has(n.id)) };
+};
+
 export const addNote = (p: MidiProject, trackId: string, note: Omit<MidiNote, 'id'>, id?: string): MidiProject =>
-  mapTrack(p, trackId, t => ({
-    ...t,
-    notes: [...t.notes, { ...note, id: id || newMidiId('mn') }].sort((a, b) => a.start - b.start || a.pitch - b.pitch),
-  }));
+  mapTrack(p, trackId, t => addNoteToTrack(t, note, id));
 
 export const updateNote = (p: MidiProject, trackId: string, noteId: string, patch: Partial<Omit<MidiNote, 'id'>>): MidiProject =>
-  mapTrack(p, trackId, t => ({
-    ...t,
-    notes: t.notes
-      .map(n => (n.id === noteId ? {
-        ...n,
-        ...patch,
-        pitch: patch.pitch === undefined ? n.pitch : clampInt(patch.pitch, 0, 127),
-        start: patch.start === undefined ? n.start : Math.max(0, patch.start),
-        dur: patch.dur === undefined ? n.dur : Math.max(MIN_DUR, patch.dur),
-        vel: patch.vel === undefined ? n.vel : clampInt(patch.vel, MIN_VEL, MAX_VEL),
-      } : n))
-      .sort((a, b) => a.start - b.start || a.pitch - b.pitch),
-  }));
+  mapTrack(p, trackId, t => updateNoteInTrack(t, noteId, patch));
 
-export const removeNotes = (p: MidiProject, trackId: string, noteIds: readonly string[]): MidiProject => {
-  const drop = new Set(noteIds);
-  return mapTrack(p, trackId, t => ({ ...t, notes: t.notes.filter(n => !drop.has(n.id)) }));
-};
+export const removeNotes = (p: MidiProject, trackId: string, noteIds: readonly string[]): MidiProject =>
+  mapTrack(p, trackId, t => removeNotesFromTrack(t, noteIds));
 
 export const moveNotes = (p: MidiProject, trackId: string, noteIds: readonly string[],
                           dBeat: number, dPitch: number): MidiProject => {
@@ -319,17 +304,20 @@ export const setVelocities = (p: MidiProject, trackId: string, noteIds: readonly
 };
 
 /** 量化：把起点（可选尾巴）吸附到 `grid` 拍的整数倍。 */
-export const quantize = (p: MidiProject, trackId: string, grid: number, alsoLength = false): MidiProject => {
+export const quantizeTrack = (t: MidiTrack, grid: number, alsoLength = false): MidiTrack => {
   const g = Math.max(1 / 32, grid);
-  return mapTrack(p, trackId, t => ({
+  return {
     ...t,
     notes: t.notes.map(n => {
       const start = Math.round(n.start / g) * g;
       const dur = alsoLength ? Math.max(MIN_DUR, Math.round(n.dur / g) * g) : n.dur;
       return { ...n, start, dur };
     }).sort((a, b) => a.start - b.start || a.pitch - b.pitch),
-  }));
+  };
 };
+
+export const quantize = (p: MidiProject, trackId: string, grid: number, alsoLength = false): MidiProject =>
+  mapTrack(p, trackId, t => quantizeTrack(t, grid, alsoLength));
 
 /** `name` 给"从乐器库添轨"用 —— 轨名就是乐器名，回来一眼认得出是哪件。 */
 export const addTrack = (p: MidiProject, name?: string): MidiProject => {
@@ -339,21 +327,22 @@ export const addTrack = (p: MidiProject, name?: string): MidiProject => {
   let ch = 0;
   while (used.has(ch) && ch < 16) ch += 1;
   if (ch >= 16) ch = 0;
-  const t = track(name?.trim() || `Track ${idx + 1}`, 0, ch, idx);
+  const t = track(name?.trim() || `Track ${idx + 1}`, ch, idx);
   return { ...p, tracks: [...p.tracks, t], selTrack: t.id };
 };
 
+/** 删轨不设下限：删到一条不剩也是一份能用的工程（空工程由界面的空态交代怎么加回来）。 */
 export const removeTrack = (p: MidiProject, trackId: string): MidiProject => {
-  if (p.tracks.length <= 1) return p;
   const tracks = p.tracks.filter(t => t.id !== trackId);
-  return { ...p, tracks, selTrack: tracks[0].id, selNote: '' };
+  if (tracks.length === p.tracks.length) return p;
+  return { ...p, tracks, selTrack: tracks[0]?.id ?? '', selNote: '' };
 };
 
 export const updateTrack = (p: MidiProject, trackId: string, patch: Partial<Omit<MidiTrack, 'id' | 'notes'>>): MidiProject =>
   mapTrack(p, trackId, t => ({
     ...t,
     ...patch,
-    program: patch.program === undefined ? t.program : clampInt(patch.program, 0, 127),
     channel: patch.channel === undefined ? t.channel : clampInt(patch.channel, 0, 15),
+    instrument: patch.instrument === undefined ? t.instrument : String(patch.instrument),
     velScale: patch.velScale === undefined ? t.velScale : clampNum(patch.velScale, 0.1, 2),
   }));

@@ -13,6 +13,11 @@ import { audioCtx } from './audio';
 //
 // probe(电平探头)是声明方自己搭的 WebAudio 小图:源 → 上混 → 分光 → [gain → analyser]×2 →
 // destination。声明方图自己管,Monitor 只**读** analyser、拨 gain —— 两边只认这四个节点。
+//
+// 不是 WebAudio 出的声(原生引擎: MIDI 的采样乐器/插件)没有这张图,就改用 `levels` 直接报数
+// (见 midi/nativeMonitor.ts)。两条路二选一:有 probe 读 analyser,只有 levels 就按时取一帧。
+// **两条同时在**= 这一路声源两样都有(时间线:音频段走 WebAudio、MIDI 轨走本机引擎,见
+// workbench/video/timelineAudio.ts),Monitor 两路各取峰值后取大的那条 —— 一条时间线一只表。
 
 export type AudioProbe = {
   /** 左/右声道电平探针(时域数据,RMS/峰值都从这里算)。 */
@@ -24,11 +29,15 @@ export type AudioProbe = {
 };
 
 export type AudioHolder = {
-  /** 声源 id:'inspector' / 'player' / …… 释放与幂等申请都按它对账。 */
+  /** 声源 id:'inspector' / 'player' / 'midi-native' / …… 释放与幂等申请都按它对账。 */
   id: string;
   /** Monitor 上显示的名号,如 'Inspector — Demo clip'。 */
   label: string;
-  probe: AudioProbe;
+  /** WebAudio 声源的探头。与 `levels` 可同时给(时间线:音频段 + MIDI 轨)。 */
+  probe?: AudioProbe;
+  /** 非 WebAudio 声源(原生引擎)的电平:返回左右声道的**线性**峰值 0..1。没有闸节点可拨,
+   *  Monitor 因此不画那两枚 M 键。 */
+  levels?: () => { l: number; r: number };
 };
 
 let holder: AudioHolder | null = null;

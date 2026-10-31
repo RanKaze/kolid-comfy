@@ -7,11 +7,18 @@
 //   * **时间单位是拍**，不是秒。改 BPM 时音符不许动 —— 秒只在播放时才出现，且由 clock 给。
 //   * **只画可视区**。整卷帘按 128 个半音 × 200 拍铺成一张画布是几十 MB 位图，拖动会卡死；
 //     这里画布永远是"窗口那么大"，滚动只是换一个偏移量重画。
-//   * **力度是每个音自己的**，轨上那根推子是另一个乘数（见 TrackList）。两者在画面上互不干扰：
+//   * **力度是每个音自己的**，轨上那根推子是另一个乘数（见 Tracks 轨头的乐器弹窗）。两者在画面上互不干扰：
 //     这里改的永远是 note.vel。
 //   * 拖动的每一帧都走 update（同一个 label），撤销栈会把它们并成**一步**。
 //
 // 键盘区在左边始终固定（不随横向滚动走），因为"哪一行是哪个音"必须一直看得见。
+//
+// 网格与缩放**没有自己的工具条**：控件都在底部 Transport，这里只消费 gridBeats / pps。
+// 缩放要钉住视口中心，所以滚动容器 ref 由 Workspace 持有、与 Transport 共用（见 zoomTo）。
+//
+// 标尺上的播放头与范围游标**照 Tracks 那一套画**（workbench/video/Timeline.tsx）：上带是
+// 入/出两枚平顶楔形把手（拖它改循环范围），下带是播放头三角，中间才是小节号 —— 两种手势
+// 分住在尺子的上下两端，抓范围和点游标永远不会互相抢。
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { clock } from './clock';
@@ -20,12 +27,13 @@ import { DEFAULT_LAYOUT, readLayout, writeLayout } from './layoutPrefs';
 import { midiOut } from './output';
 import { Splitter } from './Splitter';
 import {
-  MIN_DUR, type MidiNote, addNote, effectiveVelocity, isBlackKey, newMidiId, pitchName,
-  quantize, removeNotes, secondsToBeat, updateNote,
+  MIN_DUR, type MidiNote, addNoteToTrack, effectiveVelocity, isBlackKey, newMidiId, pitchName,
+  removeNotesFromTrack, secondsToBeat, updateNoteInTrack,
 } from './model';
 import type { MidiCtl } from './types';
 
-const KEY_W = 46;
+/** 琴键栏宽度。缩放要把可见区的中心钉住 —— 那是 clientWidth 减掉这 46px。 */
+export const KEY_W = 46;
 const ROW_H = 13;
 const PITCH_TOP = 108;      // 画到 C8
 const PITCH_BOTTOM = 24;    // 画到 C1
@@ -34,13 +42,22 @@ const VEL_MIN = 46;
 const VEL_MAX = 340;
 /** 卷帘主体至少留这么高 —— 拖到只剩力度泳道就没意义了。 */
 const ROLL_MIN_H = 120;
-const RULER_H = 20;
+/** 标尺：上带范围楔形（MARK_H）、下带播放头三角（PLAY_H），中间那条窄带才是小节号。
+ *  三段的高度与 Tracks 的标尺同一套读数（见 Timeline.tsx 的 RULER_H / MARK_TOP / PLAY_TOP）。 */
+const RULER_H = 28;
+const MARK_H = 10;
+const PLAY_H = 10;
+const LABEL_Y = MARK_H + (RULER_H - MARK_H - PLAY_H) / 2;   // 14
+/** 范围线与楔形的颜色、范围外的压暗 —— 与 Tracks 一字不差。 */
+const RANGE_LINE = 'rgba(120,200,255,0.75)';
+const RANGE_DIM = 'rgba(0,0,0,0.28)';
 /** 横向缩放（每拍多少像素）的取值范围与默认值。双击 zoom 滑杆回到这里。 */
-const ZOOM_MIN = 18;
-const ZOOM_MAX = 220;
-const DEFAULT_PPS = 64;
+export const ZOOM_MIN = 18;
+export const ZOOM_MAX = 220;
+export const DEFAULT_PPS = 64;
 
-const GRID_CHOICES: { label: string; beats: number }[] = [
+/** 网格档位。画在底部 Transport，卷帘只用选中的那一档做吸附与画线。 */
+export const GRID_CHOICES: { label: string; beats: number }[] = [
   { label: '1/4', beats: 1 },
   { label: '1/8', beats: 0.5 },
   { label: '1/16', beats: 0.25 },
@@ -59,26 +76,37 @@ const COL = {
   note: '#3a8ee6',
   noteSel: '#ffffff',
   playhead: '#ff453a',
-  loop: 'rgba(10,132,255,0.10)',
 };
 
-type DragMode = 'move' | 'resize' | 'vel' | 'draw' | ''
+type DragMode = 'move' | 'resize' | 'vel' | 'draw' | 'marquee' | 'loopA' | 'loopB' | ''
 
-export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
-  const { project, update, track } = ctl;
+export const MidiPianoRoll: React.FC<{
+  ctl: MidiCtl;
+  /** 吸附刻度（拍）。控件在底部 Transport。 */
+  gridBeats: number;
+  /** 每拍多少像素。控件在底部 Transport；缩放的中心保持由 Workspace 的 zoomTo 负责。 */
+  pps: number;
+  /** 滚动容器（Workspace 与 Transport 共用，缩放中心要靠它换算）。 */
+  scrollRef: React.MutableRefObject<HTMLDivElement | null>;
+}> = ({ ctl, gridBeats, pps, scrollRef }) => {
+  // 这一窗只编**选中的那一段**：音符是段内拍（0 = 窗口第一拍），窗口长度就是段的时长。
+  // 写回走 updateEditor —— 段内容里被裁到窗口外的音符不会被碰（见 applyEditorNotes）。
+  const { track, updateEditor } = ctl;
+  const length = ctl.editor?.length ?? 16;
+  const loop = ctl.editor?.loop ?? { on: false, a: 0, b: 16 };
+  const timeSig = ctl.editor?.timeSig ?? ([4, 4] as [number, number]);
+  const tempo = ctl.editor?.tempo ?? ctl.project.tempo;
+  const baseBeat = ctl.editor?.baseBeat ?? 0;
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
   const rollRef = useRef<HTMLCanvasElement | null>(null);
   const velRef = useRef<HTMLCanvasElement | null>(null);
   const headRef = useRef<HTMLDivElement | null>(null);
 
-  const [gridBeats, setGridBeats] = useState(0.25);
-  const [pps, setPps] = useState(DEFAULT_PPS);
   const [sel, setSel] = useState<string[]>([]);
+  // 框选的橡皮筋（画布局部像素）。null = 没在框。
+  const [box, setBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   // 按下的琴键（-1 = 没按）。只用来给键盘画一下高亮 —— 点琴键只试听，不落音。
   const [pressedKey, setPressedKey] = useState(-1);
-  const ppsRef = useRef(pps);
-  ppsRef.current = pps;
   // 力度泳道多高 —— 可拖（视图态，存 localStorage，见 layoutPrefs）。
   const [velH, setVelH] = useState(() => readLayout().velH);
   const velHRef = useRef(velH);
@@ -90,14 +118,14 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     const el = rootRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    // 增量式（往上拖变高）+ 留出卷帘主体的最小高度。工具条那一条也算在 r 里，一并扣掉。
-    const cap = Math.max(VEL_MIN, Math.min(VEL_MAX, r.height - ROLL_MIN_H - 30));
+    // 增量式（往上拖变高）+ 留出卷帘主体的最小高度。中间还有一条 7px 的分隔条，一并扣掉。
+    const cap = Math.max(VEL_MIN, Math.min(VEL_MAX, r.height - ROLL_MIN_H - 7));
     setVelH(Math.round(Math.max(VEL_MIN, Math.min(cap, baseVelH.current + (y0 - y)))));
   }, []);
   const commitVel = useCallback(() => setVelH(h => { writeLayout({ velH: h }); return h; }), []);
   const resetVel = useCallback(() => {
     const el = rootRef.current;
-    const cap = el ? Math.max(VEL_MIN, Math.min(VEL_MAX, el.getBoundingClientRect().height - ROLL_MIN_H - 30)) : VEL_MAX;
+    const cap = el ? Math.max(VEL_MIN, Math.min(VEL_MAX, el.getBoundingClientRect().height - ROLL_MIN_H - 7)) : VEL_MAX;
     setVelH(Math.round(Math.min(DEFAULT_LAYOUT.velH, cap)));
     writeLayout({ velH: DEFAULT_LAYOUT.velH });
   }, []);
@@ -113,6 +141,9 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     origStart: number; origDur: number; origVel: number; origPitch: number;
     base: { id: string; start: number; dur: number; pitch: number }[];
     moved: boolean;
+    /** 框选专用（只有 mode === 'marquee' 时有值）：起点按画布局部像素记，selBase 是
+     *  按下那一刻的选择 —— 它不跟着每帧改写，否则框往回缩时先选中的退不回去。 */
+    marquee?: { x0: number; y0: number; selBase: string[]; selCur: string[] };
   }>({
     mode: '', noteId: '', grabBeat: 0, grabPitch: 0,
     origStart: 0, origDur: 0, origVel: 0, origPitch: 0, base: [], moved: false,
@@ -121,39 +152,9 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
   const snapOf = (n: MidiNote) => ({ id: n.id, start: n.start, dur: n.dur, pitch: n.pitch });
 
   const trackNotes = track?.notes ?? [];
-  const endBeat = Math.max(16, ...trackNotes.map(n => n.start + n.dur), project.loop.b + 4);
+  const endBeat = Math.max(length, 16, ...trackNotes.map(n => n.start + n.dur), loop.b + 4);
   const contentW = KEY_W + endBeat * pps + 240;
   const contentH = RULER_H + ROWS * ROW_H;
-
-  const zoomRef = useRef<HTMLInputElement | null>(null);
-  /** 缩放：**把视口中心那一拍钉在原地**。直接 setPps 只会让内容变宽而 scrollLeft 不动，
-   *  用户一拖滑块视野就跑到别处、还得再找回来 —— 这是缩放"不好用"的最大来源。 */
-  const setZoom = useCallback((next: number) => {
-    const prev = ppsRef.current;
-    const v = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(next)));
-    if (v === prev) return;
-    const host = scrollRef.current;
-    const span = host ? Math.max(1, host.clientWidth - KEY_W) : 0;
-    const centerBeat = host ? (host.scrollLeft + span / 2) / prev : 0;
-    setPps(v);
-    // 内容宽度要等这一帧的布局，所以挪 scrollLeft 放到下一帧。
-    if (host) requestAnimationFrame(() => { host.scrollLeft = Math.max(0, centerBeat * v - span / 2); });
-  }, []);
-  const zoomFill = Math.round(((pps - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN)) * 100) + '%';
-
-  // 原生 range 对滚轮完全没反应，而缩放是这排控件里最常反复微调的一件事。
-  // 必须走原生监听才能 preventDefault（React 的 onWheel 挂的是 passive 监听）。
-  useEffect(() => {
-    const el = zoomRef.current;
-    if (!el) return;
-    const onWheel = (ev: WheelEvent) => {
-      ev.preventDefault();
-      const step = Math.max(1, Math.round(ppsRef.current * 0.08));
-      setZoom(ppsRef.current - Math.sign(ev.deltaY) * step);
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, [setZoom]);
 
   // 坐标换算必须用**原生滚动位置**（scrollRef.current.scrollLeft/Top），不能用渲染时的
   // 快照：滚动事件与 pointerdown 之间可能已经差了一帧，而卷帘的画布是 sticky 的
@@ -206,6 +207,11 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     const ox = host.scrollLeft, oy = host.scrollTop;
     const beat0 = Math.max(0, (ox) / pps);
     const beat1 = beat0 + (w - KEY_W) / pps;
+    // 范围（循环 A→B）在卷帘里的两处横坐标。窗口外的部分不画 —— 与 Tracks 一样，
+    // 范围只在它真正覆盖到的地方出现（范围是全局拍，段只是时间线的一段窗）。
+    const rangeOn = loop.on && loop.b > loop.a;
+    const xa = KEY_W + loop.a * pps - ox;
+    const xb = KEY_W + loop.b * pps - ox;
 
     // 行底色（黑键行沉一点）+ C 行分隔
     for (let p = PITCH_BOTTOM; p <= PITCH_TOP; p++) {
@@ -215,16 +221,15 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
       if (p % 12 === 0) { g.fillStyle = COL.rowC; g.fillRect(KEY_W, y + ROW_H - 1, w - KEY_W, 1); }
     }
 
-    // 循环区间
-    if (project.loop.on) {
-      const xa = KEY_W + project.loop.a * pps - ox;
-      const xb = KEY_W + project.loop.b * pps - ox;
-      g.fillStyle = COL.loop;
-      g.fillRect(Math.max(KEY_W, xa), RULER_H, Math.min(w, xb) - Math.max(KEY_W, xa), h - RULER_H);
+    // 段尾：窗口右缘。音符画不到它外面，这里画一条线免得用户去猜"这段有多长"。
+    const xEnd = KEY_W + length * pps - ox;
+    if (xEnd > KEY_W && xEnd < w) {
+      g.fillStyle = 'rgba(255,255,255,0.22)';
+      g.fillRect(Math.round(xEnd), RULER_H, 1, h - RULER_H);
     }
 
     // 竖线：网格 / 拍 / 小节
-    const bar = project.timeSig[0];
+    const bar = timeSig[0];
     const first = Math.floor(beat0 / gridBeats) * gridBeats;
     for (let b = first; b <= beat1; b += gridBeats) {
       const x = KEY_W + b * pps - ox;
@@ -254,6 +259,33 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
       }
     }
 
+    // 框选的橡皮筋。画在键盘与标尺**之前**：那两块随后会盖住它伸出去的部分，
+    // 不用单独裁剪，框只在卷帘主体里可见。
+    if (box) {
+      const bx = Math.min(box.x0, box.x1), by = Math.min(box.y0, box.y1);
+      const bw = Math.abs(box.x1 - box.x0), bh = Math.abs(box.y1 - box.y0);
+      g.fillStyle = 'rgba(10,132,255,0.14)';
+      g.fillRect(bx, by, bw, bh);
+      g.strokeStyle = 'rgba(10,132,255,0.9)';
+      g.lineWidth = 1;
+      g.strokeRect(Math.round(bx) + 0.5, Math.round(by) + 0.5, Math.round(bw), Math.round(bh));
+    }
+
+    // 范围外压暗 + 两条边界线（Tracks 同款）：范围是要用的那一段，其余退到后面去。
+    // 画在音符**之后** —— 压在音符上才读得懂"这些不在范围里"；键盘区不压。
+    if (rangeOn) {
+      g.fillStyle = RANGE_DIM;
+      const leftEnd = Math.min(w, Math.max(KEY_W, xa));
+      if (leftEnd > KEY_W) g.fillRect(KEY_W, RULER_H, leftEnd - KEY_W, h - RULER_H);
+      const rightStart = Math.min(w, Math.max(KEY_W, xb));
+      if (rightStart < w) g.fillRect(rightStart, RULER_H, w - rightStart, h - RULER_H);
+      g.fillStyle = RANGE_LINE;
+      for (const x of [xa, xb]) {
+        if (x < KEY_W || x > w) continue;
+        g.fillRect(x - 0.5, RULER_H, 1, h - RULER_H);
+      }
+    }
+
     // 键盘（固定在最左，不随横向滚动）
     g.fillStyle = '#0d0e10';
     g.fillRect(0, RULER_H, KEY_W, h - RULER_H);
@@ -273,7 +305,7 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
       }
     }
 
-    // 标尺（顶部）
+    // 标尺（顶部）。三条带：0..MARK_H 范围楔形、中间窄带小节号、底部 PLAY_H 播放头三角。
     g.fillStyle = 'rgba(20,21,24,0.96)';
     g.fillRect(0, 0, w, RULER_H);
     g.font = '9.5px ui-monospace, monospace';
@@ -285,13 +317,37 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
       g.fillStyle = COL.lineBar;
       g.fillRect(Math.round(x), RULER_H - 5, 1, 5);
       g.fillStyle = 'rgba(255,255,255,0.42)';
-      g.fillText(String(Math.floor(b / bar) + 1), x + 3, RULER_H / 2);
+      g.fillText(String(Math.floor(b / bar) + 1), x + 3, LABEL_Y);
+    }
+    // 标尺上的范围覆盖（贯穿整条尺子）+ 两条边界线；楔形把手随后再画。
+    if (rangeOn) {
+      const a0 = Math.max(KEY_W, xa), b0 = Math.min(w, xb);
+      if (b0 > a0) {
+        const grad = g.createLinearGradient(0, 0, 0, RULER_H);
+        grad.addColorStop(0, 'rgba(10,132,255,0.18)');
+        grad.addColorStop(1, 'rgba(10,132,255,0.34)');
+        g.fillStyle = grad;
+        g.fillRect(a0, 0, b0 - a0, RULER_H);
+      }
+      g.fillStyle = RANGE_LINE;
+      for (const x of [xa, xb]) {
+        if (x < KEY_W || x > w) continue;
+        g.fillRect(x - 0.5, 0, 1, RULER_H);
+      }
+      // 平顶楔形：竖边压在边界线上、斜边收回线上（入点朝右收、出点朝左收）。
+      if (xa >= KEY_W - 10 && xa <= w + 10) {
+        g.beginPath(); g.moveTo(xa, 0); g.lineTo(xa + 10, 0); g.lineTo(xa, MARK_H); g.closePath(); g.fill();
+      }
+      if (xb >= KEY_W - 10 && xb <= w + 10) {
+        g.beginPath(); g.moveTo(xb - 10, 0); g.lineTo(xb, 0); g.lineTo(xb, MARK_H); g.closePath(); g.fill();
+      }
     }
     g.fillStyle = 'rgba(255,255,255,0.10)';
     g.fillRect(0, RULER_H - 1, w, 1);
+    // 角格最后画：盖住楔形/范围线伸进键盘列的那一截。
     g.fillStyle = '#0d0e10';
     g.fillRect(0, 0, KEY_W, RULER_H);
-  }, [pps, gridBeats, project.loop, project.timeSig, track, sel, pressedKey]);
+  }, [pps, gridBeats, loop.on, loop.a, loop.b, length, timeSig, track, sel, pressedKey, box]);
 
   // ── 画力度 ────────────────────────────────────────────────────────────────────────────────
   const drawVel = useCallback(() => {
@@ -385,7 +441,9 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     if (!el) return;
     if (!track) { el.style.display = 'none'; return; }
     el.style.display = '';
-    const beat = secondsToBeat(clock.seconds(), project.tempo);
+    const beat = secondsToBeat(clock.seconds(), tempo) - baseBeat;
+    // 游标不在这一段里就不画 —— 画在段外的位置会被当成本段的播放头。
+    if (beat < 0 || beat > length) { el.style.display = 'none'; return; }
     const x = KEY_W + beat * pps;
     el.style.transform = `translateX(${x}px)`;
   });
@@ -417,7 +475,73 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     return null;
   };
 
+  /**
+   * 框里的音符。命中按**屏幕上画出来的那个方块**算（公式与 drawRoll 一字不差），
+   * 所以"框到谁就是谁" —— 不会因为网格吸附或滚动量差半格而漏选、多选。
+   * 相交即选中（框住大半枚也算），与常见 DAW 一致：长音的尾巴扫到框里就该被带走。
+   */
+  const notesInBox = (x0: number, y0: number, x1: number, y1: number): string[] => {
+    if (!track) return [];
+    const { ox, oy } = viewOffset();
+    const ax = Math.min(x0, x1), bx = Math.max(x0, x1);
+    const ay = Math.min(y0, y1), by = Math.max(y0, y1);
+    const out: string[] = [];
+    for (const n of track.notes) {
+      const nx = KEY_W + n.start * pps - ox;
+      const ny = RULER_H + (PITCH_TOP - n.pitch) * ROW_H - oy + 1;
+      const nw = Math.max(3, n.dur * pps - 1);
+      if (nx < bx && nx + nw > ax && ny < by && ny + ROW_H - 2 > ay) out.push(n.id);
+    }
+    return out;
+  };
+
+  /** 框选的一次更新（pointermove 与 pointerup 共用）。以按下时的选择为底做并集：Shift 的
+   *  语义是"再选上这些"，不是"只留这些" —— 也免得手一抖框空了就把原有选择清光。 */
+  const marqueeAt = (x1: number, y1: number) => {
+    const d = drag.current, m = d.marquee;
+    if (d.mode !== 'marquee' || !m || !track) return;
+    if (Math.abs(x1 - m.x0) > 2 || Math.abs(y1 - m.y0) > 2) d.moved = true;
+    if (!d.moved) return;
+    setBox({ x0: m.x0, y0: m.y0, x1, y1 });
+    const next = m.selBase.slice();
+    for (const id of notesInBox(m.x0, m.y0, x1, y1)) if (!next.includes(id)) next.push(id);
+    m.selCur = next;
+    setSel(next);
+  };
+
   const snap = (beat: number): number => Math.round(beat / gridBeats) * gridBeats;
+
+  /** 标尺上带的两枚楔形把手（热区与 Tracks 同宽：沿边界线左右各留 2px，中间 10px）。
+   *  只在循环开着（范围画着）的时候有；不然那条带上就是一片普通的 seek 区。 */
+  const wedgeAt = (clientX: number, localY: number): 'loopA' | 'loopB' | null => {
+    if (!loop.on || !(loop.b > loop.a) || localY > MARK_H) return null;
+    const rect = rollRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    const { ox } = viewOffset();
+    const x = clientX - rect.left;
+    const xa = KEY_W + loop.a * pps - ox;
+    const xb = KEY_W + loop.b * pps - ox;
+    if (x >= xa - 2 && x <= xa + 10) return 'loopA';
+    if (x >= xb - 10 && x <= xb + 2) return 'loopB';
+    return null;
+  };
+
+  /** 拖范围把手：段内拍 → 全局拍（+baseBeat），吸附到当前网格。写回走 ctl.update
+   *  （= 工程的循环 A/B），同一个 label 让一次拖动只算撤销栈里的一步。 */
+  const dragLoop = (which: 'loopA' | 'loopB', clientX: number) => {
+    const g0 = Math.max(0, baseBeat + snap(beatAtX(clientX)));
+    if (which === 'loopA') {
+      ctl.update(p => {
+        const a = Math.max(0, Math.min(g0, p.loop.b - 1e-3));
+        return Math.abs(p.loop.a - a) < 1e-6 ? p : { ...p, loop: { ...p.loop, a } };
+      }, 'Loop A');
+    } else {
+      ctl.update(p => {
+        const b = Math.max(g0, p.loop.a + 1e-3);
+        return Math.abs(p.loop.b - b) < 1e-6 ? p : { ...p, loop: { ...p.loop, b } };
+      }, 'Loop B');
+    }
+  };
 
   const onDown = (e: React.PointerEvent) => {
     if (!track) return;
@@ -427,9 +551,22 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
 
-    // 标尺：点一下就是 seek。键盘正上方那一小块角落不算标尺，点它什么也不做。
+    // 标尺：上带的两枚楔形是范围把手（与 Tracks 一样，抓把手不会顺手挪播放头），
+    // 其余地方点一下就是 seek。键盘正上方那一小块角落不算标尺，点它什么也不做。
+    // 卷帘里的坐标是**段内拍**，交给时钟前要加回段的原点。
     if (localY < RULER_H) {
-      if (localX >= KEY_W) ctl.seekBeat(snap(beatAtX(e.clientX)));
+      if (localX < KEY_W) return;
+      const wedge = wedgeAt(e.clientX, localY);
+      if (wedge) {
+        (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+        drag.current = {
+          mode: wedge, noteId: '', grabBeat: 0, grabPitch: 0,
+          origStart: 0, origDur: 0, origVel: 0, origPitch: 0, base: [], moved: false,
+        };
+        if (rollRef.current) rollRef.current.style.cursor = 'ew-resize';
+        return;
+      }
+      ctl.seekBeat(snap(beatAtX(e.clientX)) + baseBeat);
       return;
     }
 
@@ -439,8 +576,23 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
       const p = pitchAtY(e.clientY);
       setPressedKey(p);
-      midiOut.audition(track.channel, p, 100);
+      midiOut.audition(track.channel, p, 100, track.id);
       if (rollRef.current) rollRef.current.style.cursor = 'pointer';
+      return;
+    }
+
+    // Shift + 拖：框选。**起手落在音符上也照框** —— 最常见的就是从已有音符之间拉出框来。
+    // 不拖（点一下）还是老的 Shift 点选：加减那一枚，在 onUp 里补。
+    if (e.shiftKey) {
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      const hit = hitNote(e.clientX, e.clientY);
+      drag.current = {
+        mode: 'marquee', noteId: hit ? hit.note.id : '', grabBeat: 0, grabPitch: 0,
+        origStart: 0, origDur: 0, origVel: 0, origPitch: 0,
+        base: [], moved: false,
+        marquee: { x0: localX, y0: localY, selBase: sel, selCur: sel },
+      };
+      if (rollRef.current) rollRef.current.style.cursor = 'crosshair';
       return;
     }
 
@@ -449,18 +601,10 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     const grabP = pitchAtY(e.clientY);
     const hit = hitNote(e.clientX, e.clientY);
     if (hit) {
-      // 选中：Shift 加减一枚；不按 Shift 时**已经选中的就保持整组** —— 拖一组是常态，
-      // 每点一下都缩成一枚就等于每组都要重新框一遍。
-      let group: string[];
-      if (e.shiftKey) {
-        group = sel.includes(hit.note.id) ? sel.filter(x => x !== hit.note.id) : [...sel, hit.note.id];
-        setSel(group);
-      } else if (sel.includes(hit.note.id)) {
-        group = sel;
-      } else {
-        group = [hit.note.id];
-        setSel(group);
-      }
+      // 选中：**已经选中的就保持整组** —— 拖一组是常态，每点一下都缩成一枚
+      // 就等于每组都要重新框一遍。点别的收成那一枚。
+      const group = sel.includes(hit.note.id) ? sel : [hit.note.id];
+      if (!sel.includes(hit.note.id)) setSel(group);
       ctl.select(track.id, hit.note.id);
       drag.current = {
         mode: hit.edge ? 'resize' : 'move', noteId: hit.note.id,
@@ -471,7 +615,7 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
         moved: false,
       };
       // 点一下就能听见 —— 不给听感的编辑器等于闭眼画画。
-      midiOut.audition(track.channel, hit.note.pitch, effectiveVelocity(hit.note, track));
+      midiOut.audition(track.channel, hit.note.pitch, effectiveVelocity(hit.note, track), track.id);
       if (rollRef.current) rollRef.current.style.cursor = hit.edge ? 'ew-resize' : 'grabbing';
       return;
     }
@@ -479,11 +623,11 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     // 空白：按下就落一枚音，**不松手横着拖 = 拉长成一条长音，上下拖 = 换音高**。
     // 只点一下不拖，得到的仍然是一格 —— 与从前的单击行为一致，手感不突变。
     // 整个过程都用同一个 label，一次「按下→拖→松手」在撤销栈里只算一步。
-    const b0 = Math.max(0, snap(grabB));
+    const b0 = Math.max(0, Math.min(snap(grabB), Math.max(0, length - Math.max(MIN_DUR, gridBeats))));
     const dur0 = Math.max(MIN_DUR, gridBeats);
     const id = newMidiId('mn');
-    update(pp => addNote(pp, track.id, { pitch: grabP, start: b0, dur: dur0, vel: 100 }, id), 'Draw note');
-    midiOut.audition(track.channel, grabP, 100);
+    updateEditor(t => addNoteToTrack(t, { pitch: grabP, start: b0, dur: dur0, vel: 100 }, id), 'Draw note');
+    midiOut.audition(track.channel, grabP, 100, track.id);
     setSel([id]);
     drag.current = {
       mode: 'draw', noteId: id, grabBeat: grabB, grabPitch: grabP,
@@ -496,7 +640,7 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     const d = drag.current;
     if (!track) return;
     if (!d.mode) {
-      // 悬停：右边缘给拉伸光标、音符身给抓取光标、空白给十字（画）——
+      // 悬停：范围把手给左右拖动光标、右边缘给拉伸光标、音符身给抓取光标、空白给十字（画）——
       // 不提示的话，"能拉长"和"能画长音"这两件事都得靠猜。
       const rect = rollRef.current?.getBoundingClientRect();
       const el = rollRef.current;
@@ -505,8 +649,23 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
         if (el) el.style.cursor = 'pointer';
         return;
       }
+      if (rect && e.clientY - rect.top < RULER_H) {
+        // 标尺：与 Tracks 同一颗光标 —— 点一下挪游标、上带还能拖范围把手。
+        if (el) el.style.cursor = 'ew-resize';
+        return;
+      }
       const h = hitNote(e.clientX, e.clientY);
-      if (el) el.style.cursor = h ? (h.edge ? 'ew-resize' : 'grab') : 'crosshair';
+      // 按住 Shift 时一律给十字：这时拖出来的是框，压在哪枚音上都不再是"抓它"。
+      if (el) el.style.cursor = (e.shiftKey || !h) ? 'crosshair' : (h.edge ? 'ew-resize' : 'grab');
+      return;
+    }
+    if (d.mode === 'loopA' || d.mode === 'loopB') {
+      dragLoop(d.mode, e.clientX);
+      return;
+    }
+    if (d.mode === 'marquee') {
+      const rect = rollRef.current?.getBoundingClientRect();
+      if (rect) marqueeAt(e.clientX - rect.left, e.clientY - rect.top);
       return;
     }
     const b = beatAtX(e.clientX);
@@ -519,8 +678,9 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
       // 目标起点 = 抓点位移**落在网格上**；不是把位移本身量化 —— 后者对"抓在音符中间"
       // 的音符会一动手就跳半格。全程以快照为原点，绝不累加，所以拖多久都不会漂。
       let dB = Math.max(0, snap(anchor.start + (b - d.grabBeat))) - anchor.start;
-      // 整组一起走：不许任何一枚被推成负起点，全体退到刚好贴着 0
+      // 整组一起走：不许任何一枚被推成负起点，也不许越过段尾（窗口外看不见，等于凭空消失）
       for (const x of d.base) dB = Math.max(dB, -x.start);
+      for (const x of d.base) dB = Math.min(dB, length - (x.start + x.dur));
       // 音高偏移 = 现在这一行减去抓取时那一行。**别写成 grabPitch - p**：屏幕上往下
       // 走一行 pitch 是变小的，符号一反，往上拖就变成降调（用户报的"没跟鼠标"里有一半是这个）。
       // 越界时整组一起停，而不是单独 clamp 某一枚把音程拉歪。
@@ -531,10 +691,10 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
       }
       if (!d.moved && dP === 0 && Math.abs(dB) < 1e-9) return;
       d.moved = true;
-      update(pp => {
-        let next = pp;
+      updateEditor(t => {
+        let next = t;
         for (const x of d.base) {
-          next = updateNote(next, track.id, x.id, { start: x.start + dB, pitch: x.pitch + dP });
+          next = updateNoteInTrack(next, x.id, { start: x.start + dB, pitch: x.pitch + dP });
         }
         return next;
       }, 'Move notes');
@@ -543,30 +703,45 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
 
     if (d.mode === 'resize') {
       // 抓的是右边缘：新右边缘 = 原右边缘 + 位移（吸到网格），再反推长度 ⇒ 边缘与指针 1:1
-      const right = snap(anchor.start + anchor.dur + (b - d.grabBeat));
+      const right = Math.min(length, snap(anchor.start + anchor.dur + (b - d.grabBeat)));
       const dur = Math.max(MIN_DUR, right - anchor.start);
       if (!d.moved && Math.abs(dur - anchor.dur) < 1e-9) return;
       d.moved = true;
-      update(pp => updateNote(pp, track.id, d.noteId, { dur }), 'Resize note');
+      updateEditor(t => updateNoteInTrack(t, d.noteId, { dur }), 'Resize note');
       return;
     }
 
     if (d.mode === 'draw') {
       // 往后拖变长；往左拖过起点就把起点也带过去（`a` 是左端、`z` 是右端）——
       // 这样画到一半发现起头偏了，不用先松手再挪。
-      const bNow = snap(b);
+      const bNow = Math.max(0, Math.min(snap(b), length));
       const a = Math.max(0, Math.min(d.origStart, bNow));
-      const z = Math.max(d.origStart, bNow);
+      const z = Math.max(a, Math.min(length, Math.max(d.origStart, bNow)));
       const span = z - a;
       const dur = span > 1e-6 ? Math.max(MIN_DUR, span) : Math.max(MIN_DUR, gridBeats);
       const pitch = Math.max(0, Math.min(127, p));
       d.moved = true;
-      update(pp => updateNote(pp, track.id, d.noteId, { start: a, dur, pitch }), 'Draw note');
+      updateEditor(t => updateNoteInTrack(t, d.noteId, { start: a, dur, pitch }), 'Draw note');
     }
   };
 
-  const onUp = () => {
-    drag.current.mode = ''; drag.current.base = [];
+  const onUp = (e?: React.PointerEvent) => {
+    const d = drag.current, m = d.marquee;
+    if (d.mode === 'marquee' && m) {
+      const rect = rollRef.current?.getBoundingClientRect();
+      if (rect && e) marqueeAt(e.clientX - rect.left, e.clientY - rect.top);
+      if (!d.moved && d.noteId) {
+        // 没拖出去 = 一次 Shift 点选：加减那一枚（与框选之前的行为一致）。
+        const next = sel.includes(d.noteId) ? sel.filter(x => x !== d.noteId) : [...sel, d.noteId];
+        m.selCur = next;
+        setSel(next);
+      }
+      // 主音符（工程里 selNote 只有一枚，agent 报的 selection 用它）指着选择里的第一枚。
+      const primary = m.selCur[0];
+      if (track && primary && ctl.project.selNote !== primary) ctl.select(track.id, primary);
+      setBox(null);
+    }
+    d.mode = ''; d.base = []; d.marquee = undefined;
     setPressedKey(-1);
   };
 
@@ -600,7 +775,7 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
     const d = drag.current;
     const frac = 1 - (clientY - top - 6) / (h - 14);
     const vel = Math.max(1, Math.min(127, Math.round(frac * 127)));
-    update(pp => updateNote(pp, track.id, d.noteId, { vel }), 'Velocity');
+    updateEditor(t => updateNoteInTrack(t, d.noteId, { vel }), 'Velocity');
   };
 
   const onVelMove = (e: React.PointerEvent) => {
@@ -613,9 +788,14 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (!track) return;
+    // 框完之后总得有个"散开"的路 —— 否则清掉一组只能一枚一枚点回去（点空白是画音符）。
+    if (e.key === 'Escape' && sel.length) {
+      setSel([]);
+      return;
+    }
     if ((e.key === 'Delete' || e.key === 'Backspace') && sel.length) {
       e.preventDefault();
-      update(pp => removeNotes(pp, track.id, sel), 'Delete notes');
+      updateEditor(t => removeNotesFromTrack(t, sel), 'Delete notes');
       setSel([]);
     }
   };
@@ -623,42 +803,6 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
   return (
     <div ref={rootRef} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, outline: 'none' }}
       tabIndex={0} onKeyDown={onKeyDown}>
-      {/* 工具条 */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px', flexShrink: 0,
-        borderBottom: '0.5px solid rgba(255,255,255,0.08)',
-      }}>
-        <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.45)' }}>grid</span>
-        {GRID_CHOICES.map(gc => (
-          <button key={gc.label}
-            style={{
-              fontSize: 9.5, fontWeight: 600, padding: '1px 6px', borderRadius: 4, cursor: 'pointer',
-              background: Math.abs(gridBeats - gc.beats) < 1e-6 ? 'rgba(10,132,255,0.85)' : 'rgba(255,255,255,0.06)',
-              border: '0.5px solid rgba(255,255,255,0.14)',
-              color: Math.abs(gridBeats - gc.beats) < 1e-6 ? '#fff' : 'rgba(255,255,255,0.65)',
-            }}
-            onClick={() => setGridBeats(gc.beats)}>{gc.label}</button>
-        ))}
-        <button style={{
-          fontSize: 9.5, fontWeight: 600, padding: '1px 7px', borderRadius: 4, cursor: 'pointer',
-          background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(255,255,255,0.14)',
-          color: 'rgba(255,255,255,0.75)',
-        }}
-          title="把选中（没选中就整轨）的音符起点吸附到这个网格"
-          onClick={() => { if (track) update(pp => quantize(pp, track.id, gridBeats), 'Quantize'); }}>Quantize</button>
-        <div style={{ flex: 1 }} />
-        <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.45)' }}>zoom</span>
-        <input ref={zoomRef} className="midi-slider" type="range"
-          min={ZOOM_MIN} max={ZOOM_MAX} step={1} value={pps}
-          style={{ width: 96, flex: '0 0 auto', '--fill': zoomFill } as React.CSSProperties}
-          onChange={e => setZoom(Number(e.target.value))}
-          onDoubleClick={() => setZoom(DEFAULT_PPS)}
-          title="横向缩放（滚轮微调，双击回默认）" />
-        <span style={{ fontSize: 9.5, color: 'rgba(255,255,255,0.35)', width: 34 }}>
-          {Math.round(pps)}px
-        </span>
-      </div>
-
       {/* 卷帘 */}
       <div ref={scrollRef} onScroll={onScroll}
         style={{ position: 'relative', flex: 1, minHeight: 0, overflow: 'auto' }}>
@@ -674,14 +818,25 @@ export const MidiPianoRoll: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
               // 琴键上的双击也只是试听，不能顺手删掉 0 拍附近的音。
               if (rect && e.clientX - rect.left < KEY_W) return;
               const hit = hitNote(e.clientX, e.clientY);
-              if (hit && track) { update(pp => removeNotes(pp, track.id, [hit.note.id]), 'Delete note'); setSel([]); }
+              if (hit && track) { updateEditor(t => removeNotesFromTrack(t, [hit.note.id]), 'Delete note'); setSel([]); }
             }}
           />
+          {/* 播放头：三角落在标尺底部带、细线从三角顶往下穿（与 Tracks 同一套画法）。
+              外层只钉基准点，逐帧位移交给 useClockFrame 直改 transform。 */}
           <div ref={headRef} style={{
-            position: 'absolute', top: 0, bottom: 0, width: 1.5, background: COL.playhead,
-            boxShadow: '0 0 6px rgba(255,69,58,0.7)', pointerEvents: 'none', willChange: 'transform',
-            zIndex: 3, display: 'none',
-          }} />
+            position: 'absolute', top: 0, bottom: 0, left: 0, width: 0,
+            pointerEvents: 'none', willChange: 'transform', zIndex: 3, display: 'none',
+          }}>
+            <div style={{
+              position: 'absolute', left: -5, top: RULER_H - PLAY_H, width: 10, height: PLAY_H,
+              background: COL.playhead, clipPath: 'polygon(0 0, 100% 0, 50% 100%)',
+              filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.6))',
+            }} />
+            <div style={{
+              position: 'absolute', left: -0.5, top: RULER_H - PLAY_H, bottom: 0, width: 1,
+              background: COL.playhead, opacity: 0.85,
+            }} />
+          </div>
         </div>
       </div>
 

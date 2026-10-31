@@ -77,6 +77,9 @@ class MasterClock {
   private lastBroadcast = 0;
   private subs = new Set<() => void>();
   private inflight = false;
+  /** 去抖中的那一发 seek：`wantSeek` 永远是最后一次想去的秒数。 */
+  private seekTimer: ReturnType<typeof setTimeout> | null = null;
+  private wantSeek = 0;
 
   constructor() {
     // 插值的起点就是"现在"：没有这一句，第一次 play 之后 dt 会等于整个页面存活时长，
@@ -123,10 +126,56 @@ class MasterClock {
   }
 
   // ── 传输控制（都是"说给后端听"，本地不抢先改状态）──────────────────────────────────────────
-  async play(): Promise<void> { await this.ctl('play'); }
-  async pause(): Promise<void> { await this.ctl('pause'); }
+  async play(): Promise<void> {
+    // 先把挂着的 seek 发出去，再按播放 —— 顺序反过来的话，后端会从旧位置起跑，
+    // 80ms 后那一发 seek 才把它拽回来（听感上就是"一按播放先窜一下"）。
+    await this.flushSeek();
+    await this.ctl('play');
+  }
+  async pause(): Promise<void> {
+    await this.flushSeek();
+    await this.ctl('pause');
+  }
   async toggle(): Promise<void> { await this.ctl('toggle'); }
-  async seek(s: number): Promise<void> { await this.ctl('seek', Math.max(0, s)); }
+  /** 跳转：**本地先落位**（播放头与画面立刻跟手），网络那一趟去抖 80ms 只发最后一发。
+   *  一次拖动会来几十上百发，后端不需要每一发都知道 —— 它只需要最终位置。
+   *  返回的 Promise 在那一发回包后 resolve（调用方一般不用等它）。 */
+  async seek(s: number): Promise<void> {
+    const t = Math.max(0, s);
+    this.wantSeek = t;
+    this.posAtSnap = t;
+    this.perfAtSnap = nowPerf();
+    this.broadcast();
+    await new Promise<void>(resolve => {
+      if (this.seekTimer) clearTimeout(this.seekTimer);
+      this.seekTimer = setTimeout(() => {
+        this.seekTimer = null;
+        void this.ctl('seek', this.wantSeek).then(() => resolve(), () => resolve());
+      }, 80);
+    });
+  }
+
+  /** 停在某一秒（片尾 / 收摊用）：先暂停、再落位。顺序反过来的话，pause 的回包里
+   *  后端那一刻的位置会把刚落好的位置盖掉。 */
+  async stopAt(s: number): Promise<void> {
+    const t = Math.max(0, s);
+    if (this.seekTimer) { clearTimeout(this.seekTimer); this.seekTimer = null; }
+    this.posAtSnap = t;
+    this.perfAtSnap = nowPerf();
+    await this.ctl('pause');
+    await this.ctl('seek', t);
+    this.posAtSnap = t;
+    this.perfAtSnap = nowPerf();
+    this.broadcast();
+  }
+
+  /** 把还没发出去的那一发 seek 立刻发掉（按播放 / 暂停前用）。 */
+  private async flushSeek(): Promise<void> {
+    if (!this.seekTimer) return;
+    clearTimeout(this.seekTimer);
+    this.seekTimer = null;
+    await this.ctl('seek', this.wantSeek);
+  }
 
   private async ctl(action: string, value?: number): Promise<void> {
     try {
@@ -282,6 +331,8 @@ class MasterClock {
   dispose(): void {
     if (this.timer) clearInterval(this.timer);
     if (this.raf) cancelAnimationFrame(this.raf);
+    if (this.seekTimer) clearTimeout(this.seekTimer);
+    this.seekTimer = null;
     this.stopTicker?.();
     this.stopTicker = null;
     this.timer = null;

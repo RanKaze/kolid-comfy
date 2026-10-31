@@ -13,11 +13,13 @@ import { hit, isRecording } from '../../keybindings';
 import { useDocAssets } from '../docAssets';
 import { clipCards, groupDocAssets, whereText } from './assetScope';
 import { ensureFrame, ensureWaveform } from './previews';
-import { reloadInstruments, useInstrumentLibrary, type InstrumentItem } from '../../midi/library';
+import { instrumentAbsPath, reloadInstruments, useInstrumentLibrary, type InstrumentItem } from '../../midi/library';
 import { useMidiSettings } from '../../midi/settings';
 import { nativeEngine } from '../../midi/engine';
 import { midiOut } from '../../midi/output';
+import { editorState, subscribeEditor } from '../../midi/soundWindow';
 import { addTrack as addMidiTrack } from '../../midi/model';
+import { loadInstrumentOnTrack } from '../../midi/instrumentOps';
 import type { MidiCtl } from '../../midi/types';
 
 // ── Assets 窗 ───────────────────────────────────────────────────────────────────────────────
@@ -493,7 +495,7 @@ const instrNote: React.CSSProperties = {
 
 /** 谁去加载这件乐器。sfz = 引擎自己读，vst3-preset / surge-fxp = 只登记了位置。 */
 const backendBadge = (it: InstrumentItem): string =>
-  it.backend === 'vst3-preset' ? 'VST3'
+  it.backend === 'vst3-preset' || it.backend === 'vst3-plugin' ? 'VST3'
     : it.backend === 'surge-fxp' ? 'FXP'
       : it.backend === 'sfz' ? 'SFZ'
         : it.backend === 'kontakt' ? 'NKI'
@@ -501,26 +503,39 @@ const backendBadge = (it: InstrumentItem): string =>
             : (it.backend || '?');
 
 // 播不动的时候要说清"卡在哪一步"，否则一律 "not wired up" 等于什么也没说。
+// Kontakt / HALion 的库是封闭容器 —— 那些行本身播不动，但**那件乐器的插件播得动**：
+// 双击上面对应的插件行（Installed plug-in），装上后用它自己的音色窗挑一次，关窗就自动入库。
 const whyNotPlayable = (it: InstrumentItem): string =>
   it.backend === 'kontakt'
-    ? "Kontakt instrument — the samples inside are NI's .ncw (a closed compressed format). Listed so you can see what is here; this engine cannot decode it yet."
+    ? "Kontakt instrument — its samples live in NI's closed .ncw format, so this row cannot be loaded as-is. To get this sound: double-click the Kontakt 7 row under Installed plug-in, pick it in the window that opens (or press Edit on the track later), then close that window — the sound is saved into the library."
     : it.backend === 'vstsound'
-      ? "HALion library — everything lives inside Steinberg's .vstsound container, which is not a sample file this engine can read."
+      ? "HALion library — the sounds live inside Steinberg's .vstsound container. Load the HALion 7 plug-in row instead; its window opens so you can pick this library's sound (the track's Edit button reopens it later)."
       : 'Listed, but this engine cannot play it yet — the player for this format is not wired up';
 
 const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => {
   const { lib, loading, error } = useInstrumentLibrary();
   const settings = useMidiSettings();
-  // 双击一行 = 给它加一条轨（轨名就是乐器名）；能播的顺手装进引擎，这样新轨立刻有声音。
-  // `loaded` 是**已经装上的那个**，`busy` 是正在装的那个 —— 装一次可能要读十几兆 wav，
-  // 没有"正在载入"的话界面会像卡住了。
-  const [loaded, setLoaded] = useState(() => nativeEngine.currentInstrument()?.path || '');
+  // 双击一行 = 给它加一条轨（轨名就是乐器名），**这条轨**装这件乐器 —— 2b 之后每条轨各有
+  // 一支实例，同一件装在两条轨上也是两份，互不顶掉。
+  // `busy` 是正在装的那个 —— 装一次可能要读十几兆 wav，没有"正在载入"的话界面会像卡住了。
   const [busy, setBusy] = useState('');
   const [note, setNote] = useState('');
   const [noteTone, setNoteTone] = useState<'info' | 'error' | 'quiet'>('info');
   const say = (text: string, tone: 'info' | 'error' | 'quiet' = 'info') => { setNote(text); setNoteTone(tone); };
+  // 音色窗的回话（开不出来 / 存好了）也落到这条底栏 —— 用户在 Assets 里双击起的窗，
+  // 结果不该只有 MIDI 模式才看得见。按提示对象认"新的一条"。
+  const edNote = useRef<object | null>(null);
+  useEffect(() => subscribeEditor(() => {
+    const n = editorState().note;
+    if (!n || n === edNote.current) return;
+    edNote.current = n;
+    say(n.text, n.tone);
+  }), []);
   // 正在响的那件（三个音走完之前别让人连点 —— 连点会叠成一片）。
   const [playing, setPlaying] = useState('');
+  // "哪几件已经装着"来自引擎的实况（工程里每条轨的那件 + 试听槽那件），不是本地记忆。
+  const [, setEngineVer] = useState(0);
+  useEffect(() => nativeEngine.subscribe(() => setEngineVer(v => v + 1)), []);
   // 第一次打开这一档：拉一次。settings 还没回来时拿到的 root 是空，等它到了
   // （路径/深度一变）midi/library.ts 自己会再扫一遍 —— 这里不用等它。
   useEffect(() => { void reloadInstruments(); }, []);
@@ -539,8 +554,8 @@ const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => 
 
   if (loading && !lib) return <div style={instrNote}>{'Scanning ' + (settings.instrumentsLibrary || 'the library') + '…'}</div>;
   if (error) return <div style={{ ...instrNote, color: '#ff8a80' }}>{error}</div>;
-  if (!lib || !lib.state.set) {
-    return <div style={instrNote}>{'No instrument library yet.\nPick the folder in Settings → MIDI → Instruments Library.'}</div>;
+  if (!lib || (!lib.state.set && !lib.presetsState.set && !(lib.items || []).length)) {
+    return <div style={instrNote}>{'No instrument library yet.\nPick the folder in Settings → MIDI (Instruments Library, and Presets Folder for Kontakt/HALion exports).'}</div>;
   }
   if (!lib.ok) return <div style={{ ...instrNote, color: '#ff8a80' }}>{lib.state.reason || lib.error || 'library unreadable'}</div>;
   if (!rows.length) {
@@ -549,31 +564,46 @@ const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => 
       : 'No instruments found in this folder.\nIf they are nested deeper, raise Scan depth in Settings → MIDI.'}</div>;
   }
 
-  const root = (settings.instrumentsLibrary || '').replace(/[\\/]+$/, '');
-  const absPath = (it: InstrumentItem) => (root ? root + '/' + it.where : it.where);
+  // 每条自带 root：乐器和预设住在两棵根里（预设根见 Settings → MIDI）。绝对路径的 where
+  // （catalog 那种）直接用它自己。老后端没有 root 字段时回落到乐器库那条。
+  // 拼法住在 library.ts —— agent 的 instrument_library 报的必须是同一个绝对路径，否则
+  // "列表里的这一条"与"装到轨上的那一条"对不上。
+  const absPath = (it: InstrumentItem) => instrumentAbsPath(it, settings.instrumentsLibrary);
+  // 已经出声的那几件：工程里各轨的实例（open）+ 试听槽那件。路径比较不分大小写。
+  const loadedPaths = new Set<string>([
+    ...(nativeEngine.getStatus().instruments || []).filter(r => r.open).map(r => r.path),
+    ...(nativeEngine.currentInstrument()?.path ? [nativeEngine.currentInstrument()!.path] : []),
+  ].map(p => p.replace(/\\/g, '/').toLowerCase()));
+  const isLoaded = (it: InstrumentItem) => loadedPaths.has(absPath(it).replace(/\\/g, '/').toLowerCase());
 
-  /** 双击一行：在这份文档的 MIDI 工程里加一条轨，轨名＝乐器名。
-   *  能播的顺手装进引擎 —— 引擎一次只持一件乐器，装的就是双击这件，新轨立刻出声。
+  /** 双击一行：在这份文档的 MIDI 工程里加一条轨，轨名＝乐器名，**这件乐器装给这条新轨**。
    *  播不动的也照样加轨：轨道是编排，不是播放能力；底栏照 ▶ 那套说清卡在哪一步。 */
   const addTrackFor = async (it: InstrumentItem) => {
     if (busy) return;
-    midi.update(p => addMidiTrack(p, it.name), `Add ${it.name}`);
-    if (!it.playable) { say(`Added track ${it.name} — ${whyNotPlayable(it)}`, 'quiet'); return; }
+    if (!it.playable) {
+      midi.update(p => addMidiTrack(p, it.name), `Add ${it.name}`);
+      say(`Added track ${it.name} — ${whyNotPlayable(it)}`, 'quiet');
+      return;
+    }
     const target = absPath(it);
-    if (loaded === target) { say(`Added track ${it.name} · instrument already loaded`); return; }
     setBusy(target);
-    const inst = await nativeEngine.loadInstrument(target);
+    // 加轨、写路径、推整表、装乐器、插件本体替用户弹窗 —— 全在 instrumentOps 那一条里
+    // （agent 的 set_track_instrument 走的是同一个函数）。
+    const inst = await loadInstrumentOnTrack(midi, { path: target, name: it.name });
     setBusy('');
-    if (inst.error) {
-      setLoaded('');
+    if (!inst.ok) {
       // 不弹窗：这一档的底栏就是报错的地方，和"读不到库"同一个位置。轨已经加上了，别吞掉这句。
       say(`Added track ${it.name} — could not load the instrument: ${inst.error}`, 'error');
       return;
     }
-    setLoaded(inst.path || target);
     // 大小按 KB 报（后端 `kb`）—— 小乐器用 MB 会被截成 0，读起来像没装上。
     const size = inst.kb >= 1024 ? (inst.kb / 1024).toFixed(1) + ' MB' : inst.kb + ' KB';
-    say(`Added track ${it.name} · loaded ${inst.zones} zone${inst.zones === 1 ? '' : 's'}`
+    const what = inst.kind === 'vst3'
+      ? (/\.vst3$/i.test(target)
+        ? 'loaded the plug-in — pick a sound in its window'
+        : 'loaded the plug-in preset')
+      : `loaded ${inst.zones} zone${inst.zones === 1 ? '' : 's'}`;
+    say(`Added track ${it.name} · ${what}`
       + (inst.kb ? ` · ${size}` : '')
       + (inst.failed ? ` · ${inst.failed} sample${inst.failed === 1 ? '' : 's'} skipped` : ''));
   };
@@ -590,27 +620,32 @@ const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => 
     const target = absPath(it);
     setPlaying(target);
     setNote('');
-    if (loaded !== target) {
-      setBusy(target);
-      const inst = await nativeEngine.loadInstrument(target);
-      setBusy('');
-      if (inst.error) {
-        setLoaded('');
-        say(`Could not load ${it.name} — ${inst.error}`, 'error');
+    // 试听走**试听槽**（不进任何轨）：装在可能已经装着的那件上就不重装，只弹三个音。
+    // 本机引擎不在时回落到外部 MIDI 端口 —— 别让用户对着一颗没反应的键猜。
+    if (!nativeEngine.available) {
+      if (!midiOut.canAudition()) {
+        say('Nothing can play it — no native engine and no MIDI out port.', 'quiet');
         setPlaying('');
         return;
       }
-      setLoaded(inst.path || target);
+      const tones = [48, 60, 72];
+      tones.forEach((p, i) => {
+        window.setTimeout(() => midiOut.audition(0, p, i === 1 ? 108 : 84), i * 240);
+      });
+      window.setTimeout(() => setPlaying(''), tones.length * 240 + 400);
+      return;
     }
-    // 装上不等于能听见：既没本机引擎也没外部端口时，别让用户对着一颗没反应的键猜。
-    if (!midiOut.canAudition()) {
-      say('Loaded, but nothing can play it — no native engine and no MIDI out port.', 'quiet');
+    setBusy(target);
+    const inst = await nativeEngine.preview(target, -1, 100);
+    setBusy('');
+    if (inst.error) {
+      say(`Could not load ${it.name} — ${inst.error}`, 'error');
       setPlaying('');
       return;
     }
     const tones = [48, 60, 72];
     tones.forEach((p, i) => {
-      window.setTimeout(() => midiOut.audition(0, p, i === 1 ? 108 : 84), i * 240);
+      window.setTimeout(() => { void nativeEngine.preview(target, p, i === 1 ? 108 : 84); }, i * 240);
     });
     window.setTimeout(() => setPlaying(''), tones.length * 240 + 400);
   };
@@ -633,8 +668,8 @@ const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => 
       )}
       {playableCount === 0 && (
         <div style={{ ...instrNote, padding: '4px 4px 8px', textAlign: 'left', lineHeight: 1.5 }}
-          title={'This engine reads SFZ (text + wav). Everything else is listed so the folder is not a blank box.'}>
-          {`Nothing here can be played yet — this engine only reads SFZ. ${sources.join(' / ') || 'These'} ${rows.length === 1 ? 'is' : 'are'} listed so you can see what is in the folder. Double-click a row to add a track for it; click ▶ for the reason it cannot play.`}
+          title={'This engine reads SFZ, VST3 plug-ins and VST3 presets. Everything else is listed so the folder is not a blank box.'}>
+          {`Nothing here can be played yet — this engine reads SFZ, VST3 plug-ins and .vstpreset. ${sources.join(' / ') || 'These'} ${rows.length === 1 ? 'is' : 'are'} listed so you can see what is in the folder. Double-click a row to add a track for it; click ▶ for the reason it cannot play.`}
         </div>
       )}
       {shown.map(it => (
@@ -647,7 +682,7 @@ const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => 
           style={{
             display: 'flex', alignItems: 'center', gap: 6, height: 20, padding: '0 4px', borderRadius: 4,
             cursor: 'pointer',
-            background: loaded && absPath(it) === loaded ? 'rgba(10,132,255,0.16)' : 'transparent',
+            background: isLoaded(it) ? 'rgba(10,132,255,0.16)' : 'transparent',
             opacity: busy && busy === absPath(it) ? 0.5 : 1,
           }}
         >
@@ -681,7 +716,7 @@ const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => 
             whiteSpace: 'nowrap', color: 'rgba(255,255,255,0.3)',
           }}>{it.model || it.source}</span>
           <span
-            title={it.playable ? 'This engine can play it (SFZ)' : whyNotPlayable(it)}
+            title={it.playable ? 'This engine can play it' : whyNotPlayable(it)}
             style={{
               flexShrink: 0, fontSize: 8.5, fontWeight: 600, letterSpacing: 0.3, padding: '1px 3px', borderRadius: 3,
               color: it.playable ? '#3b9dff' : 'rgba(255,255,255,0.3)',
@@ -689,7 +724,7 @@ const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => 
               border: '0.5px solid ' + (it.playable ? 'rgba(10,132,255,0.4)' : 'rgba(255,255,255,0.1)'),
             }}
           >{backendBadge(it)}</span>
-          {loaded && absPath(it) === loaded && (
+          {isLoaded(it) && (
             <span style={{ flexShrink: 0, fontSize: 9, color: '#3b9dff' }}>loaded</span>
           )}
         </div>
@@ -1092,7 +1127,7 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
     : instrLib.loading ? 'scanning the library…'
       : instrLib.error ? instrLib.error
         : instrLib.lib && !instrLib.lib.ok ? (instrLib.lib.state.reason || 'library unreadable')
-          : instrLib.lib && instrLib.lib.state.set
+          : instrLib.lib && (instrLib.lib.state.set || instrLib.lib.presetsState.set)
             ? `${instrLib.lib.total} ${instrLib.lib.total === 1 ? 'instrument' : 'instruments'} · `
               + `${(instrLib.lib.items || []).filter(i => i.playable).length} playable · `
               + (instrLib.lib.source === 'catalog' ? 'catalog' : 'folder scan')

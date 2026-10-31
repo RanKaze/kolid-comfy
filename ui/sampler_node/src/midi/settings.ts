@@ -14,14 +14,20 @@ export type LibraryState = { set: boolean; ok: boolean; reason: string };
 export type MidiSettings = {
   /** 乐器库的根目录。空串 = 还没选。 */
   instrumentsLibrary: string;
+  /** 用户从宿主导出的 .vstpreset 住在哪儿 —— Kontakt/HALion 那类库靠它才出得了声。 */
+  presetsLibrary: string;
   /** 往下展开几层目录（0 = 只看根目录）。 */
   scanDepth: number;
   /** 后端对这条路径的实话 —— 没设 / 不存在 / 不是目录 / 可读。 */
   state: LibraryState;
+  /** 同上，预设根那一份。 */
+  presetsState: LibraryState;
 };
 
 const NONE: LibraryState = { set: false, ok: false, reason: '' };
-export const MIDI_SETTINGS_DEFAULT: MidiSettings = { instrumentsLibrary: '', scanDepth: 3, state: NONE };
+export const MIDI_SETTINGS_DEFAULT: MidiSettings = {
+  instrumentsLibrary: '', presetsLibrary: '', scanDepth: 3, state: NONE, presetsState: NONE,
+};
 
 let current: MidiSettings = { ...MIDI_SETTINGS_DEFAULT };
 let loading: Promise<void> | null = null;
@@ -29,29 +35,44 @@ const subs = new Set<() => void>();
 const emit = () => subs.forEach(fn => fn());
 
 /** 后端回的东西**认得出**才收（见文件头：`{}` 不是一份设置）。 */
+const readState = (v: unknown, fallback: LibraryState): LibraryState => {
+  const st = v as Partial<LibraryState> | null;
+  return st && typeof st === 'object' && typeof st.ok === 'boolean'
+    ? { set: !!st.set, ok: !!st.ok, reason: typeof st.reason === 'string' ? st.reason : '' }
+    : fallback;
+};
+
 const adopt = (data: unknown): MidiSettings | null => {
   const d = data as Partial<MidiSettings> | null;
   if (!d || typeof d !== 'object' || typeof d.instrumentsLibrary !== 'string' || typeof d.scanDepth !== 'number') {
     return null;
   }
-  const st = d.state as Partial<LibraryState> | undefined;
   return {
     instrumentsLibrary: d.instrumentsLibrary,
+    // 老后端没有这个键：认成"没设"，别把用户正在用的预设根抹成 undefined。
+    presetsLibrary: typeof d.presetsLibrary === 'string' ? d.presetsLibrary : '',
     scanDepth: d.scanDepth,
-    state: st && typeof st.ok === 'boolean'
-      ? { set: !!st.set, ok: !!st.ok, reason: typeof st.reason === 'string' ? st.reason : '' }
-      : NONE,
+    state: readState(d.state, NONE),
+    presetsState: readState(d.presetsState, NONE),
   };
 };
 
 /** 后端的字段名是下划线（`instruments_library`），这里转一次就往回走，不把两套名字散到组件里。 */
 const fromWire = (data: unknown) => {
-  const d = data as { instruments_library?: unknown; scan_depth?: unknown; state?: unknown } | null;
+  const d = data as {
+    instruments_library?: unknown; presets_library?: unknown; scan_depth?: unknown;
+    state?: unknown; presets_state?: unknown;
+  } | null;
   if (!d || typeof d !== 'object') return null;
-  return adopt({ instrumentsLibrary: d.instruments_library, scanDepth: d.scan_depth, state: d.state });
+  return adopt({
+    instrumentsLibrary: d.instruments_library, presetsLibrary: d.presets_library,
+    scanDepth: d.scan_depth, state: d.state, presetsState: d.presets_state,
+  });
 };
 
-const toWire = (s: MidiSettings) => ({ instruments_library: s.instrumentsLibrary, scan_depth: s.scanDepth });
+const toWire = (s: MidiSettings) => ({
+  instruments_library: s.instrumentsLibrary, presets_library: s.presetsLibrary, scan_depth: s.scanDepth,
+});
 
 export const getMidiSettings = (): MidiSettings => current;
 
@@ -77,7 +98,9 @@ export const ensureMidiSettings = (): Promise<void> => {
 };
 
 /** 改一项。乐观写 + POST；后端把夹过的值回来时以它为准（失败就保持用户填的样子）。 */
-export const patchMidiSettings = async (patch: Partial<Pick<MidiSettings, 'instrumentsLibrary' | 'scanDepth'>>): Promise<void> => {
+export const patchMidiSettings = async (
+  patch: Partial<Pick<MidiSettings, 'instrumentsLibrary' | 'presetsLibrary' | 'scanDepth'>>,
+): Promise<void> => {
   current = { ...current, ...patch };
   emit();
   try {

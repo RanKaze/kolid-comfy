@@ -12,10 +12,15 @@
 //    活不过一次刷新，读档时把 blob: 的片段剪掉 —— 图池条目的 URL 是持久的，照常回来。
 
 import type { StagingItem, VideoGenPorts } from '../../types';
+import type { MidiNote, MidiProject, MidiTrack } from '../../midi/model';
+import type { MidiEditor } from '../../midi/types';
+import {
+  MAX_VEL, MIN_DUR, MIN_TEMPO, MIN_VEL, MAX_TEMPO, TRACK_COLORS, beatToSeconds, clampInt, clampNum, secondsToBeat,
+} from '../../midi/model';
 import type { MediaInfo } from './audio';
 import type { Ingested } from './ingest';
 
-// 四种轨：
+// 五种轨：
 //  * video / audio —— 素材轨，帧与声直接来自源文件；
 //  * layer —— **合成轨**。它自己不装素材，只装"Layer 段"：每一段绑定一套独立图层
 //    （在 Layers 窗里编辑），这一帧的画面**就是这一段图层自己的合成** —— 不叠加脚下视频轨的帧，
@@ -24,11 +29,22 @@ import type { Ingested } from './ingest';
 //  * process —— **process 轨**（琥珀色）：只装 Processor / Preset 的**占位段**（VidProcPending），
 //    不播、不参与合成、不收素材。Run 时自动创建（在输出轨正下方），产物落到上方输出轨；
 //    占位段原地保留，所以可以反复 ▶ 重跑。
-export type VidTrackKind = 'video' | 'audio' | 'layer' | 'process';
+//  * midi —— **乐器轨**（紫色）：轨上装的是 MIDI 段（`VidClip.notes`），不参与视频合成、
+//    不收素材文件。它与音频轨同住下半区 —— 声域共用 mute / audio solo，时间线共用秒，
+//    音符自己住在拍上（见 `VidMusic` / `midiClipWindow`）。
+export type VidTrackKind = 'video' | 'audio' | 'layer' | 'process' | 'midi';
 export type VidTrack = {
   id: string;
   kind: VidTrackKind;
   name: string;
+  /** MIDI 轨的通道 0..15（9 = 鼓，协议固定）。其余轨型不用这个字段。 */
+  channel?: number;
+  /** MIDI 轨挂的乐器（.vstpreset / .sfz 的绝对路径）。空 = 这一轨不出声。 */
+  instrument?: string;
+  /** MIDI 轨的力度基线 0.1..2：音符自己的 vel × 它才是发出去的力度。 */
+  velScale?: number;
+  /** MIDI 轨行上的色点；缺省由 midi/model 的调色板按轨序补。 */
+  color?: string;
   /** `'output'` = **产物输出轨**：Processor / Preset 的 process 段跑完，成品固定落在这一条
    *  上层轨的对应时间位置（占位段自己留在原地，可以反复重跑）。每条输出口一条，懒建。
    *  `'vgen'` = **生成器段所在的 process 轨**（紧贴对应输出轨下方、每个输出口一条、懒建复用）：
@@ -87,9 +103,10 @@ export type VidClip = {
   start: number;
   /** 时间线上的长度（s）—— 裁剪之后的那段。 */
   duration: number;
-  /** 这段从源文件的哪里开始播（s）。 */
+  /** 这段从源文件的哪里开始播（s）。**MIDI 段例外：单位是拍**，窗口在内容里的起点
+   *  （左裁会改它，可以为负 = 内容前面留白）—— 见 `midiClipWindow`。 */
   offset: number;
-  /** 源文件总长（s）。 */
+  /** 源文件总长（s）；MIDI 段是内容总长（拍）。 */
   srcDuration: number;
   /** 源里有可解码的音频（导入时探测）。 */
   hasAudio: boolean;
@@ -108,6 +125,10 @@ export type VidClip = {
   /** 关键帧系统（见 VidKeyframes）：持久化在段上，随 .cud 走。眼下只有 Layer 段用 ——
    *  通道里记的是它图层集的 fx 参数与 transform。结构对参数源开放，之后扩啥都只是新键。 */
   keyframes?: VidKeyframes;
+  /** MIDI 段的音符。时间单位是**拍**，原点在这段内容的开头（0 = 内容第一拍）——
+   *  段怎么挪、怎么裁，音符本身不动；能听见/看见的窗口由 `offset + duration` 决定
+   *  （见 `midiClipWindow`）。只有 `kind === 'midi'` 的段有这一栏。 */
+  notes?: MidiNote[];
 };
 
 // ── 关键帧系统 ───────────────────────────────────────────────────────────────────────────────
@@ -618,6 +639,48 @@ export const vgenWith = (v: VidGenPending, slot: keyof VideoGenPorts, value: unk
   return { ...v, params: { ...v.params, [String(port)]: value } };
 };
 
+/** 工程的音乐时间基：MIDI 段与音频/视频共用同一条时间线（秒），音符自己住在拍上。
+ *  BPM / 拍号 / PPQ 是**整份工程**的（与主流 DAW 一致：改 BPM 音符原地不动、听感变快），
+ *  循环区间也记在拍上。旧档没有 `music` → 用 `musicOf` 的缺省值（120 / 4/4 / 480）。 */
+export type VidMusic = {
+  /** 每分钟四分音符数。 */
+  tempo: number;
+  /** [分子, 分母]。分母只认 2/4/8/16。 */
+  timeSig: [number, number];
+  /** 导出 .mid 的 tick 密度（每四分音符多少 tick）；内部一律浮点拍。 */
+  ppq: number;
+  /** 循环区间（拍）。 */
+  loop: { on: boolean; a: number; b: number };
+};
+
+export const MUSIC_DEFAULT: VidMusic = {
+  tempo: 120, timeSig: [4, 4], ppq: 480, loop: { on: false, a: 0, b: 16 },
+};
+
+export const musicOf = (p: VidProject): VidMusic => p.music ?? MUSIC_DEFAULT;
+
+/** MIDI 段在**内容拍轴**上的可见窗口 [from, to)。窗口之外（= 左右裁掉的那部分）的音符
+ *  仍然留在段上（裁错了可以拉回来），但不画、不响。 */
+export const midiClipWindow = (c: VidClip, tempo: number): { from: number; to: number } => {
+  const from = Number.isFinite(c.offset) ? c.offset : 0;
+  return { from, to: from + secondsToBeat(Math.max(0, c.duration), tempo) };
+};
+
+/** 段窗口里真正有效的音符：与窗口相交的那些，按交集裁齐（窗口边缘切进来的音只响切进来的那截）。 */
+export const midiNotesInClip = (c: VidClip, tempo: number): MidiNote[] => {
+  const notes = c.notes;
+  if (!notes || !notes.length) return [];
+  const { from, to } = midiClipWindow(c, tempo);
+  const out: MidiNote[] = [];
+  for (const n of notes) {
+    const s = Math.max(n.start, from);
+    const e = Math.min(n.start + n.dur, to);
+    if (e <= s) continue;
+    out.push(s === n.start && e === n.start + n.dur ? n : { ...n, start: s, dur: e - s });
+  }
+  return out.sort((a, b) => a.start - b.start || a.pitch - b.pitch);
+};
+
 export type VidProject = {
   tracks: VidTrack[];
   clips: VidClip[];
@@ -640,12 +703,12 @@ export type VidProject = {
   /** solo 的轨道 id，音频与视频分开记。随工程走，与 `muteIds` 同理。 */
   soloAudioIds?: string[];
   soloVideoIds?: string[];
-  /** 同一份 .cud 里还装得下一套 MIDI（`midi/model.ts`）。视频侧**只透传不解释**：音符的归一化
-   *  归 midi/useMidiHost，读档时它自己会再读一遍。旧档没有这个字段 → 就是没有 MIDI。 */
-  midi?: unknown;
+  /** 音乐时间基（BPM / 拍号 / PPQ / 循环）。MIDI 音符与音频/视频共用一条时间线，
+   *  MIDI 段内部按拍记；旧档没有这个字段 → `MUSIC_DEFAULT`。 */
+  music?: VidMusic;
   /** 这份工程的**查看模式**（Image / Video / Midi）。它是文档的属性、随 .cud 走：
    *  打开哪份工程就落回它自己存的模式，不再是页面级的一颗开关。旧档没有这个字段 → 'image'。
-   *  同一份 .cud 里视频与 MIDI 并存（见 midi/model.ts），模式只决定**先看哪一副面孔**。 */
+   *  同一份 .cud 里视频与 MIDI 并存（都在 tracks/clips 里），模式只决定**先看哪一副面孔**。 */
   mode?: 'image' | 'video' | 'midi';
 };
 
@@ -836,7 +899,7 @@ export const rebindAsset = (
   return {
     ...p,
     assets: p.assets.map(fixAsset),
-    clips: p.clips.map(c => (c.kind === 'layer' ? c : fixClip(c))),
+    clips: p.clips.map(c => (c.kind === 'layer' || c.kind === 'midi' ? c : fixClip(c))),
   };
 };
 
@@ -845,7 +908,8 @@ export const trackOf = (p: VidProject, id: string): VidTrack | null => p.tracks.
 /** 播放头 t 落在哪一段上（按轨道上下序，先命中先赢）。`kind` 缺省 = 不挑类型。 */
 export const clipAt = (p: VidProject, t: number, kind?: VidTrackKind): VidClip | null => {
   for (const tr of p.tracks) {
-    if (tr.kind === 'process') continue;             // process 轨只有占位段，从来不播
+    // process 轨只有占位段；MIDI 轨的声音走音序器，也不参与"这一刻哪段画面/音频在播"。
+    if (tr.kind === 'process' || tr.kind === 'midi') continue;
     if (kind && tr.kind !== kind) continue;
     const hit = p.clips.find(c => c.trackId === tr.id && !c.pending && t >= c.start && t < c.start + c.duration);
     if (hit) return hit;
@@ -932,15 +996,22 @@ export const trimClip = (p: VidProject, id: string, edge: 'l' | 'r', t: number, 
     ...p,
     clips: p.clips.map(c => {
       if (!ids.has(c.id)) return c;
-      // Layer / process（生成器、处理器占位）段没有源文件：两条边都不受"源长"限制
-      // （它们的 srcDuration 只是造段那一刻的时长）—— 否则永远拉不过造出来时的长度。
-      const timeless = c.kind === 'layer' || c.kind === 'process';
+      // Layer / process（生成器、处理器占位）/ MIDI 段没有"源文件时长"这条边界：两条边都不受
+      // 限制（它们的 srcDuration 只是造段那一刻的长度）—— 否则永远拉不过造出来时的长度。
+      const timeless = c.kind === 'layer' || c.kind === 'process' || c.kind === 'midi';
       if (edge === 'l') {
         // 左边：start 最多退到 start-offset（源的开头），最多进到 start+duration-MIN。
         const lo = timeless ? 0 : Math.max(0, c.start - c.offset);
         const hi = c.start + c.duration - MIN_CLIP;
         const ns = Math.min(hi, Math.max(lo, t));
         const d = ns - c.start;
+        // MIDI 段的 offset 是**拍**：左裁把窗口在内容里平移，允许为负（内容前面留白）。
+        if (c.kind === 'midi') {
+          return {
+            ...c, start: ns, duration: c.duration - d,
+            offset: c.offset + secondsToBeat(d, musicOf(p).tempo),
+          };
+        }
         return { ...c, start: ns, duration: c.duration - d, offset: timeless ? 0 : Math.max(0, c.offset + d) };
       }
       // 右边：end 最多到源的结尾（offset + srcDuration），最短 MIN_CLIP。
@@ -980,7 +1051,11 @@ export const splitClip = (p: VidProject, id: string, t: number, linked = true): 
     clips.push({ ...c, groupId: gLeft, duration: cut, ...(c.keyframes ? { keyframes: kfL } : {}) });
     // 占位段切开后右半丢掉 pending：两半都揣着同一段的快照，各点各的 ▶ 会把这一段跑两遍。
     const { pending: _dropR, ...right } = c;
-    clips.push({ ...right, id: newVidId('clip'), groupId: gRight, start: c.start + cut, duration: c.duration - cut, offset: c.offset + cut,
+    // MIDI 段窗口在内容拍轴上切：右半的 offset 推进的是**拍**；音符本身两边都留着，
+    // 各自按窗口显示（左半看不到切点之后、右半看不到切点之前）。
+    const rightOffset = c.kind === 'midi'
+      ? c.offset + secondsToBeat(cut, musicOf(p).tempo) : c.offset + cut;
+    clips.push({ ...right, id: newVidId('clip'), groupId: gRight, start: c.start + cut, duration: c.duration - cut, offset: rightOffset,
       ...(c.keyframes ? { keyframes: kfR } : {}) });
   }
   return changed ? { ...p, clips } : p;
@@ -1040,6 +1115,7 @@ export const copyVidClips = (p: VidProject, ids: readonly string[]): VidClipClip
     .filter(c => want.has(c.id) || (c.groupId && groups.has(c.groupId)))
     .map(c => ({
       ...c,
+      ...(c.notes ? { notes: c.notes.map(n => ({ ...n })) } : {}),
       ...(c.pending ? { pending: cloneProcPending(c.pending) } : {}),
       ...(c.vgen ? { vgen: cloneVgenPending(c.vgen) } : {}),
     }))
@@ -1071,7 +1147,7 @@ export const pasteVidClips = (p: VidProject, cb: VidClipClipboard, at: number): 
     return same ? same.id : null;
   };
   const idMap = new Map<string, string>();        // 旧 id → 新 id（组 / 链 / 图层认亲都用它）
-  for (const c of cb.clips) idMap.set(c.id, newVidId(c.kind === 'layer' ? 'lcl' : 'clip'));
+  for (const c of cb.clips) idMap.set(c.id, newVidId(c.kind === 'layer' ? 'lcl' : c.kind === 'midi' ? 'mcl' : 'clip'));
   const groupMap = new Map<string, string>();
   const stamp = `copy-${Date.now()}`;
   const clips: VidClip[] = [];
@@ -1097,6 +1173,8 @@ export const pasteVidClips = (p: VidProject, cb: VidClipClipboard, at: number): 
       start: Math.max(0, t + (c.start - cb.anchor)),
       procOwner: undefined,
       ...(c.kind === 'layer' ? { layerKey: fromKey } : {}),
+      // 音符是段自己的内容：副本必须换一批 id（同一枚音的 id 在工程里不该出现两次）。
+      ...(c.notes ? { notes: c.notes.map(n => ({ ...n, id: newVidId('mn') })) } : {}),
       ...(c.pending
         ? { pending: { ...cloneProcPending(c.pending), runId: `${stamp}-p-${id}` } }
         : {}),
@@ -1171,15 +1249,408 @@ export const usedByCount = (idx: Map<string, Set<string>>, ...keys: (string | nu
   return ids.size;
 };
 
-export const addTrack = (p: VidProject, kind: VidTrackKind): VidProject => {
+/** 新 MIDI 轨的下一个通道：绕开 9（鼓是协议固定）与已被占用的号；16 个都占满就回到 0。 */
+const nextMidiChannel = (p: VidProject): number => {
+  const used = new Set(p.tracks.filter(t => t.kind === 'midi').map(t => t.channel ?? 0));
+  for (let ch = 0; ch < 16; ch++) if (ch !== 9 && !used.has(ch)) return ch;
+  for (let ch = 0; ch < 16; ch++) if (!used.has(ch)) return ch;
+  return 0;
+};
+
+export const addTrack = (p: VidProject, kind: VidTrackKind, name?: string): VidProject => {
   const n = p.tracks.filter(t => t.kind === kind).length + 1;
-  const name = kind === 'video' ? `Video ${n}` : kind === 'layer' ? `Layer ${n}`
-    : kind === 'process' ? `Process ${n}` : `Audio ${n}`;
-  const track: VidTrack = { id: newVidId('trk'), kind, name };
+  const title = name?.trim() || (kind === 'video' ? `Video ${n}` : kind === 'layer' ? `Layer ${n}`
+    : kind === 'process' ? `Process ${n}` : kind === 'midi' ? `MIDI ${n}` : `Audio ${n}`);
+  const track: VidTrack = kind === 'midi'
+    ? {
+      id: newVidId('trk'), kind, name: title,
+      channel: nextMidiChannel(p), instrument: '', velScale: 1,
+      color: TRACK_COLORS[p.tracks.filter(t => t.kind === 'midi').length % TRACK_COLORS.length],
+    }
+    : { id: newVidId('trk'), kind, name: title };
   // 视频轨 / Layer 轨 / process 轨插到最上面（序 = 数组序，也是渲染的上下序），
-  // 音频轨排到所有音频轨的最后。
-  const tracks = kind === 'audio' ? [...p.tracks, track] : [track, ...p.tracks];
+  // 音频轨与 MIDI 轨排到底部（声域在下半区）。
+  const tracks = kind === 'audio' || kind === 'midi' ? [...p.tracks, track] : [track, ...p.tracks];
   return { ...p, tracks };
+};
+
+/** 改 MIDI 轨的轨级设置（名字 / 通道 / 乐器 / 力度基线 / 色点）。非 MIDI 轨原样不动。 */
+export const updateMidiTrack = (
+  p: VidProject,
+  trackId: string,
+  patch: Partial<Pick<VidTrack, 'name' | 'channel' | 'instrument' | 'velScale' | 'color'>>,
+): VidProject => ({
+  ...p,
+  tracks: p.tracks.map(t => {
+    if (t.id !== trackId || t.kind !== 'midi') return t;
+    const next: VidTrack = { ...t, ...patch };
+    if (patch.name !== undefined) next.name = patch.name.trim() || t.name;
+    next.channel = clampInt(next.channel ?? 0, 0, 15);
+    next.instrument = String(next.instrument ?? '');
+    next.velScale = clampNum(next.velScale ?? 1, 0.1, 2);
+    return next;
+  }),
+});
+
+/** 在 MIDI 轨上造一段**空段**（双击轨道）：4 小节长，窗口从内容第 0 拍开始。
+ *  起点就是**点下去的那一刻**（不像素材段那样吸到轨尾 —— 空轨吸到轨尾 = 永远落在 0，
+ *  "在第 9 小节双击、段跑到第 1 小节"）。点进了一段里就顺到那一段的尾巴，连点两次不叠。
+ *  `id` 可由调用方给（Tracks 双击后要当场选中这一段，不能等 React 更新完再回头找）。 */
+export const addMidiClip = (p: VidProject, trackId: string, at: number, beats = 16, id = newVidId('mcl')): VidProject => {
+  const track = trackOf(p, trackId);
+  if (!track || track.kind !== 'midi') return p;
+  const tempo = musicOf(p).tempo;
+  const lenBeats = Math.max(1, Number(beats) || 16);
+  const dur = beatToSeconds(lenBeats, tempo);
+  let start = Math.max(0, Number(at) || 0);
+  // 同一轨上已有的段：点进去就和它叠了 → 顺到这个（串联的）冲突段之后。
+  for (const c of p.clips) {
+    if (c.trackId !== trackId || c.kind !== 'midi') continue;
+    if (start < c.start + c.duration && start + dur > c.start) start = c.start + c.duration;
+  }
+  const clip: VidClip = {
+    id, trackId, kind: 'midi', name: 'MIDI ' + (p.clips.filter(c => c.kind === 'midi' && c.trackId === trackId).length + 1),
+    src: '', origin: 'asset', start, duration: dur,
+    offset: 0, srcDuration: lenBeats, hasAudio: false, notes: [],
+  };
+  return { ...p, clips: [...p.clips, clip] };
+};
+
+/** 把段上的音符整批换掉（编辑器写回用；调用方负责拍 ↔ 段的换算）。 */
+export const setMidiClipNotes = (p: VidProject, clipId: string, notes: MidiNote[]): VidProject => {
+  const sorted = [...notes].sort((a, b) => a.start - b.start || a.pitch - b.pitch);
+  return { ...p, clips: p.clips.map(c => (c.id === clipId && c.kind === 'midi' ? { ...c, notes: sorted } : c)) };
+};
+
+/** 段在**全局拍轴**上的原点（= 段起点对应的拍）。音符的全局拍 = 这个数 + (n.start - 窗口起点)。 */
+export const midiClipOriginBeat = (p: VidProject, c: VidClip): number =>
+  secondsToBeat(c.start, musicOf(p).tempo);
+
+/** 一条 MIDI 轨上所有**能听见**的音符（裁到段窗口内），坐标换算到**全局拍**。
+ *  投影、编辑视图、写回三条路都用它 —— 换算只写这一处。 */
+const midiTrackNotesGlobal = (p: VidProject, trackId: string): MidiNote[] => {
+  const tempo = musicOf(p).tempo;
+  const out: MidiNote[] = [];
+  for (const c of p.clips) {
+    if (c.trackId !== trackId || c.kind !== 'midi') continue;
+    const origin = midiClipOriginBeat(p, c);
+    const { from } = midiClipWindow(c, tempo);
+    for (const n of midiNotesInClip(c, tempo)) out.push({ ...n, start: origin + (n.start - from) });
+  }
+  return out.sort((a, b) => a.start - b.start || a.pitch - b.pitch);
+};
+
+/** 喂给引擎/外部端口的只读投影：所有 MIDI 轨 + 音符换算到**全局拍**。
+ *  - 只用段窗口里的音符（裁掉的部分不响，与界面一致）；
+ *  - 每条 MIDI 轨都在，**空轨也留**（引擎按 id 认乐器，漏一条就等于把它卸了）；
+ *  - 段上的音符是内容拍，`start` 是时间线秒 —— 换算是 `秒→拍 + (音符 - 窗口起点)`。 */
+export const midiProjectOf = (p: VidProject): MidiProject => {
+  const music = musicOf(p);
+  const muted = new Set(p.muteIds ?? []);
+  const soloed = new Set(p.soloAudioIds ?? []);
+  const tracks = p.tracks.filter(t => t.kind === 'midi').map((t, idx) => ({
+    id: t.id,
+    name: t.name,
+    channel: clampInt(t.channel ?? 0, 0, 15),
+    instrument: t.instrument ?? '',
+    velScale: clampNum(t.velScale ?? 1, 0.1, 2),
+    mute: muted.has(t.id),
+    solo: soloed.has(t.id),
+    color: t.color || TRACK_COLORS[idx % TRACK_COLORS.length],
+    notes: midiTrackNotesGlobal(p, t.id),
+  }));
+  return {
+    version: 1,
+    tempo: music.tempo,
+    timeSig: music.timeSig,
+    ppq: music.ppq,
+    tracks,
+    loop: music.loop,
+    selTrack: tracks[0]?.id ?? '',
+    selNote: '',
+  };
+};
+
+/** 钢琴卷帘的编辑视图：时间线上选中那一段。没有选中 / 不是 MIDI 段 = null。
+ *  音符换成**段内拍**（0 = 窗口第一拍），窗口外（左/右裁掉）的音符不在这里 —— 写回时由
+ *  `applyEditorNotes` 按 id 做差量，隐藏的那部分原样留着。 */
+export const midiEditorOf = (p: VidProject, clipId: string | null | undefined): MidiEditor | null => {
+  if (!clipId) return null;
+  const c = p.clips.find(x => x.id === clipId);
+  if (!c || c.kind !== 'midi') return null;
+  const tr = p.tracks.find(t => t.id === c.trackId && t.kind === 'midi');
+  if (!tr) return null;
+  const music = musicOf(p);
+  const { from } = midiClipWindow(c, music.tempo);
+  const origin = midiClipOriginBeat(p, c);
+  const muted = new Set(p.muteIds ?? []);
+  const soloed = new Set(p.soloAudioIds ?? []);
+  const idx = p.tracks.filter(t => t.kind === 'midi').findIndex(t => t.id === tr.id);
+  const track: MidiTrack = {
+    id: tr.id,
+    name: tr.name,
+    channel: clampInt(tr.channel ?? 0, 0, 15),
+    instrument: tr.instrument ?? '',
+    velScale: clampNum(tr.velScale ?? 1, 0.1, 2),
+    mute: muted.has(tr.id),
+    solo: soloed.has(tr.id),
+    color: tr.color || TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length],
+    notes: midiNotesInClip(c, music.tempo).map(n => ({ ...n, start: n.start - from })),
+  };
+  return {
+    clipId: c.id,
+    trackId: tr.id,
+    track,
+    length: Math.max(MIN_DUR, secondsToBeat(Math.max(0, c.duration), music.tempo)),
+    baseBeat: origin + from,
+    contentOffset: from,
+    tempo: music.tempo,
+    timeSig: music.timeSig,
+    ppq: music.ppq,
+    loop: { on: music.loop.on, a: music.loop.a - (origin + from), b: music.loop.b - (origin + from) },
+  };
+};
+
+/** 卷帘写回：`next` 是编辑视图那条轨（段内拍）。按 id 做**差量**：
+ *  - 窗口外的音符不在 base/next 里，原样保留（左裁掉的头、右裁掉的尾都还在段内容里）；
+ *  - 窗口边上被裁过的长音，用"位移量"套回它在内容里的真身，隐藏的那截不会被截断。 */
+export const applyEditorNotes = (p: VidProject, editor: MidiEditor, next: MidiTrack): VidProject => {
+  const c = p.clips.find(x => x.id === editor.clipId);
+  if (!c || c.kind !== 'midi') return p;
+  const base = new Map(editor.track.notes.map(n => [n.id, n]));
+  const nextMap = new Map(next.notes.map(n => [n.id, n]));
+  const out: MidiNote[] = [];
+  for (const orig of c.notes ?? []) {
+    const b = base.get(orig.id);
+    if (!b) { out.push(orig); continue; }          // 窗口外：看不见的音符不归卷帘管
+    const n = nextMap.get(orig.id);
+    if (!n) continue;                              // 删了
+    out.push({
+      ...orig,
+      pitch: clampInt(n.pitch, 0, 127),
+      vel: clampInt(n.vel, MIN_VEL, MAX_VEL),
+      start: Math.max(0, orig.start + (n.start - b.start)),
+      dur: Math.max(MIN_DUR, orig.dur + (n.dur - b.dur)),
+    });
+  }
+  for (const n of next.notes) {
+    if (base.has(n.id)) continue;                  // 改过的已经在上面写过
+    out.push({
+      id: n.id || newVidId('mn'),
+      pitch: clampInt(n.pitch, 0, 127),
+      vel: clampInt(n.vel, MIN_VEL, MAX_VEL),
+      start: Math.max(0, editor.contentOffset + Math.max(0, n.start)),
+      dur: Math.max(MIN_DUR, n.dur),
+    });
+  }
+  out.sort((a, b) => a.start - b.start || a.pitch - b.pitch);
+  return { ...p, clips: p.clips.map(x => (x.id === c.id ? { ...x, notes: out } : x)) };
+};
+
+/** 轨级投影写回：agent/工具改的是"整份投影"（轨属性 + M/S + 音符），这里把它并回工程。
+ *  音符写回按 id 认段：同一枚音留在原段、用位移量套回内容拍；新音符落到窗口包住它的那一段。 */
+const writeTrackNotes = (
+  p: VidProject, trackId: string, prevNotes: MidiNote[], nextNotes: MidiNote[],
+): VidProject => {
+  const clips = p.clips.filter(c => c.trackId === trackId && c.kind === 'midi');
+  if (!clips.length) return p;
+  const tempo = musicOf(p).tempo;
+  const windows = new Map(clips.map(c => [c.id, midiClipWindow(c, tempo)]));
+  const origins = new Map(clips.map(c => [c.id, midiClipOriginBeat(p, c)]));
+  const sets = new Map(clips.map(c => [c.id, [...(c.notes ?? [])]]));
+  const homeOf = new Map<string, string>();
+  for (const c of clips) for (const n of c.notes ?? []) homeOf.set(n.id, c.id);
+  const prevMap = new Map(prevNotes.map(n => [n.id, n]));
+  const nextMap = new Map(nextNotes.map(n => [n.id, n]));
+  for (const b of prevNotes) {
+    if (nextMap.has(b.id)) continue;
+    const home = homeOf.get(b.id);
+    if (!home) continue;
+    const arr = sets.get(home)!;
+    const k = arr.findIndex(n => n.id === b.id);
+    if (k >= 0) arr.splice(k, 1);
+  }
+  for (const n of nextNotes) {
+    const b = prevMap.get(n.id);
+    const home = b ? homeOf.get(n.id) : undefined;
+    if (b && home) {
+      const arr = sets.get(home)!;
+      const k = arr.findIndex(x => x.id === n.id);
+      if (k >= 0) {
+        const orig = arr[k];
+        arr[k] = {
+          ...orig,
+          pitch: clampInt(n.pitch, 0, 127),
+          vel: clampInt(n.vel, MIN_VEL, MAX_VEL),
+          start: Math.max(0, orig.start + (n.start - b.start)),
+          dur: Math.max(MIN_DUR, orig.dur + (n.dur - b.dur)),
+        };
+        continue;
+      }
+    }
+    // 新音符（或换了段）：落到窗口包住它的那一段，否则第一段。
+    const target = clips.find(c => {
+      const w = windows.get(c.id)!;
+      return n.start >= w.from && n.start < w.to;
+    }) ?? clips[0];
+    const w = windows.get(target.id)!;
+    const origin = origins.get(target.id)!;
+    sets.get(target.id)!.push({
+      id: n.id || newVidId('mn'),
+      pitch: clampInt(n.pitch, 0, 127),
+      vel: clampInt(n.vel, MIN_VEL, MAX_VEL),
+      start: Math.max(0, w.from + (n.start - origin)),
+      dur: Math.max(MIN_DUR, n.dur),
+    });
+  }
+  return {
+    ...p,
+    clips: p.clips.map(c => {
+      const arr = sets.get(c.id);
+      return arr ? { ...c, notes: arr.sort((a, b) => a.start - b.start || a.pitch - b.pitch) } : c;
+    }),
+  };
+};
+
+export const applyMidiProject = (p: VidProject, prev: MidiProject, next: MidiProject): VidProject => {
+  if (prev === next) return p;
+  let out = p;
+  const pm = musicOf(p);
+  if (pm.tempo !== next.tempo || pm.timeSig !== next.timeSig || pm.ppq !== next.ppq
+    || pm.loop !== next.loop) {
+    out = {
+      ...out,
+      music: { tempo: next.tempo, timeSig: next.timeSig, ppq: next.ppq, loop: next.loop },
+    };
+  }
+  const prevTracks = new Map(prev.tracks.map(t => [t.id, t]));
+  const nextTracks = new Map(next.tracks.map(t => [t.id, t]));
+  for (const t of next.tracks) {
+    const b = prevTracks.get(t.id);
+    if (b && b.notes !== t.notes) out = writeTrackNotes(out, t.id, b.notes, t.notes);
+  }
+  const removed = new Set(prev.tracks.filter(t => !nextTracks.has(t.id)).map(t => t.id));
+  if (removed.size) {
+    out = { ...out, clips: out.clips.filter(c => !removed.has(c.trackId)) };
+  }
+  const nonMidi = out.tracks.filter(t => t.kind !== 'midi' && !removed.has(t.id));
+  const midiTracks: VidTrack[] = next.tracks.map((t, idx) => {
+    const old = out.tracks.find(x => x.id === t.id);
+    return {
+      ...(old ?? { id: t.id, kind: 'midi' as const }),
+      id: t.id,
+      kind: 'midi' as const,
+      name: (t.name || '').trim() || old?.name || `MIDI ${idx + 1}`,
+      channel: clampInt(t.channel, 0, 15),
+      instrument: t.instrument,
+      velScale: clampNum(t.velScale, 0.1, 2),
+      color: t.color || old?.color,
+    };
+  });
+  out = { ...out, tracks: [...nonMidi, ...midiTracks] };
+  const mute = new Set(out.muteIds ?? []);
+  const solo = new Set(out.soloAudioIds ?? []);
+  for (const t of next.tracks) {
+    if (t.mute) mute.add(t.id); else mute.delete(t.id);
+    if (t.solo) solo.add(t.id); else solo.delete(t.id);
+  }
+  for (const id of removed) { mute.delete(id); solo.delete(id); }
+  return { ...out, muteIds: [...mute], soloAudioIds: [...solo] };
+};
+
+/** 音乐时间基的宽容读法：缺项用 `fallback`，坏值夹回合法区间。 */
+export const normalizeMusic = (raw: unknown, fallback: VidMusic = MUSIC_DEFAULT): VidMusic => {
+  if (!raw || typeof raw !== 'object') return fallback;
+  const o = raw as Record<string, unknown>;
+  const tempoRaw = Number(o.tempo);
+  const tempo = Number.isFinite(tempoRaw) ? clampNum(tempoRaw, MIN_TEMPO, MAX_TEMPO) : fallback.tempo;
+  const tsRaw = Array.isArray(o.timeSig) ? o.timeSig : fallback.timeSig;
+  const num = clampInt(tsRaw[0], 1, 16);
+  const denRaw = Math.round(Number(tsRaw[1]));
+  const den = [2, 4, 8, 16].includes(denRaw) ? denRaw : fallback.timeSig[1];
+  const ppqRaw = Number(o.ppq);
+  const ppq = Number.isFinite(ppqRaw) ? clampInt(ppqRaw, 24, 3840) : fallback.ppq;
+  const loopRaw = (o.loop && typeof o.loop === 'object' ? o.loop : {}) as Record<string, unknown>;
+  const aRaw = Number(loopRaw.a);
+  const bRaw = Number(loopRaw.b);
+  const a = Number.isFinite(aRaw) ? Math.max(0, aRaw) : fallback.loop.a;
+  const b = Math.max(a + 1, Number.isFinite(bRaw) ? bRaw : fallback.loop.b);
+  return {
+    tempo,
+    timeSig: [num, den],
+    ppq,
+    loop: { on: typeof loopRaw.on === 'boolean' ? loopRaw.on : fallback.loop.on, a, b },
+  };
+};
+
+/** 音符的宽容读法：坏值夹回合法区间，id 缺了就补一个。读档与迁移共用这一份口径。 */
+const sanitizeMidiNotes = (raw: unknown): MidiNote[] => {
+  if (!Array.isArray(raw)) return [];
+  const notes: MidiNote[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const n = item as Record<string, unknown>;
+    notes.push({
+      id: typeof n.id === 'string' && n.id ? n.id : newVidId('mn'),
+      pitch: clampInt(n.pitch, 0, 127),
+      start: Math.max(0, Number(n.start) || 0),
+      dur: Math.max(MIN_DUR, Number(n.dur) || MIN_DUR),
+      vel: clampInt(n.vel, MIN_VEL, MAX_VEL),
+    });
+  }
+  return notes.sort((a, b) => a.start - b.start || a.pitch - b.pitch);
+};
+
+// ── 老档迁移：`VidProject.midi`（一份并列的 MidiProject）→ 统一轨/段 ────────────────────────
+// 只做一次：读档时搬进 tracks/clips，写出去的工程里不再有这个键（见 normalizeVidProject）。
+// 只有"确实装过东西"的轨才搬（有音符或挂了乐器）—— 旧档默认那四条空轨不该凭空长出来。
+const migrateLegacyMidi = (
+  raw: unknown,
+  music: VidMusic,
+): { tracks: VidTrack[]; clips: VidClip[]; music: VidMusic; muteIds: string[]; soloAudioIds: string[] } | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  if (!Array.isArray(o.tracks)) return null;
+  const migratedMusic = normalizeMusic({
+    tempo: o.tempo, timeSig: o.timeSig, ppq: o.ppq, loop: o.loop,
+  }, music);
+  const tracks: VidTrack[] = [];
+  const clips: VidClip[] = [];
+  const muteIds: string[] = [];
+  const soloAudioIds: string[] = [];
+  let idx = 0;
+  for (const rawTrack of o.tracks) {
+    if (!rawTrack || typeof rawTrack !== 'object') continue;
+    const t = rawTrack as Record<string, unknown>;
+    const notes = sanitizeMidiNotes(t.notes);
+    const instrument = typeof t.instrument === 'string' ? t.instrument : '';
+    if (!notes.length && !instrument) continue;
+    const id = typeof t.id === 'string' && t.id ? t.id : newVidId('trk');
+    const trackId = tracks.some(x => x.id === id) ? newVidId('trk') : id;
+    tracks.push({
+      id: trackId,
+      kind: 'midi',
+      name: typeof t.name === 'string' && t.name ? t.name : `MIDI ${tracks.length + 1}`,
+      channel: clampInt(t.channel, 0, 15),
+      instrument,
+      velScale: clampNum(t.velScale, 0.1, 2),
+      color: typeof t.color === 'string' && t.color ? t.color : TRACK_COLORS[idx % TRACK_COLORS.length],
+    });
+    idx++;
+    if (t.mute) muteIds.push(trackId);
+    if (t.solo) soloAudioIds.push(trackId);
+    if (notes.length) {
+      // 一段盖住整份内容：旧模型里音符就在全局拍轴上，搬成段内内容拍（原点 0）。
+      const endBeat = Math.max(4, ...notes.map(n => n.start + n.dur));
+      clips.push({
+        id: newVidId('mcl'), trackId, kind: 'midi', name: t.name ? String(t.name) : 'MIDI',
+        src: '', origin: 'asset', start: 0, duration: beatToSeconds(endBeat, migratedMusic.tempo),
+        offset: 0, srcDuration: endBeat, hasAudio: false, notes,
+      });
+    }
+  }
+  if (!tracks.length) return null;
+  return { tracks, clips, music: migratedMusic, muteIds, soloAudioIds };
 };
 
 /** 在 Layer 轨上造一段。段 = 一段时间区间 + 一套独立图层（key 就是它自己的 id）。
@@ -1250,7 +1721,11 @@ export const placeImport = (
   trackId: string | null,
   at: number,
 ): VidProject => {
-  let track = (trackId ? trackOf(p, trackId) : null) ?? p.tracks.find(t => t.kind === 'video') ?? null;
+  const chosen = trackId ? trackOf(p, trackId) : null;
+  // 素材只能落在 video / audio 轨上。显式指到 Layer / process / MIDI 轨 = 这一趟不落
+  // （那些轨不吃文件；静默改道到别的轨会让"我明明拖到这条轨上"变成一句谎话）。
+  if (chosen && chosen.kind !== 'video' && chosen.kind !== 'audio') return p;
+  let track = chosen ?? p.tracks.find(t => t.kind === 'video') ?? null;
   // 落进一个**还没有视频轨**的工程（新工程 / 用户把视频轨删光了）：当场建一条，插在最上面 ——
   // 与 addTrack 的口径一致（视频插头、音频追尾）。没有这一手，拖进来的视频会静默消失，
   // 只在 Assets 里剩一件没人用的资产。
@@ -1948,6 +2423,7 @@ export const defaultVidProject = (): VidProject => ({
   inPoint: 0,
   outPoint: 0,
   fps: 30,
+  music: { tempo: 120, timeSig: [4, 4], ppq: 480, loop: { on: false, a: 0, b: 16 } },
   mode: 'image',
 });
 
@@ -2038,19 +2514,84 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
   try {
     const p = raw as VidProject;
     if (!p || !Array.isArray(p.tracks) || !Array.isArray(p.clips)) return base;
-    const trackIds = new Set(p.tracks.map(t => t.id));
+    // ── 轨道 ── 只认这五种类型；id 必须非空且唯一。MIDI 轨的轨级字段夹回合法区间。
+    const validKinds = new Set<VidTrackKind>(['video', 'audio', 'layer', 'process', 'midi']);
+    let tracks: VidTrack[] = [];
+    let midiCount = 0;
+    for (const t of p.tracks) {
+      if (!t || typeof t.id !== 'string' || !t.id) continue;
+      if (!validKinds.has(t.kind) || tracks.some(x => x.id === t.id)) continue;
+      const name = typeof t.name === 'string' && t.name ? t.name : 'Track';
+      if (t.kind === 'midi') {
+        tracks.push({
+          ...t,
+          name,
+          channel: clampInt(t.channel ?? 0, 0, 15),
+          instrument: typeof t.instrument === 'string' ? t.instrument : '',
+          velScale: clampNum(t.velScale ?? 1, 0.1, 2),
+          color: typeof t.color === 'string' && t.color ? t.color : TRACK_COLORS[midiCount % TRACK_COLORS.length],
+        });
+        midiCount++;
+      } else {
+        tracks.push({ ...t, name });
+      }
+    }
+    // ── 老档 MIDI → 统一轨/段（7.a，只搬一次）──
+    // 统一轨里已经有 MIDI 轨 = 这盘是搬过之后存的，不再碰旧键；否则把 `midi` 里的
+    // "确实装过东西"的轨搬进 tracks/clips，音乐时间基一并接过来。搬完旧键就不存在了。
+    let music = normalizeMusic((p as { music?: unknown }).music);
+    let legacyClips: VidClip[] = [];
+    let legacyMute: string[] = [];
+    let legacySolo: string[] = [];
+    if (!tracks.some(t => t.kind === 'midi')) {
+      const legacy = migrateLegacyMidi((p as { midi?: unknown }).midi, music);
+      if (legacy) {
+        music = legacy.music;
+        // 轨道 id 与现有轨撞号（手改档）就换一个；段的归属、mute/solo 跟着换。
+        const remap = new Map<string, string>();
+        for (const t of legacy.tracks) {
+          if (tracks.some(x => x.id === t.id)) {
+            const nid = newVidId('trk');
+            remap.set(t.id, nid);
+            t.id = nid;
+          }
+        }
+        for (const c of legacy.clips) {
+          const to = remap.get(c.trackId);
+          if (to) c.trackId = to;
+        }
+        tracks = [...tracks, ...legacy.tracks];
+        legacyClips = legacy.clips;
+        legacyMute = legacy.muteIds.map(id => remap.get(id) ?? id);
+        legacySolo = legacy.soloAudioIds.map(id => remap.get(id) ?? id);
+      }
+    }
+    const trackIds = new Set(tracks.map(t => t.id));
+    const trackKind = new Map(tracks.map(t => [t.id, t.kind] as const));
     const fps = clampFps(Number(p.fps));
     // blob: 的 objectURL 活不过刷新 —— 那些片段/资产当场蒸发；挂在不存在的轨道上的也一样。
-    // Layer 段没有 src（它装的是图层，不是素材），所以"必须有 src"那条只对素材段成立。
-    const clips = p.clips.filter(c => {
-      if (!c || !trackIds.has(c.trackId)) return false;
+    // Layer / MIDI 段没有素材源（一个装图层、一个装音符），所以"必须有 src"那条只对素材段成立。
+    const clips = [...p.clips, ...legacyClips].filter(c => {
+      if (!c || typeof c.id !== 'string' || !trackIds.has(c.trackId)) return false;
       if (!Number.isFinite(c.start) || !Number.isFinite(c.duration) || !(c.duration > 0)) return false;
+      if (c.kind === 'midi') return trackKind.get(c.trackId) === 'midi';
       // 占位段没有 src（等跑完才有）—— 快照要活过重开，照常回来；生成器段同理。
       if (c.pending || c.vgen) return true;
       if (c.kind === 'layer') return c.src === '' || !c.src;
       // A5：有哈希的段永远收回来（src 可由 play/asset 重建）；只有"既没 src 又没哈希"的老 blob: 行丢掉。
       return !!recover(c);
     }).map(c => {
+      if (c.kind === 'midi') {
+        // 音符逐条夹回合法值；offset 是**拍**，可以为负（左裁留白）。
+        const offsetRaw = Number(c.offset);
+        const srcDurRaw = Number(c.srcDuration);
+        return {
+          ...c, src: '', hasAudio: false,
+          offset: Number.isFinite(offsetRaw) ? offsetRaw : 0,
+          srcDuration: Number.isFinite(srcDurRaw) ? Math.max(0, srcDurRaw) : 0,
+          notes: sanitizeMidiNotes(c.notes),
+        };
+      }
       if (c.pending) {
         // 占位段的输入窗口统一成帧段（旧存档的 ss/t 在这里换掉 —— 存档不再写秒）。
         const inputs = migrateWindows(c.pending.inputs, fps) ?? {};
@@ -2070,22 +2611,22 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       .filter(a => a && recover(a) && Number.isFinite(a.duration) && a.duration > 0)
       .map(a => { const src = recover(a); return src === a.src ? a : { ...a, src }; }));
     // mute / solo 的轨道 id：只留还活着的轨（删轨后重开不该把悬空 id 带回来）。
-    const pickIds = (v: unknown): string[] => Array.isArray(v)
-      ? [...new Set(v.filter((x): x is string => typeof x === 'string' && trackIds.has(x)))]
-      : [];
+    const pickIds = (v: unknown, extra: string[] = []): string[] => [...new Set(
+      [...(Array.isArray(v) ? v : []), ...extra]
+        .filter((x): x is string => typeof x === 'string' && trackIds.has(x)),
+    )];
     return pruneVgenChains({
-      tracks: p.tracks, clips, assets,
+      tracks, clips, assets,
       inPoint: Math.max(0, +p.inPoint || 0), outPoint: Math.max(0, +p.outPoint || 0),
       fps: clampFps(Number(p.fps)),
+      music,
       // Mask 轨：绑的轨没了就当没绑（读档后轨道可能被删/改名）—— 不留一条悬空 id。
       ...(typeof p.maskTrackId === 'string' && trackIds.has(p.maskTrackId)
         ? { maskTrackId: p.maskTrackId } : {}),
-      muteIds: pickIds(p.muteIds),
-      soloAudioIds: pickIds(p.soloAudioIds),
+      muteIds: pickIds(p.muteIds, legacyMute),
+      soloAudioIds: pickIds(p.soloAudioIds, legacySolo),
       soloVideoIds: pickIds(p.soloVideoIds),
       mode: p.mode === 'video' ? 'video' : p.mode === 'midi' ? 'midi' : 'image',
-      // MIDI 原样透传（形状检查只到"是不是个对象"这一层；里面怎么读归 midi 那边）。
-      ...(p.midi && typeof p.midi === 'object' ? { midi: p.midi } : {}),
     });
   } catch { return base; }
 };
