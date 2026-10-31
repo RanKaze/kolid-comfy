@@ -19,6 +19,12 @@ import {
 import PipelineGraphEditor from '../workbench/pipeline-graph-editor';
 import type { PipelineGraph } from '../workbench/pipeline-graph';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
+// MIDI 模式：按文档分桶的工程 + "每帧一次"的循环守卫，都在 useMidiHost 里；界面是**一整块**
+// （Transport 在顶、左乐器右卷帘，见 midi/Workspace），放进模式主窗的正文，不占 dock 窗。
+import { useMidiHost } from '../midi/useMidiHost';
+import { MidiWorkspace } from '../midi/Workspace';
+import { patchMidiSettings, useMidiSettings } from '../midi/settings';
+import { reloadInstruments, useInstrumentLibrary } from '../midi/library';
 import { unitIcon } from '../workbench/icons';
 import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
@@ -71,7 +77,9 @@ const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', '
 // vtracks / vassets 是**默认提供**的常驻窗，两种模式都显示正文（时间线 / 资产库）——
 // 轨道与资产属于文档，不该只在 Video 模式下才看得见。播放器不单独占窗：
 // Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
-// 标题条上有一颗 Image/Video 切换（见 heads）。
+// 标题条上有一颗 Image/Video/Midi 切换（见 heads）。
+// MIDI 模式**不占任何 dock 窗**：它是模式主窗（文档窗）的正文，一整块铺在那里面
+// （Transport 横贯顶部、左 INSTRUMENTS 右 Piano Roll）。窗一多，编曲就变成窗口管理。
 const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'];
 // 工具窗的标识色:Log / Debug / Probe 三扇"看现场"的窗,图标与 tab 名同穿一件颜色的衣服,
 // 与内容窗(素色)一眼分开。icon 的着色与 titleColor 都从这里来 —— 一处定色,两处生效。
@@ -98,7 +106,8 @@ const DOCK_STORE = 'sampler.drawDock';
 // （id 'canvas'）的正文换成播放器。Tracks / Assets 两扇窗的正文与模式无关，始终是时间线与
 // 资产库。**其它每一扇窗原地不动**，来回切换不重排任何东西。
 const VID_MODE_STORE = 'sampler.vidMode';
-export type VidMode = 'image' | 'video';
+/** 工作台的三副面孔。三副共用一棵 dock 树，`midi` 连窗都不多开 —— 它换的是主窗的正文。 */
+export type VidMode = 'image' | 'video' | 'midi';
 // A canvas window pops out at a working size. A settings card gets the dock's default 300px strip;
 // a project the user dragged out of the tab strip wants to be painted on.
 const DOC_POP_W = 760, DOC_POP_H = 560;
@@ -617,7 +626,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // ── Video 模式 ── 页面级的第二形态，刷新后留在上次的模式里（localStorage 一位）。
   // 只改一处：canvas 格正文换播放器（见 bodies）—— Tracks / Assets 与模式无关。
   const vidMode0: VidMode = (() => {
-    try { return localStorage.getItem(VID_MODE_STORE) === 'video' ? 'video' : 'image'; } catch { return 'image'; }
+    try {
+      const m = localStorage.getItem(VID_MODE_STORE);
+      return m === 'video' ? 'video' : m === 'midi' ? 'midi' : 'image';
+    } catch { return 'image'; }
   })();
   const [vidMode, setVidModeState] = useState<VidMode>(vidMode0);
   const vidModeRef = useRef(vidMode);
@@ -733,6 +745,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       markVidDirty(uid);
     }
   }, [markVidDirty]);
+
   // 页面这份模式态只是**活跃工程 mode 的投影**：切文档 / 读档回来时跟着工程走（打开哪份
   // .cud 就显示它自己的设置）。
   const syncVidMode = useCallback((m: VidMode) => {
@@ -840,6 +853,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       return { ...p, muteIds: cur.includes(trackId) ? cur.filter(id => id !== trackId) : [...cur, trackId] };
     });
   }, [updateVidMeta]);
+
+  // ── MIDI 模式 ── 一份 .cud 里除了图层与视频，还装得下一套 MIDI。它跟视频工程走**同一套规矩**：
+  // 按文档分桶、脏了置脏、去抖落盘、随 header.video 一起进出文件（多一个 midi 键，iframe 那边
+  // 只当黑盒）。差别只在模型与撤销栈 —— 那些都在 midi/useMidiHost 里，这儿只装一次。
+  // 时间这件事这里一个字都不存：位置归 clock，拍归工程。
+  const midiHost = useMidiHost({
+    activeUid: activeUid ?? null,
+    onDirty: markVidDirty,
+    saveSoon: saveVidSoon,
+  });
 
   // ── Video 的撤销摞 ── 工程住在宿主，工作台那两支摞（undoStack/redoStack）只认识图层，
   //  所以视频这一半得宿主自己记：Ctrl+Z 才撤得动片段、轨道、范围。
@@ -1011,7 +1034,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       vidProjectRef.current = proj;
       setVidProject(proj);
       // 模式跟着工程走：打开哪份文档就落回它自己的 Image / Video 设置。
-      syncVidMode(proj.mode === 'video' ? 'video' : 'image');
+      syncVidMode(proj.mode === 'video' ? 'video' : proj.mode === 'midi' ? 'midi' : 'image');
     },
   });
   // 文档关掉了 → 它那一桶（工程 + 脏标记）跟着走。uid 是工作台**每次开机从 1 重新发**的，
@@ -1031,6 +1054,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         vidByDoc.current.delete(uid);
         vidDirty.current.delete(uid);
         vidHist.current.delete(uid);       // uid 会被复用：旧步留着就会串到下一份文档上
+        midiHost.drop(uid);                // MIDI 那一桶同理（uid 从 1 重发，留着就串号）
       }
     }
     if (blendDocs.activeUid == null) {
@@ -1132,12 +1156,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         // **确实是屏幕上这份的归属**时给：否则会把上一份的轨道写进新文件的 header.video。
         const own = vidByDoc.current.get(uid);
         const screen = vidProjectOwner.current === uid ? vidProjectRef.current : null;
-        (e.source as Window | null)?.postMessage({ type: 'blend-vid', uid, project: own ?? screen }, '*');
+        const proj = own ?? screen;
+        // MIDI 挂在同一个对象上一起走：iframe 只把 header.video 当黑盒存，多一个 key 不碍事，
+        // 于是"一份 .cud = 图层 + 视频 + MIDI"这件事不用动页面那边的存盘代码。
+        (e.source as Window | null)?.postMessage(
+          { type: 'blend-vid', uid, project: proj ? midiHost.withMidi(proj, uid) : proj }, '*');
       } else if (d.type === 'blend-vid-restore') {
         const uid = Math.round(Number(d.uid) || 0);
         const proj = normalizeVidProject(d.project);
         vidByDoc.current.set(uid, proj);
         vidDirty.current.delete(uid);      // 刚从文件里读出来的 = 与盘上一致
+        // MIDI 跟视频同一份文件：这里把它从同一个对象里摘出来，落进它自己的桶。
+        // 文件里没有 midi 键（老档 / 只做过图）→ 给它一份空的，别把上一份的轨带过来。
+        midiHost.restore(uid, (proj as { midi?: unknown }).midi);
         // 从文件里读出来的这份是**新基线**：之前那支撤销摞属于另一份内容，留着就能
         // "撤销到上一个工程"，那是没有人想要的结果。
         vidHist.current.delete(uid);
@@ -1148,7 +1179,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           vidProjectRef.current = proj;
           setVidProject(proj);
           // 文件里带的模式跟着落地：打开这份 .cud 就显示它自己的设置。
-          syncVidMode(proj.mode === 'video' ? 'video' : 'image');
+          syncVidMode(proj.mode === 'video' ? 'video' : proj.mode === 'midi' ? 'midi' : 'image');
           // 图层编辑目标跟着复位：面板只跟**本会话的选中**走，载入的文档没有选中 → 回文档主
           // 图层集。留在手上的 key 属于上一份文档，指过去会把编辑写进错的那一套。
           setVidLayerKey('');
@@ -2557,10 +2588,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 那扇窗就是 Video 模式的播放器宿主。其它任何窗上都不出现。
   const vidModeSeg = (
     <div style={styles.modeSeg} role="tablist" title="Workbench mode">
-      {(['image', 'video'] as VidMode[]).map(m => (
+      {(['image', 'video', 'midi'] as VidMode[]).map(m => (
         <button key={m} style={{ ...styles.modeSegBtn, ...(vidMode === m ? styles.modeSegOn : null) }}
-          title={m === 'image' ? 'Image — the canvas workbench' : 'Video — the player (Tracks and Assets stay available in both modes)'}
-          onClick={e => { e.stopPropagation(); setVidMode(m); }}>{m === 'image' ? 'Image' : 'Video'}</button>
+          title={m === 'image' ? 'Image — the canvas workbench'
+            : m === 'video' ? 'Video — the player (Tracks and Assets stay available in both modes)'
+            : 'Midi — piano roll, instruments and the shared time base (notes ride the same transport as video)'}
+          onClick={e => { e.stopPropagation(); setVidMode(m); }}>
+          {m === 'image' ? 'Image' : m === 'video' ? 'Video' : 'Midi'}
+        </button>
       ))}
     </div>
   );
@@ -2599,7 +2634,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     staging, blendPreview, guidanceCard, stageUpload, stageRemove,
     layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock },
     video: {
-      mode: vidMode, fps: vidProject.fps, setFps: setVidFps, tracks: vidTrackList, assets: vidAssetList,
+      // 视频那一侧只认两态：Midi 模式下它按 Image 对待（不出播放器、不抢画布），
+      // 否则视频面板会以为自己该干活。
+      mode: (vidMode === 'video' ? 'video' : 'image') as 'image' | 'video',
+      fps: vidProject.fps, setFps: setVidFps, tracks: vidTrackList, assets: vidAssetList,
       // Video Generator：Processor 那一格要能列出"哪些接口是生成器"并发起添加（段的位置/时长
       // 只有宿主知道，所以添加这个动作也住在宿主 —— 窗口只挑哪一台）。`cont` 是时间线上
       // 恰好选中的那枚视频段（Add continue segment 的原料）；没有 = null。
@@ -2626,7 +2664,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, [blendDocs.announced, blendDocs.docs, blendDocs.activeUid]);
   const agentCtx: AgentCtx = useMemo(() => ({
     uiSend, vid: vidCtl, docOpen: blendDocs.activeUid !== null, docUid: blendDocs.activeUid,
-    vidMode, cudDir: agentCudDir,
+    vidMode: vidMode === 'video' ? 'video' : 'image', cudDir: agentCudDir,
     blockSets, activeBlockSetId,
     runPreset: id => {
       const set = blockSets.find(s => s.id === id);
@@ -2842,6 +2880,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // Video 模式：活跃文档窗的正文整个让给工作台画布（见 vidCanvasRef）—— 画布常驻，量到走带
     // 那条的上沿为止，播放按钮留在原位不被盖住。游标在 Layer 段上时画布折这一段图层；不在段上时
     // 页面自己换成视频底片（见 blend_node.html 的 vidBaseOn），所以这里不用再按段让位。
+    //
+    // **MIDI 模式一律不量**：那扇主窗的正文是整套 MIDI 界面（midi/Workspace），不是画布。
+    // 以前漏了这一条 —— 画布那一层照样戴着主窗的矩形、opacity=1，把 MIDI 界面整个盖在一张
+    // 深色画布底下，用户看到的就是"切到 midi，workbench 全黑"。iframe 本身仍然挂着（放到
+    // -12000 屏外），工作台的工程不会被这一改重新装载。
+    if (vidModeRef.current === 'midi') {
+      setFrameRect(prev => (prev === null ? prev : null));
+      return;
+    }
     if (host && body && (vidModeRef.current !== 'video' || vidCanvasRef.current) && body.clientWidth > 0 && body.clientHeight > 0) {
       const a = body.getBoundingClientRect(), b = host.getBoundingClientRect();
       let h = Math.round(a.height);
@@ -2886,9 +2933,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     docBodies[docUnit(d.uid)] = active && vidMode === 'video'
       ? <VidPlayer vid={vidCtl} visible={tab === 'draw'}
           stageCovers={!!frameRect && vidMode === 'video'} />
-      : still
-        ? <img src={still} alt={d.name} style={styles.docStill} />
-        : <div style={styles.docVoid} />;
+      : active && vidMode === 'midi'
+        // MIDI 模式的主窗就是**整套 MIDI 界面**（Transport 在顶、左乐器右卷帘，见 midi/Workspace）：
+        // 与 Video 模式显示播放器同一个道理 —— 模式换的是这扇主窗的正文，dock 树一棵都不多开。
+        ? <MidiWorkspace ctl={midiHost.ctl} />
+        : still
+          ? <img src={still} alt={d.name} style={styles.docStill} />
+          : <div style={styles.docVoid} />;
   }
   // 保留位（关掉最后一份工程后留下的空窗）也给正文：一句引导，别让用户对着一扇黑窗发愣。
   // 新工程打开时会原地认领这一格，正文自动换成真的画布。
@@ -3642,7 +3693,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     onVGenCudOpen={path => { void openVgenCud(path); }} />,
               vassets: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
-                : <VidAssets vid={vidCtl} sel={vidInspect?.key ?? null} onSel={setVidInspect}
+                : <VidAssets vid={vidCtl} midi={midiHost.ctl} sel={vidInspect?.key ?? null} onSel={setVidInspect}
                     onActivate={() => revealPanel('vinspector')} />,
               // Inspector:放大看 Assets 里选中的那一件(图/音/视频)。与 vassets 同一道文档闸 ——
               // 没有工程就没有资产可挑,选中态也随文档切换被清掉(见上方 effect)。
@@ -3891,15 +3942,20 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               the dock draws underneath would be invisible behind a full-opacity canvas. */}
           <div style={{
             ...styles.frameLayer,
-            left: frameRect?.x ?? -12000, top: frameRect?.y ?? -12000,
-            width: frameRect?.w ?? 900, height: frameRect?.h ?? 640,
+            // MIDI 模式下这层画布**整个退场**（挪到屏外 + 透明）：那扇主窗的正文是 MIDI 界面，
+            // 画布盖上去就是"切到 midi，workbench 全黑"。判在渲染期而不是只判 measureFrame，
+            // 因为量框是 effect 里的事，晚一帧就够把用户吓一跳；这里两个都要（那边省掉一次无用的量）。
+            left: vidMode === 'midi' ? -12000 : (frameRect?.x ?? -12000),
+            top: vidMode === 'midi' ? -12000 : (frameRect?.y ?? -12000),
+            width: vidMode === 'midi' ? 900 : (frameRect?.w ?? 900),
+            height: vidMode === 'midi' ? 640 : (frameRect?.h ?? 640),
             // toolbar 小窗里那一格要是活的那份文档，画布这一层就得压在小窗之上：小窗是 75，
             // 画布这一层因此提到 76 —— 否则小窗里只能看见一块深色底（活的工作台被盖在下面）。
             zIndex: tbPopover && tbPopover === activeUnit ? 76 : activeIsWindow ? 61 : 5,
             // 活画布显不显：这一份画好了没有（见 liveReady）。没画好时它停在屏外/透明 ——
             // 否则从旧位置挪到这扇窗上的那两帧里，用户看到的是上一份的画面。
-            opacity: frameRect && !dockDrag && liveReady ? 1 : 0,
-            pointerEvents: dockDrag ? 'none' : undefined,
+            opacity: vidMode !== 'midi' && frameRect && !dockDrag && liveReady ? 1 : 0,
+            pointerEvents: dockDrag || vidMode === 'midi' ? 'none' : undefined,
           }}>
             <iframe
               ref={blendIframeRef}
@@ -4607,11 +4663,13 @@ const VideoGenFrameModal: React.FC<{
 //                 that replace some of them for the pipelines they match. They are one screen
 //                 because a rule is nothing but those nine numbers, per architecture — two screens
 //                 meant looking up the default on one to understand the override on the other.
+//   MIDI        — where the instruments come from: one folder on this machine, plus how deep to
+//                 look inside it. The Assets window's Instruments tab reads exactly this.
 //   Key Bindings — every shortcut in the workbench, editable (see KeyBindingsScreen).
 //
 // The numbers stay the host's either way: this page only edits what the Draw panel edited, so a
 // value can never exist twice.
-type SettingsScreen = 'pref' | 'image' | 'keys';
+type SettingsScreen = 'pref' | 'image' | 'midi' | 'keys';
 // Which screen is showing and which rule cards are open belong to the user, not to the program, so
 // they are remembered per browser — same policy as the section folds and the panel width, and ONE
 // key for both because they are one page's view state. An unreadable store just opens on Image.
@@ -4620,6 +4678,7 @@ type SettingsUI = { screen: SettingsScreen; openRules: string[] };
 const SCREENS: { id: SettingsScreen; label: string; title: string }[] = [
   { id: 'pref', label: 'Preference', title: 'What the application does around a run' },
   { id: 'image', label: 'Image', title: 'The numbers every run starts from, and the rules that change them' },
+  { id: 'midi', label: 'MIDI', title: 'Where the instruments live on this machine, and how the Assets tab finds them' },
   { id: 'keys', label: 'Key Bindings', title: 'Every shortcut in the workbench' },
 ];
 const loadSettingsUI = (): SettingsUI => {
@@ -4627,7 +4686,7 @@ const loadSettingsUI = (): SettingsUI => {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_UI_STORE) || 'null');
     // 旧的两种屏（default / arch）都并进了 Image —— 老浏览器里存着的那个值读进来不能变成"哪屏都不亮"。
     const raw = saved?.screen;
-    const screen: SettingsScreen = raw === 'pref' || raw === 'keys' ? raw : 'image';
+    const screen: SettingsScreen = raw === 'pref' || raw === 'keys' || raw === 'midi' ? raw : 'image';
     return {
       screen,
       openRules: Array.isArray(saved?.openRules) ? saved.openRules.filter((s: unknown) => typeof s === 'string') : [],
@@ -4654,8 +4713,19 @@ const SETTINGS_GROUPS: { title: string; hint?: string; keys: OverrideKey[]; foot
   if (lost.length) console.warn(`[Settings] OVERRIDE_KEYS in no card: ${lost.join(', ')} — they would not render`);
 }
 
-const segBtnStyle = (on: boolean): React.CSSProperties => ({
-  flex: 1, padding: '6px 0', borderRadius: 7, border: 'none', outline: 'none', cursor: 'pointer',
+// MIDI 屏那个「Choose…」和路径框：iOS 卡片里的一个按钮 + 一条等宽路径。宽度跟着卡片走，
+// 路径可能很长 —— 框里横向滚，不换行（换行会把一张 44px 的行撑成两行）。
+const iosBtn: React.CSSProperties = {
+  height: 26, padding: '0 10px', borderRadius: 7, border: '0.5px solid rgba(255,255,255,0.16)',
+  background: 'rgba(255,255,255,0.08)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+};
+const iosPathInput: React.CSSProperties = {
+  width: '100%', boxSizing: 'border-box', height: 26, padding: '0 8px', borderRadius: 7,
+  border: '0.5px solid rgba(255,255,255,0.12)', background: '#1c1c1e', color: 'rgba(255,255,255,0.9)',
+  fontSize: 11.5, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', outline: 'none',
+};
+
+const segBtnStyle = (on: boolean): React.CSSProperties => ({  flex: 1, padding: '6px 0', borderRadius: 7, border: 'none', outline: 'none', cursor: 'pointer',
   fontSize: 13, fontWeight: 600, background: on ? '#636366' : 'transparent',
   color: on ? '#fff' : 'rgba(255,255,255,0.62)', boxShadow: on ? '0 3px 8px rgba(0,0,0,0.35)' : 'none',
 });
@@ -4859,6 +4929,59 @@ const SettingsTab: React.FC<{
 }) => {
   const [ruleMenu, setRuleMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [ui, setUi] = useState<SettingsUI>(loadSettingsUI);
+  // ── MIDI 屏：乐器库那条路径（真源在后端 data/sampler/midi.json，见 midi/settings.ts）──
+  const midi = useMidiSettings();
+  const instr = useInstrumentLibrary();
+  const [pathDraft, setPathDraft] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
+  const [pickErr, setPickErr] = useState('');
+  // 进这一屏才去问一次"这底下有什么"（Assets 窗自己也会拉，两边共用同一份缓存）。
+  useEffect(() => {
+    if (ui.screen !== 'midi') return;
+    void reloadInstruments();
+  }, [ui.screen, midi.instrumentsLibrary]);
+
+  // 目录只有原生对话框拿得到真实路径（浏览器给不了）。挑中即写 —— 没有"再按一次保存"。
+  const pickLibraryFolder = async () => {
+    setPicking(true); setPickErr('');
+    try {
+      const r = await fetch('/api/io_pick', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'open', kind: 'folder', suggested: midi.instrumentsLibrary }),
+      }).then(r => r.json());
+      if (r?.unavailable) { setPickErr('The native folder dialog needs tkinter in this Python build.'); return; }
+      const picks = (r?.picks || []) as { path?: string }[];
+      const path = picks[0]?.path;
+      if (!path) return;                                  // 用户取消
+      setPathDraft(null);
+      await patchMidiSettings({ instrumentsLibrary: path });
+      void reloadInstruments(true);
+    } catch (e) {
+      setPickErr(e instanceof Error ? e.message : String(e));
+    } finally { setPicking(false); }
+  };
+
+  // 手填的那一行：落焦点/回车才提交（途中不打断 —— 用户可能正一个字一个字打一条长路径）。
+  const commitPath = () => {
+    const draft = pathDraft;
+    if (draft === null) return;
+    setPathDraft(null);
+    const next = draft.trim();
+    if (next === midi.instrumentsLibrary) return;
+    void patchMidiSettings({ instrumentsLibrary: next }).then(() => reloadInstruments(true));
+  };
+
+  // "What it finds" 那两行：状态（读得到 / 读不到，为什么）与数量（能在这里出声的有几件）。
+  const libState = instr.lib;
+  const libBad = !!instr.error || (!!libState && !libState.ok);
+  const statusText = instr.loading ? 'Scanning…'
+    : instr.error ? instr.error
+      : !libState ? 'Not read yet'
+        : !libState.state.set ? 'No folder chosen'
+          : libState.ok ? 'Readable' : (libState.state.reason || 'Unreadable');
+  const foundText = !libState || !libState.ok ? '—'
+    : `${libState.total}${libState.truncated ? '+' : ''} · `
+      + `${libState.items.filter(i => i.playable).length} playable here`;
   const pickScreen = (screen: SettingsScreen) => { const next = { ...ui, screen }; setUi(next); saveSettingsUI(next); };
   const toggleRule = (id: string) => {
     const openRules = ui.openRules.includes(id) ? ui.openRules.filter(x => x !== id) : [...ui.openRules, id];
@@ -4936,6 +5059,73 @@ const SettingsTab: React.FC<{
               </div>
             </div>
             <div style={styles.iosFooter}>What happens when a node opens its UI while a run is going.</div>
+          </>
+        )}
+
+        {/* MIDI — 乐器从哪儿来：一条本机路径 + 往下看几层。Assets 窗的 Instruments 档读的就是这一份。
+            两个值都是"这台机器的事实"，落在后端 data/sampler/midi.json：不跟浏览器，也不跟文档。 */}
+        {ui.screen === 'midi' && (
+          <>
+            <div style={styles.iosGroupTitle}>Instruments Library</div>
+            <div style={styles.iosCard}>
+              <div style={styles.iosRow}
+                title={'The folder the Assets window lists under Instruments. It is read where it is — nothing is copied into this application.'}>
+                <span style={styles.iosLabel}>Library folder</span>
+                <button
+                  data-midi-pick=""
+                  disabled={picking}
+                  onClick={() => void pickLibraryFolder()}
+                  style={{ ...iosBtn, opacity: picking ? 0.5 : 1 }}
+                >{picking ? 'Choosing…' : 'Choose…'}</button>
+              </div>
+              <div style={styles.iosSep} />
+              <div style={{ padding: '6px 16px' }}>
+                <input
+                  data-midi-path=""
+                  value={pathDraft ?? midi.instrumentsLibrary}
+                  placeholder="e.g. H:\music\Sound Library"
+                  spellCheck={false}
+                  onChange={e => setPathDraft(e.target.value)}
+                  onBlur={commitPath}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); commitPath(); }
+                    else if (e.key === 'Escape') { setPathDraft(null); }
+                  }}
+                  style={iosPathInput}
+                />
+              </div>
+              <div style={styles.iosSep} />
+              <div style={styles.iosRow}
+                title={'How many folder levels to walk down from the root. 0 = only the root folder itself; 6 = the deepest this page allows. A very large library with a big depth makes each scan slower.'}>
+                <span style={styles.iosLabel}>Scan depth</span>
+                <NumField value={midi.scanDepth} min={0} max={6} step={1}
+                  onChange={n => void patchMidiSettings({ scanDepth: n })} />
+              </div>
+            </div>
+            <div style={{ ...styles.iosFooter, ...(pickErr ? { color: '#ff453a' } : null) }}>
+              {pickErr || 'The folder is read in place — nothing is copied and nothing is indexed in the background.'}
+            </div>
+            
+            <div style={styles.iosGroupTitle}>What It Finds</div>
+            <div style={styles.iosCard}>
+              <div style={styles.iosRow} title={libState?.root || undefined}>
+                <span style={styles.iosLabel}>Status</span>
+                <span style={{ fontSize: 12, color: libBad ? '#ff453a' : 'rgba(255,255,255,0.62)' }}>{statusText}</span>
+              </div>
+              <div style={styles.iosSep} />
+              <div style={styles.iosRow}>
+                <span style={styles.iosLabel}>Instruments</span>
+                <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.62)' }}>{foundText}</span>
+              </div>
+              <div style={styles.iosSep} />
+              <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '6px 16px' }}>
+                <button data-midi-rescan="" onClick={() => void reloadInstruments(true)} style={iosBtn}>Rescan</button>
+              </div>
+            </div>
+            <div style={styles.iosFooter}>
+              A catalog.json at the root wins when present (it carries a per-preset verification record).
+              Without one, the folder is scanned for .sfz and .vst3.
+            </div>
           </>
         )}
 

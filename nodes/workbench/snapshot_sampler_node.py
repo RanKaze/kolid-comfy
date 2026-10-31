@@ -42,6 +42,22 @@ except ImportError as e:
     print(f"[SnapshotDetailerSampler] Warning: cannot import agent_backend: {e}")
     agent_backend = None
 
+# 公共时间基准（MIDI 模式）。整个插件里"现在几点"只有一个出处，别处只准读数 —— 详见
+# clock_bridge 头部的注释。DLL 缺失不算致命：那边会自动退到同语义的 QPC 替身。
+try:
+    from . import clock_bridge
+except Exception as e:      # noqa: BLE001 —— 任何原因都不该让节点起不来
+    print(f"[SnapshotDetailerSampler] Warning: cannot import clock_bridge: {e}")
+    clock_bridge = None
+
+# 原生发声引擎（MIDI 模式）。声音由 client/kolid_audio/KolidAudio.dll 直接开声卡合成，
+# 不经过浏览器。DLL 缺失同样不致命：那边报 available=False，界面照常画谱、只是不出声。
+try:
+    from . import audio_bridge
+except Exception as e:      # noqa: BLE001
+    print(f"[SnapshotDetailerSampler] Warning: cannot import audio_bridge: {e}")
+    audio_bridge = None
+
 from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl, merge_mask_alpha, recover_scale_image, _geo_info_at
 from ...libs.mask_utils import expand_mask
 from ...libs.video_utils import get_video_metadata
@@ -596,6 +612,15 @@ IO_FILE_KINDS = {
         'extension': '.png',
         'mime': 'image/*',
     },
+    # MIDI 的乐器库是一条**目录**，不是一份文件 —— 所以它不进 token 表（没有字节可读），
+    # 只把选中的路径原样回给调用方。folder=True 是这一类的唯一标记。
+    'folder': {
+        'label': 'Folder',
+        'patterns': [],
+        'extension': '',
+        'mime': '',
+        'folder': True,
+    },
 }
 
 # Video Generator 的八个固定槽（与前端 types.ts 的 VIDEO_GEN_SLOTS 逐条同名）：
@@ -725,6 +750,201 @@ def _layouts_apply(action, name, dock=None):
         store = {'v': 1, 'default': default, 'items': items, 'current': current}
         _layouts_write(store)
     return store, None
+
+
+# =============================================================================
+# MIDI：乐器库（一条本机路径）与它下面的东西
+# =============================================================================
+# Assets 窗的 Instruments 那一档**自己不存东西** —— 每次照用户填的那条路径现扫。所以这一节只有
+# 两件事：记住那条路径（data/sampler/midi.json，和 dock 布局同一个抽屉），按它列出乐器。
+#
+# 路径为什么在后端而不是 localStorage：它是"这台机器的音源在哪儿"，与浏览器、与哪份文档都无关；
+# 而扫描只能在后端做（页面拿不到目录）。真源只有这一份，页面读回来只是回显。
+_MIDI_LOCK = threading.Lock()
+# 扫描的护栏。音源库动辄几万个文件，而这一档是给人**看和挑**的，不是索引器 —— 超了如实报截断，
+# 不偷偷截断。深度上限挡的是"选了整个盘"这种误操作。
+_INSTRUMENT_SCAN_LIMIT = 4000
+_INSTRUMENT_DEPTH_MAX = 6
+_INSTRUMENT_DEPTH_DEFAULT = 3
+# 只有**这个程序播得出来**的才算 playable。SFZ 是纯文本 + wav，引擎里读得动；VST3 与 .fxp 现在
+# 只知道它们在哪儿，播不动 —— 列出来但标暗，别让人以为点了会响。
+_INSTRUMENT_PLAYABLE = {'sfz': True, 'vst3-preset': False, 'surge-fxp': False,
+                        'kontakt': False, 'vstsound': False}
+
+# ── 一颗库里"一件乐器"是哪种文件 ───────────────────────────────────────────────────────────────
+# 光认 .sfz 会让 Cubase / Kontakt / HALion 那种库整个变成 0 条 —— 用户把 `F:\Cubase Lib` 绑上去，
+# 界面上什么都没有，看着像"绑定没生效"。而那种库里根本没有 .sfz：乐器是 .nki（Kontakt），音色库是
+# .vstsound（HALion）。所以列出来的口径改成"**这是什么格式的乐器**"，播不播得动另说：
+#   ext         → (backend, 来源标签, 可播)
+# 不列的：.ncw（Kontakt 的压缩采样，几万个，是采样不是乐器）、.nkc/.nkr/.nkx（库容器，跟着 .nki 走）、
+# .nksn（Kontakt 快照 = 预设，不是独立乐器）、.nicnt（库许可证描述）。
+_INSTRUMENT_FILE_KINDS = {
+    '.sfz': ('sfz', 'SFZ', True),
+    '.nki': ('kontakt', 'Kontakt', False),
+    '.vstsound': ('vstsound', 'HALion', False),
+}
+
+
+def _midi_read():
+    """读 MIDI 设置。形状不认识就退回默认 —— 一份坏设置不该让这一屏打不开。"""
+    out = {'instruments_library': '', 'scan_depth': _INSTRUMENT_DEPTH_DEFAULT}
+    try:
+        with open(_workbench_file('midi.json'), 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return out
+    if isinstance(data, dict):
+        lib = data.get('instruments_library')
+        if isinstance(lib, str):
+            out['instruments_library'] = lib[:1024]
+        depth = data.get('scan_depth')
+        if isinstance(depth, (int, float)) and not isinstance(depth, bool):
+            out['scan_depth'] = max(0, min(_INSTRUMENT_DEPTH_MAX, int(depth)))
+    return out
+
+
+def _midi_write(patch):
+    """合并写。**只认这两个键** —— 页面送来的别的一律不收（这不是一个通用设置抽屉）。"""
+    if not isinstance(patch, dict):
+        raise ValueError('settings must be an object')
+    with _MIDI_LOCK:
+        cur = _midi_read()
+        if 'instruments_library' in patch:
+            lib = patch.get('instruments_library')
+            if not isinstance(lib, str):
+                raise ValueError('instruments_library must be a string')
+            cur['instruments_library'] = lib.strip()[:1024]
+        if 'scan_depth' in patch:
+            depth = patch.get('scan_depth')
+            if not isinstance(depth, (int, float)) or isinstance(depth, bool):
+                raise ValueError('scan_depth must be a number')
+            cur['scan_depth'] = max(0, min(_INSTRUMENT_DEPTH_MAX, int(depth)))
+        path = _workbench_file('midi.json')
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(cur, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    return cur
+
+
+def _library_state(path):
+    """一条路径的实话 —— 没设 / 不存在 / 不是目录 / 可读。前端照它决定画清单还是画一句话。"""
+    if not path:
+        return {'set': False, 'ok': False, 'reason': 'no library folder chosen yet'}
+    if not os.path.exists(path):
+        return {'set': True, 'ok': False, 'reason': 'folder does not exist'}
+    if not os.path.isdir(path):
+        return {'set': True, 'ok': False, 'reason': 'that path is a file, not a folder'}
+    return {'set': True, 'ok': True, 'reason': ''}
+
+
+def _scan_instruments(root, depth):
+    """列出 root 下的乐器。返回 (source, items, truncated)。
+
+    两条路，按"这颗库到底是什么"自动选，不让用户选：
+      · 有 catalog.json（原项目那种入库清单）—— 它已经逐条验证过，直接读，source='catalog'；
+      · 没有 —— 扫目录，source='scan'。一枚 .sfz 是一件乐器；一个 .vst3 bundle（在 Windows 上
+        是**目录**）也是一件，bundle 里面不再往下走 —— 那里是二进制，不是音色。
+    """
+    catalog = os.path.join(root, 'catalog.json')
+    if os.path.isfile(catalog):
+        try:
+            if os.path.getsize(catalog) <= 64 * 1024 * 1024:
+                with open(catalog, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                presets = data.get('presets') if isinstance(data, dict) else None
+                if isinstance(presets, list) and presets:
+                    items = []
+                    for p in presets[:_INSTRUMENT_SCAN_LIMIT]:
+                        if not isinstance(p, dict):
+                            continue
+                        backend = str(p.get('backend') or '')
+                        model = p.get('model') if isinstance(p.get('model'), dict) else {}
+                        src = p.get('source') if isinstance(p.get('source'), dict) else {}
+                        where = ''
+                        for key in ('sfizz_sfz_path', 'preset_path', 'plugin_path'):
+                            if isinstance(p.get(key), str) and p[key]:
+                                where = p[key]
+                                break
+                        items.append({
+                            'id': str(p.get('id') or ''),
+                            'name': str(p.get('name') or p.get('variant_name') or ''),
+                            'model': str(model.get('name') or ''),
+                            'family': str(p.get('family') or ''),
+                            'backend': backend,
+                            'source': str(src.get('product') or src.get('library') or ''),
+                            'playable': bool(_INSTRUMENT_PLAYABLE.get(backend, False)),
+                            'verified': bool(p.get('audio_verified')),
+                            'where': where[:400],
+                        })
+                    return 'catalog', items, len(presets) > len(items)
+        except Exception:
+            pass  # 读不动就当没有 catalog，退回扫目录（一颗坏清单不该让整档空着）
+    items = []
+    truncated = False
+    base = os.path.abspath(root)
+    for dirpath, dirnames, filenames in os.walk(base):
+        rel = os.path.relpath(dirpath, base)
+        level = 0 if rel == '.' else rel.count(os.sep) + 1
+        if level >= depth:
+            dirnames[:] = []
+        keep = []
+        for d in sorted(dirnames):
+            if d.lower().endswith('.vst3'):
+                full = os.path.join(dirpath, d)
+                items.append({
+                    'id': os.path.relpath(full, base).replace(os.sep, '/'),
+                    'name': d[:-5],
+                    'model': '' if rel == '.' else rel.split(os.sep)[-1],
+                    'family': '', 'backend': 'vst3-preset', 'source': 'VST3',
+                    'playable': False, 'verified': False,
+                    'where': os.path.relpath(full, base).replace(os.sep, '/'),
+                })
+            else:
+                keep.append(d)
+        dirnames[:] = keep
+        for fn in sorted(filenames):
+            kind = _INSTRUMENT_FILE_KINDS.get(os.path.splitext(fn)[1].lower())
+            if not kind:
+                continue
+            backend, label, playable = kind
+            full = os.path.join(dirpath, fn)
+            items.append({
+                'id': os.path.relpath(full, base).replace(os.sep, '/'),
+                'name': os.path.splitext(fn)[0],
+                'model': '' if rel == '.' else rel.split(os.sep)[-1],
+                'family': '', 'backend': backend, 'source': label,
+                'playable': playable, 'verified': playable,
+                'where': os.path.relpath(full, base).replace(os.sep, '/'),
+            })
+        if len(items) >= _INSTRUMENT_SCAN_LIMIT:
+            truncated = True
+            items = items[:_INSTRUMENT_SCAN_LIMIT]
+            break
+    items.sort(key=lambda it: (it['model'].casefold(), it['name'].casefold()))
+    return 'scan', items, truncated
+
+
+def _instruments_payload():
+    """给 Assets 窗的 Instruments 档：路径 + 状态 + 清单，一次给全，页面不用再问第二遍。"""
+    settings = _midi_read()
+    path = settings['instruments_library']
+    state = _library_state(path)
+    payload = {'ok': state['ok'], 'root': path, 'state': state, 'scan_depth': settings['scan_depth'],
+               'source': 'none', 'items': [], 'total': 0, 'truncated': False, 'error': '',
+               'elapsed_ms': 0}
+    if not state['ok']:
+        return payload
+    started = time.time()
+    try:
+        source, items, truncated = _scan_instruments(path, settings['scan_depth'])
+        payload.update({'source': source, 'items': items, 'total': len(items), 'truncated': truncated})
+    except Exception as e:
+        # 盘被拔了、没有权限 —— 如实报，别把整档画成"空库"（空库和读不到是两件事）。
+        payload.update({'ok': False, 'error': str(e)[:300],
+                        'state': {'set': True, 'ok': False, 'reason': str(e)[:200]}})
+    payload['elapsed_ms'] = int((time.time() - started) * 1000)
+    return payload
 
 
 def _layouts_boot_payload():
@@ -1977,6 +2197,13 @@ class DocumentIo:
     def _ask(root, mode, kind, suggested, multiple):
         from tkinter import filedialog
         spec = IO_FILE_KINDS.get(kind) or IO_FILE_KINDS['cud']
+        if spec.get('folder'):
+            # 目录选择：只有一个 askdirectory，没有"保存目录"这回事，suggested 当起始位置。
+            # 起始位置必须是真目录 —— Tk 拿到一条不存在的 initialdir 会当场抛，用户就只看到
+            # 一句"dialog failed"，明明是要换一条路径。
+            extra = {'initialdir': suggested} if suggested and os.path.isdir(suggested) else {}
+            path = filedialog.askdirectory(parent=root, title='Choose folder', **extra)
+            return [path] if path else []
         filetypes = [(spec['label'], ' '.join(spec['patterns'])), ('All files', '*.*')]
         if mode == 'save':
             path = filedialog.asksaveasfilename(
@@ -2129,6 +2356,10 @@ class DocumentIo:
         status, result = reply.get()
         if status == 'err':
             raise RuntimeError(result)
+        if kind == 'folder':
+            # 目录没有字节可读，不该进 token 表（那是个"读这份文件"的口）。只回报路径本身。
+            return [{'token': '', 'name': os.path.basename(p.rstrip('\\/')) or p,
+                     'path': p, 'size': 0, 'mime': ''} for p in (result or []) if p]
         picks = [self._document(p, kind) for p in (result or [])]
         if kind == 'cud' and picks:
             self._remember_cud(picks[0]['path'])
@@ -3918,6 +4149,24 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'staging': inst.get_staging_list() if inst else []})
                 return
 
+            # ── 公共时间基准 ── MIDI 模式的所有窗（传输条、钢琴卷帘、力度泳道）都从这里对表。
+            # 一次给全：帧 / 采样率 / 在播 / QPC 轴上的秒数 / 频率 / 后端是谁。前端拿 `now` 做
+            # 一次往返折半的对齐，之后本地插值，隔几秒回来重校一次（见 midi/clock.ts）。
+            if page == '/api/clock':
+                if clock_bridge is None:
+                    self._send_json({'error': 'clock bridge unavailable'}, 500)
+                    return
+                self._send_json(clock_bridge.get_clock().snapshot())
+                return
+
+            # ── 原生发声引擎的状态 ── 只报数，不开设备。开设备是 POST 的事。
+            if page == '/api/audio':
+                if audio_bridge is None:
+                    self._send_json({'available': False, 'error': 'audio bridge unavailable'})
+                    return
+                self._send_json(audio_bridge.get_engine().status())
+                return
+
             if self.path == '/api/prompt_presets':
                 self._send_json({'presets': inst._load_prompt_presets() if inst else []})
                 return
@@ -3930,6 +4179,17 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'ok': True, 'kind': 'layouts',
                                  'default': store['default'], 'items': store['items'],
                                  'current': store['current']})
+                return
+
+            # ---- MIDI：乐器库。Settings 的 MIDI 屏与 Assets 的 Instruments 档读的是同一份 ----
+            if self.path == '/api/midi_settings':
+                settings = _midi_read()
+                self._send_json({'ok': True, **settings,
+                                 'state': _library_state(settings['instruments_library'])})
+                return
+
+            if self.path == '/api/instruments':
+                self._send_json(_instruments_payload())
                 return
 
             # ---- 文档 IO：前端问一次能力，之后就只按 token 读文件 ----
@@ -4159,6 +4419,38 @@ class SnapshotDetailerSamplerServer:
             if probe_post == '/api/ui_probe/pull':
                 _UI_PROBE_PULL['want'] = time.time()
                 self._send_json({'ok': True, 'want': _UI_PROBE_PULL['want']})
+                return
+
+            # ── 公共时间基准的写口 ── 传输条按一下 = 落到这里一次（play / pause / toggle /
+            # seek / rate / speed）。前端**不自己算位置**：它只是把意图说出来，位置由这一个宿主给。
+            if probe_post == '/api/clock':
+                if clock_bridge is None:
+                    self._send_json({'error': 'clock bridge unavailable'}, 500)
+                    return
+                _len = int(self.headers.get('Content-Length', 0))
+                _data = json.loads(self.rfile.read(_len)) if _len else {}
+                try:
+                    self._send_json(clock_bridge.get_clock().apply(
+                        str(_data.get('action') or ''), _data.get('value')))
+                except Exception as _exc:      # noqa: BLE001 —— 参数错了要说清，不是 500
+                    self._send_json({'error': str(_exc)}, 400)
+                return
+
+            # ── 原生发声引擎的写口 ── open / close / tracks / notes / audition / panic。
+            # 音符与轨道是**整张表**推过来（不是增量）：一次十几 KB，比维护两套增量协议稳。
+            if probe_post == '/api/audio':
+                if audio_bridge is None:
+                    self._send_json({'available': False, 'error': 'audio bridge unavailable'}, 500)
+                    return
+                _len = int(self.headers.get('Content-Length', 0))
+                _data = json.loads(self.rfile.read(_len)) if _len else {}
+                try:
+                    self._send_json(audio_bridge.get_engine().apply(
+                        str(_data.get('op') or ''), _data))
+                except ValueError as _exc:
+                    self._send_json({'error': str(_exc)}, 400)
+                except Exception as _exc:      # noqa: BLE001
+                    self._send_json({'error': str(_exc)}, 500)
                 return
             if probe_post == '/api/ui_probe/ack':
                 _UI_PROBE_PULL['done'] = time.time()
@@ -4997,6 +5289,18 @@ class SnapshotDetailerSamplerServer:
                         self._send_json({'ok': True, 'doc': doc})
                 except Exception as e:
                     self._send_json({'ok': False, 'error': str(e)}, 500)
+                return
+
+            # MIDI 设置：只认 instruments_library / scan_depth 两个键（见 _midi_write）。
+            if self.path == '/api/midi_settings':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    settings = _midi_write(body)
+                    self._send_json({'ok': True, **settings,
+                                     'state': _library_state(settings['instruments_library'])})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 400)
                 return
 
             if self.path == '/api/io_pick':

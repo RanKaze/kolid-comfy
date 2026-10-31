@@ -640,9 +640,13 @@ export type VidProject = {
   /** solo 的轨道 id，音频与视频分开记。随工程走，与 `muteIds` 同理。 */
   soloAudioIds?: string[];
   soloVideoIds?: string[];
-  /** 这份工程的**查看模式**（Image / Video）。它是文档的属性、随 .cud 走：
-   *  打开哪份工程就落回它自己存的模式，不再是页面级的一颗开关。旧档没有这个字段 → 'image'。 */
-  mode?: 'image' | 'video';
+  /** 同一份 .cud 里还装得下一套 MIDI（`midi/model.ts`）。视频侧**只透传不解释**：音符的归一化
+   *  归 midi/useMidiHost，读档时它自己会再读一遍。旧档没有这个字段 → 就是没有 MIDI。 */
+  midi?: unknown;
+  /** 这份工程的**查看模式**（Image / Video / Midi）。它是文档的属性、随 .cud 走：
+   *  打开哪份工程就落回它自己存的模式，不再是页面级的一颗开关。旧档没有这个字段 → 'image'。
+   *  同一份 .cud 里视频与 MIDI 并存（见 midi/model.ts），模式只决定**先看哪一副面孔**。 */
+  mode?: 'image' | 'video' | 'midi';
 };
 
 /** solo 状态：**音频与视频分开记** —— 一边亮着不影响另一边。空集 = 没有 solo（全部照常）。
@@ -2079,7 +2083,9 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       muteIds: pickIds(p.muteIds),
       soloAudioIds: pickIds(p.soloAudioIds),
       soloVideoIds: pickIds(p.soloVideoIds),
-      mode: p.mode === 'video' ? 'video' : 'image',
+      mode: p.mode === 'video' ? 'video' : p.mode === 'midi' ? 'midi' : 'image',
+      // MIDI 原样透传（形状检查只到"是不是个对象"这一层；里面怎么读归 midi 那边）。
+      ...(p.midi && typeof p.midi === 'object' ? { midi: p.midi } : {}),
     });
   } catch { return base; }
 };

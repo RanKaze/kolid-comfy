@@ -1191,3 +1191,22 @@ export const flexOf = (sz?: number): string => (typeof sz === 'number' && sz > 0
 // other members alone already overflow has nothing left — without this the workbench resolves to 0 and
 // the frame has nowhere to be.
 export const DOCK_GROW_MIN_H = 160;
+
+// 把缺的单元补进布局，一处、不多不少。用的是 `fitLayout` 补缺时同一套规则：落进"最长的那一块"。
+//
+// 什么时候需要它：改版之后新增了一组面板，而用户盘上那份布局是改版前存的 —— 那份存档里根本
+// 没有这几个 id，`fitLayout` 又只在**读档**那一趟跑（BOOT 注入的布局是"第一帧就摆好"，不经过
+// 它）。于是那些面板就一直不在树里，用户切过去看到的是"什么都没有"。
+//
+// 补的是**位置**，不是内容：只往树里塞还没出现的 id，已经摆好的窗一格都不动。
+export function ensureUnits(dock: Dock, ids: readonly UnitId[]): Dock {
+  let tree = dock.tree;
+  const present = () => dockUnits(tree).concat(dock.floats.map(f => f.id));
+  for (const id of ids) {
+    if (present().includes(id)) continue;
+    const b = biggestBlock(tree);
+    if (!b) break;
+    tree = dropInDock({ tree, floats: dock.floats }, id, b.ids[0], 'center').tree;
+  }
+  return tree === dock.tree ? dock : { ...dock, tree };
+}

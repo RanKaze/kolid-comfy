@@ -13,6 +13,12 @@ import { hit, isRecording } from '../../keybindings';
 import { useDocAssets } from '../docAssets';
 import { clipCards, groupDocAssets, whereText } from './assetScope';
 import { ensureFrame, ensureWaveform } from './previews';
+import { reloadInstruments, useInstrumentLibrary, type InstrumentItem } from '../../midi/library';
+import { useMidiSettings } from '../../midi/settings';
+import { nativeEngine } from '../../midi/engine';
+import { midiOut } from '../../midi/output';
+import { addTrack as addMidiTrack } from '../../midi/model';
+import type { MidiCtl } from '../../midi/types';
 
 // ── Assets 窗 ───────────────────────────────────────────────────────────────────────────────
 // 三档作用域（顶部那条 segmented），三档说的是**三处不同的字节**：
@@ -38,8 +44,9 @@ export const GLOBAL_ITEM_TYPE = 'application/x-vid-global';
 /** 工程资产的老载荷：只带资产 id（时间线据此直接落片段，不再走一次 importSource）。 */
 export const VID_ASSET_TYPE = 'application/x-vid-asset';
 
-/** 三档：公用库 / 这份文档的 Layer 段 / 这份文档的 image 工作面。后两档的字节在 .cud 里。 */
-export type Scope = 'library' | 'video' | 'image';
+/** 四档：公用库 / 这份文档的 Layer 段 / 这份文档的 image 工作面 / 乐器库。
+ *  前三是"字节在哪"，第四档不是字节 —— 它跟这份文档无关，内容只由 MIDI 设置里那条库路径决定。 */
+export type Scope = 'library' | 'video' | 'image' | 'instruments';
 
 /** 仓库里的一件货（/api/global_assets 的响应项；A0 加了 hash / inLibrary / thumb 三个字段）。
  *  老服务没有这三个字段 —— 读的时候按"是库成员、没有 hash"兜底，窗不会白屏。 */
@@ -318,6 +325,18 @@ const ClipIcon = () => (
     <path d="M9.5 5.2L5.6 9.1a2.1 2.1 0 01-3-3l4.3-4.3a1.5 1.5 0 012.1 2.1L4.7 8.2a0.8 0.8 0 01-1.1-1.1l3.9-3.9" />
   </svg>
 );
+// 试听 / 停止：和 Timeline 里生成器段的运行键同一套（三角形 / 方块自己说话）。
+// 不用字符 ♪ / ■ —— 字符随系统字体变形，10px 上下还会糊成一小团，看着像"按不动"。
+const AuditionIcon = () => (
+  <svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor" stroke="none">
+    <path d="M5.3 3.3 12.3 8l-7 4.7z" />
+  </svg>
+);
+const AuditionStopIcon = () => (
+  <svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor" stroke="none">
+    <rect x="4.4" y="4.4" width="7.2" height="7.2" rx="1.1" />
+  </svg>
+);
 
 /** 原地改名输入框:Enter/失焦落(空值或没改 = 放弃),Esc 弃。`done` 守卫挡住
  *  "Enter 提交后组件卸载引发的那次 blur"造成的双发。 */
@@ -437,6 +456,9 @@ const SCOPES: { id: Scope; label: string; title: string }[] = [
   { id: 'library', label: 'Library', title: 'Shared library — bytes in data/assets, visible to every document' },
   { id: 'video', label: 'Video', title: "This document's own assets, as used by video mode: media referenced by the timeline (hash only) + images on Layer segments (embedded)" },
   { id: 'image', label: 'Image', title: "This document's own images, as used by layers / guidances / staging (embedded in the .cud)" },
+  // 第四档不属于文档：它照 Settings → MIDI 里那条 Instruments Library 路径现扫，与打开的是哪份
+  // 文档、哪个模式都无关。放在最后，别把前三条"字节在哪"的顺序搅了。
+  { id: 'instruments', label: 'Instruments', title: 'Instruments found under the Instruments Library folder (Settings → MIDI)' },
 ];
 
 /** 内嵌图的可播地址：载入时这些字节已经落回仓库（storeCudImages），所以一张 <img> 就能画。
@@ -449,17 +471,253 @@ const selStyle: React.CSSProperties = {
   outline: 'none', cursor: 'pointer', minWidth: 0,
 };
 
-export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSel?: (s: InspectSel | null) => void; onActivate?: () => void }> = ({ vid, sel, onSel, onActivate }) => {
+// ── Instruments 档的列表 ────────────────────────────────────────────────────────────────────
+// 跟其它三档不是一回事：那边列的是**字节**（能拖、能预览、能删），这边列的是"哪儿有一件乐器"——
+// 拖不出图，也删不掉。所以它不铺卡片网格，是一张列表：名字（能不能出声看颜色）+ 型号/来源 + 徽标。
+//
+// 只画前 300 行：catalog 那种库动辄两三千条，全铺进 DOM 会把这个窄窗拖慢；剩下的靠搜索收窄，
+// 计数里如实说还有多少没画，不装作列全了。
+const INSTRUMENT_ROW_LIMIT = 300;
+
+/** 路径的最后一段（底栏只放得下这个，完整路径进 title）。 */
+const folderName = (p: string): string => {
+  if (!p) return '';
+  const parts = p.replace(/[\\/]+$/, '').split(/[\\/]/);
+  return parts[parts.length - 1] || p;
+};
+
+const instrNote: React.CSSProperties = {
+  padding: '14px 12px', fontSize: 11, lineHeight: 1.75, color: 'rgba(255,255,255,0.38)',
+  textAlign: 'center', whiteSpace: 'pre-line',
+};
+
+/** 谁去加载这件乐器。sfz = 引擎自己读，vst3-preset / surge-fxp = 只登记了位置。 */
+const backendBadge = (it: InstrumentItem): string =>
+  it.backend === 'vst3-preset' ? 'VST3'
+    : it.backend === 'surge-fxp' ? 'FXP'
+      : it.backend === 'sfz' ? 'SFZ'
+        : it.backend === 'kontakt' ? 'NKI'
+          : it.backend === 'vstsound' ? 'VST'
+            : (it.backend || '?');
+
+// 播不动的时候要说清"卡在哪一步"，否则一律 "not wired up" 等于什么也没说。
+const whyNotPlayable = (it: InstrumentItem): string =>
+  it.backend === 'kontakt'
+    ? "Kontakt instrument — the samples inside are NI's .ncw (a closed compressed format). Listed so you can see what is here; this engine cannot decode it yet."
+    : it.backend === 'vstsound'
+      ? "HALion library — everything lives inside Steinberg's .vstsound container, which is not a sample file this engine can read."
+      : 'Listed, but this engine cannot play it yet — the player for this format is not wired up';
+
+const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => {
+  const { lib, loading, error } = useInstrumentLibrary();
+  const settings = useMidiSettings();
+  // 双击一行 = 给它加一条轨（轨名就是乐器名）；能播的顺手装进引擎，这样新轨立刻有声音。
+  // `loaded` 是**已经装上的那个**，`busy` 是正在装的那个 —— 装一次可能要读十几兆 wav，
+  // 没有"正在载入"的话界面会像卡住了。
+  const [loaded, setLoaded] = useState(() => nativeEngine.currentInstrument()?.path || '');
+  const [busy, setBusy] = useState('');
+  const [note, setNote] = useState('');
+  const [noteTone, setNoteTone] = useState<'info' | 'error' | 'quiet'>('info');
+  const say = (text: string, tone: 'info' | 'error' | 'quiet' = 'info') => { setNote(text); setNoteTone(tone); };
+  // 正在响的那件（三个音走完之前别让人连点 —— 连点会叠成一片）。
+  const [playing, setPlaying] = useState('');
+  // 第一次打开这一档：拉一次。settings 还没回来时拿到的 root 是空，等它到了
+  // （路径/深度一变）midi/library.ts 自己会再扫一遍 —— 这里不用等它。
+  useEffect(() => { void reloadInstruments(); }, []);
+  const needle = q.trim().toLowerCase();
+  const rows = useMemo(() => {
+    const all = (lib?.items || []).filter(it =>
+      !needle
+      || it.name.toLowerCase().includes(needle)
+      || it.model.toLowerCase().includes(needle)
+      || it.source.toLowerCase().includes(needle)
+      || it.where.toLowerCase().includes(needle));
+    // 能出声的排前面 —— 这一档的用处就是"挑一件现在能用的"。
+    return all.slice().sort((a, b) =>
+      a.playable === b.playable ? a.name.localeCompare(b.name) : (a.playable ? -1 : 1));
+  }, [lib, needle]);
+
+  if (loading && !lib) return <div style={instrNote}>{'Scanning ' + (settings.instrumentsLibrary || 'the library') + '…'}</div>;
+  if (error) return <div style={{ ...instrNote, color: '#ff8a80' }}>{error}</div>;
+  if (!lib || !lib.state.set) {
+    return <div style={instrNote}>{'No instrument library yet.\nPick the folder in Settings → MIDI → Instruments Library.'}</div>;
+  }
+  if (!lib.ok) return <div style={{ ...instrNote, color: '#ff8a80' }}>{lib.state.reason || lib.error || 'library unreadable'}</div>;
+  if (!rows.length) {
+    return <div style={instrNote}>{needle
+      ? 'Nothing matches "' + q.trim() + '".'
+      : 'No instruments found in this folder.\nIf they are nested deeper, raise Scan depth in Settings → MIDI.'}</div>;
+  }
+
+  const root = (settings.instrumentsLibrary || '').replace(/[\\/]+$/, '');
+  const absPath = (it: InstrumentItem) => (root ? root + '/' + it.where : it.where);
+
+  /** 双击一行：在这份文档的 MIDI 工程里加一条轨，轨名＝乐器名。
+   *  能播的顺手装进引擎 —— 引擎一次只持一件乐器，装的就是双击这件，新轨立刻出声。
+   *  播不动的也照样加轨：轨道是编排，不是播放能力；底栏照 ▶ 那套说清卡在哪一步。 */
+  const addTrackFor = async (it: InstrumentItem) => {
+    if (busy) return;
+    midi.update(p => addMidiTrack(p, it.name), `Add ${it.name}`);
+    if (!it.playable) { say(`Added track ${it.name} — ${whyNotPlayable(it)}`, 'quiet'); return; }
+    const target = absPath(it);
+    if (loaded === target) { say(`Added track ${it.name} · instrument already loaded`); return; }
+    setBusy(target);
+    const inst = await nativeEngine.loadInstrument(target);
+    setBusy('');
+    if (inst.error) {
+      setLoaded('');
+      // 不弹窗：这一档的底栏就是报错的地方，和"读不到库"同一个位置。轨已经加上了，别吞掉这句。
+      say(`Added track ${it.name} — could not load the instrument: ${inst.error}`, 'error');
+      return;
+    }
+    setLoaded(inst.path || target);
+    // 大小按 KB 报（后端 `kb`）—— 小乐器用 MB 会被截成 0，读起来像没装上。
+    const size = inst.kb >= 1024 ? (inst.kb / 1024).toFixed(1) + ' MB' : inst.kb + ' KB';
+    say(`Added track ${it.name} · loaded ${inst.zones} zone${inst.zones === 1 ? '' : 's'}`
+      + (inst.kb ? ` · ${size}` : '')
+      + (inst.failed ? ` · ${inst.failed} sample${inst.failed === 1 ? '' : 's'} skipped` : ''));
+  };
+
+  /** 试听一件乐器：没装就先装（用当前音色听一件没装的乐器 = 骗人），然后弹三个音。
+   *  弹三个而不是一个 —— 一个音听不出音域分层，也听不出高低力度是不是两套采样。
+   *  **不要求正在播放**：试听不属于传输，引擎那头暂停时照样渲染。
+   *
+   *  **播不动的行也要给一句回话**。以前这里把按钮 `disabled` 掉：鼠标事件根本到不了它，
+   *  点下去什么都没有 —— 看着就是"按钮坏了"。现在照点，点完在列表顶上把**卡在哪一步**说清楚。 */
+  const audition = async (it: InstrumentItem) => {
+    if (busy || playing) return;
+    if (!it.playable) { say(`${it.name} — ${whyNotPlayable(it)}`, 'quiet'); return; }
+    const target = absPath(it);
+    setPlaying(target);
+    setNote('');
+    if (loaded !== target) {
+      setBusy(target);
+      const inst = await nativeEngine.loadInstrument(target);
+      setBusy('');
+      if (inst.error) {
+        setLoaded('');
+        say(`Could not load ${it.name} — ${inst.error}`, 'error');
+        setPlaying('');
+        return;
+      }
+      setLoaded(inst.path || target);
+    }
+    // 装上不等于能听见：既没本机引擎也没外部端口时，别让用户对着一颗没反应的键猜。
+    if (!midiOut.canAudition()) {
+      say('Loaded, but nothing can play it — no native engine and no MIDI out port.', 'quiet');
+      setPlaying('');
+      return;
+    }
+    const tones = [48, 60, 72];
+    tones.forEach((p, i) => {
+      window.setTimeout(() => midiOut.audition(0, p, i === 1 ? 108 : 84), i * 240);
+    });
+    window.setTimeout(() => setPlaying(''), tones.length * 240 + 400);
+  };
+
+  const shown = rows.slice(0, INSTRUMENT_ROW_LIMIT);
+  // 一件都播不动时，先解释一句再列 —— 否则满屏灰字读作"绑定坏了"。来源取实际的，不写死
+  // Kontakt/HALion：换一颗库（比如全是 VST3）这句话自己就跟着变。
+  const playableCount = rows.filter(r => r.playable).length;
+  const sources = Array.from(new Set(rows.map(r => r.source).filter(Boolean)));
+  return (
+    <div style={{ gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: 1 }}>
+      {note && (
+        <div style={{
+          ...instrNote, padding: '4px 6px 6px', textAlign: 'left', whiteSpace: 'normal',
+          // 钉在列表顶上：点的是第 120 行时，回话也得看得见（滚下去的那条就白说了）。
+          position: 'sticky', top: 0, zIndex: 1, background: '#141416',
+          color: noteTone === 'error' ? '#ff8a80'
+            : noteTone === 'quiet' ? 'rgba(255,255,255,0.62)' : 'rgba(59,157,255,0.92)',
+        }}>{note}</div>
+      )}
+      {playableCount === 0 && (
+        <div style={{ ...instrNote, padding: '4px 4px 8px', textAlign: 'left', lineHeight: 1.5 }}
+          title={'This engine reads SFZ (text + wav). Everything else is listed so the folder is not a blank box.'}>
+          {`Nothing here can be played yet — this engine only reads SFZ. ${sources.join(' / ') || 'These'} ${rows.length === 1 ? 'is' : 'are'} listed so you can see what is in the folder. Double-click a row to add a track for it; click ▶ for the reason it cannot play.`}
+        </div>
+      )}
+      {shown.map(it => (
+        <div
+          key={it.backend + ':' + it.id}
+          onDoubleClick={() => void addTrackFor(it)}
+          title={(it.where ? it.where + (it.source ? '\n' + it.source : '') : it.name)
+            + '\nDouble-click: add a track for this instrument'
+            + (it.playable ? '' : '\nClick ▶ to see why this one cannot be played')}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6, height: 20, padding: '0 4px', borderRadius: 4,
+            cursor: 'pointer',
+            background: loaded && absPath(it) === loaded ? 'rgba(10,132,255,0.16)' : 'transparent',
+            opacity: busy && busy === absPath(it) ? 0.5 : 1,
+          }}
+        >
+          {/* 试听。放在名字左边而不是行尾：行尾已经挤着 model 与格式徽章，
+              再挂一颗按钮窄栏里就剩不下名字了。 */}
+          <button
+            disabled={!!busy}
+            onClick={e => { e.stopPropagation(); void audition(it); }}
+            onDoubleClick={e => e.stopPropagation()}
+            aria-label={it.playable ? 'Audition' : 'Why this cannot be played'}
+            title={it.playable
+              ? (playing === absPath(it) ? 'Playing…' : '试听这件乐器（C3 / C4 / C5）— 没装会先装上')
+              : whyNotPlayable(it)}
+            style={{
+              flexShrink: 0, width: 16, height: 16, padding: 0, borderRadius: 3,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              cursor: busy ? 'default' : it.playable ? 'pointer' : 'help',
+              color: playing === absPath(it)
+                ? '#0a84ff'
+                : it.playable ? 'rgba(255,255,255,0.62)' : 'rgba(255,255,255,0.34)',
+              background: playing === absPath(it) ? 'rgba(10,132,255,0.2)' : 'rgba(255,255,255,0.06)',
+              border: '0.5px solid ' + (it.playable ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.1)'),
+            }}
+          >{playing === absPath(it) ? <AuditionStopIcon /> : <AuditionIcon />}</button>
+          <span style={{
+            flex: 1, minWidth: 0, fontSize: 10.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            color: it.playable ? 'rgba(255,255,255,0.86)' : 'rgba(255,255,255,0.4)',
+          }}>{it.name}</span>
+          <span style={{
+            flexShrink: 0, maxWidth: '40%', fontSize: 9, overflow: 'hidden', textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap', color: 'rgba(255,255,255,0.3)',
+          }}>{it.model || it.source}</span>
+          <span
+            title={it.playable ? 'This engine can play it (SFZ)' : whyNotPlayable(it)}
+            style={{
+              flexShrink: 0, fontSize: 8.5, fontWeight: 600, letterSpacing: 0.3, padding: '1px 3px', borderRadius: 3,
+              color: it.playable ? '#3b9dff' : 'rgba(255,255,255,0.3)',
+              background: it.playable ? 'rgba(10,132,255,0.16)' : 'rgba(255,255,255,0.05)',
+              border: '0.5px solid ' + (it.playable ? 'rgba(10,132,255,0.4)' : 'rgba(255,255,255,0.1)'),
+            }}
+          >{backendBadge(it)}</span>
+          {loaded && absPath(it) === loaded && (
+            <span style={{ flexShrink: 0, fontSize: 9, color: '#3b9dff' }}>loaded</span>
+          )}
+        </div>
+      ))}
+      {rows.length > shown.length && (
+        <div style={{ ...instrNote, padding: '8px 4px', textAlign: 'left' }}>
+          {`${rows.length - shown.length} more — narrow it down with the search box.`}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: string | null; onSel?: (s: InspectSel | null) => void; onActivate?: () => void }> = ({ vid, midi, sel, onSel, onActivate }) => {
   const { project: p } = vid;
   // 这份文档内嵌的图（Video / Image 两档的唯一数据源）。页面按整份清单播报，这里按活跃文档取桶 ——
   // 切 tab 那一瞬读到的就是目标文档自己那份，不必等页面重播。
   const doc = useDocAssets();
   const [over, setOver] = useState(false);
-  // 起手看文档自己的模式：image 模式落到它那套工作面，video 模式落到 Layer 段。之后跟着用户的手 ——
-  // 切文档不把人从自己选的档上拽走。
-  const [scope, setScope] = useState<Scope>(() => (p.mode === 'video' ? 'video' : 'image'));
+  // 起手看文档自己的模式：image 落地自己那套工作面，video 落 Layer 段，midi 落乐器库。
+  // 之后跟着用户的手 —— 切文档不把人从自己选的档上拽走。
+  const [scope, setScope] = useState<Scope>(() => (p.mode === 'video' ? 'video' : p.mode === 'midi' ? 'instruments' : 'image'));
   /** 这一档说的是"文档内嵌的图"（字节在 .cud 里，不是仓库里的一堆）。 */
   const docScope = scope === 'video' || scope === 'image';
+  /** 乐器库那一档：不属文档，内容由 Settings → MIDI 里那条路径决定。 */
+  const isInstruments = scope === 'instruments';
+  const instrLib = useInstrumentLibrary();
+  const midiSettings = useMidiSettings();
   const [kind, setKind] = useState<'all' | 'image' | 'video' | 'audio'>('all');
   const [q, setQ] = useState('');
   const [store, setStore] = useState<StoreAsset[] | null>(null);
@@ -695,7 +953,7 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
   // Del:只对**库条目**生效（字节真删，整批一次确认）。文档那两档里的图删不得 —— 它们是文件的
   // 一部分，删一行库表只是把文档的缓存抹掉，画面该缺还是缺。孤儿缺失键不可选,天然走不到。
   const deleteSelected = async () => {
-    if (docScope) return;
+    if (docScope || isInstruments) return;
     const sKeys = [...multiSel].filter(k => k.startsWith('s:')).map(k => k.slice(2));
     if (sKeys.length) {
       const items = sKeys
@@ -805,6 +1063,9 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setOver(false);
+    // 乐器库那一档收不了东西：它列的是"盘上哪儿有一件乐器"，不是可入库的字节。文件拖进来
+    // 在这里落不进任何地方 —— 但 preventDefault 还是要做，否则浏览器会拿它当"打开这个文件"。
+    if (isInstruments) return;
     const sid = e.dataTransfer.getData(STAGING_ITEM_TYPE);
     if (sid) {
       const item = vid.staging.find(s => s.id === sid);
@@ -825,15 +1086,34 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
     for (const f of media) void collectFile(f);
   };
 
+  // 底栏那一行：乐器档报的是"扫到多少件、从哪儿来的"，跟其它三档的"多少件字节"不是一回事，
+  // 所以它自己一句话，不挤进那个三元的表达式里。
+  const instrLine = !isInstruments ? ''
+    : instrLib.loading ? 'scanning the library…'
+      : instrLib.error ? instrLib.error
+        : instrLib.lib && !instrLib.lib.ok ? (instrLib.lib.state.reason || 'library unreadable')
+          : instrLib.lib && instrLib.lib.state.set
+            ? `${instrLib.lib.total} ${instrLib.lib.total === 1 ? 'instrument' : 'instruments'} · `
+              + `${(instrLib.lib.items || []).filter(i => i.playable).length} playable · `
+              + (instrLib.lib.source === 'catalog' ? 'catalog' : 'folder scan')
+              + (instrLib.lib.truncated ? ' · truncated' : '')
+            : 'no library folder yet';
+  const instrBroken = isInstruments && (!!instrLib.error || (!!instrLib.lib && !instrLib.lib.ok));
+
   return (
     <div
-      onDragOver={e => { const ts = e.dataTransfer.types; if (ts.includes(STAGING_ITEM_TYPE) || ts.includes(ASSET_ITEM_TYPE) || Array.from(ts).includes('Files')) { e.preventDefault(); setOver(true); } }}
+      onDragOver={e => {
+        // 乐器档收不了东西 —— 不 preventDefault，浏览器自己给"不可放下"的光标，
+        // 比先亮一个蓝框再什么都不做诚实。
+        if (isInstruments) return;
+        const ts = e.dataTransfer.types; if (ts.includes(STAGING_ITEM_TYPE) || ts.includes(ASSET_ITEM_TYPE) || Array.from(ts).includes('Files')) { e.preventDefault(); setOver(true); } }}
       onDragLeave={() => setOver(o => (o ? false : o))}
       onDrop={onDrop}
       style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#141416', minWidth: 0, overflow: 'hidden' }}
     >
-      {/* 第一行：作用域。三档 = 公用库 + 这份文档的两种用途（层段 / image 工作面）。 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '5px 6px 3px', flexShrink: 0 }}>
+      {/* 第一行：作用域。四档 = 公用库 + 这份文档的两种用途（层段 / image 工作面）+ 乐器库。
+          窄窗里四个按钮会挤到换行 —— wrap 比横向滚动好找。 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 3, rowGap: 3, flexWrap: 'wrap', padding: '5px 6px 3px', flexShrink: 0 }}>
         {SCOPES.map(s => (
           <button
             key={s.id}
@@ -855,7 +1135,7 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
 
       {/* 第二行：种类 + 搜索 + 导入。种类与导入只对库有意义 —— 文档那两档里全是图，也 import 不了。 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px 5px', borderBottom: '0.5px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
-        {!docScope && (
+        {scope === 'library' && (
           <select value={kind} onChange={e => setKind(e.target.value as 'all' | 'image' | 'video' | 'audio')} style={selStyle}>
             <option value="all">All kinds</option>
             <option value="image">Images</option>
@@ -874,7 +1154,7 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
             padding: '0 4px', outline: 'none',
           }}
         />
-        {!docScope && (
+        {scope === 'library' && (
           <>
             <button
               title="Import images into the library (they are copied into data/assets)"
@@ -944,11 +1224,14 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
         style={{
           flex: 1, minHeight: 0, overflow: 'auto', scrollbarWidth: 'thin', outline: 'none',
           padding: 8, display: 'grid', gap: 6, alignContent: 'start',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))',
-          background: over ? 'rgba(10,132,255,0.06)' : 'transparent',
+          // 乐器档是一张列表（一行一件），其它三档是卡片网格 —— 同一个滚动容器，两种列宽。
+          gridTemplateColumns: isInstruments ? '1fr' : 'repeat(auto-fill, minmax(104px, 1fr))',
+          background: over && !isInstruments ? 'rgba(10,132,255,0.06)' : 'transparent',
         }}
       >
-        {total === 0 && (
+        {isInstruments && <InstrumentList q={q} midi={midi} />}
+
+        {!isInstruments && total === 0 && (
           <div style={{ gridColumn: '1 / -1', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8, whiteSpace: 'pre-line' }}>
             {docPending ? 'Reading this document…'
               : docScope && scope === 'video' ? 'Nothing in this document yet.\nMedia you drop on the timeline shows up here as a reference;\nimages on Layer segments are embedded.'
@@ -1118,13 +1401,14 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
         borderTop: '0.5px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.015)',
       }}>
         <span
-          title={(err || listErr) || undefined}
+          title={isInstruments ? (instrLib.lib?.root || undefined) : ((err || listErr) || undefined)}
           style={{
-            fontSize: 9.5, color: (err || listErr) ? '#ff8a80' : 'rgba(255,255,255,0.32)',
+            fontSize: 9.5, color: (instrBroken || (!isInstruments && (err || listErr))) ? '#ff8a80' : 'rgba(255,255,255,0.32)',
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
           }}>
-          {busy && !docScope ? 'loading…' : err ? err : listErr ? listErr
-            : `${total} ${total === 1 ? 'item' : 'items'} · ${scope === 'library' ? 'library' : 'in this document'}`}
+          {isInstruments ? instrLine
+            : busy && !docScope ? 'loading…' : err ? err : listErr ? listErr
+              : `${total} ${total === 1 ? 'item' : 'items'} · ${scope === 'library' ? 'library' : 'in this document'}`}
         </span>
         {multiSel.size > 0 && (
           <span style={{ fontSize: 9, color: '#3b9dff', flexShrink: 0, whiteSpace: 'nowrap' }}>
@@ -1132,7 +1416,26 @@ export const VidAssets: React.FC<{ vid: VidController; sel?: string | null; onSe
           </span>
         )}
         <span style={{ flex: 1 }} />
-        {docScope ? (
+        {isInstruments ? (
+          <>
+            <span
+              title={midiSettings.instrumentsLibrary || undefined}
+              style={{
+                fontSize: 9, color: 'rgba(255,255,255,0.26)', flexShrink: 1, minWidth: 0,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}
+            >{folderName(midiSettings.instrumentsLibrary)}</span>
+            <button
+              title="Read that folder again from disk (the list is cached until you ask)"
+              onClick={() => void reloadInstruments(true)}
+              style={{
+                ...rowBtn, width: 'auto', height: 15, padding: '0 4px', flexShrink: 0,
+                fontSize: 8.5, fontWeight: 600, border: '0.5px solid rgba(255,255,255,0.12)',
+                borderRadius: 3, color: 'rgba(255,255,255,0.45)',
+              }}
+            >Rescan</button>
+          </>
+        ) : docScope ? (
           <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.26)', flexShrink: 0, whiteSpace: 'nowrap' }}
             title={scope === 'video'
               ? 'REF = the .cud stores only the hash and URL (bytes stay in the store). IN DOC = the pixels are embedded in the .cud.'
