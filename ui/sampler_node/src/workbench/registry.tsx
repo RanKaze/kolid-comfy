@@ -11,6 +11,8 @@ import { historyUnit } from './history';
 import { layersUnit } from './layers';
 import { layoutUnit } from './layout';
 import { selectionUnit } from './selection';
+import { cutUnit } from './cut';
+import { cursorUnit } from './cursor';
 import { transformUnit } from './transform';
 import { viewUnit } from './view';
 import { textUnit } from './text';
@@ -43,7 +45,10 @@ export type WorkbenchHostCtx = {
    *  音频轨没有帧可取。Processor 窗的视频挑选（Sel. Track / Asset）也从这里拿清单 ——
    *  `assets` 只列视频资产（音频没有帧）。 */
   video: {
-    mode: 'image' | 'video'; fps: number; setFps: (v: number) => void;
+    /** 文档此刻是哪一种模式。Video 专属的正文只看 `=== 'video'`，所以 MIDI 模式与 Image 同待遇
+     *  （不出播放器、不抢画布）；但 Cut 那一格要按模式给**不同的一条命令**（裁画布 / 剪段 / 剪音符），
+     *  它必须能分出 midi —— 所以这里带上第三态，不把 midi 折叠成 image。 */
+    mode: 'image' | 'video' | 'midi'; fps: number; setFps: (v: number) => void;
     tracks: { id: string; name: string }[];
     assets: { id: string; name: string }[];
     /** Video Generator（它自己那一格用）：哪几个接口开了 Video Generator 模式、各自八个槽
@@ -96,7 +101,13 @@ export const WORKBENCH_UNITS: WorkbenchUnit[] = [
   // Staging 那一格：画布底部原来那条工作区（Extra Prompt + Blend/Tag + 图池条 + Cancel / 进度）整条
   // 搬进宿主后合成的一格，排在最前 —— 它是画布的底栏，最常伸手。
   stagingUnit,
-  canvasUnit, transformUnit, colorUnit, brushUnit, bucketUnit, eraserUnit, selectionUnit, viewUnit,
+  canvasUnit, transformUnit, colorUnit, brushUnit, bucketUnit, eraserUnit, selectionUnit,
+  // Cut 紧跟 Selection：两者都是"框 / 区域 + 一下动作"，但 Cut 跨三种模式（裁布 / 剪段 / 剪音符）。
+  cutUnit,
+  // Cursor 是 Cut 的反面：手上什么都不拿。跟着它跨三种模式（画布无工具 / 卷帘不落音 /
+  // 时间线无刀），放在 Cut 旁边，两颗相邻的键也就相邻。
+  cursorUnit,
+  viewUnit,
   // 侧栏那六格工具小窗：Text、Geometry、3D、Pose、Detector、Processor（序 = 页面那一列的序）。
   textUnit, geometryUnit, scene3dUnit, poseUnit, detectorUnit, processorUnit,
   // Video Generator 单独一扇窗：它原来压在 Processor 窗里，可两件事不是一件事 —— Processor 是

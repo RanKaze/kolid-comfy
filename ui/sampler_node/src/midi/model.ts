@@ -275,6 +275,23 @@ export const removeNotesFromTrack = (t: MidiTrack, noteIds: readonly string[]): 
   return { ...t, notes: t.notes.filter(n => !drop.has(n.id)) };
 };
 
+/** 在某拍把一枚音剪成两半（拍由调用方按网格吸附好）。两半都不许短于 MIN_DUR —— 落点离任一端
+ *  太近就原样返回，调用方拿"没变"当"剪不动"。左半**保留原 id**（选中态、agent 报的 selNote 都
+ *  还指着它），右半用新 id；音高与力度原样。 */
+export const splitNoteInTrack = (t: MidiTrack, noteId: string, at: number, rightId?: string): MidiTrack => {
+  const n = t.notes.find(x => x.id === noteId);
+  if (!n) return t;
+  const left = at - n.start;
+  const right = n.start + n.dur - at;
+  if (left < MIN_DUR - 1e-9 || right < MIN_DUR - 1e-9) return t;
+  const rightNote: MidiNote = { ...n, id: rightId || newMidiId('mn'), start: at, dur: right };
+  return {
+    ...t,
+    notes: [...t.notes.map(x => (x.id === n.id ? { ...x, dur: left } : x)), rightNote]
+      .sort((a, b) => a.start - b.start || a.pitch - b.pitch),
+  };
+};
+
 export const addNote = (p: MidiProject, trackId: string, note: Omit<MidiNote, 'id'>, id?: string): MidiProject =>
   mapTrack(p, trackId, t => addNoteToTrack(t, note, id));
 

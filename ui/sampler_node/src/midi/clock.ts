@@ -49,6 +49,9 @@ type Snap = {
 };
 
 const POLL_MS = 2000;
+/** 传输命令失败后的重发间隔（毫秒）。play/pause 都是幂等的，重发没有副作用；
+ *  一直退避重试到后端接住为止 —— 暂停丢了就是"按了停，声音还在响"。 */
+const RETRY_MS = [400, 900, 1800, 3500, 5000];
 /** 超过这个误差就认为是 seek（硬跳），否则按比例软纠。 */
 const HARD_JUMP_S = 0.08;
 /** 软纠的比例：每帧吃掉 25% 的余量，肉眼看不出来，几帧内就贴住。 */
@@ -80,6 +83,13 @@ class MasterClock {
   /** 去抖中的那一发 seek：`wantSeek` 永远是最后一次想去的秒数。 */
   private seekTimer: ReturnType<typeof setTimeout> | null = null;
   private wantSeek = 0;
+  /** 没送到后端的传输意图（play/pause）。在它被后端确认之前，轮询拿回来的 `playing`
+   *  不许把它盖掉 —— 否则暂停失败后界面会被自己的 2 秒轮询翻回"在播"，声音也一直不停。 */
+  private pending: {
+    action: 'play' | 'pause';
+    tries: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  } | null = null;
 
   constructor() {
     // 插值的起点就是"现在"：没有这一句，第一次 play 之后 dt 会等于整个页面存活时长，
@@ -178,22 +188,71 @@ class MasterClock {
   }
 
   private async ctl(action: string, value?: number): Promise<void> {
+    // 用户改了主意：旧的待发意图作废（seek 不算改主意 —— 它不改"播/停"，别把暂停重试挤掉）。
+    if (this.pending && this.pending.action !== action &&
+        (action === 'play' || action === 'pause' || action === 'toggle')) {
+      this.clearPending();
+    }
+    if (await this.send(action, value)) return;
+
+    if (action === 'play' || action === 'pause') {
+      // 后端没收下：界面先按意图走（否则按了暂停画面不动），意图留着一直重发。
+      if (!this.pending) this.localFallback(action, value);
+      this.scheduleRetry(action);
+      this.broadcast();
+      return;
+    }
+    // toggle 不幂等、seek 只影响落点：失败了就本地降级，不重发（重发 toggle 会翻两次）。
+    this.localFallback(action, value);
+    this.broadcast();
+  }
+
+  /** 发一发控制命令。后端回了一份**像样的快照**才算数（见下面的形状校验）。 */
+  private async send(action: string, value?: number): Promise<boolean> {
+    let snap: (Snap & { error?: string }) | null = null;
     try {
       const r = await fetch('/api/clock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, value }),
       });
-      const snap = (await r.json()) as Snap & { error?: string };
-      // **必须先验形状**：后端对一个它不认识的路由会回 `{}`（200 + 空对象），那不是"快照"。
-      // 信了它，`playing` 当场被当成 false —— 用户按播放，界面上一秒后又自己停了。
-      if (snap && typeof snap.frames === 'number' && !snap.error) this.accept(snap, nowPerf(), 0);
-      else this.localFallback(action, value);
+      snap = (await r.json()) as Snap & { error?: string };
     } catch {
-      // 后端不在：本地自己动（降级也得好用，只是不权威）。
-      this.localFallback(action, value);
+      return false;
     }
+    // **必须先验形状**：后端对一个它不认识的路由会回 `{}`（200 + 空对象），那不是"快照"。
+    // 信了它，`playing` 当场被当成 false —— 用户按播放，界面上一秒后又自己停了。
+    if (!(snap && typeof snap.frames === 'number' && !snap.error)) return false;
+    // 后端接住了：先撤掉意图闸门，再让这份快照（含权威的 playing）生效。
+    if (this.pending && this.pending.action === action) this.clearPending();
+    this.accept(snap, nowPerf(), 0);
     this.broadcast();
+    return true;
+  }
+
+  private scheduleRetry(action: 'play' | 'pause'): void {
+    let p = this.pending;
+    if (!p || p.action !== action) {
+      p = { action, tries: 0, timer: null };
+      this.pending = p;
+    }
+    if (p.timer) return;                       // 已经排上了，别叠计时器
+    const delay = RETRY_MS[Math.min(p.tries, RETRY_MS.length - 1)];
+    p.tries++;
+    p.timer = setTimeout(() => {
+      p!.timer = null;
+      if (this.pending !== p) return;
+      void this.send(action).then(ok => {
+        if (this.pending !== p) return;         // 期间用户又按了别的：这条作废
+        if (!ok) this.scheduleRetry(action);
+      });
+    }, delay);
+  }
+
+  private clearPending(): void {
+    const p = this.pending;
+    this.pending = null;
+    if (p?.timer) clearTimeout(p.timer);
   }
 
   /** 后端不在时的本地走时。**先把"此刻在哪"结账，再改状态** ——
@@ -254,7 +313,9 @@ class MasterClock {
 
     this.rate = snap.rate > 0 ? snap.rate : this.rate;
     this.speed = snap.speed || 1;
-    this.playing = !!snap.playing;
+    // 有待确认的传输意图时，"在不在播"由意图说了算：后端还没收到那发暂停，
+    // 它当然还说自己在播 —— 照抄就会让界面自己翻回播放态，那声音也就一直停不下来。
+    if (!this.pending) this.playing = !!snap.playing;
     this.rttMs = rtt;
     this.backend = snap.source || '';
     this.source = 'native';
@@ -333,6 +394,7 @@ class MasterClock {
     if (this.raf) cancelAnimationFrame(this.raf);
     if (this.seekTimer) clearTimeout(this.seekTimer);
     this.seekTimer = null;
+    this.clearPending();
     this.stopTicker?.();
     this.stopTicker = null;
     this.timer = null;

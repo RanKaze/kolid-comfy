@@ -1030,7 +1030,7 @@ export const EMPTY_BLEND_UI: BlendUi = {
  *  `'visible-faces'` 仍压在最末：它是一条通道而不是一颗按钮，而且门禁钉的就是"`| 'visible-faces';`"这一句
  *  在联合类型的最末 —— 顺序没有语义，动了它反而要重钉一条本来就成立的判据。 */
 export type BlendUiAction =
-  | 'canvas-size' | 'canvas-modify' | 'canvas-resize' | 'layer-set'
+  | 'canvas-size' | 'canvas-modify' | 'canvas-crop' | 'canvas-cursor' | 'canvas-resize' | 'layer-set'
   | 'transform-adjust' | 'transform-fill'
   | 'select-rect' | 'select-lasso' | 'select-all' | 'select-none'
   | 'view-pan' | 'view-zoom' | 'view-rotate' | 'view-fit' | 'view-reset'
@@ -1075,6 +1075,12 @@ export type BlendUiAction =
 export type BlendUiPayloads = {
   'canvas-size': undefined;
   'canvas-modify': undefined;
+  /** PS 裁切模式：拖一个框（或拉把手），Enter 把画布裁成框内那块，Esc 原样收起。
+   *  同一颗键再按一下 = 收起 —— 面板上那颗按钮是黏住的，键是手势，两者都走这一条。 */
+  'canvas-crop': undefined;
+  /** Cursor：把工具全部放下（mode 'none'）。裁切 / 改画布 / 扩展那三种边界拖动先按它们自己的
+   *  取消走 —— 直接换 mode 会把快照和预览撂在原地。视图不动（归 Esc 管）。 */
+  'canvas-cursor': undefined;
   /** 直接设画布尺寸（宿主侧那两颗输入框用）：Video 模式下活画布的弹窗看不见窗口外，
    *  所以给一条带值的路，落地仍是页面同一个 setCanvasSize。 */
   'canvas-resize': { w: number; h: number };

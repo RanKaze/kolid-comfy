@@ -1244,6 +1244,11 @@ let modSnapshot = null;
 // Esc restores the transform. Rotation stays whatever it was — resize only.
 let expandState = null;        // {layerId, startTransform}
 
+// Crop（Image 模式的 Cut）：框还只是屏幕上的预览，提交前谁都不动 —— 所以它不用快照，
+// 入口和出口都只是 mode 那一格（见「裁切模式」那一节）。
+let cropBox = null;            // {x, y, w, h} doc 像素；null = 还没拖出框
+let cropDrag = null;           // {kind: 'new'|'move'|'resize', ...}
+
 const HANDLE_UV = { nw: [-1, -1], n: [0, -1], ne: [1, -1], e: [1, 0], se: [1, 1], s: [0, 1], sw: [-1, 1], w: [-1, 0] };
 const HANDLE_CURSOR = { nw: 'nwse-resize', n: 'ns-resize', ne: 'nesw-resize', e: 'ew-resize', se: 'nwse-resize', s: 'ns-resize', sw: 'nesw-resize', w: 'ew-resize', rotate: 'grab' };
 
@@ -2904,6 +2909,10 @@ const BUCKET_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2
 // rectangle's origin corner), with a dashed box badge to the bottom-right saying "this drag lays
 // out a new layer".
 const DYNAMIC_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32' fill='none'%3E%3Cg stroke='%23000' stroke-width='4.6'%3E%3Cpath d='M16 15h12v13h-12z M19.5 15v-3h8.5v8h-3' stroke-dasharray='3.4 2.6'/%3E%3C/g%3E%3Cg stroke='%23fff' stroke-width='1.8'%3E%3Cpath d='M16 15h12v13h-12z M19.5 15v-3h8.5v8h-3' stroke-dasharray='3.4 2.6'/%3E%3C/g%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23fff' stroke-width='3.2'/%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E") 8 8, crosshair`;
+// Crop in the page is the same precision tool as the Cut dock's blade on the host side: the shared
+// crosshair (hotspot 8,8 = the point you aim with) plus a scissors badge. Same glyph and badge
+// placement as workbench/cursors.ts + cutStore.ts so one Cut looks the same on every surface.
+const CUT_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32' fill='none' stroke-linecap='round' stroke-linejoin='round'%3E%3Cg transform='translate(12 11) scale(0.68)' stroke='%23000' stroke-width='4.8' fill='none'%3E%3Ccircle cx='4.1' cy='11.7' r='1.8'/%3E%3Ccircle cx='4.1' cy='4.3' r='1.8'/%3E%3Cpath d='M5.6 10.5 13.4 2.7M5.6 5.5l7.8 7.8'/%3E%3C/g%3E%3Cg transform='translate(12 11) scale(0.68)' stroke='%23fff' stroke-width='2' fill='none'%3E%3Ccircle cx='4.1' cy='11.7' r='1.8'/%3E%3Ccircle cx='4.1' cy='4.3' r='1.8'/%3E%3Cpath d='M5.6 10.5 13.4 2.7M5.6 5.5l7.8 7.8'/%3E%3C/g%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23fff' stroke-width='3.2'/%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E") 8 8, crosshair`;
 
 // 两支选框指针, 解剖和油漆桶一致: **准星**才是拿来瞄准的 (交点即落点, hotspot 8 8), 右下的徽章
 // 只报身份 —— 外面那枚说工具 (实线方框 = 矩形选框, 带绳的环 = 套索), 角上那枚说这次按下会提交
@@ -2979,6 +2988,7 @@ function refreshCursor() {
     }
     if (mode === 'transform' && lastScreen) { updateHoverCursor(lastScreen, lastDoc); return; }
     if (adjustModeActive() && lastScreen) { updateHoverCursor(lastScreen, lastDoc); return; }
+    if (mode === 'crop') { setCursor(CUT_CURSOR); return; }
     setCursor('default');
 }
 
@@ -3083,6 +3093,12 @@ function updateHoverCursor(sp, docPos) {
         const el = expandState ? getLayer(expandState.layerId) : null;
         const h = el ? hitHandleScreen(sp, docPos, el) : null;
         setCursor(h && h !== 'rotate' ? HANDLE_CURSOR[h] : 'default');
+        return;
+    }
+    if (mode === 'crop') {
+        const h = hitCropHandle(sp);
+        if (h) { setCursor(HANDLE_CURSOR[h]); return; }
+        setCursor(cropBox && pointInCropBox(docPos) ? 'move' : CUT_CURSOR);
         return;
     }
     if (mode !== 'transform') { setCursor('default'); return; }
@@ -3439,6 +3455,7 @@ function drawOverlay() {
         if (canvasW) drawAdjustBox(canvasHandlePoints(), false);
         return;
     }
+    if (mode === 'crop') { drawCropOverlay(); return; }
     if (mode === 'expand') {
         const el = expandState ? getLayer(expandState.layerId) : null;
         if (el && el.img) drawAdjustBox(handleScreenPoints(el), false);
@@ -6969,6 +6986,10 @@ function restoreState(s, opts) {
     // re-canvas-sizes everything it was measured against (undo, redo, tab switch, Load) — so it
     // goes rather than pointing at pixels that no longer mean what they did.
     clearSelection();
+    // 裁切框同理：它量的是这一张画布，重放之后一块像素都不再对得上。工具还留在 Crop 上
+    // （用户自己再拖一个框就是），框本身收走。
+    cropBox = null;
+    cropDrag = null;
     // The Mask layer is a live object the paint engine mutates in place, so it travels with the
     // document and is adopted before anything below writes through it.
     if (asDocument && s.maskLayer) maskLayer = s.maskLayer;
@@ -7033,7 +7054,9 @@ function restoreState(s, opts) {
     pruneAssets();
     pruneAttrs();
     if (asDocument) {
-        mode = s.mode === 'canvasModify' ? 'transform' : (s.mode || 'transform');
+        // 两种"悬着的手势"都活不过一次往返：Canvas Modify 的预览挂在快照上（它的落点就是 Transform），
+        // Crop 的框干脆只在 overlay 上 —— 回来时没有框可续，退回"没有工具"。
+        mode = s.mode === 'canvasModify' ? 'transform' : s.mode === 'crop' ? 'none' : (s.mode || 'transform');
         paintTarget = s.paintTarget === 'image' ? 'image' : 'mask';
         const v = s.view || {};
         if (Number.isFinite(v.zoom)) view.zoom = clampZoom(v.zoom);
@@ -9445,13 +9468,15 @@ function updateTransformDrag(e, pos) {
     render();
 }
 
-// ==================== 边框调整模式（Canvas Modify / Expand） ====================
+// ==================== 边框调整模式（Canvas Modify / Expand / Crop） ====================
 // One interaction, two destinations: the canvas gets border-drag resizing (Enter applies the
 // new resolution, Esc rewinds from the snapshot) and smart objects get Expand (Enter resamples
 // the layer's own image to the dragged box, Esc restores the transform). Both live on the same
 // screen-space overlay the transform box uses, both end with Enter / Esc, and while either is
 // active every other mode switch is refused — a half-dragged preview must not be abandoned.
-function adjustModeActive() { return mode === 'canvasModify' || mode === 'expand'; }
+// Crop 是第三条：同一块 overlay、同一个 Enter/Esc，但它只画预览（框），不加进撤销摞，
+// 也不锁画布 —— 所以它只要「别的模式不许换」那一条规矩。
+function adjustModeActive() { return mode === 'canvasModify' || mode === 'expand' || mode === 'crop'; }
 
 function guardAdjustMode() {
     if (!adjustModeActive()) return false;
@@ -9621,6 +9646,319 @@ function cancelCanvasModify() {
     applyView();
     setMode('none');
     setStatus(wasMoved ? 'Canvas Modify cancelled' : 'Canvas Modify closed');
+}
+
+// ---- Crop（Image 模式的 Cut） ----
+// PS 的裁切：拖一个框（或拉八颗把手），Enter 把**画布**裁成框内那块，Esc 原样收起。框只是屏幕上的
+// 预览（框外压暗、三分线、八颗把手都在 overlay 上画），提交之前像素一个字节都不动 —— 所以它没有
+// 快照，取消这一步不需要回滚任何东西。
+// 裁的是画布，而画布是文档级的：活跃这套的**栅格**图层连同缓冲一起裁；智能图层的像素不碰，只把
+// transform 按新画布重新归一（分母换了，画面因此还在原地）。非活跃的 Layer 段也一起过这一趟，
+// 各自补一条自己的撤销步 —— 它们不在活跃撤销摞里，不补的话切回去按 Ctrl+Z 会跳过裁切那一刻。
+function cropBoxFrom(x0, y0, x1, y1) {
+    let l = Math.round(Math.max(0, Math.min(canvasW, Math.min(x0, x1))));
+    let r = Math.round(Math.max(0, Math.min(canvasW, Math.max(x0, x1))));
+    let t = Math.round(Math.max(0, Math.min(canvasH, Math.min(y0, y1))));
+    let b = Math.round(Math.max(0, Math.min(canvasH, Math.max(y0, y1))));
+    if (r - l < 1) r = Math.min(canvasW, l + 1);
+    if (b - t < 1) b = Math.min(canvasH, t + 1);
+    return { x: l, y: t, w: Math.max(1, r - l), h: Math.max(1, b - t) };
+}
+
+function cropHandlePoints() {
+    const pts = {};
+    if (!cropBox) return pts;
+    for (const key in HANDLE_UV) {
+        const [u, v] = HANDLE_UV[key];
+        pts[key] = docToScreen({
+            x: cropBox.x + (u + 1) / 2 * cropBox.w,
+            y: cropBox.y + (v + 1) / 2 * cropBox.h,
+        });
+    }
+    return pts;
+}
+
+function hitCropHandle(sp) {
+    if (!cropBox) return null;
+    const pts = cropHandlePoints();
+    for (const key in HANDLE_UV) {
+        if (Math.hypot(sp.x - pts[key].x, sp.y - pts[key].y) <= 9) return key;
+    }
+    return null;
+}
+
+function pointInCropBox(pos) {
+    return !!cropBox && pos.x >= cropBox.x && pos.y >= cropBox.y
+        && pos.x <= cropBox.x + cropBox.w && pos.y <= cropBox.y + cropBox.h;
+}
+
+function startCanvasCrop() {
+    // 同一颗键/同一颗按钮再按一下 = 收起（面板那颗是黏住的，键是手势，两条都走这一句）。
+    if (mode === 'crop') { cancelCanvasCrop(); return; }
+    if (!canvasW || !canvasH) { setStatus('Nothing to crop — the canvas does not exist yet', 'error'); return; }
+    // Video 模式下这一格是**监视器**（底片 / 合成帧），不是可裁的图层面：裁它会把文档画布连同
+    // 输出栅格一起切小，此后的 Layer 段就全在错的栅格上折（用户报的"Video 里 Layer 段渲染不对"
+    // 最短的一条路 —— 游标恰在视频段之外时 vidBaseOn 是假的，下面那条守卫拦不住）。
+    if (vidSurfaceVideo) { setStatus('Crop lives in the Image view — Video mode has no layer canvas to crop', 'error'); return; }
+    // 底片态（Video 画面顶在画布上）没有可裁的图层画面 —— 这一格只在 Image 视图里有意义。
+    if (vidBaseOn) { setStatus('Crop lives in the Image view — there is no layer picture under the video base', 'error'); return; }
+    // 3D tab 的画布是场景渲染出来的，裁它会把 2D 与场景两套坐标错开 —— 这一格不做。
+    if (Scene3D.active) { setStatus('Crop is a 2D tool — leave the 3D tab first', 'error'); return; }
+    // A pending transform is pixels waiting for Enter; crop is another commit of those pixels, so
+    // land it first (its own step, as any other action that cannot wait would).
+    applyTransformPending();
+    if (guardAdjustMode()) return;
+    cropBox = null;
+    cropDrag = null;
+    setMode('crop');
+    setStatus('Drag a box — Enter crops the canvas, Esc cancels');
+}
+
+function cancelCanvasCrop() {
+    const had = !!cropBox;
+    cropBox = null;
+    cropDrag = null;
+    setMode('none');
+    setStatus(had ? 'Crop cancelled' : 'Crop closed');
+}
+
+// Cursor（A）：把工具全部放下 —— 画布回到"无工具"：点一下仍可选中图层，但不会落笔、不会改画布。
+// Esc 也回到 'none'，但它顺带把视图归位；这一条只管工具，视图原地不动（两件事分开，各归各的键）。
+// 三种边界拖动（裁切 / 改画布 / 扩展）必须先走它们自己的取消：直接 setMode('none') 只换 mode，
+// 会把快照和半应用的预览撂在原地（既没落地也没回滚）。
+function enterCursorMode() {
+    if (layerMenuOpen()) closeLayerMenu();
+    if (cancelSelDrag()) return;
+    if (cancelRectDrag()) return;
+    if (mode === 'crop') { cancelCanvasCrop(); return; }
+    if (mode === 'canvasModify') { cancelCanvasModify(); return; }
+    if (mode === 'expand') { cancelExpand(); return; }
+    if (mode === 'none') return;
+    setMode('none');
+    setStatus('Cursor — no tool');
+}
+
+function beginCropDrag(sp, pos) {
+    const handle = hitCropHandle(sp);
+    if (handle) {
+        cropDrag = { kind: 'resize', handle, box0: { x: cropBox.x, y: cropBox.y, w: cropBox.w, h: cropBox.h }, moved: true };
+        setCursor(HANDLE_CURSOR[handle]);
+        return;
+    }
+    if (cropBox && pointInCropBox(pos)) {
+        cropDrag = { kind: 'move', box0: { x: cropBox.x, y: cropBox.y, w: cropBox.w, h: cropBox.h }, start: pos, moved: true };
+        setCursor('move');
+        return;
+    }
+    // 框外按下 = 重新框选（PS 裁切框外拖拽）。框还没有时这是唯一的路；小于 3px 的抖动作罢。
+    cropDrag = {
+        kind: 'new',
+        start: { x: Math.max(0, Math.min(canvasW, pos.x)), y: Math.max(0, Math.min(canvasH, pos.y)) },
+        startScreen: { x: sp.x, y: sp.y },
+        moved: false,
+    };
+    cropBox = null;
+    setCursor(CUT_CURSOR);
+}
+
+function updateCropDrag(pos, sp) {
+    const d = cropDrag;
+    if (!d) return;
+    if (d.kind === 'new') {
+        if (!d.moved && Math.hypot(sp.x - d.startScreen.x, sp.y - d.startScreen.y) <= 3) return;
+        d.moved = true;
+        cropBox = cropBoxFrom(d.start.x, d.start.y, pos.x, pos.y);
+    } else if (d.kind === 'move') {
+        const b = d.box0;
+        const x = Math.max(0, Math.min(canvasW - b.w, Math.round(b.x + pos.x - d.start.x)));
+        const y = Math.max(0, Math.min(canvasH - b.h, Math.round(b.y + pos.y - d.start.y)));
+        cropBox = { x, y, w: b.w, h: b.h };
+    } else {
+        const b = d.box0;
+        const [hu, hv] = HANDLE_UV[d.handle];
+        const x0 = hu < 0 ? pos.x : b.x;
+        const x1 = hu > 0 ? pos.x : b.x + b.w;
+        const y0 = hv < 0 ? pos.y : b.y;
+        const y1 = hv > 0 ? pos.y : b.y + b.h;
+        cropBox = cropBoxFrom(x0, y0, x1, y1);
+    }
+    if (cropBox) setStatus(`${cropBox.w} × ${cropBox.h} — Enter crops, Esc cancels`);
+    drawOverlay();
+}
+
+function endCropDrag() {
+    cropDrag = null;
+    if (!cropBox) setStatus('Drag a box — Enter crops the canvas, Esc cancels');
+    refreshCursor();
+}
+
+// 框外压暗 + 三分线 + 八颗把手 + 尺寸角标。全部画在 overlay 上（屏幕坐标），文档一个像素都不动。
+function drawCropOverlay() {
+    if (!cropBox || !canvasW || !canvasH) return;
+    const ctx = overlayCtx;
+    const w = overlayCanvas.width / overlayDpr, h = overlayCanvas.height / overlayDpr;
+    const pts = cropHandlePoints();
+    // evenodd：外圈整幅、内圈就是框 —— 一次填掉四块
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.moveTo(pts.nw.x, pts.nw.y);
+    ctx.lineTo(pts.ne.x, pts.ne.y);
+    ctx.lineTo(pts.se.x, pts.se.y);
+    ctx.lineTo(pts.sw.x, pts.sw.y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fill('evenodd');
+    ctx.restore();
+    // 三分线：框里两条竖两条横，跟着框一起转（连线两端取边上的三等分点）
+    const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+    ctx.lineWidth = 1;
+    for (const t of [1 / 3, 2 / 3]) {
+        const a = lerp(pts.nw, pts.ne, t), b = lerp(pts.sw, pts.se, t);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        const c = lerp(pts.nw, pts.sw, t), e = lerp(pts.ne, pts.se, t);
+        ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(e.x, e.y); ctx.stroke();
+    }
+    ctx.restore();
+    drawAdjustBox(pts, false);
+    // 尺寸角标：框一给出，屏幕上就该读得到它裁出来多大
+    ctx.save();
+    ctx.font = '600 11px ui-monospace, Consolas, monospace';
+    const label = cropBox.w + ' × ' + cropBox.h;
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.62)';
+    ctx.fillRect(pts.nw.x + 6, pts.nw.y + 6, tw + 10, 18);
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillText(label, pts.nw.x + 11, pts.nw.y + 19);
+    ctx.restore();
+}
+
+// 一张面按源矩形裁一块，落到框那么大的新画布上。永远是**新画布**：撤销摞里的快照按引用握着旧面。
+function cropSurfaceRect(src, sx, sy, sw, sh, dw, dh) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(dw));
+    c.height = Math.max(1, Math.round(dh));
+    if (src && src.width && src.height && sw > 0 && sh > 0) {
+        c.getContext('2d').drawImage(src, sx, sy, sw, sh, 0, 0, c.width, c.height);
+    }
+    return c;
+}
+
+// 栅格层 1:1 焊在画布上（缓冲本来就该是画布那么大）：按框裁缓冲，条带上的面按同一比例映射。
+function cropRasterLayerTo(l, box, oldW, oldH) {
+    const img = l.img;
+    if (!img) return;
+    const kw = (img.width || oldW) / oldW, kh = (img.height || oldH) / oldH;
+    const c = cropSurfaceRect(img, box.x * kw, box.y * kh, box.w * kw, box.h * kh, box.w, box.h);
+    l.img = c;
+    if (l.src) l.src = c.toDataURL('image/png');
+    remapAttrFaces(l, s => {
+        const fw = (s.width || oldW) / oldW, fh = (s.height || oldH) / oldH;
+        return cropSurfaceRect(s, box.x * fw, box.y * fh, box.w * fw, box.h * fh, box.w, box.h);
+    });
+    l.rasterTr = null;      // 内容框的缓存跟着缓冲走（键是 img 引用，这里显式再断一次）
+}
+
+// 智能层：像素不碰，只按新画布重新归一 —— 与 Canvas Modify 的预览同一条算术（origin0 = (0,0)）。
+// 旋转轴心是中心，裁切是轴对齐的窗口，所以 rotation 一个字不用改。
+function cropTransform(t, box, oldW, oldH) {
+    t.cx = (t.cx * oldW - box.x) / box.w;
+    t.cy = (t.cy * oldH - box.y) / box.h;
+    t.w = t.w * oldW / box.w;
+    t.h = t.h * oldH / box.h;
+}
+
+function cropLayerList(list, box, oldW, oldH) {
+    for (const l of list || []) {
+        if (!l) continue;
+        if (isRasterLayer(l)) { cropRasterLayerTo(l, box, oldW, oldH); continue; }
+        cropTransform(l.transform, box, oldW, oldH);
+    }
+}
+
+// Mask 的覆盖面是 doc 锚定的：按框原样裁，不缩放。
+function cropMaskSurface(surface, box, oldW, oldH) {
+    const sw = (surface && surface.width) || oldW, sh = (surface && surface.height) || oldH;
+    return cropSurfaceRect(surface, box.x * sw / oldW, box.y * sh / oldH, box.w * sw / oldW, box.h * sh / oldH, box.w, box.h);
+}
+
+// 非活跃的 Layer 段：画布是文档级的，它们也得跟着裁；每套补一条自己的撤销步（裁完那一刻），
+// 否则切回去按 Ctrl+Z 会跳过裁切前的状态，直接把最后一次编辑撤掉。
+function cropOtherLayerSets(box, oldW, oldH) {
+    for (const set of layerSets.values()) {
+        if (!set) continue;
+        const stack = Array.isArray(set.undoStack) ? set.undoStack : [];
+        // 读档回来、从没切进去过的那套没有撤销基线（它一进来就是空摞）：先把裁前那一刻补成基线，
+        // 否则这一套唯一的一步会是"裁完"，切回去按 Ctrl+Z 什么也撤不掉。
+        if (!stack.length) {
+            stack.push(tagHistoryStep({
+                canvasW: oldW, canvasH: oldH, canvasCustom: true,
+                selectedId: Number.isInteger(set.selectedId) ? set.selectedId : null,
+                group: [],
+                maskVisible: maskLayer.visible,
+                layers: (set.layers || []).map(snapshotLayerRecord),
+                maskDecal: set.decal,
+            }, null, 'Layer segment opened'));
+        }
+        cropLayerList(set.layers, box, oldW, oldH);
+        set.decal = cropMaskSurface(set.decal, box, oldW, oldH);
+        set.decalCtx = set.decal ? set.decal.getContext('2d') : null;
+        const rec = {
+            canvasW: box.w, canvasH: box.h, canvasCustom: true,
+            selectedId: Number.isInteger(set.selectedId) ? set.selectedId : null,
+            group: [],
+            maskVisible: maskLayer.visible,
+            layers: (set.layers || []).map(snapshotLayerRecord),
+            maskDecal: set.decal,
+        };
+        stack.push(tagHistoryStep(rec, null, 'Canvas Cropped — ' + box.w + ' × ' + box.h));
+        while (stack.length > HISTORY_MAX_ENTRIES) stack.shift();
+        set.undoStack = stack;
+        set.redoStack = [];
+        set.lastActionKey = null;
+    }
+}
+
+function commitCanvasCrop() {
+    const box = cropBox;
+    cropBox = null;
+    cropDrag = null;
+    if (!box) {
+        setMode('none');
+        setStatus('Drag a box first — Enter crops the canvas to it');
+        return;
+    }
+    const oldW = Math.round(canvasW), oldH = Math.round(canvasH);
+    if (!oldW || !oldH) { setMode('none'); return; }
+    if (box.x <= 0 && box.y <= 0 && box.w >= oldW && box.h >= oldH) {
+        setMode('none');
+        setStatus('The box covers the whole canvas — nothing to crop');
+        return;
+    }
+    // 框左上角此刻的屏幕位置：裁完画布原点回到 (0,0)，把新原点钉在这里 —— Enter 前后画面不跳。
+    const sp = docToScreen({ x: box.x, y: box.y });
+    // 活跃这套 + Mask 覆盖面（mask 的 scratch 要等新尺寸定下来再按画布重建）
+    cropLayerList(layers, box, oldW, oldH);
+    const decal = cropMaskSurface(maskLayer.decal, box, oldW, oldH);
+    canvasW = box.w;
+    canvasH = box.h;
+    canvasCustom = true;
+    adoptMaskSurface(decal);
+    maskLayer.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+    sizeCanvasElement();
+    // 其余 Layer 段（画布是文档级的，一套都不能留在旧格子上）
+    cropOtherLayerSets(box, oldW, oldH);
+    clearSelection();
+    layoutCanvas();
+    if (!view.autoFit) { anchorView(sp, { x: 0, y: 0 }); applyView(); }
+    vidCompCache = null;
+    if (vidFramePacket) vidFramePacket.rendered = false;
+    updateCanvasReadout();
+    setStatus(`Canvas cropped to ${box.w} × ${box.h} — raster layers cropped, smart layers kept their pixels`, 'success');
+    pushHistory(null, 'Canvas Cropped — ' + box.w + ' × ' + box.h);
+    setMode('none');
 }
 
 // ---- Expand (smart object) ----
@@ -10632,13 +10970,27 @@ function endWarpDrag() {
 }
 
 // ==================== 画布交互 ====================
+// 宿主按"鼠标压在哪块面上"路由快捷键（Cut 一条键在画布/时间线/卷帘是三个目的地）：画布这一面
+// 自己报进出，时间线与卷帘由各自那一面报。只在值真的翻了才发；blur/focus 补两针，
+// 免得 alt-tab 出去再回来停在旧状态。
+let canvasHoverPosted = false;
+function postCanvasHover(inside) {
+    const v = !!inside;
+    if (v === canvasHoverPosted) return;
+    canvasHoverPosted = v;
+    if (window.parent === window) return;
+    window.parent.postMessage({ type: 'blend-canvas-hover', inside: v }, '*');
+}
+
 viewport.addEventListener('mouseenter', () => {
     cursorInside = true;
+    postCanvasHover(true);
     syncBrushCursor();
     refreshCursor();
 });
 viewport.addEventListener('mouseleave', () => {
     cursorInside = false;
+    postCanvasHover(false);
     syncBrushCursor();          // 正在绘制时笔刷光标保持不变
 });
 
@@ -10716,6 +11068,13 @@ viewport.addEventListener('mousedown', e => {
     if (mode === 'pan' && e.button === 0) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
     if (mode === 'zoom' && (e.button === 0 || e.button === 2)) { rightGesture = e.button === 2; beginViewDrag('zoom', e, sp); e.preventDefault(); return; }
     if (mode === 'rotate' && e.button === 0) { beginViewDrag('rotate', e, sp); e.preventDefault(); return; }
+    // 裁切框拥有其余每一个左键：把手 = 改框，框里 = 挪框，框外 = 重新框选；右键一律吞掉
+    // （框悬着的时候不该顺手选层或画画）。平移/缩放留在上面那条视图手势里 —— 框不怕看。
+    if (mode === 'crop') {
+        e.preventDefault();
+        if (e.button === 0) beginCropDrag(sp, pos);
+        return;
+    }
     // 摊开的网格拥有每一个左键 (视图手势在它上面,缩放/平移照常):把手要的是指针,不是选层或画蒙版。
     if (warpEdit && e.button === 0 && warpPress(sp)) { e.preventDefault(); return; }
     // Ctrl is the Mask shortcut and it outranks everything below: while it is held the canvas
@@ -10845,6 +11204,7 @@ window.addEventListener('mousemove', e => {
     if (warpDrag) { updateWarpDrag(screenToDoc(toScreenCoords(e))); return; }
     if (selDrag) { updateSelDrag(screenToDoc(toScreenCoords(e))); return; }
     if (modDrag && modDragging) { updateCanvasModify(screenToDoc(toScreenCoords(e))); return; }
+    if (cropDrag) { updateCropDrag(screenToDoc(toScreenCoords(e)), toScreenCoords(e)); return; }
     if (picking) { updatePick(e); return; }
     if (!canvasW) return;
     const sp = toScreenCoords(e);
@@ -10885,6 +11245,7 @@ window.addEventListener('mouseup', e => {
     // applies it or Esc rewinds it — but modDragging ends, so the rect stops following the
     // pointer (a fresh press on a handle starts a new drag from the tentative geometry).
     if (modDragging) modDragging = false;
+    if (cropDrag) endCropDrag();
     if (viewDrag) endViewDrag(e);
     if (isDrawing) {
         // Shift + a press that never moved = a connect tap: lay a straight segment from the
@@ -10919,6 +11280,7 @@ window.addEventListener('mouseup', e => {
 
 // Safety net: releasing the button outside the frame (or tab switch) must not leave a tool stuck.
 window.addEventListener('blur', () => {
+    postCanvasHover(false);     // 焦点走了：宿主那一侧不该继续以为鼠标还压着画布
     if (isDrawing) { commitStroke(); isDrawing = false; }
     if (warpDrag) endWarpDrag();        // 松手发生在窗口外:把手就地停下,最后一帧与撤销都补上
     endMaskShortcut();
@@ -10927,12 +11289,15 @@ window.addEventListener('blur', () => {
     rectDrag = null;
     sizeDrag = null;
     modDragging = false;        // 拖拽中切走:预览保持待定,指针不再驱动矩形
+    cropDrag = null;            // 裁切框同理：框留着，指针不再驱动它
     sizeHud.style.display = 'none';
     keySpace = keyAlt = keyShift = false;
     setKeyCtrl(false);          // a tab switch swallows the keyup, so the tint would stay stuck on
     syncBrushCursor();
     refreshCursor();
 });
+// 回来时鼠标可能一拍都没动过（没有新的 mouseenter）：指针还压在画布上就重新报一次。
+window.addEventListener('focus', () => { if (cursorInside) postCanvasHover(true); });
 
 viewport.addEventListener('wheel', e => {
     // 底片态没有笔尖：滚轮一律是缩放（不然会静默改画笔尺寸）。
@@ -13200,8 +13565,15 @@ window.addEventListener('keydown', e => {
     // 用户在 Settings ▸ Key Bindings 里改过的键立刻在这儿生效，且两边判定是同一套语义。
     if (adjustModeActive() && (KB.hit(e, 'layer.confirm') || KB.hit(e, 'view.cancel'))) {
         e.preventDefault();
-        if (KB.hit(e, 'layer.confirm')) { if (mode === 'canvasModify') applyCanvasModify(); else endExpandCommit(); }
-        else { if (mode === 'canvasModify') cancelCanvasModify(); else cancelExpand(); }
+        if (KB.hit(e, 'layer.confirm')) {
+            if (mode === 'canvasModify') applyCanvasModify();
+            else if (mode === 'crop') commitCanvasCrop();
+            else endExpandCommit();
+        } else {
+            if (mode === 'canvasModify') cancelCanvasModify();
+            else if (mode === 'crop') cancelCanvasCrop();
+            else cancelExpand();
+        }
         return;
     }
     // Enter / Esc on a released transform drag: the box the pointer left is a preview until now.
@@ -13244,6 +13616,23 @@ window.addEventListener('keydown', e => {
     if (tag === 'textarea' || tag === 'select' || editable || (tag === 'input' && type !== 'range' && type !== 'checkbox')) return;
     // Sliders and checkboxes keep their own key handling (arrows, space, enter).
     if ((tag === 'input' || tag === 'button' || editable) && [' ', 'Spacebar', 'Enter', 'Delete', 'Backspace', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+    // Cut（Image 面）：鼠标在画布上时这颗键才管画布 —— 时间线/卷帘各自的 Cut 由宿主按悬停面路由，
+    // 这里只认自己这一块。它排在文本框守卫之后：在 Extra Prompt 里打一个 C 不该裁画布。
+    // 第二下 = 收起（startCanvasCrop 自己认 mode === 'crop'）。
+    if (KB.hit(e, 'cut.canvas')) {
+        if (!cursorInside) return;
+        e.preventDefault();
+        startCanvasCrop();
+        return;
+    }
+    // Cursor（A）：同一套"指针在哪一面"的路由 —— 这一颗只管指针落在画布上的那一下；卷帘与
+    // 时间线各自的 Cursor 由宿主按悬停面分派（midi/Workspace、video/Timeline）。
+    if (KB.hit(e, 'tool.cursor')) {
+        if (!cursorInside) return;
+        e.preventDefault();
+        enterCursorMode();
+        return;
+    }
     // Undo / redo — Ctrl+Z and Ctrl+Y (Ctrl+Shift+Z too, the other common redo binding).
     // Text fields returned above, so their native undo keeps working. 三条默认都挂在
     // edit.undo / edit.redo 上，用户在 Key Bindings 里改一条就换一条。
@@ -15952,6 +16341,10 @@ const uiStack = v => { const s = String(v); return s === GUIDANCE_STACK || s ===
 const UI_COMMANDS = {
     'canvas-size': () => openCanvasModal(),
     'canvas-modify': () => startCanvasModify(),
+    // Image 模式的 Cut：那颗按钮是黏住的，第二下发回来就是收起（startCanvasCrop 自己认）。
+    'canvas-crop': () => startCanvasCrop(),
+    // Cursor 那一格：工具全部放下（裁切 / 改画布 / 扩展各有各的取消，见 enterCursorMode）。
+    'canvas-cursor': () => enterCursorMode(),
     // 带值的尺寸写口：Video 模式下活画布被挪到视口外，弹窗看不见 —— 宿主那两颗输入框
     // 直接走这条，落地仍是同一个 setCanvasSize（尺寸/上限校验也共用）。
     'layer-set': v => switchLayerSet(v && v.key),
@@ -17104,7 +17497,19 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-vid-grid') { noteVidGrid(d.width, d.height); vidSurfaceVideo = true; return; }
     // 宿主明说"此刻是不是 Video 显示模式"。Video 模式下画布永远铺一层视频帧打底
     // （见 stageBackdropItem），Image 模式保持透明。播放器挂上/卸下时各发一条，不靠推断。
-    if (d.type === 'blend-vid-surface') { vidSurfaceVideo = d.video === true; return; }
+    if (d.type === 'blend-vid-surface') {
+        const on = d.video === true;
+        // 换进 Video 模式：画布上的三种"边界拖动"（裁切 / 改画布 / 扩展）是**事务中间态** ——
+        // 带着它换面，之后一次 Enter 就会把 Image 的裁剪落到 Video 的文档上（画布被裁成框大小，
+        // Layer 段从此在错的栅格上渲染），指针也会被裁切框接管。换面即取消，快照与预览各自收摊。
+        if (on && adjustModeActive()) {
+            if (mode === 'crop') cancelCanvasCrop();
+            else if (mode === 'canvasModify') cancelCanvasModify();
+            else cancelExpand();
+        }
+        vidSurfaceVideo = on;
+        return;
+    }
     if (d.type === 'blend-guidance-republish') {
         // 宿主说图池里那张 Guidance 卡不是我们的了（被别的实例顶掉，或整池换水时被清掉）：
         // 去重的记忆清掉，立刻重发一张自己的。

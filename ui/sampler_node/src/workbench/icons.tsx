@@ -64,6 +64,17 @@ const Selection: UnitIcon = p => <Svg {...p}>
   <rect x="2.4" y="2.4" width="11.2" height="11.2" rx="1" strokeDasharray="2.2 1.8" />
   <rect x="9" y="9" width="3.2" height="3.2" rx="0.4" fill="currentColor" stroke="none" />
 </Svg>;
+// Cut：一把剪刀。两枚环在左、两道刃在右交叉 —— 与光标那份（cutStore 的 CUT_CURSOR）同一个朝向，
+// 免得同一件事在两处长出两张脸。
+const Cut: UnitIcon = p => <Svg {...p}>
+  <circle cx="4.1" cy="11.7" r="1.8" />
+  <circle cx="4.1" cy="4.3" r="1.8" />
+  <path d="M5.6 10.5 13.4 2.7M5.6 5.5l7.8 7.8" />
+</Svg>;
+// Cursor：一支普通箭头。它是"手上不拿工具"的记号，所以画的是指针本身，不加任何工具徽章。
+const Cursor: UnitIcon = p => <Svg {...p}>
+  <path d="M4.2 2.2v10.4l2.7-2.5 1.5 3.3 1.9-.9-1.5-3.2h3.5z" />
+</Svg>;
 const View: UnitIcon = p => <Svg {...p}>
   <path d="M8 3.6C4.7 3.6 2 5.9 1.1 8c.9 2.1 3.6 4.4 6.9 4.4S14.9 10.1 15 8c-.9-2.1-3.6-4.4-6.9-4.4z" />
   <circle cx="8" cy="8" r="1.9" fill="currentColor" stroke="none" />
@@ -240,7 +251,7 @@ const Document: UnitIcon = p => <Svg {...p}>
 export const UNIT_ICONS: Record<string, UnitIcon> = {
   // 工作台
   staging: Staging, canvas: Canvas, transform: Transform, mask: Mask, color: Color,
-  brush: Brush, bucket: Bucket, eraser: Eraser, selection: Selection, view: View,
+  brush: Brush, bucket: Bucket, eraser: Eraser, selection: Selection, cut: Cut, cursor: Cursor, view: View,
   text: Text, geometry: Geometry, scene3d: Scene3d, pose: Pose, detector: Detector,
   processor: Processor, guidances: Guidances, layers: Layers, history: History, fxParams: FxParams,
   layout: Layout, videoGen: VideoGen,

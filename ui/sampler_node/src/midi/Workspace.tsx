@@ -18,9 +18,13 @@
 // 比例里只剩一条横线（力度泳道），双击回默认。横向比例（pps）与吸附网格住在底部 Transport。
 // 这些是**视图态**，不属工程也不进撤销栈。
 
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { hit, isRecording } from '../keybindings';
+import { onGlobalKey, onGlobalKeyUp } from '../hotkeys';
+import { disarmCut, getCut, pressCutKey, releaseCutKey, setHover } from '../workbench/cutStore';
 import { DEFAULT_PPS, KEY_W, MidiPianoRoll, ZOOM_MAX, ZOOM_MIN } from './PianoRoll';
 import { MidiTransport } from './Transport';
+import { setMidiTool } from './tool';
 import type { MidiCtl } from './types';
 
 /** MIDI 里的滑杆（底部 Transport 的 zoom）—— 与 Tracks 窗那根 Opacity 同一族，一字不差地照搬它的
@@ -73,6 +77,61 @@ export const MidiWorkspace: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
   const ppsRef = useRef(pps);
   ppsRef.current = pps;
 
+  // ── Cut / Brush / Eraser / Cursor 的键（C / B / E / A）──────────────────────────────────
+  // 判定只看**指针在不在这扇窗上**（cutStore 的 hover，拍板 3），不看键盘焦点：焦点可能还留在
+  // 画布 iframe 里（宿主的热键桥会把同一个键送到这里），而用户的手已经挪到卷帘上了。
+  // 输入框里不抢键（轨头那种内联输入不该被 B/E 打断）；Key Bindings 录制时整条让路。
+  useEffect(() => {
+    const inField = (t: EventTarget | null): boolean => {
+      const el = t as HTMLElement | null;
+      const tag = el?.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el?.isContentEditable;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat || isRecording() || inField(e.target)) return;
+      if (getCut().hover !== 'midi') return;
+      if (hit(e, 'cut.midi')) {
+        e.preventDefault();
+        pressCutKey('cut.midi');
+        return;
+      }
+      // A 是"把笔放下"：指针回到普通箭头，空白处不再落音（见 PianoRoll 的 onDown）。
+      if (hit(e, 'tool.cursor')) {
+        e.preventDefault();
+        setMidiTool('cursor');
+        disarmCut('cut.midi');
+        return;
+      }
+      // 拿起一支笔 = 放下剪刀：两者都是"指针落在音符上该干什么"，同时武装只会互相吃掉手势。
+      if (hit(e, 'tool.brush')) {
+        e.preventDefault();
+        setMidiTool('brush');
+        disarmCut('cut.midi');
+        return;
+      }
+      if (hit(e, 'tool.eraser')) {
+        e.preventDefault();
+        setMidiTool('eraser');
+        disarmCut('cut.midi');
+      }
+    };
+    // 松键不按 hover 过滤：按住档的武装必须在键松开时解除，哪怕指针已经挪出这扇窗。
+    // 也只认主键（keyOnly）：松手那一刻按着 Shift/Ctrl，事件照样算"这把剪刀松了"。
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (hit(e, 'cut.midi', { keyOnly: true })) releaseCutKey('cut.midi');
+    };
+    // 走宿主的热键桥（onGlobalKey）：焦点还留在画布 iframe 里时，窗口自己的 keydown 收不到。
+    const un1 = onGlobalKey(onKey);
+    const un2 = onGlobalKeyUp(onKeyUp);
+    return () => {
+      un1();
+      un2();
+      setHover('midi', false);
+      // 卸载时键还按着 ⇒ 等不到那次 keyup：撤掉"键按下的这一档"（面板的黏住态不动）。
+      releaseCutKey('cut.midi');
+    };
+  }, []);
+
   /** 缩放：**把视口中心那一拍钉在原地**。只改 pps 的话内容宽度变了而 scrollLeft 不动，
    *  用户一拖滑杆视野就跑到别处、还得再找回来 —— 这是缩放"不好用"的最大来源。
    *  中心必须在改之前按旧值记下：变窄时浏览器会先把 scrollLeft 夹回去，那之后还原不出来。 */
@@ -92,7 +151,9 @@ export const MidiWorkspace: React.FC<{ ctl: MidiCtl }> = ({ ctl }) => {
   const hasTracks = ctl.project.tracks.length > 0;
 
   return (
-    <div style={S.wrap}>
+    <div style={S.wrap}
+      onPointerEnter={() => setHover('midi', true)}
+      onPointerLeave={() => setHover('midi', false)}>
       <style>{MIDI_CSS}</style>
       <div style={S.body}>
         <div style={S.right}>

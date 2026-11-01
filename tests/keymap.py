@@ -12,7 +12,10 @@
   G1 产物同步        `tools/gen_keymap.cjs --check`
   G2 表 → 代码       每个 id 至少被引用一次
   G3 代码 → 表       每个 `hit(…, 'id')` 的 id 都在表里
-  G4 默认键不打架    同一 scope 内两条命令的默认键不重复（`shiftAsParam` 忽略 Shift 不算遮盖）
+  G4 默认键不打架    面集有交集的两条命令默认键不重复（`shiftAsParam` 忽略 Shift 不算遮盖）
+
+"面集" = 条目的 `scopes`（省 = `[scope]`）。Brush / Eraser 同时算 canvas 与 midi 两个面，
+所以它们和只住在 midi 面的 Cut 也在同一组里查重 —— 这正是用户按键时真正会撞的那些对。
 
 用法：python tests/keymap.py [--strict]
 退出码：有 FAIL 即 1（--strict 目前与默认一致，留给将来加报告项）。
@@ -36,6 +39,10 @@ CONSUMERS = [
     os.path.join(ROOT, 'ui/sampler_node/src/workbench/video/Timeline.tsx'),
     os.path.join(ROOT, 'ui/sampler_node/src/workbench/video/Keyframes.tsx'),
     os.path.join(ROOT, 'ui/sampler_node/src/workbench/video/Assets.tsx'),
+    os.path.join(ROOT, 'ui/sampler_node/src/midi/Workspace.tsx'),
+    os.path.join(ROOT, 'ui/sampler_node/src/midi/PianoRoll.tsx'),
+    os.path.join(ROOT, 'ui/sampler_node/src/workbench/cut.tsx'),
+    os.path.join(ROOT, 'ui/sampler_node/src/workbench/cursor.tsx'),
 ]
 
 # `KB.hit(e, 'x')` / `hit(e, 'x')` / `hit(e.nativeEvent, 'x')`
@@ -51,7 +58,8 @@ def read(path):
 
 def load_table():
     """借生成器自己的求值路径取表（--list 吐 JSON），别在这再写一份解析。"""
-    r = subprocess.run(['node', GEN, '--list'], cwd=ROOT, capture_output=True, text=True)
+    # 表的 label 里有中文与破折号；Windows 的默认 locale（GBK）解 UTF-8 会炸，这里钉死 utf-8。
+    r = subprocess.run(['node', GEN, '--list'], cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
     if r.returncode != 0:
         print('  FAIL G0 读表失败：' + (r.stderr or r.stdout).strip()[:400])
         fail.append('G0')
@@ -60,7 +68,7 @@ def load_table():
 
 
 def gate_generated():
-    r = subprocess.run(['node', GEN, '--check'], cwd=ROOT, capture_output=True, text=True)
+    r = subprocess.run(['node', GEN, '--check'], cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
     ok = r.returncode == 0
     print(('  ok   ' if ok else '  FAIL ') + 'G1 产物与键位表同步'
           + ('' if ok else '：' + (r.stderr or r.stdout).strip().splitlines()[0]))
@@ -113,15 +121,17 @@ def gate_collisions(table):
     by_scope = {}
     clash = []
     for d in table:
-        for chord in d['keys']:
-            sig = norm(chord, d.get('shiftAsParam'))
-            slot = by_scope.setdefault((d['scope'], sig), [])
-            slot.append(f"{d['id']} ({chord})")
+        # 一个条目可以在几个面上都生效：每个面各占一格（见文件头的"面集"）。
+        for scope in (d.get('scopes') or [d['scope']]):
+            for chord in d['keys']:
+                sig = norm(chord, d.get('shiftAsParam'))
+                slot = by_scope.setdefault((scope, sig), [])
+                slot.append(f"{d['id']} ({chord})")
     for (scope, _sig), owners in by_scope.items():
         if len(owners) > 1:
             clash.append(f'{scope}: ' + ' = '.join(owners))
     ok = not clash
-    print(('  ok   ' if ok else '  FAIL ') + 'G4 同一 scope 内默认键不重复')
+    print(('  ok   ' if ok else '  FAIL ') + 'G4 面集相交的命令默认键不重复')
     if clash:
         for line in clash:
             print('       ' + line)

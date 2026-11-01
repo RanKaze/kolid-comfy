@@ -662,6 +662,8 @@ static int32_t wk_noff = 0;
  * 倒计时按"渲了几块"走 —— 宿主音频线程那条路上只准填事件，不能等命令回执。 */
 static int32_t wk_aud_life = -1;
 static int32_t wk_aud_ch = 0, wk_aud_pitch = 0;
+/* 上一圈看到的是不是在播。暂停那一下要把按着的音收掉（见 wk_render）。 */
+static int32_t wk_was_playing = 0;
 
 static int32_t wk_note_at(int64_t pos) {
     int32_t lo = 0, hi = wk_note_count, mid;
@@ -753,8 +755,24 @@ static void wk_render(ka_shm* s) {
     /* 插件窗口开着（宿主写的 ed_mon）= 用户正在它自己的界面里试音。那边的键盘/试听按钮
      * 不会经过我们，声音只从 process() 出来 —— 暂停时不渲，界面里点了就是一片安静。 */
     mon = (!playing && s->ed_mon) ? 1 : 0;
+    /* 播放 → 暂停：按着的音要**交给插件**收掉。
+     *
+     * note-off 只有在 process() 里才会被读走 —— 排进 g_v3.evq 不算数。而暂停时这一块
+     * 输出没人要（宿主在 ka_plug_mix 里把 ring 抽干），于是"只排不渲"的写法把 note-off
+     * 留在了队列里：下一次开播 epoch 一翻，wk_flush_notes 先把队列清掉（wk_noff 已经是 0，
+     * 没有一条补得回来），插件那边的声部就一直按着 —— 旧音还在响，新音再叠上来。
+     * 听感就是"播一下、再播第二下，声音叠在一起"；插件窗口开着时更糟（暂停也照渲，旧音一直响）。
+     * 所以这个边沿必须走一次 process()。 */
+    if (!playing && wk_was_playing) {
+        if (wk_aud_life > 0) { ka_v3_note(0, wk_aud_ch, wk_aud_pitch, 0, 0); wk_aud_life = -1; }
+        wk_flush_notes();
+    }
+    wk_was_playing = playing;
     if (!playing && !aud && !mon) {
-        if (wk_noff > 0) wk_flush_notes();               /* 停播：把还挂着的声音收掉 */
+        /* 上面那个边沿（以及暂停时发来的 NOTES_OFF）只把事件排进了队列：丢一块静音给插件，
+         * 让它把钱读走。这一块的输出谁也不写 —— ring 正被宿主抽干。 */
+        if (wk_noff > 0) wk_flush_notes();
+        if (g_v3.evq.count > 0) ka_v3_render(0, s->block, g_v3.frames_done);
         s->peak = 0;                                     /* 电平表要跟着停（与内置合成器那条一致） */
         return;
     }
@@ -944,6 +962,7 @@ static int wk_cmd_body(ka_shm* s) {
         g_veh_seen = 0;
         wk_noff = 0;
         wk_aud_life = -1;
+        wk_was_playing = 0;
         s->aud_blocks = 0;
         wk_epoch_seen = -1;
         wk_notes_gen_seen = -1;
@@ -959,6 +978,7 @@ static int wk_cmd_body(ka_shm* s) {
         ka_ed_close();
         wk_flush_notes();
         wk_aud_life = -1;
+        wk_was_playing = 0;
         s->aud_blocks = 0;
         ka_v3_close();
         s->opened = 0;

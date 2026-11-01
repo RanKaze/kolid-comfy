@@ -28,8 +28,10 @@ import { midiOut } from './output';
 import { Splitter } from './Splitter';
 import {
   MIN_DUR, type MidiNote, addNoteToTrack, effectiveVelocity, isBlackKey, newMidiId, pitchName,
-  removeNotesFromTrack, secondsToBeat, updateNoteInTrack,
+  removeNotesFromTrack, secondsToBeat, splitNoteInTrack, updateNoteInTrack,
 } from './model';
+import { BRUSH_CURSOR, ERASER_CURSOR, setMidiTool, useMidiTool } from './tool';
+import { CUT_CURSOR, disarmCut, useCut } from '../workbench/cutStore';
 import type { MidiCtl } from './types';
 
 /** 琴键栏宽度。缩放要把可见区的中心钉住 —— 那是 clientWidth 减掉这 46px。 */
@@ -78,7 +80,7 @@ const COL = {
   playhead: '#ff453a',
 };
 
-type DragMode = 'move' | 'resize' | 'vel' | 'draw' | 'marquee' | 'loopA' | 'loopB' | ''
+type DragMode = 'move' | 'resize' | 'vel' | 'draw' | 'erase' | 'marquee' | 'loopA' | 'loopB' | ''
 
 export const MidiPianoRoll: React.FC<{
   ctl: MidiCtl;
@@ -92,6 +94,10 @@ export const MidiPianoRoll: React.FC<{
   // 这一窗只编**选中的那一段**：音符是段内拍（0 = 窗口第一拍），窗口长度就是段的时长。
   // 写回走 updateEditor —— 段内容里被裁到窗口外的音符不会被碰（见 applyEditorNotes）。
   const { track, updateEditor } = ctl;
+  // Cut（C）剪音符、Brush（B）/ Eraser（E）/ Cursor（A）换笔：互斥 —— 拿到笔就把剪刀收起来
+  // （见 Workspace 的键处理）。Cursor = 手上不拿工具：不落音、不擦音，只保留选中与拖动。
+  const cutArmed = useCut().armed['cut.midi'];
+  const tool = useMidiTool();
   const length = ctl.editor?.length ?? 16;
   const loop = ctl.editor?.loop ?? { on: false, a: 0, b: 16 };
   const timeSig = ctl.editor?.timeSig ?? ([4, 4] as [number, number]);
@@ -581,6 +587,37 @@ export const MidiPianoRoll: React.FC<{
       return;
     }
 
+    // Cut（C）：指针下那枚音在**吸附到网格**的拍上被剪开。左半保留原 id（选择与工程里的
+    // selNote 都还指着它），右半是新 id；音高/力度照抄。剪点落在音外、或剪完任一半短于
+    // MIN_DUR（1/32 拍）就什么也不做 —— 与 Tracks 那把剃刀的"剪不动就不剪"同一条口径。
+    // 一次点击只写一次，撤销栈里是一步。
+    if (cutArmed) {
+      const h = hitNote(e.clientX, e.clientY);
+      if (!h) return;
+      const at = snap(beatAtX(e.clientX));
+      if (at - h.note.start < MIN_DUR - 1e-9 || h.note.start + h.note.dur - at < MIN_DUR - 1e-9) return;
+      updateEditor(t => splitNoteInTrack(t, h.note.id, at, newMidiId('mn')), 'Cut note');
+      if (rollRef.current) rollRef.current.style.cursor = CUT_CURSOR;
+      return;
+    }
+
+    // Eraser（E）：按到哪枚音擦哪枚，按住拖着扫一片（同一个 label ⇒ 一次扫除是一步撤销）。
+    // Delete / Backspace 照旧删**选中的那一批**，两条路互不影响。
+    if (tool === 'eraser') {
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      const h = hitNote(e.clientX, e.clientY);
+      drag.current = {
+        mode: 'erase', noteId: h ? h.note.id : '', grabBeat: 0, grabPitch: 0,
+        origStart: 0, origDur: 0, origVel: 0, origPitch: 0, base: [], moved: false,
+      };
+      if (h) {
+        updateEditor(t => removeNotesFromTrack(t, [h.note.id]), 'Erase notes');
+        setSel(s => s.filter(x => x !== h.note.id));
+      }
+      if (rollRef.current) rollRef.current.style.cursor = ERASER_CURSOR;
+      return;
+    }
+
     // Shift + 拖：框选。**起手落在音符上也照框** —— 最常见的就是从已有音符之间拉出框来。
     // 不拖（点一下）还是老的 Shift 点选：加减那一枚，在 onUp 里补。
     if (e.shiftKey) {
@@ -620,6 +657,10 @@ export const MidiPianoRoll: React.FC<{
       return;
     }
 
+    // Cursor（A）：普通鼠标。空白处按下什么都不发生 —— 这是它和画笔唯一的分界；选中、拖动、
+    // 拉边都还在上面的分支里，所以"只想整理、不想画出东西"时不必先放下笔再点。
+    if (tool === 'cursor') return;
+
     // 空白：按下就落一枚音，**不松手横着拖 = 拉长成一条长音，上下拖 = 换音高**。
     // 只点一下不拖，得到的仍然是一格 —— 与从前的单击行为一致，手感不突变。
     // 整个过程都用同一个 label，一次「按下→拖→松手」在撤销栈里只算一步。
@@ -654,9 +695,25 @@ export const MidiPianoRoll: React.FC<{
         if (el) el.style.cursor = 'ew-resize';
         return;
       }
+      // 武装着剪刀 / 拿着橡皮：整面（除琴键与标尺）都换光标 —— 这两支工具对"哪一行、哪一拍"
+      // 都不敏感，逐枚音再换一次光标只会闪。三支精确工具的光标都是"准星 + 工具徽章"（见
+      // workbench/cursors.ts）。
+      if (el && cutArmed) { el.style.cursor = CUT_CURSOR; return; }
+      if (el && tool === 'eraser') { el.style.cursor = ERASER_CURSOR; return; }
+      // Cursor：指针就是普通箭头，压在哪枚音上都不换 —— 这正是"手上不拿工具"的样子。
+      if (el && tool === 'cursor') { el.style.cursor = 'default'; return; }
       const h = hitNote(e.clientX, e.clientY);
-      // 按住 Shift 时一律给十字：这时拖出来的是框，压在哪枚音上都不再是"抓它"。
-      if (el) el.style.cursor = (e.shiftKey || !h) ? 'crosshair' : (h.edge ? 'ew-resize' : 'grab');
+      // 空白处 = 画笔的落点（准星 + 笔徽章）；按住 Shift 一律给十字 —— 这时拖出来的是框，
+      // 压在哪枚音上都不再是"抓它"。
+      if (el) el.style.cursor = e.shiftKey ? 'crosshair' : !h ? BRUSH_CURSOR : (h.edge ? 'ew-resize' : 'grab');
+      return;
+    }
+    if (d.mode === 'erase') {
+      const h = hitNote(e.clientX, e.clientY);
+      if (!h) return;
+      d.moved = true;
+      updateEditor(t => removeNotesFromTrack(t, [h.note.id]), 'Erase notes');
+      setSel(s => s.filter(x => x !== h.note.id));
       return;
     }
     if (d.mode === 'loopA' || d.mode === 'loopB') {
@@ -788,9 +845,15 @@ export const MidiPianoRoll: React.FC<{
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (!track) return;
-    // 框完之后总得有个"散开"的路 —— 否则清掉一组只能一枚一枚点回去（点空白是画音符）。
-    if (e.key === 'Escape' && sel.length) {
-      setSel([]);
+    // Esc 先把剪刀和橡皮收起来、回到画笔，再散开选择 —— 一次 Esc 只撤一层：
+    // 正拿着工具时它管工具，工具已经收着时才管选择。
+    if (e.key === 'Escape') {
+      if (cutArmed || tool !== 'brush') {
+        disarmCut('cut.midi');
+        setMidiTool('brush');
+        return;
+      }
+      if (sel.length) setSel([]);
       return;
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && sel.length) {

@@ -127,13 +127,17 @@ export const chordsOf = (id: string): readonly string[] => {
   return byId[id]?.keys ?? [];
 };
 
-/** 这个事件是不是这条命令。 */
-export const hit = (e: KeyboardEvent, id: string): boolean => {
+/** 这个事件是不是这条命令。
+ *  `keyOnly` = 只认主键，不管按没按修饰键 —— 松键那一侧专用：按住 C 之后又按下 Shift 再松开，
+ *  事件带的是 shiftKey=true，按"修饰键必须全等"判就永远不匹配 ⇒ 按住档的武装一直不撤，
+ *  下一次点片段就被当成"剪"而不是"选中"。按下仍走全等（Ctrl+C 是别的命令）。 */
+export const hit = (e: KeyboardEvent, id: string, opts?: { keyOnly?: boolean }): boolean => {
   const def = byId[id];
   if (!def) return false;
   for (const chord of chordsOf(id)) {
     const c = parseChord(chord);
-    if (c && matches(e, c, def)) return true;
+    if (!c) continue;
+    if (opts?.keyOnly ? keyMatch(e, c.key) : matches(e, c, def)) return true;
   }
   return false;
 };
@@ -167,14 +171,23 @@ export const chordOf = (e: KeyboardEvent): string => {
   return [...mods, key].join('+');
 };
 
-/** 同 scope 里已经占了这个键的别的命令。 */
+/** 一条命令生效的面（`scopes` 没写就只有 `scope` 那一个）。 */
+export const scopesOf = (def: KeyDef): readonly KeyScope[] => def.scopes ?? [def.scope];
+
+/** 两个面集有交集 —— 只有交集非空的两条命令才可能同时吃到同一个键。 */
+const shareScope = (a: KeyDef, b: KeyDef): boolean => {
+  const sa = scopesOf(a);
+  return scopesOf(b).some(s => sa.includes(s));
+};
+
+/** 面集有交集、且已经占了这个键的别的命令。 */
 export const conflicts = (id: string, chord: string): KeyDef[] => {
   const self = byId[id];
   const b = parseChord(chord);
   if (!self || !b) return [];
   const out: KeyDef[] = [];
   for (const d of DEFS) {
-    if (d.id === id || d.scope !== self.scope) continue;
+    if (d.id === id || !shareScope(self, d)) continue;
     if (chordsOf(d.id).some(c => {
       const a = parseChord(c);
       return !!a && a.ctrl === b.ctrl && a.alt === b.alt && a.key === b.key

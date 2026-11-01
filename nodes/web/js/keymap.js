@@ -18,6 +18,13 @@
 //   2. 但有一类命令的 Shift 是**参数**不是绑定的一部分（方向键微调：Shift = 走 10 像素）。
 //      那些条目写 `shiftAsParam: true`，判定时忽略 Shift。
 //
+// **一条命令可以在几个面上都算命中的**（`scopes`，不写就只有 `scope` 那一个面）：Brush / Eraser
+// 在画布与卷帘上是同一件事，所以它们写 `scopes: ['canvas', 'midi']`。冲突判定因此不再是"同一个
+// scope"，而是**两个 scope 集有交集**才算可能撞车（交集为空的两条命令各按各的键，互不相干）。
+//
+// `holdable: true` = 这条命令的键默认是**按住才有效**，用户可以在 Key Bindings 里把它改成
+// 按一下切换；笔刷/橡皮不在此列（它们是黏住的工具，不是手势）。见宿主 `workbench/cutStore.ts`。
+//
 // 新增一条命令的规矩：先在这里加表项 → 页面/宿主里用 `KB.hit(e, 'id')` / `hit(e, 'id')` 引用 →
 // `python tests/keymap.py` 双向核对（表里没人用、代码里没登记，两种都会红）。
 
@@ -50,11 +57,29 @@ var KOLID_KEYMAP = ([
     { id: 'tool.zoom', group: 'Tools', label: 'Zoom tool', scope: 'canvas', keys: ['Z'] },
     { id: 'tool.pan', group: 'Tools', label: 'Pan tool', scope: 'canvas', keys: ['H'] },
     { id: 'tool.rotate', group: 'Tools', label: 'Rotate tool', scope: 'canvas', keys: ['R'] },
-    { id: 'tool.brush', group: 'Tools', label: 'Brush', scope: 'canvas', keys: ['B'] },
-    { id: 'tool.eraser', group: 'Tools', label: 'Eraser', scope: 'canvas', keys: ['E'] },
+    // Brush / Eraser 在卷帘上也是同一件事（画出/擦掉音符），所以它们同时算 midi 面的命令。
+    { id: 'tool.brush', group: 'Tools', label: 'Brush', scope: 'canvas', scopes: ['canvas', 'midi'], keys: ['B'] },
+    { id: 'tool.eraser', group: 'Tools', label: 'Eraser', scope: 'canvas', scopes: ['canvas', 'midi'], keys: ['E'] },
+    // Cursor = 手上什么都不拿：画布回到无工具（点一下仍可选中图层），卷帘上不落音也不擦音，
+    // 时间线上撤掉剪刀。三个面各放各的工具，与 Brush / Eraser 一样同时算 canvas 与 midi 面，
+    // 另加 timeline —— 这一条是"把刀放下"。
+    { id: 'tool.cursor', group: 'Tools', label: 'Cursor (no tool)', scope: 'canvas',
+      scopes: ['canvas', 'midi', 'timeline'], keys: ['A'],
+      note: 'Puts every tool down: the plain arrow, no painting, no note on an empty click, no blade on the timeline. '
+        + 'The view is left alone (Esc is the one that also refits it).' },
     { id: 'tool.bucket', group: 'Tools', label: 'Fill', scope: 'canvas', keys: ['G'] },
     { id: 'tool.marquee', group: 'Tools', label: 'Rectangle marquee', scope: 'canvas', keys: ['M'] },
     { id: 'tool.lasso', group: 'Tools', label: 'Lasso', scope: 'canvas', keys: ['L'] },
+
+    // ── Cut（三个面各一条，默认都是 C）────────────────────────────────────────────────────────
+    // 同一个字母在三个面上是三种剪法：画布上是"把画布裁成框"（PS 裁切模式：Enter 落地、Esc 收起），
+    // 时间线上是"在指针处剪开段"，卷帘上是"在指针处剪开音符"。按哪一条由**鼠标所在的面**决定
+    // （宿主 cutStore 的路由），与键盘焦点无关 —— 所以点哪扇窗、按 C，剪的就是那扇窗里的东西。
+    // 两条"剪"可按 `holdable` 走 Hold / Toggle；画布那条是模态框（Enter 落地），没有按住这回事。
+    { id: 'cut.canvas', group: 'Cut', label: 'Crop the canvas to a box', scope: 'canvas', keys: ['C'],
+      note: 'Frame mode: drag a box over the canvas, Enter crops to it, Esc leaves without changing anything.' },
+    { id: 'cut.timeline', group: 'Cut', label: 'Cut segments', scope: 'timeline', keys: ['C'], holdable: true },
+    { id: 'cut.midi', group: 'Cut', label: 'Cut notes', scope: 'midi', keys: ['C'], holdable: true },
 
     // ── Paint ─────────────────────────────────────────────────────────────────────────────────
     { id: 'paint.swap-colors', group: 'Paint', label: 'Swap foreground / background', scope: 'canvas', keys: ['X'] },
@@ -75,7 +100,6 @@ var KOLID_KEYMAP = ([
     // ── Timeline（视频时间线，宿主渲染）────────────────────────────────────────────────────────
     { id: 'timeline.copy', group: 'Timeline', label: 'Copy segments', scope: 'timeline', keys: ['Ctrl+C'] },
     { id: 'timeline.paste', group: 'Timeline', label: 'Paste segments', scope: 'timeline', keys: ['Ctrl+V'] },
-    { id: 'timeline.blade', group: 'Timeline', label: 'Blade (hold)', scope: 'timeline', keys: ['C'] },
     { id: 'timeline.delete', group: 'Timeline', label: 'Delete segments', scope: 'timeline', keys: ['Delete', 'Backspace'] },
 
     // ── Keyframes ─────────────────────────────────────────────────────────────────────────────
@@ -275,14 +299,25 @@ var KOLID_KEYMAP = ([
 
     function resetAll() { write({}); }
 
-    /** 同 scope 里已经占了这个 chord 的别的命令（冲突提示用）。 */
+    /** 一条命令生效的面：`scopes` 写了就用它，否则只有 `scope` 那一个。 */
+    function scopesOf(def) {
+        return (def && def.scopes && def.scopes.length) ? def.scopes : [def.scope];
+    }
+
+    /** 两个面集有没有交集 —— 只有交集非空的两条命令才可能同时吃到同一个键。 */
+    function shareScope(a, b) {
+        var sa = scopesOf(a), sb = scopesOf(b);
+        for (var i = 0; i < sa.length; i++) if (sb.indexOf(sa[i]) >= 0) return true;
+        return false;
+    }
+
+    /** 面集有交集、且已经占了这个 chord 的别的命令（冲突提示用）。 */
     function conflicts(id, chord) {
         if (!chord || !byId[id]) return [];
-        var scope = byId[id].scope;
         var out = [];
         for (var i = 0; i < defs.length; i++) {
             var d = defs[i];
-            if (d.id === id || d.scope !== scope) continue;
+            if (d.id === id || !shareScope(byId[id], d)) continue;
             var cs = chordsOf(d.id);
             for (var j = 0; j < cs.length; j++) {
                 var a = parse(cs[j]), b = parse(chord);
@@ -319,6 +354,7 @@ var KOLID_KEYMAP = ([
         defs: defs,
         STORE: STORE,
         get: function (id) { return byId[id] || null; },
+        scopesOf: scopesOf,
         chordsOf: chordsOf,
         hit: hit,
         parse: parse,

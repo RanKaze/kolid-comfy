@@ -15,6 +15,7 @@ import { useCudScope, useCudState } from '../cudScope';
 import { probeMedia } from './audio';
 import { ingestFile } from './ingest';
 import { GLOBAL_ITEM_TYPE } from './Assets';
+import { CUT_CURSOR, disarmCut, getCut, pressCutKey, releaseCutKey, setHover, useCut } from '../cutStore';
 import { setVidSelection } from './selection';
 import { markRender } from './perf';
 import {
@@ -217,17 +218,8 @@ const IconPaste: React.FC = () => (
 );
 
 
-// 剃刀光标：按住 C 时整条时间线换成剪刀。内联 SVG 数据 URI（`#` 等已被 encodeURIComponent 编码），
-// 热点在刀口中点；黑描边 + 白描边两层，压在任何缩略图/底色上都看得清。
-const BLADE_CURSOR = `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(
-  "<svg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'>"
-  + "<g fill='none' stroke='rgba(0,0,0,0.72)' stroke-width='4' stroke-linecap='round'>"
-  + "<circle cx='7' cy='20' r='3.1'/><circle cx='7' cy='6' r='3.1'/>"
-  + "<path d='M9.7 18L22 6M9.7 8L22 20'/></g>"
-  + "<g fill='none' stroke='#fff' stroke-width='1.8' stroke-linecap='round'>"
-  + "<circle cx='7' cy='20' r='3.1'/><circle cx='7' cy='6' r='3.1'/>"
-  + "<path d='M9.7 18L22 6M9.7 8L22 20'/></g></svg>",
-)}") 13 13, crosshair`;
+// 剃刀光标与武装状态都搬进了 workbench/cutStore：时间线、卷帘、画布三处共用一个剪刀、
+// 一份"按住 / 黏住"的偏好（Key Bindings 里可改）。这里不再留第二份 BLADE_CURSOR。
 
 // 轨道类型的配色：视频蓝、音频绿、Layer 琥珀、process 浅灰白。文字/图标/带子全从这里取，
 // 别处不再写颜色。
@@ -284,7 +276,11 @@ export const VidTimeline: React.FC<{
   onVGenPrompt?: (clipId: string) => void;
   /** .cud 帧卡预览上的跳转按钮：把那份工程送进 blend 编辑器（已开着就切换过去）。 */
   onVGenCudOpen?: (path: string, name?: string) => void;
-}> = ({ vid, midi, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, onVGenCudOpen }) => {
+  /** 当前文档是哪种模式。**MIDI 模式里这一条上的全局 Delete / Copy / Paste 全部让路**：
+   *  那是卷帘的键（删音符），不能被"删掉选中的段"抢走。Cut（C）不受它限制 —— 那一条
+   *  按鼠标在哪一面分派，指针停在时间线上就该剪段。 */
+  mode: 'image' | 'video' | 'midi';
+}> = ({ vid, midi, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, onVGenCudOpen, mode }) => {
   const { project: p, transport, pps } = vid;
   // 引擎那头每轨的装载结果（装上了没有、是不是 vst3）：MIDI 轨头的乐器键要读它来标红/点亮 Edit。
   // 音符拖动会连着推工程但乐器很少变，nativeEngine 只在"每轨乐器"变了时才叫醒订阅者。
@@ -390,6 +386,9 @@ export const VidTimeline: React.FC<{
       // 键位按名字取自表（timeline.copy / timeline.paste）：这一对是时间线的独占语义，
       // 和画布的图层复制是两条命令，用户在 Key Bindings 里能分别改。
       if (isRecording()) return;
+      // MIDI 模式里这一条让路（拍板 8）：那时用户的手指在卷帘上（删音符 / 剪音符），
+      // 时间线的批量搬段不该从他背后发生。
+      if (mode === 'midi') return;
       const copyH = hit(e, 'timeline.copy');
       if (!copyH && !hit(e, 'timeline.paste')) return;
       const t = e.target as HTMLElement | null;
@@ -404,7 +403,7 @@ export const VidTimeline: React.FC<{
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [doCopy, doPaste]);
+  }, [doCopy, doPaste, mode]);
   // ── Shift + 拖空白 = 框选（可以跨轨）：矩形碰到的片段全选。片段自己会 stopPropagation，
   //    所以"在片段上按住 Shift 拖"仍是原来的同轨连选，不和这里抢手势。 ──
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -603,26 +602,33 @@ export const VidTimeline: React.FC<{
     vid.update(proj => importToTrack(proj, { src: url, name: f.name, origin: 'file' }, info, trackId, at), 'Add clip');
   }, [vid]);
 
-  // ── 剃刀：**按住 C** + 左键片段 = 在指针处剪开（Alt = 只剪按到的这一段，不带联动组）。 ──
-  // 按键走 onGlobalKey/onGlobalKeyUp：鼠标在画布 iframe 上时焦点在那边的 document，
-  // 宿主 window 收不到 keyup（见 hotkeys.ts 的文件头）。窗口失焦不会有 keyup，blur 兜底。
-  const [blade, setBlade] = useState(false);
-  const bladeRef = useRef(false);
+  // ── Cut（C）：武装着时左键点片段 = 在指针处剪开（Alt = 只剪按到的这一段，不带联动组）。
+  // 键与武装状态住在 workbench/cutStore —— 卷帘与画布各有一条同名的 Cut，**按指针在哪一面分派**
+  // （拍板 3）。这里只做三件事：指针进出这扇窗时报一声、键按下/松开时武装/解除、以及在
+  // startClipDrag 里看"现在是不是武装着"。按住是默认手势，用户可在 Key Bindings 改成黏住。
+  // 键走 onGlobalKey：鼠标在画布 iframe 上时焦点在那边的 document，宿主 window 收不到。
   useEffect(() => {
-    const set = (v: boolean) => { bladeRef.current = v; setBlade(v); };
     const inField = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
     };
     const un1 = onGlobalKey(e => {
       if (e.repeat || isRecording()) return;
-      if (hit(e, 'timeline.blade') && !inField(e)) set(true);
+      if (getCut().hover !== 'timeline') return;
+      if (hit(e, 'cut.timeline') && !inField(e)) { e.preventDefault(); pressCutKey('cut.timeline'); }
+      // A = 把刀放下：片段回到普通的拖动 / 裁剪。按住档的 C 松手自会解除，黏住档才需要这一条。
+      if (hit(e, 'tool.cursor') && !inField(e)) { e.preventDefault(); disarmCut('cut.timeline'); }
     });
-    const un2 = onGlobalKeyUp(e => { if (hit(e, 'timeline.blade')) set(false); });
-    const blur = () => set(false);
-    window.addEventListener('blur', blur);
-    return () => { un1(); un2(); window.removeEventListener('blur', blur); };
+    // 松键只认主键（keyOnly）：松手时按着 Shift/Ctrl 也得撤 —— 否则刀一直举着，下一次点击
+    // 落在片段上就是"剪"而不是"选中"（用户报的"选不中段"就是这么来的）。
+    const un2 = onGlobalKeyUp(e => { if (hit(e, 'cut.timeline', { keyOnly: true })) releaseCutKey('cut.timeline'); });
+    return () => {
+      un1(); un2(); setHover('timeline', false);
+      // 卸载时键还按着 ⇒ 再也等不到那次 keyup：把"键按下的这一档"撤掉（面板的黏住态不动）。
+      releaseCutKey('cut.timeline');
+    };
   }, []);
+  const cutArmed = useCut().armed['cut.timeline'];
 
   // ── Ctrl 按住：接缝上的连接/断开徽章才显形、才吃指针 ──
   // 平时接缝那一小块留给两侧的裁剪把手；按住 Ctrl 才换成链接开关（用户点名的手势）。
@@ -665,8 +671,8 @@ export const VidTimeline: React.FC<{
         return;
       }
     }
-    if (bladeRef.current) {
-      // 剃刀优先于拖拽：切口落在指针处，片段不动。
+    if (getCut().armed['cut.timeline']) {
+      // Cut 优先于拖拽：切口落在指针处，片段不动。
       e.preventDefault();
       vid.update(proj => splitClip(proj, clip.id, timeAt(e.clientX), !e.altKey), 'Split clip');
       return;
@@ -796,7 +802,9 @@ export const VidTimeline: React.FC<{
   };
 
   // ── 键删 ── Delete/Backspace 删选中的片段（多选时整批删；输入框里不抢）。
+  // MIDI 模式里整条让路：Delete 在那时是卷帘的"删音符"（拍板 8）。
   useEffect(() => {
+    if (mode === 'midi') return;
     const onKey = (e: KeyboardEvent) => {
       if (!selIds.size) return;
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -808,7 +816,7 @@ export const VidTimeline: React.FC<{
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selIds, vid, clearSel]);
+  }, [selIds, vid, clearSel, mode]);
 
   // ── 右键合并（多选 + 头尾相接）────────────────────────────────────────────────────────────
   // 菜单只在"多选、同轨同类、首尾严格相接"时露头（结构由 vidMergeStructure 判，见 model）。
@@ -1286,12 +1294,14 @@ export const VidTimeline: React.FC<{
   };
 
   return (
-    <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#141416', minWidth: 0, overflow: 'hidden' }}>
+    <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#141416', minWidth: 0, overflow: 'hidden' }}
+      onPointerEnter={() => setHover('timeline', true)}
+      onPointerLeave={() => setHover('timeline', false)}>
       {/* 关键帧录制钮不在这里了：搬进 Keyframes 窗的工具条（一个动作一个可见入口）。 */}
       {/* 顶栏撤掉了:加轨走**轨头右键菜单**,Copy/Paste 走**段右键菜单**,Fit 走**滚动条双击**,
           Mask 绑定搬去了 Guidances 窗(Video 模式的 MaskRow)。只留两样无处可去的反馈:
           动作播报(actNote)与 Blade 提示 —— 覆盖在滚动区左下角,不吃指针。 */}
-      {(actNote || blade) && (
+      {(actNote || cutArmed) && (
         <div style={{ position: 'absolute', left: 8, bottom: 22, zIndex: 30, pointerEvents: 'none', display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-start' }}>
           {actNote && (
             <span data-vid-act-note="" title={actNote} style={{
@@ -1300,11 +1310,11 @@ export const VidTimeline: React.FC<{
               background: 'rgba(20,20,22,0.88)', border: '0.5px solid rgba(255,176,74,0.35)', borderRadius: 5, padding: '2px 7px',
             }}>{actNote}</span>
           )}
-          {blade && (
-            <span title="Blade: left-click a clip to cut it in two. Hold Alt to cut only the one you clicked (its linked audio/video stays whole)."
+          {cutArmed && (
+            <span title="Cut: click a segment to cut it in two. Alt cuts only the one you clicked (its linked audio/video stays whole)."
               style={{ fontSize: 10.5, fontWeight: 600, color: '#ff9f0a', whiteSpace: 'nowrap',
                 background: 'rgba(20,20,22,0.88)', border: '0.5px solid rgba(255,159,10,0.35)', borderRadius: 5, padding: '2px 7px' }}>
-              ✂ Blade — click a clip to cut
+              Cut — click a segment to cut
             </span>
           )}
         </div>
@@ -1629,7 +1639,7 @@ export const VidTimeline: React.FC<{
                   const continueBlocked = (c.pending || c.vgen)
                     ? procSlotBusy(p, outPort ?? 0, c.start, c.duration, c.id) : false;
                   return (
-                    <Clip key={c.id} clip={c} pps={pps} selected={selIds.has(c.id)} blade={blade} muted={isMuted}
+                    <Clip key={c.id} clip={c} pps={pps} selected={selIds.has(c.id)} blade={cutArmed} muted={isMuted}
                       touchesLeft={touchesLeft}
                       missing={!!((c.asset && vid.missing.has(c.asset)) || (c.play && vid.missing.has(c.play)))}
                       wave={assetBySrc.get(c.src)?.waveform}
@@ -2156,7 +2166,7 @@ const Clip: React.FC<{
         : `${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}${gone ? ' · MEDIA MISSING from the asset store — pick the original file in the Assets window (Project scope) to relink' : ''}`}
       style={{
         position: 'absolute', left: c.start * pps, width: Math.max(8, c.duration * pps), top: 3, bottom: 3,
-        borderRadius: 0, overflow: 'hidden', cursor: blade ? BLADE_CURSOR : 'grab', userSelect: 'none',
+        borderRadius: 0, overflow: 'hidden', cursor: blade ? CUT_CURSOR : 'grab', userSelect: 'none',
         // 上亮下暗的立面色：片段是"一片实体"，不是一块半透明色纸；选中时白边 + 外发光。
         // 占位段：虚线浅灰白边 —— "这里有个坑等着被填"一眼认出；跑出来的成品在输出轨上是实心蓝。
         background: (isPending || isVGen) ? `linear-gradient(180deg, ${PK.clipA}, ${PK.clipB})` : `linear-gradient(180deg, ${K.clipA}, ${K.clipB})`,
@@ -2463,9 +2473,9 @@ const Clip: React.FC<{
       {/* 裁剪把手：左右各一条**透明**窄带 —— 只留命中区（光标变 ew-resize、可拖边），
           不画任何底色/边线，段面上看不到额外色块。 */}
       <div onPointerDown={e => onStartDrag(e, 'l', c)} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
-        style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 7, cursor: blade ? BLADE_CURSOR : 'ew-resize', background: 'transparent' }} />
+        style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 7, cursor: blade ? CUT_CURSOR : 'ew-resize', background: 'transparent' }} />
       <div onPointerDown={e => onStartDrag(e, 'r', c)} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
-        style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 7, cursor: blade ? BLADE_CURSOR : 'ew-resize', background: 'transparent' }} />
+        style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 7, cursor: blade ? CUT_CURSOR : 'ew-resize', background: 'transparent' }} />
       {/* 删除按钮已移除：删除入口是选中段后按 Delete / Backspace。 */}
     </div>
   );

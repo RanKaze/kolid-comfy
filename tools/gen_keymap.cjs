@@ -27,7 +27,7 @@ const ROOT = path.resolve(__dirname, '..');
 const SRC = path.join(ROOT, 'nodes/web/js/keymap.js');
 const OUT = path.join(ROOT, 'ui/sampler_node/src/keymap.generated.ts');
 
-const SCOPES = ['app', 'canvas', 'timeline', 'keyframes', 'assets'];
+const SCOPES = ['app', 'canvas', 'timeline', 'keyframes', 'assets', 'midi'];
 
 /** 求值那个经典脚本，拿回 KOLID_KEYMAP。它自己会挂 window.KB —— 这里只要表。 */
 function readTable() {
@@ -57,6 +57,15 @@ function validate(table) {
     if (!d || typeof d.group !== 'string' || !d.group) errs.push(`${d && d.id}: group 空`);
     if (!d || typeof d.label !== 'string' || !d.label) errs.push(`${d && d.id}: label 空`);
     if (!d || !SCOPES.includes(d.scope)) errs.push(`${d && d.id}: scope 非法 ${JSON.stringify(d && d.scope)}`);
+    // `scopes` 可省；写了就必须是非空数组、每项都认得，且把 `scope` 包含进去（scope 是主面）。
+    if (d && d.scopes !== undefined) {
+      if (!Array.isArray(d.scopes) || !d.scopes.length) errs.push(`${d.id}: scopes 必须是非空数组`);
+      else {
+        d.scopes.forEach(s => { if (!SCOPES.includes(s)) errs.push(`${d.id}: scopes 里有非法面 ${JSON.stringify(s)}`); });
+        if (!d.scopes.includes(d.scope)) errs.push(`${d.id}: scopes 必须包含 scope ${JSON.stringify(d.scope)}`);
+        if (new Set(d.scopes).size !== d.scopes.length) errs.push(`${d.id}: scopes 里有重复的面`);
+      }
+    }
     if (!d || !Array.isArray(d.keys)) { errs.push(`${d && d.id}: keys 必须是数组（不绑就写 []）`); continue; }
     d.keys.forEach(k => { if (!parse(k)) errs.push(`${d.id}: chord 解析不了 ${JSON.stringify(k)}`); });
   }
@@ -69,8 +78,10 @@ function opt(k, v) { return v === undefined ? '' : `, ${k}: ${JSON.stringify(v)}
 function render(table) {
   const body = table.map(d =>
     `  { id: ${q(d.id)}, group: ${q(d.group)}, label: ${q(d.label)}, scope: ${q(d.scope)}, `
+    + (d.scopes ? `scopes: [${d.scopes.map(q).join(', ')}], ` : '')
     + `keys: [${(d.keys || []).map(q).join(', ')}]`
     + (d.shiftAsParam ? ', shiftAsParam: true' : '')
+    + (d.holdable ? ', holdable: true' : '')
     + opt('note', d.note) + ' },').join('\n');
 
   return `// 由 tools/gen_keymap.cjs 从 nodes/web/js/keymap.js 生成 —— **不要手改**。
@@ -79,8 +90,8 @@ function render(table) {
 // 拿一份打好类型的副本。改了键位表就重新构建（\`npm run build -w sampler_node\` 第一步就是重跑
 // 生成器），\`tests/keymap.py\` 会检查这份是否落后。
 
-/** 命令在哪儿有效。冲突检测按它分组：同一 scope 里两条命令占同一个键才叫真冲突。 */
-export type KeyScope = 'app' | 'canvas' | 'timeline' | 'keyframes' | 'assets';
+/** 命令在哪儿有效。冲突检测按它分组：两个面集**有交集**、又占同一个键，才叫真冲突。 */
+export type KeyScope = 'app' | 'canvas' | 'timeline' | 'keyframes' | 'assets' | 'midi';
 
 export type KeyDef = {
   /** \`group.command\`，页面与宿主都用它认命令（\`KB.hit(e, id)\` / \`hit(e, id)\`）。 */
@@ -90,10 +101,14 @@ export type KeyDef = {
   /** 那一行显示的名字。 */
   label: string;
   scope: KeyScope;
+  /** 这条命令在哪些面上都算命中（省 = 只有 \`scope\`）。Brush / Eraser 在 canvas 与 midi 上同一件事。 */
+  scopes?: readonly KeyScope[];
   /** 默认键。空数组 = 默认不绑，等用户自己绑。 */
   keys: readonly string[];
   /** Shift 是这条命令的**参数**而非绑定的一部分（方向键微调：Shift 走大步）。 */
   shiftAsParam?: boolean;
+  /** 键默认是"按住才有效"，用户可在 Key Bindings 里改成按一下切换（见 workbench/cutStore.ts）。 */
+  holdable?: boolean;
   /** 给屏幕下方那行小字用的说明（可无）。 */
   note?: string;
 };
@@ -125,7 +140,8 @@ function main() {
     // 给 tests/keymap.py：整张表原样吐出来（它要按 group 分组、按 scope 查冲突）。
     console.log(JSON.stringify(table.map(d => ({
       id: d.id, group: d.group, label: d.label, scope: d.scope,
-      keys: d.keys, shiftAsParam: !!d.shiftAsParam,
+      scopes: d.scopes || [d.scope],
+      keys: d.keys, shiftAsParam: !!d.shiftAsParam, holdable: !!d.holdable,
     }))));
     return;
   }

@@ -4,8 +4,8 @@
 // 拿一份打好类型的副本。改了键位表就重新构建（`npm run build -w sampler_node` 第一步就是重跑
 // 生成器），`tests/keymap.py` 会检查这份是否落后。
 
-/** 命令在哪儿有效。冲突检测按它分组：同一 scope 里两条命令占同一个键才叫真冲突。 */
-export type KeyScope = 'app' | 'canvas' | 'timeline' | 'keyframes' | 'assets';
+/** 命令在哪儿有效。冲突检测按它分组：两个面集**有交集**、又占同一个键，才叫真冲突。 */
+export type KeyScope = 'app' | 'canvas' | 'timeline' | 'keyframes' | 'assets' | 'midi';
 
 export type KeyDef = {
   /** `group.command`，页面与宿主都用它认命令（`KB.hit(e, id)` / `hit(e, id)`）。 */
@@ -15,10 +15,14 @@ export type KeyDef = {
   /** 那一行显示的名字。 */
   label: string;
   scope: KeyScope;
+  /** 这条命令在哪些面上都算命中（省 = 只有 `scope`）。Brush / Eraser 在 canvas 与 midi 上同一件事。 */
+  scopes?: readonly KeyScope[];
   /** 默认键。空数组 = 默认不绑，等用户自己绑。 */
   keys: readonly string[];
   /** Shift 是这条命令的**参数**而非绑定的一部分（方向键微调：Shift 走大步）。 */
   shiftAsParam?: boolean;
+  /** 键默认是"按住才有效"，用户可在 Key Bindings 里改成按一下切换（见 workbench/cutStore.ts）。 */
+  holdable?: boolean;
   /** 给屏幕下方那行小字用的说明（可无）。 */
   note?: string;
 };
@@ -42,11 +46,15 @@ export const KEYMAP = [
   { id: "tool.zoom", group: "Tools", label: "Zoom tool", scope: "canvas", keys: ["Z"] },
   { id: "tool.pan", group: "Tools", label: "Pan tool", scope: "canvas", keys: ["H"] },
   { id: "tool.rotate", group: "Tools", label: "Rotate tool", scope: "canvas", keys: ["R"] },
-  { id: "tool.brush", group: "Tools", label: "Brush", scope: "canvas", keys: ["B"] },
-  { id: "tool.eraser", group: "Tools", label: "Eraser", scope: "canvas", keys: ["E"] },
+  { id: "tool.brush", group: "Tools", label: "Brush", scope: "canvas", scopes: ["canvas", "midi"], keys: ["B"] },
+  { id: "tool.eraser", group: "Tools", label: "Eraser", scope: "canvas", scopes: ["canvas", "midi"], keys: ["E"] },
+  { id: "tool.cursor", group: "Tools", label: "Cursor (no tool)", scope: "canvas", scopes: ["canvas", "midi", "timeline"], keys: ["A"], note: "Puts every tool down: the plain arrow, no painting, no note on an empty click, no blade on the timeline. The view is left alone (Esc is the one that also refits it)." },
   { id: "tool.bucket", group: "Tools", label: "Fill", scope: "canvas", keys: ["G"] },
   { id: "tool.marquee", group: "Tools", label: "Rectangle marquee", scope: "canvas", keys: ["M"] },
   { id: "tool.lasso", group: "Tools", label: "Lasso", scope: "canvas", keys: ["L"] },
+  { id: "cut.canvas", group: "Cut", label: "Crop the canvas to a box", scope: "canvas", keys: ["C"], note: "Frame mode: drag a box over the canvas, Enter crops to it, Esc leaves without changing anything." },
+  { id: "cut.timeline", group: "Cut", label: "Cut segments", scope: "timeline", keys: ["C"], holdable: true },
+  { id: "cut.midi", group: "Cut", label: "Cut notes", scope: "midi", keys: ["C"], holdable: true },
   { id: "paint.swap-colors", group: "Paint", label: "Swap foreground / background", scope: "canvas", keys: ["X"] },
   { id: "paint.decal", group: "Paint", label: "Paint target — last Image step", scope: "canvas", keys: ["Tab"] },
   { id: "paint.mask", group: "Paint", label: "Paint target — last Mask step", scope: "canvas", keys: ["`"] },
@@ -57,7 +65,6 @@ export const KEYMAP = [
   { id: "panel.pose", group: "Panels", label: "Show Pose panel", scope: "canvas", keys: ["P"] },
   { id: "timeline.copy", group: "Timeline", label: "Copy segments", scope: "timeline", keys: ["Ctrl+C"] },
   { id: "timeline.paste", group: "Timeline", label: "Paste segments", scope: "timeline", keys: ["Ctrl+V"] },
-  { id: "timeline.blade", group: "Timeline", label: "Blade (hold)", scope: "timeline", keys: ["C"] },
   { id: "timeline.delete", group: "Timeline", label: "Delete segments", scope: "timeline", keys: ["Delete", "Backspace"] },
   { id: "keyframes.add", group: "Keyframes", label: "Add keyframe at playhead", scope: "keyframes", keys: ["K"] },
   { id: "keyframes.fit", group: "Keyframes", label: "Fit keys in view", scope: "keyframes", keys: ["F"] },
@@ -71,4 +78,4 @@ export const KEYMAP = [
 export type KeyCommandId = (typeof KEYMAP)[number]['id'];
 
 export const KEY_COMMAND_IDS: readonly string[] = KEYMAP.map(d => d.id);
-export const KEY_SCOPES: readonly KeyScope[] = ["app","canvas","timeline","keyframes","assets"];
+export const KEY_SCOPES: readonly KeyScope[] = ["app","canvas","timeline","keyframes","assets","midi"];

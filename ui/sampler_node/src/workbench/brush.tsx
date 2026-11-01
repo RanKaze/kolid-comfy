@@ -3,6 +3,8 @@ import { wbStyles } from './skin';
 import { useBlendUi } from './store';
 import type { WorkbenchUnit, WorkbenchUnitProps } from './registry';
 import type { BlendUiAction, BlendUiSend } from '../types';
+import { setMidiTool, useMidiTool } from '../midi/tool';
+import { disarmCut } from './cutStore';
 
 // Brush 那一格：三颗档位 + 它此刻有可见差别的那几根旋钮。正文从快照读，按下发的是动作键 ——
 // 这一格不认识图层，也不认识画布，它只知道页面那一侧 `brushMode` 那一族变量现在是什么。
@@ -85,8 +87,8 @@ export const PenBody: React.FC<{
   );
 };
 
-const BrushBody: React.FC<WorkbenchUnitProps> = ({ send }) => (
-  <PenBody which="brush" send={send} sentence={(target, selection) =>
+const BrushBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => (
+  host.video.mode === 'midi' ? <MidiPenBody which="brush" /> : <PenBody which="brush" send={send} sentence={(target, selection) =>
     `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, `
     + 'Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), '
     + 'Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws '
@@ -98,6 +100,28 @@ export const brushUnit: WorkbenchUnit = {
   id: 'brush',
   title: 'Brush',
   hint: 'Brush (B) — how the stroke falls off, how opaque one pass is, and how wide it is. '
-    + 'The ring says which face the stroke lands on.',
+    + 'The ring says which face the stroke lands on. In MIDI the same brush places notes on the roll.',
   Body: BrushBody,
+};
+
+// ── 卷帘上的这支笔 ─────────────────────────────────────────────────────────────────────────────
+// MIDI 模式把 Brush / Eraser 两格复用过来（拍板 8）：B 落音、E 擦音，两支笔都**黏住**，选了一次
+// 就一直拿着，直到换另一支或按 Esc 回到画笔。档位 / 强度 / 大小那几根旋钮属于画布那套笔画算法，
+// 卷帘没有可调的东西 —— 所以这一面只摆那一枚键徽章。键的判定在 midi/Workspace.tsx（B / E 的命令
+// 同时算 canvas 与 midi 两个面），这里只管按下去换手。
+export const MidiPenBody: React.FC<{ which: 'brush' | 'eraser' }> = ({ which }) => {
+  const tool = useMidiTool();
+  const on = tool === which;
+  return (
+    <div style={wbStyles.row}>
+      <button style={{ ...wbStyles.btn, ...(on ? wbStyles.btnOn : null) }}
+        title={`${which === 'brush' ? 'Brush (B)' : 'Eraser (E)'} — ${which === 'brush'
+          ? 'click a pitch row to place a note, drag sideways to make it longer.'
+          : 'click a note to rub it out, drag across notes to sweep them.'} `
+          + 'Stays on until you take the other tool or press Esc.'}
+        onClick={() => { setMidiTool(which); disarmCut('cut.midi'); }}>
+        <span style={{ ...wbStyles.key, ...(on ? wbStyles.keyOn : null) }}>{which === 'brush' ? 'B' : 'E'}</span>
+      </button>
+    </div>
+  );
 };

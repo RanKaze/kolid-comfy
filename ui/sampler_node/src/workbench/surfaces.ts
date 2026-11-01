@@ -36,7 +36,7 @@ const ACTION_ALIAS: Record<string, AgentSurface> = {
 
 /** 这些前缀**本身就是** dock 的面板 id（`WORKBENCH_UNITS` + 宿主那几格）。 */
 const PANEL_PREFIXES = new Set([
-  'staging', 'canvas', 'transform', 'color', 'brush', 'bucket', 'eraser', 'selection', 'view',
+  'staging', 'canvas', 'transform', 'color', 'brush', 'bucket', 'eraser', 'selection', 'cut', 'cursor', 'view',
   'text', 'geometry', 'scene3d', 'pose', 'detector', 'processor', 'videogen', 'guidances',
   'layers', 'history', 'layout',
   'toolbar', 'context', 'pipeline', 'presets', 'blocks',

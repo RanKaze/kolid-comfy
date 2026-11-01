@@ -9,6 +9,7 @@ import { parseDocAssets, setDocAssets, dropDocAssets } from './workbench/docAsse
 import { getVidStagingOverlay, dropVidProcState } from './workbench/video/procRun';
 import { dropVidProcPicks } from './workbench/video/procPicks';
 import { bumpAssets } from './workbench/video/assetsTick';
+import { setHover as setCutHover } from './workbench/cutStore';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -1233,6 +1234,10 @@ const App: React.FC = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: sid }),
         }).then(() => refreshStaging()));
+      } else if (event.data?.type === 'blend-canvas-hover') {
+        // 画布是 iframe，宿主收不到里面的指针事件 —— 页面在鼠标进出画布时报一声。Cut 的三条
+        // 命令按"指针在哪一面"分派（见 workbench/cutStore.ts），这是其中画布那一面的消息源。
+        setCutHover('canvas', event.data.inside === true);
       } else if (event.data?.type === 'blend-log') {
         // 工作台画布上那颗常显的状态药丸撤掉了：它每次说话改发一条到这里，攒成 Log 面板
         // （Context 标题行 → Log）。kind 只可能是 '' / 'success' / 'error'，别的按普通行显示。

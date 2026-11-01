@@ -33,6 +33,7 @@ import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModa
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
 import { setLayerEditBlocked } from '../workbench/editGate';
+import { setArmMode, useCut, type ArmMode, type CutCommand } from '../workbench/cutStore';
 import { getBlendUi, setBlendUi, getActiveBlendUid } from '../workbench/store';
 import { pruneCudState, runCudSwitch, useCudScope, useCudState } from '../workbench/cudScope';
 import { resetRowInteraction } from '../workbench/layerRow';
@@ -2689,9 +2690,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     staging, blendPreview, guidanceCard, stageUpload, stageRemove,
     layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock },
     video: {
-      // 视频那一侧只认两态：Midi 模式下它按 Image 对待（不出播放器、不抢画布），
-      // 否则视频面板会以为自己该干活。
-      mode: (vidMode === 'video' ? 'video' : 'image') as 'image' | 'video',
+      // 三态照传：Video 专属的正文只看 `=== 'video'`（MIDI 与 Image 同待遇，不出播放器、不抢画布），
+      // 而 Cut 那一格要按模式换命令（裁画布 / 剪段 / 剪音符），必须能分出 midi。
+      mode: vidMode,
       fps: vidProject.fps, setFps: setVidFps, tracks: vidTrackList, assets: vidAssetList,
       // Video Generator：Processor 那一格要能列出"哪些接口是生成器"并发起添加（段的位置/时长
       // 只有宿主知道，所以添加这个动作也住在宿主 —— 窗口只挑哪一台）。`cont` 是时间线上
@@ -3742,7 +3743,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               // 一句空态，不能把刚关掉那份的轨道/资产继续摆着（它们属于文档，不属于页面）。
               vtracks: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — Tracks belong to a document.</div>
-                : <VidTimeline vid={vidCtl} midi={midiHost.ctl} onSettingsPlaceholders={setProcSettingsIds}
+                : <VidTimeline vid={vidCtl} midi={midiHost.ctl} mode={vidMode} onSettingsPlaceholders={setProcSettingsIds}
                     onRunVGen={id => { void runVideoGenSegment(id); }}
                     onPickVGenFrame={(id, which) => setVgenFramePick({ clipId: id, which })}
                     onVGenTrackSettings={setVgenTrackSettingsId}
@@ -4864,12 +4865,25 @@ const kbStyle = {
   conflict: {
     padding: '0 16px 8px', marginTop: -4, fontSize: 11.5, lineHeight: '15px', color: '#ff9f0a',
   },
+  // Cut 那两行的 Hold / Toggle 分段控件：与模式切换（Image / Video）同一条 iOS 读法，只是更小一号
+  // —— 它住的是一行里，不该比那行的键徽章还抢眼。
+  seg: {
+    display: 'flex', gap: 1, padding: 1.5, borderRadius: 999, flexShrink: 0,
+    background: 'rgba(255,255,255,0.07)',
+  },
+  segBtn: {
+    padding: '1px 7px', borderRadius: 999, border: 'none', background: 'transparent',
+    color: 'rgba(255,255,255,0.5)', fontSize: 10, fontWeight: 600, lineHeight: 1.5, cursor: 'pointer',
+  },
+  segOn: { background: 'rgba(10,132,255,0.85)', color: '#fff' },
 };
 
 const KeyBindingsScreen: React.FC = () => {
   // 键位的真相在 localStorage 里，React 看不见；用版本号把"变了"转成重渲染。
   const [, setVersion] = useState(0);
   const [rec, setRec] = useState<string | null>(null);
+  // Cut 那两行还多一件东西：键的手势（按住 / 按一下切换），它住在 cutStore 的 localStorage 里。
+  const cut = useCut();
   const bump = useCallback(() => setVersion(v => v + 1), []);
   useEffect(() => onKeymapChange(bump), [bump]);
 
@@ -4935,6 +4949,21 @@ const KeyBindingsScreen: React.FC = () => {
                       </span>
                     ) : (
                       <span style={{ ...kbStyle.chip, ...kbStyle.chipNone }}>unbound</span>
+                    )}
+                    {/* Cut 的两条：键可以按住、也可以按一下切换 —— 面板上那颗按钮始终是黏住的。
+                        点击不能冒到行上（那会开始录制），所以这一层自己 stopPropagation。 */}
+                    {d.holdable && !active && (
+                      <span style={kbStyle.seg} onClick={ev => ev.stopPropagation()}
+                        title={'Hold — the key arms Cut only while it is down. Toggle — one press arms it, '
+                          + 'another disarms it. The Cut button in the dock keeps it on either way.'}>
+                        {(['hold', 'toggle'] as ArmMode[]).map(m => (
+                          <button key={m}
+                            style={{ ...kbStyle.segBtn, ...(cut.modes[d.id as CutCommand] === m ? kbStyle.segOn : null) }}
+                            onClick={ev => { ev.stopPropagation(); setArmMode(d.id as CutCommand, m); }}>
+                            {m === 'hold' ? 'Hold' : 'Toggle'}
+                          </button>
+                        ))}
+                      </span>
                     )}
                     {isCustom(d.id) && !active && (
                       <button style={kbStyle.reset} title="Restore this one to its default"
