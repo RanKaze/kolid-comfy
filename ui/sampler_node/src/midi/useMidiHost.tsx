@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { clock } from './clock';
+import { transport } from './transportActions';
 import { useClockFrame } from './hooks';
 import { startNativeMonitor } from './nativeMonitor';
 import { midiOut } from './output';
@@ -132,18 +133,12 @@ export const useMidiHost = (opts: {
     midiOut.rebuild(midiProj);
   }, [midiProj]);
 
-  // ── 每帧：循环回绕 + 把事件喂出去 ─────────────────────────────────────────────────────────
-  // 这两个动作必须在**页面**里跑，而不是某扇窗里 —— 用户把卷帘关了，音乐还得继续走。
+  // ── 每帧：把事件喂出去 ────────────────────────────────────────────────────────────────────
+  // 这一步必须在**页面**里跑，而不是某扇窗里 —— 用户把卷帘关了，音乐还得继续走。
+  // 循环回绕不在这里：区间是时间线的入/出点，回绕归整页的走带（见 video/timelineAudio.ts），
+  // 一处判断就够；两处各判一次就是两套回绕互相打架。
   useClockFrame(() => {
-    const p = midiProjRef.current;
-    if (clock.isPlaying() && p.loop.on) {
-      const endSec = beatToSeconds(p.loop.b, p.tempo);
-      const startSec = beatToSeconds(p.loop.a, p.tempo);
-      if (endSec > startSec && clock.seconds() >= endSec) {
-        void clock.seek(startSec);
-      }
-    }
-    midiOut.tick(p);
+    midiOut.tick(midiProjRef.current);
   });
 
   // playing 是时钟的状态，不是工程的 —— 让 ctl 跟着时钟翻新（面板上的 ▶/❙❙ 才切得过来）。
@@ -164,9 +159,10 @@ export const useMidiHost = (opts: {
     updateEditor,
     select: (_trackId, noteId) => setSelNote(noteId ?? ''),
     playing: playingNow,
-    play: () => { void clock.play(); },
-    pause: () => { void clock.pause(); },
-    seekBeat: (beat: number) => { void clock.seek(beatToSeconds(Math.max(0, beat), midiProj.tempo)); },
+    play: () => transport.play(),
+    pause: () => transport.pause(),
+    stopAt: (sec: number) => transport.stopAt(sec),
+    seekBeat: (beat: number) => transport.seek(beatToSeconds(Math.max(0, beat), midiProj.tempo)),
     undo,
     redo,
     canUndo,

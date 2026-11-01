@@ -102,9 +102,9 @@ export const MidiTransport: React.FC<{
       <div style={C.group}>
         <button style={C.key()} title="回到开头 (Home)"
           onClick={() => ctl.seekBeat(0)}>⏮</button>
-        <button style={C.key()} title="Stop — 回到循环起点（没开循环就回 0）"
-          onClick={() => { ctl.pause(); ctl.seekBeat(project.loop.on ? project.loop.a : 0); }}>■</button>
-        <button style={C.key(ctl.playing)} title="Play / Pause (Space)"
+        <button style={C.key()} title="Stop — 回到循环起点（没设循环就回 0）"
+          onClick={() => ctl.stopAt(beatToSeconds(project.loop.on ? project.loop.a : 0, project.tempo))}>■</button>
+        <button style={C.key(ctl.playing)} title="Play / Pause"
           onClick={() => (ctl.playing ? ctl.pause() : ctl.play())}>
           {ctl.playing ? '❙❙' : '▶'}
         </button>

@@ -13,7 +13,9 @@
 // 取最大报数),左右两条表照同一个值画,因此 Monitor 在原生源上不画那两枚 M 键。
 
 import { acquireAudioSlot, releaseAudioSlot } from '../workbench/video/audioFocus';
+import { engineTimelineActive } from '../workbench/video/pcmClips';
 import { clock } from './clock';
+import { transportOwner } from './transportOwner';
 
 const SLOT_ID = 'midi-native';
 /** 与显示器的一帧同量级:30Hz 够表跟着音符起落,再快只是白问。 */
@@ -42,7 +44,7 @@ const levels = () => {
  *  当成"现在还在响"）。传输在播时槽归时间线（见 workbench/video/timelineAudio.ts），峰值由
  *  这里供出去，与 WebAudio 探头合在同一只表上。 */
 export const nativeLevels = (): { l: number; r: number } =>
-  isNativeOutput() && poll ? levels() : { l: 0, r: 0 };
+  (isNativeOutput() || engineTimelineActive()) && poll ? levels() : { l: 0, r: 0 };
 
 const pollOnce = (): void => {
   if (inflight) return;
@@ -75,7 +77,7 @@ const release = (): void => {
 
 const sync = (): void => {
   const t = performance.now();
-  const playing = clock.isPlaying() && isNativeOutput();
+  const playing = clock.isPlaying() && (isNativeOutput() || engineTimelineActive());
   if (!playing && !auditionAlive(t)) { if (held) release(); else peak = 0; if (poll) { window.clearInterval(poll); poll = 0; } return; }
   // 传输在播：槽归时间线 —— 它同时带 WebAudio 探头与本机引擎峰值（见 timelineAudio.ts），
   // 这里只负责把轮询跑起来、把峰值递过去。再抢一次槽只会把时间线顶掉、连带把时钟按停。
@@ -88,7 +90,10 @@ const sync = (): void => {
   if (!held || label !== next) {
     held = true;
     label = next;
-    acquireAudioSlot({ id: SLOT_ID, label: next, levels }, () => { void clock.pause(); });
+    acquireAudioSlot({ id: SLOT_ID, label: next, levels }, () => {
+      // 只有归属者的自动动作能按停共享时钟；别人的窗把槽抢走不该停别人的播放。
+      if (transportOwner.isOwner()) void clock.pause();
+    });
   }
   if (!poll) poll = window.setInterval(pollOnce, POLL_MS);
 };

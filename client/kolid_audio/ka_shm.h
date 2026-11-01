@@ -27,13 +27,15 @@
 #include <stdint.h>
 
 #define KA_SHM_MAGIC  0x4B415348u          /* 'KASH' —— 宿主 attach 时先认它，认不出就是旧版/错名 */
-#define KA_SHM_ABI    3                    /* 3：加 ed_mon（插件窗口开着时暂停也得照渲，否则界面里点了没声） */
+#define KA_SHM_ABI    4                    /* 4：事件槽 —— 调度归宿主，worker 只按块渲染（3 是 ed_mon） */
 #define KA_SHM_BLOCK  512                  /* 每块帧数，与设备的 KA_FRAMES 对齐 */
 #define KA_SHM_RING   8                    /* ring 里最多压 8 块 ≈ 85ms 的余量 */
 #define KA_SHM_PATH   320
 #define KA_SHM_TEXT   2048
 #define KA_SHM_IV     16
 #define KA_SHM_NOTES  8192                 /* 与宿主那边的 KA_MAX_NOTES 一致 */
+#define KA_SHM_EV_SLOTS 32                 /* 事件槽数：按 worker 的块号取模，必须 > 提前量 + 2 */
+#define KA_SHM_EV_MAX   64                 /* 一块最多这么多事件（和弦 + 收声 + 试听） */
 
 /* 命令。编号就是协议版本号的一部分，改了记得一起改 ABI。 */
 #define KA_CMD_NONE    0
@@ -98,6 +100,26 @@ typedef struct {
     int64_t len;
 } ka_shm_note;
 
+/* 一块里的一个事件。调度在**宿主**里做（它同时知道走带位置与音符表），worker 只按
+ * 槽渲染 —— 以前两边各排一遍，暂停收声的语义就此分叉（一叠音就是这么来的）。 */
+typedef struct {
+    int32_t on;                        /* 1 = note-on，0 = note-off */
+    int32_t track;
+    int32_t note;
+    int32_t vel;
+    int32_t off;                       /* 块内偏移帧 */
+} ka_shm_event;
+
+/* 一块的事件槽。按 worker 的块号（`ka_shm.w`）取模索引；gen 对不上 = seek / 换表之前
+ * 的旧槽，worker 一律当"没有事件"处理。 */
+typedef struct {
+    int32_t w;                         /* 这张槽是 worker 的第几块 */
+    int32_t gen;                       /* 调度代数（撞上 ka_shm.sched_gen 才算数） */
+    int32_t count;
+    int32_t drop;                      /* 放不下的事件数（诊断） */
+    ka_shm_event ev[KA_SHM_EV_MAX];
+} ka_shm_evblock;
+
 typedef struct {
     uint32_t magic;
     uint32_t abi;
@@ -157,6 +179,16 @@ typedef struct {
                                             * 本来一块都不渲 —— 于是"编辑界面里完全没声音"。
                                             * 开着窗口 = 用户正在里面试音，照渲；量按 block 压小，
                                             * 别提前灌满整条 ring（那手感就晚了 85ms）。 */
+
+    /* ── 事件槽（宿主写、worker 读）：调度只有一个作者 ────────────────────────────
+     * 宿主每块把 worker 提前量覆盖到的未来块都填好；worker 渲染第 W 块时读 evs[W % SLOTS]，
+     * 只读不改。硬对表（开播 / seek / 换表 / 暂停收声）翻 sched_gen，旧槽当场作废。 */
+    volatile int32_t sched_gen;
+    volatile int32_t flush_seq;            /* 宿主写：暂停 / seek 时 +1；worker 见到就全音收声。
+                                            * 收声不是"排到未来某一块"的事件 —— worker 可能已经
+                                            * 跨过那一块了，所以它必须是一个立即生效的信号。 */
+    int32_t sched_w;                       /* 宿主已填到哪个块（诊断） */
+    ka_shm_evblock evs[KA_SHM_EV_SLOTS];
     /* 紧跟着 ring_blocks × block × 2 个 float（交错立体声） */
 } ka_shm;
 

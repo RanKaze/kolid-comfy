@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import base64
 import ctypes
 import os
 import threading
@@ -170,6 +171,21 @@ def _load_dll():
                 lib.ka_vst3_state_save.restype = ctypes.c_int
                 lib.ka_vst3_audition.argtypes = [ctypes.c_int] * 4
                 lib.ka_vst3_audition.restype = ctypes.c_int
+                # 时间线音频段（PCM 片段）：旧 DLL 没有这几条 → hasattr 挡住，不整体降级。
+                if hasattr(lib, 'ka_pcm_begin'):
+                    lib.ka_pcm_begin.argtypes = [ctypes.c_int, ctypes.c_longlong, ctypes.c_int]
+                    lib.ka_pcm_begin.restype = ctypes.c_int
+                    lib.ka_pcm_write.argtypes = [ctypes.c_int, ctypes.c_longlong, ctypes.c_void_p, ctypes.c_int]
+                    lib.ka_pcm_write.restype = ctypes.c_int
+                    lib.ka_pcm_finish.argtypes = [ctypes.c_int]
+                    lib.ka_pcm_finish.restype = ctypes.c_int
+                    lib.ka_pcm_set.argtypes = [ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong,
+                                               ctypes.c_longlong, ctypes.c_float]
+                    lib.ka_pcm_set.restype = ctypes.c_int
+                    lib.ka_pcm_clear.argtypes = [ctypes.c_int]
+                    lib.ka_pcm_clear.restype = ctypes.c_int
+                    lib.ka_pcm_info.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_longlong)]
+                    lib.ka_pcm_info.restype = ctypes.c_int
                 lib.ka_vst3_notes_off.restype = ctypes.c_int
                 lib.ka_vst3_note.argtypes = [ctypes.c_int] * 4
                 lib.ka_vst3_note.restype = ctypes.c_int
@@ -447,6 +463,48 @@ class Engine:
                 return {'ok': True, 'via': 'sfz'}
             # 没装乐器就不再出声（内置合成器常闭）—— 报 'none'，别让界面以为它响了。
             return {'ok': True, 'via': 'none'}
+
+    # ── 时间线音频段（PCM）─────────────────────────────────────────────────────────────────
+    def pcm_begin(self, slot: int, frames: int, channels: int = 2) -> dict:
+        with self._lock:
+            if not self.available or not hasattr(self._lib, 'ka_pcm_begin'):
+                return {'ok': False, 'error': 'pcm unavailable'}
+            rc = int(self._lib.ka_pcm_begin(int(slot), int(frames), int(channels)))
+            return {'ok': rc == 0, 'slot': int(slot), 'frames': int(frames), 'rc': rc}
+
+    def pcm_chunk(self, slot: int, offset: int, data_b64: str) -> dict:
+        """写入一段交错立体声 int16（base64）。chunk 只搬字节，不做解码。"""
+        with self._lock:
+            if not self.available or not hasattr(self._lib, 'ka_pcm_write'):
+                return {'ok': False, 'error': 'pcm unavailable'}
+            raw = base64.b64decode(data_b64 or '')
+            frames = len(raw) // 4
+            if frames <= 0:
+                return {'ok': False, 'error': 'empty pcm chunk'}
+            buf = ctypes.create_string_buffer(raw, len(raw))
+            rc = int(self._lib.ka_pcm_write(int(slot), int(offset),
+                                            ctypes.cast(buf, ctypes.c_void_p), int(frames)))
+            return {'ok': rc == frames, 'slot': int(slot), 'offset': int(offset),
+                    'frames': frames, 'rc': rc}
+
+    def pcm_finish(self, slot: int) -> dict:
+        with self._lock:
+            if not self.available or not hasattr(self._lib, 'ka_pcm_finish'):
+                return {'ok': False, 'error': 'pcm unavailable'}
+            return {'ok': int(self._lib.ka_pcm_finish(int(slot))) == 0}
+
+    def pcm_set(self, slot: int, start: int, offset: int, length: int, gain: float = 1.0) -> dict:
+        with self._lock:
+            if not self.available or not hasattr(self._lib, 'ka_pcm_set'):
+                return {'ok': False, 'error': 'pcm unavailable'}
+            rc = int(self._lib.ka_pcm_set(int(slot), int(start), int(offset), int(length), float(gain)))
+            return {'ok': rc == 0}
+
+    def pcm_clear(self, slot: int) -> dict:
+        with self._lock:
+            if not self.available or not hasattr(self._lib, 'ka_pcm_clear'):
+                return {'ok': False, 'error': 'pcm unavailable'}
+            return {'ok': int(self._lib.ka_pcm_clear(int(slot))) == 0}
 
     def panic(self) -> dict:
         with self._lock:
@@ -1312,6 +1370,20 @@ class Engine:
                                  _i(payload.get('track'), 0))
         if op == 'panic':
             return self.panic()
+        if op == 'pcm_begin':
+            return self.pcm_begin(_i(payload.get('slot')), _i(payload.get('frames')),
+                                  _i(payload.get('channels'), 2))
+        if op == 'pcm_chunk':
+            return self.pcm_chunk(_i(payload.get('slot')), _i(payload.get('offset')),
+                                  str(payload.get('data') or ''))
+        if op == 'pcm_finish':
+            return self.pcm_finish(_i(payload.get('slot')))
+        if op == 'pcm_set':
+            return self.pcm_set(_i(payload.get('slot')), _i(payload.get('start')),
+                                _i(payload.get('offset')), _i(payload.get('length')),
+                                1.0 if payload.get('gain') is None else float(payload.get('gain')))
+        if op == 'pcm_clear':
+            return self.pcm_clear(_i(payload.get('slot')))
         if op == 'track_instrument':
             return self.track_instrument(payload.get('track'), payload.get('path') or '')
         if op == 'track_unload':

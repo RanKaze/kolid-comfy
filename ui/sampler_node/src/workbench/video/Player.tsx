@@ -918,7 +918,7 @@ export const VidPlayer: React.FC<{
           onClick={() => vid.setPlaying(!playing)}>
           {playing ? '⏸' : '▶'}
         </button>
-        <button style={tCtrl} title="Stop — pause and return to the In point" onClick={() => { seek(inSet ? p.inPoint : 0); vid.setPlaying(false); }}>⏹</button>
+        <button style={tCtrl} title="Stop — pause and return to the In point" onClick={() => vid.stopAt(inSet ? p.inPoint : 0)}>⏹</button>
         {/* 读数靠右：右边原来那条进度条撤掉了 —— 拖游标在时间线的标尺上做（那里才是它的家），
             监视器下面再放一条重复的进度条只会让人以为它是另一个控件。 */}
         <span style={{ marginLeft: 'auto', fontSize: 11, color: 'rgba(255,255,255,0.65)', fontVariantNumeric: 'tabular-nums' }}>

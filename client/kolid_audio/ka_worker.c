@@ -635,98 +635,25 @@ static void wk_text_units(char* b, int cap) {
 static ka_shm* g_shm = 0;
 static void*   g_ev_done = 0;
 
-/* ── 乐器音符：走带里排好的音，按锚点落进正在渲的那一块 ─────────────────────────────────────
+/* ── 渲染：只按宿主填好的事件槽出声 ─────────────────────────────────────────────────────────
  *
- * 宿主的音符表和走带锚点在共享内存里（ka_shm.h）。这里的表是**私有副本**：宿主用
- * notes_gen 当 seqlock（奇 = 正在写），读的时候前后各看一次，不一致就下一圈再来 ——
- * 直接读共享内存会读到"写了一半的表"，表现是偶尔冒出一个不存在的高音。
+ * 调度（排哪一音、什么时候收、seek 后从哪接）全在宿主那边做：它同时知道走带位置和音符表，
+ * 每块把 worker 提前量覆盖到的未来块写成事件槽（ka_shm.h 的 evs[]）。这里**不再**读音符表、
+ * 不再自己记"哪些音还按着" —— 一份游标、一份收声语义，暂停/复播/seek 不可能再分叉。
  * ──────────────────────────────────────────────────────────────────────────────────────────── */
-
-static ka_shm_note wk_notes[KA_SHM_NOTES];
-static int32_t wk_note_count = 0;
-static int32_t wk_notes_gen_seen = -1;
-static int32_t wk_note_sched = 0;
-static int32_t wk_epoch_seen = -1;
-static int32_t wk_resched = 1;
-/* 调度**已经处理到**的时间线位置。锚点是从"宿主读到第几块"外推出来的，会抖；
- * 换表时若从抖出来的 pos 重排，上一块刚发过的音就会被当成"还没发过"再来一遍。
- * 与宿主那边的 g_sched_end 同一个办法：换表只准把游标往前挪。 */
-static int64_t wk_sched_end = 0;
-
-#define WK_OFF_MAX 512
-typedef struct { int32_t pitch, ch; int64_t end; } wk_off;
-static wk_off wk_offs[WK_OFF_MAX];
-static int32_t wk_noff = 0;
 
 /* 试听音（暂停时点 ♪）：note-on 当场发，wk_aud_life 数到 0 再发 note-off。
  * 倒计时按"渲了几块"走 —— 宿主音频线程那条路上只准填事件，不能等命令回执。 */
 static int32_t wk_aud_life = -1;
 static int32_t wk_aud_ch = 0, wk_aud_pitch = 0;
-/* 上一圈看到的是不是在播。暂停那一下要把按着的音收掉（见 wk_render）。 */
-static int32_t wk_was_playing = 0;
+/** 已见过的收声序号（宿主暂停 / seek 时 +1）。 */
+static int32_t wk_flush_seen = 0;
 
-static int32_t wk_note_at(int64_t pos) {
-    int32_t lo = 0, hi = wk_note_count, mid;
-    while (lo < hi) {
-        mid = (lo + hi) / 2;
-        if (wk_notes[mid].start < pos) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo;
-}
-
-/** 把正在响的音全部收掉，并丢掉排队里还没发出去的（拖播放头 / 换乐器 / 停播都要）。 */
-static void wk_flush_notes(void) {
+/** 全通道全音收声：panic / 关插件 / 换音色用。正常播放的收声走事件槽，不走这里。 */
+static void wk_notes_off_all(void) {
     int i;
     g_v3.evq.count = 0;
-    for (i = 0; i < wk_noff; ++i) ka_v3_note(0, wk_offs[i].ch, wk_offs[i].pitch, 0, 0);
-    wk_noff = 0;
-}
-
-/** 读共享内存里的音符表（seqlock）。变了就重排游标。返回 1 = 表换了。 */
-static int32_t wk_sync_notes(ka_shm* s) {
-    int32_t g0 = s->notes_gen, n, i;
-    if (g0 == wk_notes_gen_seen || (g0 & 1)) return 0;
-    n = s->note_count;
-    if (n < 0) n = 0;
-    if (n > KA_SHM_NOTES) n = KA_SHM_NOTES;
-    for (i = 0; i < n; ++i) wk_notes[i] = s->notes[i];
-    if (s->notes_gen != g0) return 0;
-    wk_note_count = n;
-    wk_notes_gen_seen = g0;
-    wk_resched = 1;
-    return 1;
-}
-
-/** 这一块 [pos, pos+block) 里要响/要收的音。off 先发、on 后发：同一个音重触发时
- *  不会被自己的 note-off 吃掉。 */
-static void wk_note_block(int32_t block, int64_t pos) {
-    int64_t end = pos + block;
-    int32_t i = 0;
-    while (i < wk_noff) {
-        if (wk_offs[i].end < end) {
-            int64_t off = wk_offs[i].end - pos;
-            if (off < 0) off = 0;
-            ka_v3_note(0, wk_offs[i].ch, wk_offs[i].pitch, 0, (int32_t)off);
-            wk_offs[i] = wk_offs[--wk_noff];
-        } else ++i;
-    }
-    while (wk_note_sched < wk_note_count) {
-        const ka_shm_note* n = &wk_notes[wk_note_sched];
-        int64_t off;
-        if (n->start >= end) break;
-        ++wk_note_sched;
-        if (n->start + n->len <= pos) continue;      /* 整条已经过去了 */
-        off = n->start - pos;
-        if (off < 0) off = 0;
-        ka_v3_note(1, n->ch, n->note, n->vel, (int32_t)off);
-        if (wk_noff < WK_OFF_MAX) {
-            wk_offs[wk_noff].pitch = n->note;
-            wk_offs[wk_noff].ch = n->ch;
-            wk_offs[wk_noff].end = n->start + n->len;
-            ++wk_noff;
-        }
-    }
+    for (i = 0; i < 128; ++i) ka_v3_note(0, 0, i, 0, 0);
 }
 
 /** 这一块落在时钟的哪一帧：锚点（第 tr_read 块 = tr_pos 帧）往后外推。 */
@@ -744,7 +671,8 @@ static int64_t wk_block_pos(ka_shm* s) {
 }
 
 static void wk_render(ka_shm* s) {
-    int32_t rc, playing, aud, mon;
+    const ka_shm_evblock* eb;
+    int32_t rc, playing, aud, mon, ready, i;
     int64_t fr, pos;
 
     if (!s->live || !s->opened) return;
@@ -755,59 +683,39 @@ static void wk_render(ka_shm* s) {
     /* 插件窗口开着（宿主写的 ed_mon）= 用户正在它自己的界面里试音。那边的键盘/试听按钮
      * 不会经过我们，声音只从 process() 出来 —— 暂停时不渲，界面里点了就是一片安静。 */
     mon = (!playing && s->ed_mon) ? 1 : 0;
-    /* 播放 → 暂停：按着的音要**交给插件**收掉。
-     *
-     * note-off 只有在 process() 里才会被读走 —— 排进 g_v3.evq 不算数。而暂停时这一块
-     * 输出没人要（宿主在 ka_plug_mix 里把 ring 抽干），于是"只排不渲"的写法把 note-off
-     * 留在了队列里：下一次开播 epoch 一翻，wk_flush_notes 先把队列清掉（wk_noff 已经是 0，
-     * 没有一条补得回来），插件那边的声部就一直按着 —— 旧音还在响，新音再叠上来。
-     * 听感就是"播一下、再播第二下，声音叠在一起"；插件窗口开着时更糟（暂停也照渲，旧音一直响）。
-     * 所以这个边沿必须走一次 process()。 */
-    if (!playing && wk_was_playing) {
-        if (wk_aud_life > 0) { ka_v3_note(0, wk_aud_ch, wk_aud_pitch, 0, 0); wk_aud_life = -1; }
-        wk_flush_notes();
+
+    pos = wk_block_pos(s);
+
+    /* 宿主的收声信号（暂停 / seek）先看：这条必须在任何早退之前 —— 停着的时候也得把
+     * evq 里的 note-off 交给 process()，否则"按了暂停声音还在"。 */
+    if (s->flush_seq != wk_flush_seen) {
+        wk_flush_seen = s->flush_seq;
+        wk_notes_off_all();
     }
-    wk_was_playing = playing;
+
+    eb = &s->evs[s->w % KA_SHM_EV_SLOTS];
+    ready = (eb->gen == s->sched_gen && eb->w == s->w) ? 1 : 0;
+
     if (!playing && !aud && !mon) {
-        /* 上面那个边沿（以及暂停时发来的 NOTES_OFF）只把事件排进了队列：丢一块静音给插件，
-         * 让它把钱读走。这一块的输出谁也不写 —— ring 正被宿主抽干。 */
-        if (wk_noff > 0) wk_flush_notes();
-        if (g_v3.evq.count > 0) ka_v3_render(0, s->block, g_v3.frames_done);
-        s->peak = 0;                                     /* 电平表要跟着停（与内置合成器那条一致） */
+        /* 停着：只把队列里的事件交给 process()（输出没人要 —— ring 正被宿主抽干）。 */
+        if (g_v3.evq.count > 0) ka_v3_render(0, s->block, pos);
+        s->peak = 0;
         return;
     }
-    /* 界面里试音要跟手：暂停时最多压 3 块（≈32ms）待取，别像播放那样提前塞满 8 块。
-     * 满了就回去等宿主取走一块（外面那圈本来就会等）。 */
+    /* 界面里试音要跟手：暂停时最多压 3 块（≈32ms）待取，别像播放那样提前塞满 8 块。 */
     if (mon && ka_shm_ready(s) >= 3) return;
     if (!playing && aud) s->aud_blocks = s->aud_blocks - 1;
     if (wk_aud_life > 0) {
         if (--wk_aud_life == 0) ka_v3_note(0, wk_aud_ch, wk_aud_pitch, 0, 0);
     }
 
-    wk_sync_notes(s);
-    if (playing) {
-        pos = wk_block_pos(s);
-        if (s->tr_epoch != wk_epoch_seen) {
-            /* 硬对表：开播 / 拖播放头 / 换乐器。位置可能往回跳，所以要收声并重排。 */
-            wk_epoch_seen = s->tr_epoch;
-            wk_resched = 0;
-            wk_flush_notes();
-            wk_note_sched = wk_note_at(pos);
-            wk_sched_end = pos;
-        } else if (wk_resched) {
-            /* 软对表：只是音符表换了（重推工程 / 改选择 / 装乐器）。**不收声** —— 在响的音
-             * 自己会按 wk_offs 收尾；游标从"已处理到哪"接着走，不回到 pos，否则这一句
-             * 每推一次表就把上一块的音再发一遍（听感就是重复音、越叠越厚）。 */
-            int64_t at = pos;
-            wk_resched = 0;
-            if (at < wk_sched_end) at = wk_sched_end;
-            wk_note_sched = wk_note_at(at);
-            wk_sched_end = at;
+    /* 宿主排好的事件：原样交给 process()（块内偏移由 ka_v3_note 的最后一个参数带）。
+     * 槽的代数对不上 = seek/换表之前的旧槽，当没有事件。 */
+    if (ready) {
+        for (i = 0; i < eb->count; ++i) {
+            const ka_shm_event* e = &eb->ev[i];
+            ka_v3_note(e->on, 0, e->note, e->vel, e->off);
         }
-        wk_note_block(s->block, pos);
-        if (pos + (int64_t)s->block > wk_sched_end) wk_sched_end = pos + (int64_t)s->block;
-    } else {
-        pos = g_v3.frames_done;                          /* 试听：用自己已经渲到的位置 */
     }
 
     rc = ka_v3_render(ka_shm_block_at(s, s->w), s->block, pos);
@@ -960,13 +868,9 @@ static int wk_cmd_body(ka_shm* s) {
         ka_ed_close();               /* 编辑器挂在旧 controller 上，必须先拆 */
         if (s->rate > 0) g_rate = s->rate;
         g_veh_seen = 0;
-        wk_noff = 0;
+        wk_notes_off_all();
         wk_aud_life = -1;
-        wk_was_playing = 0;
         s->aud_blocks = 0;
-        wk_epoch_seen = -1;
-        wk_notes_gen_seen = -1;
-        wk_resched = 1;
         s->ret = ka_v3_open(s->has_path ? s->path : 0, s->a0, s->a1);
         s->opened = (s->ret == 0) ? 1 : 0;
         /* 帧计数要跟着归零：它只在渲染时才被推进，不开这一下宿主会一直读到上一轮的旧值
@@ -976,9 +880,8 @@ static int wk_cmd_body(ka_shm* s) {
         break;
     case KA_CMD_CLOSE:
         ka_ed_close();
-        wk_flush_notes();
+        wk_notes_off_all();
         wk_aud_life = -1;
-        wk_was_playing = 0;
         s->aud_blocks = 0;
         ka_v3_close();
         s->opened = 0;
@@ -1132,11 +1035,11 @@ static int wk_cmd_body(ka_shm* s) {
     case KA_CMD_LIVE:
         s->live = s->a0 ? 1 : 0;
         if (!s->live) {
-            wk_flush_notes();
+            wk_notes_off_all();
             wk_aud_life = -1;
             s->aud_blocks = 0;
             s->w = 0; s->r = 0;
-        } else { wk_epoch_seen = -1; wk_resched = 1; }
+        }
         break;
     case KA_CMD_STATE_LOAD: {
         int64_t bytes = 0;
@@ -1146,17 +1049,16 @@ static int wk_cmd_body(ka_shm* s) {
         s->iv[2] = g_v3_state_rc[2];
         s->iv[3] = (int32_t)bytes;
         /* 换了音色 = 换了一次"时间"：插件内部的采样流全变了，正在响的音必须收掉。 */
-        wk_flush_notes();
+        wk_notes_off_all();
         wk_aud_life = -1;
         s->aud_blocks = 0;
-        wk_epoch_seen = -1;
         break;
     }
     case KA_CMD_STATE_SAVE:
         s->ret = ka_v3_state_save(s->has_path ? s->path : 0);
         break;
     case KA_CMD_NOTES_OFF:
-        wk_flush_notes();
+        wk_notes_off_all();
         s->ret = 1;
         break;
     case KA_CMD_AUDITION: {
@@ -1253,6 +1155,7 @@ int __stdcall kaMain(void) {
     s->block = KA_SHM_BLOCK;
     s->ring_blocks = KA_SHM_RING;
     s->peak = 0;
+    s->sched_gen = 1;            /* 槽里的 gen 从 0 起：不撞这一代之前一律作废 */
     s->beat = 1;                 /* 非 0 即"我活了"，宿主 attach 后先验这个 */
     s->worker_tid = (int32_t)GetCurrentThreadId();
 

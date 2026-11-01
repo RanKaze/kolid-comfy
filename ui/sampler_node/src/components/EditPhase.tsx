@@ -23,6 +23,7 @@ import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies
 // （卷帘在上、Transport 贴底，见 midi/Workspace），放进模式主窗的正文，不占 dock 窗。
 import { useMidiHost } from '../midi/useMidiHost';
 import { clock } from '../midi/clock';
+import { transport } from '../midi/transportActions';
 import { flushEditorSaves } from '../midi/soundWindow';
 import { MidiWorkspace } from '../midi/Workspace';
 import { patchMidiSettings, useMidiSettings, type LibraryState } from '../midi/settings';
@@ -788,7 +789,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 网络那一趟去抖，拖动不会打出几十个请求）。
   const [vidSeek] = useState(() => {
     const go = createSeekCoalescer(vidTransport);
-    return (t: number) => { go(t); void clock.seek(t); };
+    return (t: number) => { go(t); transport.seek(t); };
   });
   // 播放态跟公共时钟走：视频与 MIDI 是同一台传输，谁按的播放都算数。
   const [vidPlaying, setVidPlayingState] = useState(clock.isPlaying());
@@ -804,8 +805,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setVidPlayingState(prev => (prev === now ? prev : now));
     vidTransport.set(clock.seconds(), false);
   }), [vidTransport]);
+  // 循环区间交给后端时钟：区间是全局的，回绕由时钟自己做（页面不再每帧 seek）。
+  useEffect(() => {
+    const on = vidProject.outPoint > vidProject.inPoint;
+    clock.setLoop(on, vidProject.inPoint, vidProject.outPoint);
+  }, [vidProject.inPoint, vidProject.outPoint]);
+
   /** 播放/暂停 = 对公共时钟说的那一句；按钮上的状态由上面的订阅翻新，不在这里抢先改。 */
-  const setVidPlaying = useCallback((v: boolean) => { void (v ? clock.play() : clock.pause()); }, []);
+  const setVidPlaying = useCallback((v: boolean) => { v ? transport.play() : transport.pause(); }, []);
   const [vidPps, setVidPps] = useState(60);
   // ── Inspector 的选中 ── Assets 窗点卡片产生,Inspector 窗照它放大看(图/音/视频都收,
   // 视频与音频用自己那条独立播放头,与主 transport 互不相识)。选中指向的是**那一份工程/那一次
@@ -2601,6 +2608,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // 这份工程属于哪份文档：取帧包 / 底片包都盖这个章，工作台据此丢掉换 tab 那一瞬在飞的旧包。
     docUid: blendDocs.activeUid,
     staging, update: vidUpdate, seek: vidSeek, setPlaying: setVidPlaying, setPps: setVidPps,
+    stopAt: (t: number) => transport.stopAt(t),
     missing: vidMissing, relink: vidRelink, recheckMissing: () => { void recheckMissing(); },
     // 选中即目标（2026-10-28）：Layers/Guidances 只跟**选中的 Layer 段**走，与播放头无关 ——
     // 点一段就直接切到它那套图层，不再把游标挪进段里（旧模型：画布只折游标压着的那套，选中只能

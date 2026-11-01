@@ -114,6 +114,7 @@ __declspec(dllimport) int32_t __stdcall GetFileSizeEx(void* h, int64_t* size);
 __declspec(dllimport) int32_t __stdcall CloseHandle(void* h);
 __declspec(dllimport) void* __stdcall VirtualAlloc(void* addr, uint64_t size, uint32_t type, uint32_t protect);
 __declspec(dllimport) int32_t __stdcall VirtualFree(void* addr, uint64_t size, uint32_t type);
+__declspec(dllimport) int32_t __stdcall VirtualFree(void* addr, uint64_t size, uint32_t type);
 
 #define KA_GENERIC_READ        0x80000000u
 #define KA_FILE_SHARE_READ     0x00000001u
@@ -215,6 +216,8 @@ typedef int64_t (*kc_frames_fn)(void);
 typedef int     (*kc_playing_fn)(void);
 static kc_frames_fn  g_kc_frames = 0;
 static kc_playing_fn g_kc_playing = 0;
+typedef int64_t (*kc_wraps_fn)(void);
+static kc_wraps_fn g_kc_wraps = 0;      /* 循环回绕计数（新时钟才有；没有就不认循环） */
 static void*         g_kc_mod = 0;
 
 /* 轨道与音符（双缓冲：主线程写 inactive，音频线程读 live，切换是原子的） */
@@ -318,6 +321,8 @@ static int     g_win_n = 0;               /* 已结算过几个窗口，用来�
  * 排队帧数是从 0 爬到满的，慢增益要 3 秒才追得上，那 3 秒里声音会早 56ms。 */
 static int     g_need_sync = 1;
 static int     g_thr_playing_prev = 0;    /* 音频线程上一圈看到的 playing */
+static int64_t g_thr_wraps = 0;           /* 上一圈看到的循环回绕计数 */
+static int     g_wrap_pending = 0;        /* 时钟刚回绕过：本块按 seek 处理 */
 
 /* ── 声部 ─────────────────────────────────────────────────────────────────────────────────── */
 typedef struct {
@@ -580,13 +585,13 @@ static ka_voice* ka_voice_alloc(void) {
     return &g_voice[worst];
 }
 
+/** 所有在响的声部收到 note-off：走**乐器自己的**释放（合成器/采样各自的 rel_coef）。
+ *  统一改写释放时间会让"停"比乐器自己停得更硬，也把"暂停"和"插件收声"分成两种语义。
+ *  要"立刻安静"的场合（卸乐器、等采样内存）自己在这之后再改写 rel_coef。 */
 static void ka_voice_off_all(void) {
     int i;
-    /* 12ms 的释放时间常数：够短（听感上就是"停住了"），又够长（不会把波形从 0.7
-     * 一步砍到 0 —— 那一下就是一个宽带咔哒声，正是"毛躁"里最刺耳的那部分）。 */
-    float rel = ka_coef_for(0.012f, g_rate_eff);
     for (i = 0; i < KA_VOICES; ++i) {
-        if (g_voice[i].active) { g_voice[i].stage = S_RELEASE; g_voice[i].rel_coef = rel; }
+        if (g_voice[i].active) g_voice[i].stage = S_RELEASE;
     }
 }
 
@@ -765,11 +770,24 @@ static void ka_trigger(const ka_note* n, int delay, int aud) {
  *     它只看 g_plug_on / g_plug_track_of 两个纯整数快照：attach/close 时整型写，
  *     所以就算主线程正在开关插件，音频线程也不会摸到一个半建的指针。 */
 #define KA_MAX_PLUG 16
+#define KA_MAX_HOLD 512                    /* 每槽同时挂着的音（收声账本） */
+#define KA_SCHED_LEAD 12                   /* 提前填到 worker 后面这么多块（ring 8 + 余量） */
+typedef struct { int32_t note; int32_t pad; int64_t end; } ka_hold;
 typedef struct {
     ka_shm* shm;
     void*   map;
     void*   evc;
     void*   evd;
+    /* ── 调度器（只有音频线程读写；worker 只按槽渲染）──
+     * 以前 worker 自己拿音符表排一遍、宿主的内置音源再排一遍，暂停收声的语义就分叉了。 */
+    int32_t sched_w;                       /* 下一个要填的 worker 块号 */
+    int32_t last_w;                        /* 上一块看到的 worker 块号（判重开） */
+    int32_t sched_idx;                     /* 音符表游标 */
+    int32_t noff;                          /* 账本里挂着的音 */
+    int32_t was_playing;
+    int32_t gen_seen;                      /* notes_gen 已见 */
+    int32_t epoch_seen;                    /* tr_epoch 已见 */
+    ka_hold hold[KA_MAX_HOLD];
 } ka_plug_slot;
 static ka_plug_slot g_plugs[KA_MAX_PLUG];
 static int32_t g_plug_cur = 0;
@@ -846,6 +864,122 @@ static void ka_plug_epoch(void) {
     }
 }
 
+/* ── 调度：只在这里排音符，worker 只按槽渲染 ────────────────────────────────────────────
+ *
+ * 关键在**提前量**：worker 比混音位置早渲 8 块，所以事件必须为"未来的块"准备好。
+ * 每块混音：先按锚点算出 worker 下一块落在时钟的哪一帧，再把 [那一块, +LEAD] 的槽填满。
+ * 一块的事件按块内偏移交出去，worker 原样塞给 process()。
+ *
+ * 收声（暂停 / seek）也归这里：账本（hold[]）记着本槽还按着哪些音；硬对表时翻
+ * flush_seq，worker 见到就立即全音收声 —— 收声是"现在就要"的动作，不能排进未来某一块
+ * （worker 可能已经渲过那一块了）。 */
+
+static int32_t ka_shm_note_at(const ka_shm_note* notes, int32_t n, int64_t pos) {
+    int32_t lo = 0, hi = n, mid;
+    if (n <= 0) return 0;
+    while (lo < hi) {
+        mid = (lo + hi) / 2;
+        if (notes[mid].start < pos) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
+/** 硬对表：游标回到 frame，旧槽作废。flush = 同时让 worker 立即全音收声（暂停 / seek）。
+ *  收声**不能**塞进某一张槽 —— worker 可能已经渲过那一块了；用 flush 序号才是确定送达的。 */
+static void ka_sched_reset(ka_plug_slot* p, ka_shm* s, int32_t W, int64_t frame, int32_t flush) {
+    s->sched_gen = s->sched_gen + 1;
+    p->sched_w = W;
+    p->sched_idx = ka_shm_note_at(s->notes, s->note_count, frame);
+    p->gen_seen = s->notes_gen;
+    p->epoch_seen = s->tr_epoch;
+    if (flush) {
+        p->noff = 0;                        /* 插件那边已经全收了，账本清空 */
+        s->flush_seq = s->flush_seq + 1;
+    }
+}
+
+/** 填一张槽：W = worker 的第几块，frame = 这一块的块首帧（时钟轴）。 */
+static void ka_sched_fill(ka_plug_slot* p, ka_shm* s, int32_t W, int64_t frame) {
+    ka_shm_evblock* eb = &s->evs[W % KA_SHM_EV_SLOTS];
+    int32_t block = s->block, n = 0, i;
+    int64_t end = frame + (int64_t)block;
+
+    /* 到点的收声：end 落在这一块里就发 note-off。 */
+    i = 0;
+    while (i < p->noff) {
+        if (p->hold[i].end < end) {
+            int64_t off = p->hold[i].end - frame;
+            if (off < 0) off = 0;
+            if (off >= block) off = block - 1;
+            if (n < KA_SHM_EV_MAX) {
+                eb->ev[n].on = 0;
+                eb->ev[n].track = 0;
+                eb->ev[n].note = p->hold[i].note;
+                eb->ev[n].vel = 0;
+                eb->ev[n].off = (int32_t)off;
+                ++n;
+            }
+            p->hold[i] = p->hold[--p->noff];
+        } else ++i;
+    }
+
+    /* 起点落在这一块的音（已经整条过去的跳过 —— 与从前 worker 的语义一致）。 */
+    while (p->sched_idx < s->note_count) {
+        const ka_shm_note* nt = &s->notes[p->sched_idx];
+        int64_t off;
+        if (nt->start >= end) break;
+        ++p->sched_idx;
+        if (nt->start + nt->len <= frame) continue;
+        off = nt->start - frame;
+        if (off < 0) off = 0;
+        if (off >= block) off = block - 1;
+        if (n < KA_SHM_EV_MAX) {
+            eb->ev[n].on = 1;
+            eb->ev[n].track = nt->track;
+            eb->ev[n].note = nt->note;
+            eb->ev[n].vel = nt->vel;
+            eb->ev[n].off = (int32_t)off;
+            ++n;
+        }
+        if (p->noff < KA_MAX_HOLD) {
+            p->hold[p->noff].note = nt->note;
+            p->hold[p->noff].end = nt->start + nt->len;
+            ++p->noff;
+        }
+    }
+
+    eb->w = W;
+    eb->gen = s->sched_gen;
+    eb->count = n;
+    eb->drop = 0;
+}
+
+/** 每块混音前调一次（锚点已经写好之后）：把 worker 提前量覆盖到的槽填好。 */
+static void ka_plug_sched(ka_plug_slot* p, ka_shm* s, int32_t playing) {
+    int32_t W0 = s->w;
+    int64_t frame0;
+    if (!p || !s || !s->opened) return;
+    frame0 = (((int64_t)s->tr_pos_hi << 32) | (uint32_t)s->tr_pos_lo)
+           + (int64_t)(W0 - s->tr_read) * (int64_t)s->block;
+
+    if (W0 < p->last_w) ka_sched_reset(p, s, W0, frame0, 1);        /* worker 重开过（块号回退） */
+    p->last_w = W0;
+    if (s->tr_epoch != p->epoch_seen) ka_sched_reset(p, s, W0, frame0, 1);   /* 开播 / seek */
+    else if (s->notes_gen != p->gen_seen) ka_sched_reset(p, s, W0, frame0, 0); /* 换表：不收声 */
+    if (!playing && p->was_playing) ka_sched_reset(p, s, W0, frame0, 1);     /* 播放 → 暂停 */
+    p->was_playing = playing;
+
+    if (!playing) return;                        /* 停着：不往前排（收声走 flush_seq） */
+    while (p->sched_w <= W0 + KA_SCHED_LEAD) {
+        int64_t f;
+        if (s->notes_gen & 1) break;             /* 表正在写：这一轮不填，下一块再来 */
+        f = frame0 + (int64_t)(p->sched_w - W0) * (int64_t)s->block;
+        ka_sched_fill(p, s, p->sched_w, f);
+        p->sched_w = p->sched_w + 1;
+        s->sched_w = p->sched_w;
+    }
+}
+
 /** 所有实例混进设备输出。一个取不到块不影响别的 —— 宁可这一件静音，也不能等（等 = 爆音）。
  *
  *  每块都要给每个**连着**的槽敲一次心跳，不只是出声的那些：worker 靠心跳认出"宿主还在"，
@@ -860,6 +994,7 @@ static void ka_plug_mix(int16_t* out, int frames, int playing, int64_t pos) {
         s->host_beat = s->host_beat + 1;
         if (!s->live || !s->opened) continue;
         ka_plug_anchor(s, pos, playing);
+        ka_plug_sched(&g_plugs[si], s, playing);
         if (!playing && s->aud_blocks <= 0 && !s->ed_mon) {
             /* 停了就把 ring 抽干：不然恢复播放时先甩出一段几秒前的旧块。
              * 但这儿要放试听音过去 —— 暂停时点 ♪ 也要出声；插件窗口开着时同理，
@@ -961,6 +1096,67 @@ static int32_t ka_note_index_at(const ka_note* notes, int count, int64_t pos) { 
     return lo;
 }
 
+/* ── PCM 片段：视频/音频段的声音 ───────────────────────────────────────────────────────────
+ *
+ * 时间线上的音频段以前由页面用 WebAudio 自己播（一条时间线一只 AudioContext），于是
+ * "引擎里 MIDI 一个混音、页面里音频另一个混音"：暂停语义、电平表、峰值都对不上。
+ * 现在段子的 PCM 一次解码好交到这边（48 kHz 交错 int16），按**绝对帧**摆放，和音符一样
+ * 由这条音频线程混进同一路输出 —— 暂停 / seek / 循环回绕全都自然成立（位置说话）。
+ *
+ * 上传走 HTTP 分块（Python 桥），所以只在片段新增/换源时发生；拖动/裁剪/静音只改摆放。 */
+
+#define KA_MAX_CLIPS 16
+typedef struct {
+    int16_t* data;        /* 交错立体声 int16（48 kHz） */
+    int64_t  frames;      /* 采样数（不是字节） */
+    int64_t  start;       /* 时间线起点（帧） */
+    int64_t  offset;      /* 片段内起点（帧） */
+    int64_t  len;         /* 时间线上占多少帧 */
+    float    gain;
+    volatile int32_t ready;    /* PCM 已经写完 */
+    volatile int32_t active;   /* 摆放有效（音频线程用这个 + ready 一起判） */
+} ka_pcm_clip;
+static ka_pcm_clip g_clips[KA_MAX_CLIPS];
+
+/** 把这一块里所有活跃片段混进 out（int16 交错）。返回本块 PCM 的峰值（0..32767）。 */
+static int32_t ka_pcm_mix(int16_t* out, int frames, int64_t pos) {
+    int c, j;
+    int32_t peak = 0;
+    for (c = 0; c < KA_MAX_CLIPS; ++c) {
+        ka_pcm_clip* k = &g_clips[c];
+        int64_t a, b, ca, cb, s0, n, tl;
+        const int16_t* d;
+        if (!k->active || !k->ready || !k->data || k->frames <= 0 || k->len <= 0) continue;
+        ca = k->start;
+        cb = k->start + k->len;
+        a = pos;
+        b = pos + frames;
+        if (b <= ca || a >= cb) continue;
+        if (a < ca) a = ca;
+        if (b > cb) b = cb;
+        s0 = k->offset + (a - k->start);
+        n = b - a;
+        d = k->data;
+        for (j = 0; j < n; ++j) {
+            int64_t si = s0 + j;
+            int32_t l, r;
+            tl = a + j - pos;
+            if (si < 0 || si >= k->frames) continue;
+            l = (int32_t)((float)d[si * 2] * k->gain);
+            r = (int32_t)((float)d[si * 2 + 1] * k->gain);
+            l += out[tl * 2];
+            r += out[tl * 2 + 1];
+            if (l > 32767) l = 32767; if (l < -32768) l = -32768;
+            if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+            out[tl * 2] = (int16_t)l;
+            out[tl * 2 + 1] = (int16_t)r;
+            if (l > peak) peak = l; if (-l > peak) peak = -l;
+            if (r > peak) peak = r; if (-r > peak) peak = -r;
+        }
+    }
+    return peak;
+}
+
 /* ── 渲染一块 ─────────────────────────────────────────────────────────────────────────────── */
 static void ka_render_block(int16_t* out, int frames, int64_t pos, int playing) {
     float tgtl[KA_MAX_TRACKS], tgtr[KA_MAX_TRACKS];
@@ -1008,13 +1204,8 @@ static void ka_render_block(int16_t* out, int frames, int64_t pos, int playing) 
          * 老写法带着 !g_synth_off，于是暂停时点 ♪ 会被下面整块短路吞掉。 */
         int k, live = (g_pend_note >= 0);
         if (g_was_playing) {
-            /* 播放 → 暂停：收声，但**不是**把波形一步砍到 0 —— 那一下就是一个宽带咔哒。
-             * 走 12ms 的释放，听感上仍然是"停住了"，频谱里却没有台阶。
-             * 试听音在这个边沿之后才触发，不受影响。 */
-            float rel = ka_coef_for(0.012f, g_rate_eff);
-            for (k = 0; k < KA_VOICES; ++k) {
-                if (g_voice[k].active) { g_voice[k].stage = S_RELEASE; g_voice[k].rel_coef = rel; }
-            }
+            /* 播放 → 暂停：发 note-off，让乐器按自己的 release 收尾（与插件同一条语义）。 */
+            ka_voice_off_all();
             g_was_playing = 0;
         }
         if (!live) {
@@ -1223,6 +1414,15 @@ static void ka_render_block(int16_t* out, int frames, int64_t pos, int playing) 
         g_peak = (int32_t)(peak * 1000.0f);
         ka_unlock();
 
+        /* 时间线音频段（PCM）与插件、合成器同一条总线。 */
+        {
+            int32_t pk = ka_pcm_mix(out, frames, pos);
+            if (pk > 0) {
+                ka_lock();
+                if (pk * 1000 > g_peak) g_peak = pk * 1000;
+                ka_unlock();
+            }
+        }
         /* 插件那一层在另一个进程里，它的声音从 ring 回来 —— 混在这儿，而不是让它自己出声。 */
         ka_plug_mix(out, frames, playing, pos);
     }
@@ -1251,6 +1451,11 @@ static uint32_t __stdcall ka_audio_thread(void* arg) {
              * 这里是音频线程自己的上一圈状态。 */
             if (playing && !g_thr_playing_prev) { g_need_sync = 1; ka_plug_epoch(); }   /* 0→1：重新对表 */
             g_thr_playing_prev = playing;
+            /* 循环回绕：位置可能只往回退一小段（短循环），>125ms 判不出来 —— 认计数。 */
+            if (g_kc_wraps) {
+                int64_t wr = g_kc_wraps();
+                if (wr != g_thr_wraps) { g_thr_wraps = wr; g_wrap_pending = 1; }
+            }
         } else {
             want = g_free_pos;
             playing = 1;
@@ -1370,7 +1575,8 @@ static uint32_t __stdcall ka_audio_thread(void* arg) {
              * 开机过程不是失步 —— 记进来会让 drift_max 永远显示开机那一下，看不出真问题。 */
             if (played > 0 && g_written > (int64_t)KA_BUFS * KA_FRAMES && ad > (int64_t)g_drift_max)
                 g_drift_max = (int32_t)ad;
-            if (ad > (int64_t)(g_rate / 8)) {   /* >125ms：换位置了（播放/暂停/seek） */
+            if (g_wrap_pending || ad > (int64_t)(g_rate / 8)) {   /* 换位置了：seek / 循环回绕 */
+                g_wrap_pending = 0;
                 g_pos = target;
                 g_pos_frac_q20 = 0;
                 g_corr_q8 = 0;
@@ -1460,6 +1666,7 @@ __declspec(dllexport) int ka_bind_clock(const char* path) {
     if (!mod) return 0;
     g_kc_frames = (kc_frames_fn)GetProcAddress(mod, "kc_frames");
     g_kc_playing = (kc_playing_fn)GetProcAddress(mod, "kc_playing");
+    g_kc_wraps = (kc_wraps_fn)GetProcAddress(mod, "kc_loop_wraps");   /* 老时钟没有：不认循环 */
     if (!g_kc_frames || !g_kc_playing) {
         g_kc_frames = 0;
         g_kc_playing = 0;
@@ -1525,6 +1732,8 @@ __declspec(dllexport) int ka_open(int rate) {
     g_win_n = 0;
     g_need_sync = 1;
     g_thr_playing_prev = 0;
+    g_thr_wraps = g_kc_wraps ? g_kc_wraps() : 0;
+    g_wrap_pending = 0;
     g_sched[0] = 0;
     g_sched[1] = 0;
     g_sched_end = 0;
@@ -1757,6 +1966,81 @@ __declspec(dllexport) int ka_set_tracks(const ka_track* tracks, int count) {
     g_tlive = tl;
     ka_plug_push_notes();          /* 通道/静音/独奏/力度都在这张表里 */
     return count;
+}
+
+/* ── PCM 片段的装载口（Python 桥/HTTP 线程调用）───────────────────────────────────────────
+ * 写的时候 active=0，音频线程整段跳过；写完 ready=1，再由 ka_pcm_set 把摆放和 active 打开。
+ * 释放用 VirtualFree：这块内存不属于任何槽，也不进共享内存。 */
+
+__declspec(dllexport) int ka_pcm_begin(int slot, int64_t frames, int channels) {
+    ka_pcm_clip* k;
+    int16_t* mem;
+    if (slot < 0 || slot >= KA_MAX_CLIPS || frames <= 0 || channels != 2) return -1;
+    k = &g_clips[slot];
+    k->active = 0;
+    k->ready = 0;
+    if (k->data) { VirtualFree(k->data, 0, 0x8000u); k->data = 0; }
+    mem = (int16_t*)VirtualAlloc(0, (uint64_t)frames * 4u, 0x3000u, 0x04u);
+    if (!mem) return -2;
+    k->data = mem;
+    k->frames = frames;
+    k->start = 0; k->offset = 0; k->len = 0; k->gain = 1.0f;
+    return 0;
+}
+
+/** 从 PCM 的第 offset 帧起写 frames 帧（交错立体声 int16）。 */
+__declspec(dllexport) int ka_pcm_write(int slot, int64_t offset, const int16_t* src, int frames) {
+    ka_pcm_clip* k;
+    int i, n;
+    if (slot < 0 || slot >= KA_MAX_CLIPS || !src || frames < 0) return -1;
+    k = &g_clips[slot];
+    if (!k->data || offset < 0 || offset + frames > k->frames) return -1;
+    for (i = 0; i < frames * 2; ++i) k->data[offset * 2 + i] = src[i];
+    (void)n;
+    return frames;
+}
+
+__declspec(dllexport) int ka_pcm_finish(int slot) {
+    if (slot < 0 || slot >= KA_MAX_CLIPS) return -1;
+    if (!g_clips[slot].data) return -1;
+    g_clips[slot].ready = 1;
+    return 0;
+}
+
+/** 摆放：时间线 start 帧起、播放 len 帧；从 PCM 的 offset 帧开始取。gain 0 = 静音。 */
+__declspec(dllexport) int ka_pcm_set(int slot, int64_t start, int64_t offset, int64_t len, float gain) {
+    ka_pcm_clip* k;
+    if (slot < 0 || slot >= KA_MAX_CLIPS) return -1;
+    k = &g_clips[slot];
+    if (!k->data) return -1;
+    k->start = start < 0 ? 0 : start;
+    k->offset = offset < 0 ? 0 : offset;
+    k->len = len < 0 ? 0 : len;
+    k->gain = gain < 0.0f ? 0.0f : gain;
+    k->active = 1;
+    return 0;
+}
+
+__declspec(dllexport) int ka_pcm_clear(int slot) {
+    ka_pcm_clip* k;
+    if (slot < 0 || slot >= KA_MAX_CLIPS) return -1;
+    k = &g_clips[slot];
+    k->active = 0;
+    k->ready = 0;
+    if (k->data) { VirtualFree(k->data, 0, 0x8000u); k->data = 0; }
+    k->frames = 0;
+    return 0;
+}
+
+__declspec(dllexport) int ka_pcm_info(int slot, int64_t* out) {
+    ka_pcm_clip* k;
+    if (slot < 0 || slot >= KA_MAX_CLIPS) return -1;
+    k = &g_clips[slot];
+    if (out) {
+        out[0] = k->frames; out[1] = k->start; out[2] = k->offset;
+        out[3] = k->len; out[4] = (int64_t)k->active; out[5] = (int64_t)k->ready;
+    }
+    return k->active ? 1 : 0;
 }
 
 __declspec(dllexport) void ka_all_notes_off(void) {

@@ -67,6 +67,12 @@ static int64_t kc_anchor_qpc = 0;    /* 锚点：在那个 QPC 刻度上 ... */
 static int64_t kc_anchor_frames = 0; /* ... 传输头在这个帧 */
 static int     kc_playing_flag = 0;
 static int64_t kc_epoch_qpc = 0;     /* init 那一刻，前端对齐用的公共起点 */
+/* 循环区间：区间是**时钟自己的**能力 —— 页面不再每帧检查出点再发 seek（那会在后台页
+ * 被节流时错过、也会有整帧的延迟）。回绕时只挪帧，不挪 QPC 锚点：时间轴照走。 */
+static int kc_loop_on = 0;
+static int64_t kc_loop_a = 0;
+static int64_t kc_loop_b = 0;
+static volatile int64_t kc_wrap_count = 0;
 
 static __forceinline int64_t kc_qpc_raw(void) {
     int64_t v = 0;
@@ -99,6 +105,13 @@ static int64_t kc_render_locked(void) {
                 kc_anchor_frames += whole;
                 kc_anchor_qpc += (int64_t)((double)whole * (double)kc_freq / ((double)kc_sr * kc_speed));
             }
+        }
+    }
+    /* 循环：越过出点就在同一次读里折回入点。多圈也一次折完（长暂停后恢复不会攒一堆）。 */
+    if (kc_loop_on && kc_loop_b > kc_loop_a) {
+        while (kc_anchor_frames >= kc_loop_b) {
+            kc_anchor_frames -= (kc_loop_b - kc_loop_a);
+            kc_wrap_count = kc_wrap_count + 1;
         }
     }
     if (kc_anchor_frames < 0) kc_anchor_frames = 0;
@@ -240,6 +253,44 @@ __declspec(dllexport) void kc_anchor(int64_t frames) {
     kc_anchor_qpc = kc_qpc_raw();
     kc_unlock();
 }
+
+/* 循环区间（帧）。on=1 且 b>a 才生效；设的时候如果已经越过出点，当场折回。 */
+__declspec(dllexport) int kc_set_loop(int on, int64_t a, int64_t b) {
+    if (a < 0) a = 0;
+    if (b > KC_MAX_FRAMES) b = KC_MAX_FRAMES;
+    kc_lock();
+    kc_render_locked();
+    if (on && b > a) {
+        kc_loop_on = 1;
+        kc_loop_a = a;
+        kc_loop_b = b;
+        if (kc_anchor_frames >= kc_loop_b) {
+            kc_anchor_frames = kc_loop_a + (kc_anchor_frames - kc_loop_a) % (kc_loop_b - kc_loop_a);
+            kc_wrap_count = kc_wrap_count + 1;
+        }
+    } else {
+        kc_loop_on = 0;
+        kc_loop_a = 0;
+        kc_loop_b = 0;
+    }
+    on = kc_loop_on;
+    kc_unlock();
+    return on;
+}
+
+__declspec(dllexport) int kc_loop_get(int64_t* a, int64_t* b) {
+    int on;
+    kc_lock();
+    on = kc_loop_on;
+    if (a) *a = kc_loop_a;
+    if (b) *b = kc_loop_b;
+    kc_unlock();
+    return on;
+}
+
+/* 回绕次数（单调）。音频线程拿它当"硬对表"的信号 —— 短循环的位移可能小于 125ms，
+ * 靠位置跳变是判不出来的。 */
+__declspec(dllexport) int64_t kc_loop_wraps(void) { return kc_wrap_count; }
 
 /* 一次取全，给 HTTP 一个来回就够：帧 / 采样率 / 在播 / 现在 / 频率。
  * 时间戳最后取 —— 它必须"不早于"位置，否则前端对齐时会把时间往回拨。 */

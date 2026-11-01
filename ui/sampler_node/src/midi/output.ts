@@ -19,6 +19,10 @@ import { type MidiProject, type MidiTrack, audibleTracks, beatToSeconds, MIN_TEM
 /** 未来多少秒内的事件现在就发。200ms ≈ 12 帧，掉几帧也追得上，暂停时又不会排太远。 */
 const LOOKAHEAD = 0.2;
 
+/** 试听音按住多久。与引擎那头 AUDITION_SECONDS（audio_bridge.py）是同一个数 ——
+ *  同一次 ♪ 不管落到本机引擎还是外部端口，听起来的长度必须一样。 */
+const AUDITION_MS = 700;
+
 export type MidiPort = { id: string; name: string; manufacturer: string };
 
 type Ev = {
@@ -190,7 +194,7 @@ class MidiOut {
       if (native || !this.out) return;
     }
     this.noteOn(ch, pitch, vel);
-    window.setTimeout(() => this.noteOff(ch, pitch), 80);
+    window.setTimeout(() => this.noteOff(ch, pitch), AUDITION_MS);
   }
 
   /** 有没有能出声的路子（本机引擎或已连上的外部端口）。界面靠它决定 ♪ 要不要给提示。 */

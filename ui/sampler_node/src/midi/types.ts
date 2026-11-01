@@ -48,10 +48,12 @@ export type MidiCtl = {
   updateEditor: (fn: (t: MidiTrack) => MidiTrack, label?: string) => void;
   /** 选中音符（给 agent 报 selection 用）；不改选中段。 */
   select: (trackId: string, noteId?: string) => void;
-  /** 公共时钟的播放态与三个动词。位置一律由 clock 给，这里不缓存秒数。 */
+  /** 公共时钟的播放态与动词。位置一律由 clock 给，这里不缓存秒数。 */
   playing: boolean;
   play: () => void;
   pause: () => void;
+  /** 停止 = 先停再落位（顺序由 clock.stopAt 保证）。 */
+  stopAt: (sec: number) => void;
   /** 跳到某一拍（全局拍，会换算成秒交给时钟）。 */
   seekBeat: (beat: number) => void;
   undo: () => void;

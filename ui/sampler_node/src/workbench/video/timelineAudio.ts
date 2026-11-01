@@ -12,10 +12,13 @@
 
 import { useEffect, useRef } from 'react';
 import { clock } from '../../midi/clock';
+import { nativeEngine } from '../../midi/engine';
+import { transportOwner } from '../../midi/transportOwner';
 import { nativeLevels } from '../../midi/nativeMonitor';
+import { engineTimelineActive, syncEngineClips } from './pcmClips';
 import { acquireAudioSlot, buildStereoProbe, releaseAudioSlot, type AudioProbe } from './audioFocus';
 import { scheduleAudioClips, vidAudio } from './audio';
-import { vidDuration, type VidProject } from './model';
+import { loopRangeOf, vidDuration, type VidProject } from './model';
 
 const SLOT_ID = 'timeline';
 
@@ -38,6 +41,18 @@ export const useTimelineAudio = (
   const ref = useRef({ project, solo, mute });
   ref.current = { project, solo, mute };
 
+  // 段子的 PCM 交给原生引擎（解码/上传在 pcmClips 里去抖、去重）。
+  useEffect(() => { syncEngineClips(project, solo, mute); }, [project, solo, mute]);
+
+  // 引擎能不能用：在就开着（幂等）；开不出来就退回 WebAudio。
+  const engineState = useRef<'unknown' | 'ok' | 'fail'>('unknown');
+  useEffect(() => {
+    let alive = true;
+    if (!nativeEngine.available) { engineState.current = 'fail'; return; }
+    void nativeEngine.open().then(ok => { if (alive) engineState.current = ok ? 'ok' : 'fail'; });
+    return () => { alive = false; };
+  }, []);
+
   useEffect(() => {
     let last = clock.seconds();
     let wasPlaying = clock.isPlaying();
@@ -46,6 +61,12 @@ export const useTimelineAudio = (
 
     const step = (): void => {
       const { project: p, solo: s, mute: m } = ref.current;
+      // 只有归属者出声、回绕、停止。别的窗只是同一只钟的镜子 —— 让它们也跑一份，
+      // 轻则同一段音频叠几层，重则按**自己**那份工程的片尾把共用时钟按停。
+      if (!transportOwner.isOwner()) {
+        stopLocal();
+        return;
+      }
       const t = clock.seconds();
       const playing = clock.isPlaying();
       // 先后退再看：回绕 / 用户 seek / 刚从暂停按下播放 —— 在播的声源都要按新位置重新对表。
@@ -64,31 +85,43 @@ export const useTimelineAudio = (
         held = true;
         acquireAudioSlot(
           { id: SLOT_ID, label: 'Timeline', probe: timelineProbe(), levels: nativeLevels },
-          () => { void clock.pause(); },
+          () => { if (transportOwner.isOwner()) void clock.pause(); },
         );
       }
-      // 走带范围：出点圈了就绕回入点；没圈就停在片尾（停在**内容最远的那一秒**，与本工程
-      // 的时长口径一致，见 vidDuration）。
+      // 循环区间就是时间线的入/出点（与卷帘的 A/B 同一对数）。**回绕归后端时钟**
+      // （P2：区间随 setLoop 下发，时钟自己翻位置并记回绕数）—— 页面只在"没设区间"
+      // 时负责停在片尾。页面不再每帧判出点再 seek：后台页被节流时那一跳会迟到整帧。
       const total = vidDuration(p);
-      const outP = p.outPoint > p.inPoint ? p.outPoint : total;
-      if (total > 0 && t >= outP) {
-        if (p.outPoint > p.inPoint) {
-          void clock.seek(p.inPoint);
-        } else if (!stopping) {
+      if (total > 0 && t >= total && !loopRangeOf(p).on) {
+        if (!stopping) {
           stopping = true;
-          vidAudio.stopAll();
-          held = false;
-          releaseAudioSlot(SLOT_ID);
+          stopLocal();
           void clock.stopAt(total);
         }
         return;
       }
 
+      // 引擎已经在替时间线出声（PCM 片段摆放好了）→ 页面不再自己播音频；
+      // PCM 还没就绪/引擎开不出来 → 仍旧走 WebAudio，切过去时把旧声源收干净。
+      if (engineState.current === 'unknown' && nativeEngine.available) {
+        engineState.current = 'fail';
+        void nativeEngine.open().then(ok => { engineState.current = ok ? 'ok' : 'fail'; });
+      }
+      if (engineState.current === 'ok' && engineTimelineActive()) {
+        vidAudio.stopAll();
+        return;
+      }
       scheduleAudioClips({
         clips: p.clips, t, playing, solo: s, mute: m, jumped,
         isPlaying: () => clock.isPlaying(),
         now: () => clock.seconds(),
       });
+    };
+
+    const stopLocal = (): void => {
+      stopping = false;
+      if (held) { held = false; releaseAudioSlot(SLOT_ID); }
+      vidAudio.stopAll();
     };
 
     const off = clock.subscribe(step);

@@ -90,6 +90,15 @@ class MasterClock {
     tries: number;
     timer: ReturnType<typeof setTimeout> | null;
   } | null = null;
+  /** 循环区间：后端时钟自己回绕（不再由页面每帧 seek）。失败按同一套退避重发。
+   *  页面这边也必须知道区间 —— 两次 2 秒同步之间是本地插值，不知道回绕的话
+   *  播放头会一路冲出出点，等下一次快照才跳回来。 */
+  private loopOn = false;
+  private loopA = 0;
+  private loopB = 0;
+  private loopKey = '';
+  private loopRetry: { value: { on: boolean; a: number; b: number }; tries: number;
+    timer: ReturnType<typeof setTimeout> | null } | null = null;
 
   constructor() {
     // 插值的起点就是"现在"：没有这一句，第一次 play 之后 dt 会等于整个页面存活时长，
@@ -114,6 +123,17 @@ class MasterClock {
    *  用户按播放，画面纹丝不动，看起来就是"这个功能没做"。降级时位置从 0 起算、按本地 perf
    *  推进，`status().source` 会老实写 'local'。 */
   seconds(): number {
+    const raw = this.rawSeconds();
+    // 有循环区间：显示也要回绕（后端已经这么做了）。少了这一步，插值会把播放头带出出点。
+    if (this.loopOn && this.loopB > this.loopA) {
+      const span = this.loopB - this.loopA;
+      if (raw >= this.loopB) return this.loopA + (raw - this.loopA) % span;
+    }
+    return raw;
+  }
+
+  /** 不做回绕的位置（内部算"现在真正走到哪"用）。 */
+  private rawSeconds(): number {
     const base = this.posAtSnap;
     if (!this.playing) return Math.max(0, base);
     const dt = (nowPerf() - this.perfAtSnap) / 1000;
@@ -131,7 +151,18 @@ class MasterClock {
    *  返回过去时刻时就是"立刻发"（调用方自己 max(0, ...)）。 */
   perfAt(s: number): number {
     if (!this.armed) return nowPerf();
-    const deltaSec = (s - this.posAtSnap) / (this.speed || 1);
+    const speed = this.speed || 1;
+    if (this.loopOn && this.loopB > this.loopA) {
+      // 循环里同一个事件每秒都有一份：取**现在之后**的那一次（回绕后的时间戳不能落在过去）。
+      const span = this.loopB - this.loopA;
+      const phase = ((s - this.loopA) % span + span) % span;
+      const raw = this.rawSeconds();
+      const rawPhase = ((raw - this.loopA) % span + span) % span;
+      let base = raw - rawPhase;                         // 这一圈的入点
+      if (phase < rawPhase - 1e-9) base += span;         // 已经过点 → 下一圈
+      return this.perfAtSnap + ((base + phase) - this.posAtSnap) / speed * 1000;
+    }
+    const deltaSec = (s - this.posAtSnap) / speed;
     return this.perfAtSnap + deltaSec * 1000;
   }
 
@@ -187,7 +218,62 @@ class MasterClock {
     await this.ctl('seek', this.wantSeek);
   }
 
-  private async ctl(action: string, value?: number): Promise<void> {
+  /** 把循环区间交给后端（秒进、帧出）。同一个区间只发一次。 */
+  setLoop(on: boolean, aSec: number, bSec: number): void {
+    const rate = this.rate || 48000;
+    const a = Math.max(0, aSec);
+    const b = Math.max(0, bSec);
+    const onEff = !!on && b > a;
+    if (onEff !== this.loopOn || a !== this.loopA || b !== this.loopB) {
+      this.loopOn = onEff;
+      this.loopA = a;
+      this.loopB = b;
+      // 设区间时已经越过出点：当场折回（后端 set_loop 也是这么做的，两边显示一致）。
+      const raw = this.rawSeconds();
+      if (onEff && raw >= b) {
+        const span = b - a;
+        this.posAtSnap = a + (raw - a) % span;
+        this.perfAtSnap = nowPerf();
+      }
+      this.broadcast();
+    }
+    const v = {
+      on: onEff,
+      a: Math.max(0, Math.round(a * rate)),
+      b: Math.max(0, Math.round(b * rate)),
+    };
+    const key = (v.on ? '1' : '0') + ':' + v.a + ':' + v.b;
+    if (key === this.loopKey) return;
+    this.loopKey = key;
+    void this.pushLoop(v);
+  }
+
+  private async pushLoop(v: { on: boolean; a: number; b: number }): Promise<void> {
+    if (await this.send('loop', v)) { this.clearLoopRetry(); return; }
+    let r = this.loopRetry;
+    if (!r || r.value.on !== v.on || r.value.a !== v.a || r.value.b !== v.b) {
+      this.clearLoopRetry();
+      r = { value: v, tries: 0, timer: null };
+      this.loopRetry = r;
+    }
+    if (r.timer) return;
+    const rr = r;
+    const delay = RETRY_MS[Math.min(rr.tries, RETRY_MS.length - 1)];
+    rr.tries++;
+    rr.timer = setTimeout(() => {
+      rr.timer = null;
+      if (this.loopRetry !== rr) return;
+      void this.pushLoop(rr.value);
+    }, delay);
+  }
+
+  private clearLoopRetry(): void {
+    const r = this.loopRetry;
+    this.loopRetry = null;
+    if (r?.timer) clearTimeout(r.timer);
+  }
+
+  private async ctl(action: string, value?: number | { on: boolean; a: number; b: number }): Promise<void> {
     // 用户改了主意：旧的待发意图作废（seek 不算改主意 —— 它不改"播/停"，别把暂停重试挤掉）。
     if (this.pending && this.pending.action !== action &&
         (action === 'play' || action === 'pause' || action === 'toggle')) {
@@ -208,7 +294,7 @@ class MasterClock {
   }
 
   /** 发一发控制命令。后端回了一份**像样的快照**才算数（见下面的形状校验）。 */
-  private async send(action: string, value?: number): Promise<boolean> {
+  private async send(action: string, value?: number | { on: boolean; a: number; b: number }): Promise<boolean> {
     let snap: (Snap & { error?: string }) | null = null;
     try {
       const r = await fetch('/api/clock', {
@@ -258,7 +344,7 @@ class MasterClock {
   /** 后端不在时的本地走时。**先把"此刻在哪"结账，再改状态** ——
    *  否则暂停的那一刻 `perfAtSnap` 被刷到现在而 `posAtSnap` 还是上一次的旧值，
    *  插值整段被抹掉，位置当场跳回快照点（表现就是"按一下暂停，播放头归零"）。 */
-  private localFallback(action: string, value?: number): void {
+  private localFallback(action: string, value?: unknown): void {
     const held = this.seconds();        // 冻结前先取位置（此时 playing 还是旧值）
     this.source = 'local';
     this.armed = false;                 // 降级态不参与后端对齐，别让半截的 perfAt 换算用出去
@@ -395,6 +481,7 @@ class MasterClock {
     if (this.seekTimer) clearTimeout(this.seekTimer);
     this.seekTimer = null;
     this.clearPending();
+    this.clearLoopRetry();
     this.stopTicker?.();
     this.stopTicker = null;
     this.timer = null;

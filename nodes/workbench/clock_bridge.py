@@ -71,6 +71,15 @@ def _load_dll():
             lib.kc_set_speed.argtypes = [ctypes.c_double]
             lib.kc_speed_get.restype = ctypes.c_double
             lib.kc_speed_get.argtypes = []
+            # 循环区间：老 DLL 没有这三条 → 属性不存在就跳过，整体不降级。
+            if hasattr(lib, 'kc_set_loop'):
+                lib.kc_set_loop.restype = ctypes.c_int
+                lib.kc_set_loop.argtypes = [ctypes.c_int, ctypes.c_longlong, ctypes.c_longlong]
+                lib.kc_loop_get.restype = ctypes.c_int
+                lib.kc_loop_get.argtypes = [ctypes.POINTER(ctypes.c_longlong),
+                                            ctypes.POINTER(ctypes.c_longlong)]
+                lib.kc_loop_wraps.restype = ctypes.c_longlong
+                lib.kc_loop_wraps.argtypes = []
             lib.kc_snapshot.restype = ctypes.c_int
             lib.kc_snapshot.argtypes = [ctypes.POINTER(ctypes.c_longlong), ctypes.POINTER(ctypes.c_int),
                                         ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_double),
@@ -101,6 +110,10 @@ class _PyTransport:
         self._qpc = self._now_qpc()
         self._frames = 0
         self.epoch = self._qpc
+        self.loop_on = False
+        self.loop_a = 0
+        self.loop_b = 0
+        self.wraps = 0
 
     def _now_qpc(self) -> int:
         v = ctypes.c_longlong()
@@ -116,9 +129,25 @@ class _PyTransport:
                 if whole:
                     self._frames += whole
                     self._qpc += int(whole * self.freq / (self.rate * self.speed))
+        if self.loop_on and self.loop_b > self.loop_a:
+            while self._frames >= self.loop_b:
+                self._frames -= (self.loop_b - self.loop_a)
+                self.wraps += 1
         if self._frames < 0:
             self._frames = 0
         return self._frames
+
+    def set_loop(self, on: bool, a: int, b: int):
+        with self._lock:
+            self._render()
+            if on and b > a:
+                self.loop_on, self.loop_a, self.loop_b = True, max(0, a), b
+                if self._frames >= b:
+                    self._frames = self.loop_a + (self._frames - self.loop_a) % (b - self.loop_a)
+                    self.wraps += 1
+            else:
+                self.loop_on, self.loop_a, self.loop_b = False, 0, 0
+            return self.loop_on
 
     # 与 DLL 同名，桥那一层无差别调用
     def frames(self) -> int:
@@ -194,10 +223,13 @@ class Clock:
                 seconds = py.now_seconds()
                 freq = py.freq
                 speed = py.speed
+        loop_on, loop_a, loop_b = self.loop()
         return {
             'frames': int(frames),
             'rate': int(rate),
             'playing': bool(playing),
+            'loop': {'on': bool(loop_on), 'a': int(loop_a), 'b': int(loop_b)},
+            'wraps': int(self.wraps()),
             'now': float(seconds),      # 秒（QPC 轴，从 init 起算）
             'freq': int(freq),
             'speed': float(speed),
@@ -205,6 +237,30 @@ class Clock:
             # 服务器**发出这一份**的时刻（墙钟毫秒）。前端算往返时间用，不参与对齐。
             'sent_ms': time.time() * 1000.0,
         }
+
+    def loop(self) -> tuple:
+        with self._lock:
+            if self._lib is not None and hasattr(self._lib, 'kc_loop_get'):
+                a = ctypes.c_longlong()
+                b = ctypes.c_longlong()
+                on = bool(self._lib.kc_loop_get(ctypes.byref(a), ctypes.byref(b)))
+                return on, int(a.value), int(b.value)
+            py = self._py
+            return bool(py.loop_on), int(py.loop_a), int(py.loop_b)
+
+    def wraps(self) -> int:
+        if self._lib is not None and hasattr(self._lib, 'kc_loop_wraps'):
+            return int(self._lib.kc_loop_wraps())
+        return int(self._py.wraps if self._py else 0)
+
+    def set_loop(self, on: bool, a: int, b: int):
+        a = max(0, int(a))
+        b = max(0, int(b))
+        with self._lock:
+            if self._lib is not None and hasattr(self._lib, 'kc_set_loop'):
+                self._lib.kc_set_loop(1 if on else 0, a, b)
+            else:
+                self._py.set_loop(on, a, b)
 
     # ── 写 ──
     def play(self):
@@ -280,6 +336,9 @@ class Clock:
             self.set_sample_rate(int(value or 48000))
         elif action == 'speed':
             self.set_speed(float(value if value is not None else 1.0))
+        elif action == 'loop':
+            v = value if isinstance(value, dict) else {}
+            self.set_loop(bool(v.get('on')), int(v.get('a') or 0), int(v.get('b') or 0))
         else:
             raise ValueError('unknown clock action: %r' % action)
         return self.snapshot()

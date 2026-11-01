@@ -802,6 +802,8 @@ export type VidController = {
   focusClip: (clip: VidClip | null) => void;
   seek: (t: number) => void;
   setPlaying: (v: boolean) => void;
+  /** 停止 = 先停再落位（顺序由 clock.stopAt 保证）。 */
+  stopAt: (t: number) => void;
   setPps: (v: number) => void;
   /** 给 Blend 页发消息（逐帧合成的取帧/回图都走这条边界，转交的是 ImageBitmap）。
    *  返回 false = 那个 window 此刻不在（消息没发出去，调用方得自己收掉 transferable）。 */
@@ -858,6 +860,21 @@ export const newVidId = (prefix: string): string =>
 
 export const vidDuration = (p: VidProject): number =>
   p.clips.reduce((m, c) => Math.max(m, c.start + c.duration), 0);
+
+/** 循环区间 = 时间线的入/出点（秒）。没设（out <= in）= 循环关。
+ *  MIDI 那边的 A/B **不另存一份**：读写都落到这对点上（见 midiProjectOf / applyMidiProject），
+ *  所以卷帘上拖 A/B 与在时间线上拖入/出点改的是同一对数。 */
+export const loopRangeOf = (p: VidProject): { on: boolean; a: number; b: number } =>
+  p.outPoint > p.inPoint ? { on: true, a: p.inPoint, b: p.outPoint } : { on: false, a: 0, b: 0 };
+
+/** 循环区间的**拍**口径（卷帘的 A/B 画在这里）。没设时给 [0, 整条内容] ——
+ *  正好是"打开 LOOP 就循环全曲"，不必先让用户去拉一对把手。 */
+export const loopRangeBeatsOf = (p: VidProject): { on: boolean; a: number; b: number } => {
+  const r = loopRangeOf(p);
+  const tempo = musicOf(p).tempo;
+  if (r.on) return { on: true, a: secondsToBeat(r.a, tempo), b: secondsToBeat(r.b, tempo) };
+  return { on: false, a: 0, b: Math.max(secondsToBeat(vidDuration(p), tempo), 1) };
+};
 
 /** 工程引用的全部仓库哈希（资产表 + 片段的 `asset`/`play`）。缺失检查与 relink 都按这一份。 */
 export const vidAssetRefs = (p: VidProject): string[] => {
@@ -1365,7 +1382,7 @@ export const midiProjectOf = (p: VidProject): MidiProject => {
     timeSig: music.timeSig,
     ppq: music.ppq,
     tracks,
-    loop: music.loop,
+    loop: loopRangeBeatsOf(p),
     selTrack: tracks[0]?.id ?? '',
     selNote: '',
   };
@@ -1407,7 +1424,10 @@ export const midiEditorOf = (p: VidProject, clipId: string | null | undefined): 
     tempo: music.tempo,
     timeSig: music.timeSig,
     ppq: music.ppq,
-    loop: { on: music.loop.on, a: music.loop.a - (origin + from), b: music.loop.b - (origin + from) },
+    loop: (() => {
+      const g = loopRangeBeatsOf(p);
+      return { on: g.on, a: g.a - (origin + from), b: g.b - (origin + from) };
+    })(),
   };
 };
 
@@ -1516,11 +1536,30 @@ export const applyMidiProject = (p: VidProject, prev: MidiProject, next: MidiPro
   if (prev === next) return p;
   let out = p;
   const pm = musicOf(p);
-  if (pm.tempo !== next.tempo || pm.timeSig !== next.timeSig || pm.ppq !== next.ppq
-    || pm.loop !== next.loop) {
+  if (pm.tempo !== next.tempo || pm.timeSig !== next.timeSig || pm.ppq !== next.ppq) {
     out = {
       ...out,
       music: { tempo: next.tempo, timeSig: next.timeSig, ppq: next.ppq, loop: next.loop },
+    };
+  }
+  // 比对的基线是**工程现在表达出来的区间**（入/出点换算成拍），不是 music.loop 那个镜像：
+  // 时间线上拖入/出点只写入/出点，镜像会旧；拿旧镜像当基线会把"没改循环"的更新误判成改循环，
+  // 顺手按旧区间把入/出点覆盖回去（改 BPM 时尤其明显）。
+  const prevLoop = loopRangeBeatsOf(p);
+  const loopChanged = prevLoop.on !== next.loop.on
+    || (next.loop.on
+      && (Math.abs(prevLoop.a - next.loop.a) > 1e-6 || Math.abs(prevLoop.b - next.loop.b) > 1e-6));
+  if (loopChanged) {
+    // 循环区间只有一份：时间线的入/出点（秒）。卷帘上拖 A/B、按 LOOP 都是写这里；
+    // `music.loop` 跟着写成镜像（旧读者/旧档用得上），但不再有第二条真话。
+    const on = !!next.loop.on;
+    const a = Math.max(0, beatToSeconds(Math.max(0, next.loop.a), next.tempo));
+    const b = Math.max(a + 0.001, beatToSeconds(next.loop.b, next.tempo));
+    out = {
+      ...out,
+      inPoint: on ? a : 0,
+      outPoint: on ? b : 0,
+      music: { ...musicOf(out), loop: next.loop },
     };
   }
   const prevTracks = new Map(prev.tracks.map(t => [t.id, t]));
@@ -2569,6 +2608,14 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
     const trackIds = new Set(tracks.map(t => t.id));
     const trackKind = new Map(tracks.map(t => [t.id, t.kind] as const));
     const fps = clampFps(Number(p.fps));
+    // 循环区间的唯一事实来源是时间线入/出点（秒）。旧档把区间记在拍上（music.loop），
+    // 读档时搬一次；搬过之后 music.loop 只是跟着写的镜像。
+    let inPoint = Math.max(0, +p.inPoint || 0);
+    let outPoint = Math.max(0, +p.outPoint || 0);
+    if (!(outPoint > inPoint) && music.loop.on) {
+      inPoint = Math.max(0, beatToSeconds(Math.max(0, music.loop.a), music.tempo));
+      outPoint = Math.max(inPoint + 0.001, beatToSeconds(music.loop.b, music.tempo));
+    }
     // blob: 的 objectURL 活不过刷新 —— 那些片段/资产当场蒸发；挂在不存在的轨道上的也一样。
     // Layer / MIDI 段没有素材源（一个装图层、一个装音符），所以"必须有 src"那条只对素材段成立。
     const clips = [...p.clips, ...legacyClips].filter(c => {
@@ -2617,7 +2664,7 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
     )];
     return pruneVgenChains({
       tracks, clips, assets,
-      inPoint: Math.max(0, +p.inPoint || 0), outPoint: Math.max(0, +p.outPoint || 0),
+      inPoint, outPoint,
       fps: clampFps(Number(p.fps)),
       music,
       // Mask 轨：绑的轨没了就当没绑（读档后轨道可能被删/改名）—— 不留一条悬空 id。
