@@ -787,6 +787,7 @@ typedef struct {
     int32_t was_playing;
     int32_t gen_seen;                      /* notes_gen 已见 */
     int32_t epoch_seen;                    /* tr_epoch 已见 */
+    volatile int32_t cut;                  /* 下一块硬对表时收声（这条轨刚被 Mute / 让出 Solo） */
     ka_hold hold[KA_MAX_HOLD];
 } ka_plug_slot;
 static ka_plug_slot g_plugs[KA_MAX_PLUG];
@@ -964,6 +965,12 @@ static void ka_plug_sched(ka_plug_slot* p, ka_shm* s, int32_t playing) {
 
     if (W0 < p->last_w) ka_sched_reset(p, s, W0, frame0, 1);        /* worker 重开过（块号回退） */
     p->last_w = W0;
+    if (p->cut) {
+        /* 这条轨刚被 Mute（或让出 Solo）：正在响的音要当场收，不能等它自己结束 ——
+         * 表里已经把它删了，不收就是"静音键按了，声音还在"。 */
+        p->cut = 0;
+        ka_sched_reset(p, s, W0, frame0, 1);
+    }
     if (s->tr_epoch != p->epoch_seen) ka_sched_reset(p, s, W0, frame0, 1);   /* 开播 / seek */
     else if (s->notes_gen != p->gen_seen) ka_sched_reset(p, s, W0, frame0, 0); /* 换表：不收声 */
     if (!playing && p->was_playing) ka_sched_reset(p, s, W0, frame0, 1);     /* 播放 → 暂停 */
@@ -995,10 +1002,12 @@ static void ka_plug_mix(int16_t* out, int frames, int playing, int64_t pos) {
         if (!s->live || !s->opened) continue;
         ka_plug_anchor(s, pos, playing);
         ka_plug_sched(&g_plugs[si], s, playing);
-        if (!playing && s->aud_blocks <= 0 && !s->ed_mon) {
+        if (!playing && s->aud_blocks <= 0 && !(s->ed_mon && s->ed_front)) {
             /* 停了就把 ring 抽干：不然恢复播放时先甩出一段几秒前的旧块。
-             * 但这儿要放试听音过去 —— 暂停时点 ♪ 也要出声；插件窗口开着时同理，
-             * 用户是在里面试音（ed_mon），抽干就等于静音。 */
+             * 但这儿要放试听音过去 —— 暂停时点 ♪ 也要出声；用户**正在插件界面里**试音时
+             * 同理（ed_mon && ed_front），抽干就等于静音。
+             * 光看 ed_mon 不行：窗口开着、人已经回到主界面按了暂停时，worker 不再渲染了，
+             * 留着的只是暂停前渲好的旧块 —— 那些就该抽掉。 */
             while (ka_shm_ready(s) > 0) s->r = s->r + 1;
             continue;
         }
@@ -1105,7 +1114,7 @@ static int32_t ka_note_index_at(const ka_note* notes, int count, int64_t pos) { 
  *
  * 上传走 HTTP 分块（Python 桥），所以只在片段新增/换源时发生；拖动/裁剪/静音只改摆放。 */
 
-#define KA_MAX_CLIPS 16
+#define KA_MAX_CLIPS 64                   /* 与前端 pcmClips 的 MAX_SLOTS 一致 */
 typedef struct {
     int16_t* data;        /* 交错立体声 int16（48 kHz） */
     int64_t  frames;      /* 采样数（不是字节） */
@@ -1146,8 +1155,11 @@ static int32_t ka_pcm_mix(int16_t* out, int frames, int64_t pos) {
             r = (int32_t)((float)d[si * 2 + 1] * k->gain);
             l += out[tl * 2];
             r += out[tl * 2 + 1];
-            if (l > 32767) l = 32767; if (l < -32768) l = -32768;
-            if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+            /* 与合成器/插件同一条总线：超过满量程走**软饱和**，不硬夹。
+             * 一记满幅的音频段叠在任何 MIDI 音上都会越过 0dBFS，硬夹就是波形削平（听感"破"）。
+             * ka_sat 在拐点以下恒等，只有峰值那一截被压弯。 */
+            if (l > 32767 || l < -32768) l = (int32_t)(ka_sat((float)l / 32768.0f) * 32768.0f);
+            if (r > 32767 || r < -32768) r = (int32_t)(ka_sat((float)r / 32768.0f) * 32768.0f);
             out[tl * 2] = (int16_t)l;
             out[tl * 2 + 1] = (int16_t)r;
             if (l > peak) peak = l; if (-l > peak) peak = -l;
@@ -1204,8 +1216,14 @@ static void ka_render_block(int16_t* out, int frames, int64_t pos, int playing) 
          * 老写法带着 !g_synth_off，于是暂停时点 ♪ 会被下面整块短路吞掉。 */
         int k, live = (g_pend_note >= 0);
         if (g_was_playing) {
-            /* 播放 → 暂停：发 note-off，让乐器按自己的 release 收尾（与插件同一条语义）。 */
+            /* 播放 → 暂停：发 note-off，并把 release 压到 8ms —— 走带停下就是**停**，
+             * 不能让合成器按自己的长 release 再拖下去（与插件那边"不在前台就不渲"同一个口径：
+             * 音尾是音符结束时的事，不是暂停时的事）。8ms 只是为了不"啪"。 */
+            int k;
             ka_voice_off_all();
+            for (k = 0; k < KA_VOICES; ++k) {
+                if (g_voice[k].active) g_voice[k].rel_coef = ka_coef_for(0.008f, g_rate_eff);
+            }
             g_was_playing = 0;
         }
         if (!live) {
@@ -1414,12 +1432,18 @@ static void ka_render_block(int16_t* out, int frames, int64_t pos, int playing) 
         g_peak = (int32_t)(peak * 1000.0f);
         ka_unlock();
 
-        /* 时间线音频段（PCM）与插件、合成器同一条总线。 */
-        {
+        /* 时间线音频段（PCM）与插件、合成器同一条总线。
+         * **只在播放时混**：暂停时 pos 是钉住的，照样混就是同一小段原地重复 ——
+         * 听感是"播放头停了，声音还在响"。这一段只在"暂停但还有试听音"时走得到
+         * （见上面那个分支），试听音不该把时间线一起拖响。 */
+        if (playing) {
             int32_t pk = ka_pcm_mix(out, frames, pos);
             if (pk > 0) {
+                /* 峰值统一按**千分比**报（与合成器、插件同一个口径）：pk 是 int16 采样值，
+                 * 不除 32768 就成了 20000000，Monitor 那边一夹就成了满格常亮。 */
+                int32_t pm = (pk * 1000) / 32768;
                 ka_lock();
-                if (pk * 1000 > g_peak) g_peak = pk * 1000;
+                if (pm > g_peak) g_peak = pm;
                 ka_unlock();
             }
         }
@@ -1582,7 +1606,16 @@ static uint32_t __stdcall ka_audio_thread(void* arg) {
                 g_corr_q8 = 0;
                 g_win_played = -1;
                 g_win_n = 0;
-                ka_voice_off_all();
+                /* 上一遍的音**当场收干净**，不按乐器自己的长 release 拖到下一遍里：
+                 * 短循环 + 长 release 会一圈叠一层（听感就是"越循环越厚"）。与暂停同一个口径，
+                 * 8ms 只为不"啪"。 */
+                {
+                    int vi;
+                    ka_voice_off_all();
+                    for (vi = 0; vi < KA_VOICES; ++vi) {
+                        if (g_voice[vi].active) g_voice[vi].rel_coef = ka_coef_for(0.008f, g_rate_eff);
+                    }
+                }
                 g_seeks = g_seeks + 1;
                 ka_plug_epoch();
                 /* ring 里压着的是**旧位置**的块（最多 8 块 ≈ 85ms）。不清掉的话，新位置
@@ -1949,6 +1982,15 @@ __declspec(dllexport) int ka_set_notes(const ka_note* notes, int count) {
     return count;
 }
 
+/** 一条轨在这张表里出不出声（mute 优先，solo 排他）。越界 = 不出声。 */
+static int ka_tbl_audible(const ka_track* t, int n, int idx) {
+    int i, anySolo = 0;
+    if (idx < 0 || idx >= n) return 0;
+    for (i = 0; i < n; ++i) if (t[i].solo) { anySolo = 1; break; }
+    if (t[idx].mute) return 0;
+    return (!anySolo || t[idx].solo) ? 1 : 0;
+}
+
 __declspec(dllexport) int ka_set_tracks(const ka_track* tracks, int count) {
     int tl, i;
     if (!tracks || count < 0) return -1;
@@ -1962,6 +2004,20 @@ __declspec(dllexport) int ka_set_tracks(const ka_track* tracks, int count) {
     /* 一字不差就别换表：下面那次 ka_plug_push_notes 会让每个槽的音符表 generation 变号，
      * worker 于是把调度重排一遍 —— 表没变的时候这纯属白叫醒。 */
     if (ka_tracks_same(g_tracks[tl], count, g_tracks[g_tlive], g_tn[g_tlive])) return count;
+    /* 从出声变成不出声（Mute / 让出 Solo）的轨：让它的插件槽把**正在响**的音收掉。
+     * 不做这一步，静音只是"以后不再起音"，已经按下的长音会一直响到它自己结束。 */
+    {
+        int old_n = g_tn[g_tlive];
+        int top = count > old_n ? count : old_n;
+        for (i = 0; i < top; ++i) {
+            int si;
+            if (!ka_tbl_audible(g_tracks[g_tlive], old_n, i)) continue;
+            if (ka_tbl_audible(g_tracks[tl], count, i)) continue;
+            for (si = 0; si < KA_MAX_PLUG; ++si) {
+                if (g_plug_on[si] && g_plug_track_of[si] == i) g_plugs[si].cut = 1;
+            }
+        }
+    }
     g_tn[tl] = count;
     g_tlive = tl;
     ka_plug_push_notes();          /* 通道/静音/独奏/力度都在这张表里 */
@@ -1972,14 +2028,27 @@ __declspec(dllexport) int ka_set_tracks(const ka_track* tracks, int count) {
  * 写的时候 active=0，音频线程整段跳过；写完 ready=1，再由 ka_pcm_set 把摆放和 active 打开。
  * 释放用 VirtualFree：这块内存不属于任何槽，也不进共享内存。 */
 
+/** 等音频线程再走 n 圈（定义在 SFZ 那一节，这里先用一下）。 */
+static void ka_wait_blocks(int n);
+
+/** 归还一个槽的 PCM 内存。**先关 active/ready，再等音频线程把手里的指针用完** ——
+ *  它可能正混着这一块（ka_pcm_mix 里 d = k->data），当场 VirtualFree 就是悬空指针。
+ *  声卡没开时音频线程不跑，没有读者，直接还。 */
+static void ka_pcm_free_data(ka_pcm_clip* k) {
+    k->active = 0;
+    k->ready = 0;
+    if (!k->data) return;
+    if (g_open) ka_wait_blocks(2);
+    VirtualFree(k->data, 0, 0x8000u);
+    k->data = 0;
+}
+
 __declspec(dllexport) int ka_pcm_begin(int slot, int64_t frames, int channels) {
     ka_pcm_clip* k;
     int16_t* mem;
     if (slot < 0 || slot >= KA_MAX_CLIPS || frames <= 0 || channels != 2) return -1;
     k = &g_clips[slot];
-    k->active = 0;
-    k->ready = 0;
-    if (k->data) { VirtualFree(k->data, 0, 0x8000u); k->data = 0; }
+    ka_pcm_free_data(k);
     mem = (int16_t*)VirtualAlloc(0, (uint64_t)frames * 4u, 0x3000u, 0x04u);
     if (!mem) return -2;
     k->data = mem;
@@ -2025,9 +2094,7 @@ __declspec(dllexport) int ka_pcm_clear(int slot) {
     ka_pcm_clip* k;
     if (slot < 0 || slot >= KA_MAX_CLIPS) return -1;
     k = &g_clips[slot];
-    k->active = 0;
-    k->ready = 0;
-    if (k->data) { VirtualFree(k->data, 0, 0x8000u); k->data = 0; }
+    ka_pcm_free_data(k);
     k->frames = 0;
     return 0;
 }
@@ -2584,7 +2651,12 @@ __declspec(dllexport) int ka_vst3_state_load(const uint16_t* path, int* out, int
     return r;
 }
 
-/** 把当前音色存成 .vstpreset（整个 bundle 的状态，不用编辑器）。返回总字节数或负错误码。 */
+/** 给组件空流 setState 敲一次门（rc 忽略）。HALion 一类插件在第一次 setState 之前
+ *  getState 返回 0 字节 —— 敲过之后才肯把当前 program 序列化进 Comp 块。 */
+__declspec(dllexport) int ka_vst3_prime(void) {
+    return (int)ka_plug_call(KA_CMD_PRIME, 0, 0, 0, 0, 0, KA_PLUG_MS_FAST);
+}
+
 __declspec(dllexport) int ka_vst3_state_save(const uint16_t* path) {
     return (int)ka_plug_call(KA_CMD_STATE_SAVE, 0, 0, 0, 0, path, KA_PLUG_MS_SLOW);
 }

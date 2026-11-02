@@ -20,7 +20,7 @@ import { midiOut } from './output';
 import { setEditorHost } from './soundWindow';
 import { type MidiProject, type MidiTrack, beatToSeconds, secondsToBeat } from './model';
 import {
-  applyEditorNotes, applyMidiProject, midiEditorOf, midiProjectOf,
+  applyEditorNotes, applyMidiProject, midiEditorOf, midiProjectOf, musicOf, toggleLoopRange, vidDuration,
 } from '../workbench/video/model';
 import type { VidProject } from '../workbench/video/model';
 import { getVidSelection, subscribeVidSelection } from '../workbench/video/selection';
@@ -120,6 +120,26 @@ export const useMidiHost = (opts: {
     }, label);
   }, [updateVid]);
 
+  /** 范围游标的右边界 = 段尾：拖它改的是**这一段自己的时长**（时间线上的右裁）。
+   *  左边恒为 0.0；段内容不跟着删 —— 被裁到范围外的音符仍然留在段上（卷帘压暗画着）。 */
+  const setEditorLength = useCallback((beats: number) => {
+    updateVid(p => {
+      const c = p.clips.find(x => x.id === clipIdRef.current);
+      if (!c || c.kind !== 'midi') return p;
+      const duration = Math.max(0.05, beatToSeconds(Math.max(0, beats), musicOf(p).tempo));
+      if (Math.abs(duration - c.duration) < 1e-9) return p;
+      return { ...p, clips: p.clips.map(x => (x.id === c.id ? { ...x, duration } : x)) };
+    }, 'Resize MIDI segment');
+  }, [updateVid]);
+
+  /** 时间线总长：两种模式的"片尾"都按它算（片尾停止 / 读数 / 走到片尾再按播放）。 */
+  const endSec = useMemo(() => vidDuration(project), [project]);
+
+  /** 循环开关：区间只有一份（时间线入/出点），两种模式的传输条都落到这一个动作上。 */
+  const toggleLoop = useCallback(() => {
+    updateVid(p => toggleLoopRange(p), 'Loop');
+  }, [updateVid]);
+
   // 本机引擎：进页面探一次（既不弹权限也不开设备）。探到就把它摆进端口表并默认选中。
   useEffect(() => {
     void midiOut.probeNative();
@@ -157,8 +177,11 @@ export const useMidiHost = (opts: {
     clipId,
     update,
     updateEditor,
+    setEditorLength,
     select: (_trackId, noteId) => setSelNote(noteId ?? ''),
     playing: playingNow,
+    toggleLoop,
+    endSec,
     play: () => transport.play(),
     pause: () => transport.pause(),
     stopAt: (sec: number) => transport.stopAt(sec),
@@ -169,7 +192,7 @@ export const useMidiHost = (opts: {
     canRedo,
     track,
     note,
-  }), [midiProj, editor, clipId, selNote, update, updateEditor, playingNow, undo, redo, canUndo, canRedo, track, note]);
+  }), [midiProj, editor, clipId, selNote, update, updateEditor, setEditorLength, toggleLoop, endSec, playingNow, undo, redo, canUndo, canRedo, track, note]);
 
   // ── 音色窗的宿主：它只借"当前这份工程"和唯一写口 ─────────────────────────────────────
   const tracksOf = useCallback((uid: number) => {

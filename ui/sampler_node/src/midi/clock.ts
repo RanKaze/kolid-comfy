@@ -58,6 +58,7 @@ const HARD_JUMP_S = 0.08;
 const SOFT_GAIN = 0.25;
 
 import { startBackgroundTicker } from './ticker';
+import { PAGE_SESSION } from './session';
 
 const nowPerf = (): number => performance.now();
 
@@ -80,6 +81,8 @@ class MasterClock {
   private lastBroadcast = 0;
   private subs = new Set<() => void>();
   private inflight = false;
+  /** 取数途中又收到一次"对面改了传输"：这一趟回来再补一趟（别让这一发 ping 丢掉）。 */
+  private pinged = false;
   /** 去抖中的那一发 seek：`wantSeek` 永远是最后一次想去的秒数。 */
   private seekTimer: ReturnType<typeof setTimeout> | null = null;
   private wantSeek = 0;
@@ -99,6 +102,13 @@ class MasterClock {
   private loopKey = '';
   private loopRetry: { value: { on: boolean; a: number; b: number }; tries: number;
     timer: ReturnType<typeof setTimeout> | null } | null = null;
+  /** 同源别的窗：这一扇发完传输命令后喊一声，让它们立刻回来对表。
+   *  只靠 2 秒轮询的话，"在这扇窗按了暂停、声音却在另一扇窗里"要过最多两秒才停 ——
+   *  听感就是"按了暂停音频还在放"。 */
+  private notify: BroadcastChannel | null = null;
+  /** **本窗自己**按下过几次播放（轮询/别的窗带起来的播放不算）。
+   *  时间线的 PCM 只能由"按播放的那扇窗"接管 —— 见 timelineAudio 的 claim。 */
+  private localPlays = 0;
 
   constructor() {
     // 插值的起点就是"现在"：没有这一句，第一次 play 之后 dt 会等于整个页面存活时长，
@@ -112,6 +122,13 @@ class MasterClock {
       document.addEventListener('visibilitychange', () => {
         if (!document.hidden) void this.sync();
       });
+      if (typeof BroadcastChannel !== 'undefined') {
+        try {
+          this.notify = new BroadcastChannel('kolid.clock.transport');
+          // 对面刚改了传输：不是"下一轮轮询再知道"，是现在就去取一份。
+          this.notify.onmessage = () => { this.pinged = true; void this.sync(); };
+        } catch { this.notify = null; }
+      }
       this.pump();
     }
   }
@@ -172,12 +189,23 @@ class MasterClock {
     // 80ms 后那一发 seek 才把它拽回来（听感上就是"一按播放先窜一下"）。
     await this.flushSeek();
     await this.ctl('play');
+    // **命令落地之后**才算一次"本窗按了播放"：后端就是在那条命令里把 PCM 作者定成这扇窗，
+    // 时间线再据此重落摆放（早一步会在作者还没换的时候就发出去，被 not_owner 拒掉）。
+    this.localPlays++;
   }
   async pause(): Promise<void> {
     await this.flushSeek();
     await this.ctl('pause');
   }
-  async toggle(): Promise<void> { await this.ctl('toggle'); }
+  async toggle(): Promise<void> {
+    const was = this.playing;
+    await this.ctl('toggle');
+    if (!was && this.playing) this.localPlays++;
+  }
+
+  /** 本窗自己按下播放的次数（单调）。时间线 PCM 的接管只认它 —— 别的窗看到"在播"
+   *  只是镜像，不该也去 claim（两个窗互相抢作者，声音会劈叉/掉）。 */
+  localPlayCount(): number { return this.localPlays; }
   /** 跳转：**本地先落位**（播放头与画面立刻跟手），网络那一趟去抖 80ms 只发最后一发。
    *  一次拖动会来几十上百发，后端不需要每一发都知道 —— 它只需要最终位置。
    *  返回的 Promise 在那一发回包后 resolve（调用方一般不用等它）。 */
@@ -300,7 +328,8 @@ class MasterClock {
       const r = await fetch('/api/clock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, value }),
+        // session = 这扇窗这一次加载。后端在"播放"这条命令里据此定音频作者（见 /api/clock）。
+      body: JSON.stringify({ action, value, session: PAGE_SESSION }),
       });
       snap = (await r.json()) as Snap & { error?: string };
     } catch {
@@ -313,6 +342,8 @@ class MasterClock {
     if (this.pending && this.pending.action === action) this.clearPending();
     this.accept(snap, nowPerf(), 0);
     this.broadcast();
+    // 别的窗的声源/播放头都跟着这只钟走：让它们现在就去取，别等下一轮 2 秒轮询。
+    try { this.notify?.postMessage(1); } catch { /* 通道关了：退回轮询 */ }
     return true;
   }
 
@@ -372,6 +403,7 @@ class MasterClock {
 
   private async sync(): Promise<void> {
     if (this.inflight) return;
+    this.pinged = false;
     this.inflight = true;
     const t0 = nowPerf();
     try {
@@ -386,6 +418,7 @@ class MasterClock {
       if (this.armed) this.source = 'local';
     } finally {
       this.inflight = false;
+      if (this.pinged) void this.sync();
     }
   }
 
@@ -482,6 +515,8 @@ class MasterClock {
     this.seekTimer = null;
     this.clearPending();
     this.clearLoopRetry();
+    try { this.notify?.close(); } catch { /* 已经关了 */ }
+    this.notify = null;
     this.stopTicker?.();
     this.stopTicker = null;
     this.timer = null;

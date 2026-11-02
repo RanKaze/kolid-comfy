@@ -6,7 +6,7 @@ import { clipsByTrack, type VidClip, type VidFrameNeed, type VidProject } from '
 //  * 命中 layer 段 → 这一帧交给工作台的图层系统，画面**只有这一段自己的图层**：Layer 段是遮住
 //    脚下一层的，不把底下视频帧当底图，所以空段就是一张空图。所有 video 轨的当前帧当"源帧"
 //    交过去 —— 面 attribute 的 Frame source 从里面挑（`baseTrackId` 那条只用来定输出栅格）。
-// 音频轨不参与：它们不产生画面，声音本来就走 VidAudio。
+// 音频轨不参与：它们不产生画面，声音由本机引擎按时间线位置混（见 pcmClips.ts）。
 export type VidCompositeSource = { trackId: string; clip: VidClip };
 
 export type VidCompositePlan = {

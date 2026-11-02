@@ -84,7 +84,7 @@ const KCompositor = (function () {
      * 那条链"时才能走 —— 链后面若还有 decal/生成器，就得回到 2D 画上去，那时纹理意味着又一次 readback。
      * 链后面的**蒙版**例外：它是 alpha 乘，合成着色器里一句话（与 2D 的 destination-in 同义）。
      */
-    function foldLayer(pl, t, w, h, texOK) {
+    function foldLayer(pl, t, w, h, texOK, texKey) {
         // 一笔正在纹理里（P3.1）：这一层的结果已经折好，直接交纹理。
         // （Stash 曾经是这里的例外 —— 它的输入是「以下所有层」，不在这一笔的纹理里。那一岔随图层
         //  种类一起删了：现在它的输入就是它自己那枚面，跟一张贴片没有区别。）
@@ -141,7 +141,9 @@ const KCompositor = (function () {
                 const mask = stripCoverage(left, w, h);
                 if (i === chIdx) {
                     try {
-                        tex = applyLayerEffectsTexture(fake, surf, { rec: { chain }, mask });
+                        // `texKey` = 这张结果纹理在发布区里占固定那一页（按图层）。调用方要跨帧缓存
+                        // 纹理时**必须**给：pool 的"取一张"会被下一层覆盖，缓存下来的就成了别人的图。
+                        tex = applyLayerEffectsTexture(fake, surf, { rec: { chain }, mask, slotKey: texKey });
                     } catch (e) {
                         api.notes.push('chain failed: ' + (e && e.message || e));
                         tex = null;

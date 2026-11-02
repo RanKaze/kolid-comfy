@@ -1,39 +1,50 @@
-// ── 时间线音频段 → 原生引擎 ─────────────────────────────────────────────────────────────────
+// ── 时间线音频段 → 原生引擎（时间线声音的唯一出口，见 timelineAudio.ts）──────────────────
 //
-// 以前音频段由页面用 WebAudio 自己播：引擎里 MIDI 走一条混音、页面里音频走另一条，
-// 暂停语义/电平表/峰值全对不上。现在把段子的 PCM **一次解码**好交到 DLL（48 kHz 交错 int16），
-// 按绝对帧摆放，和音符同一条音频线程混音 —— 暂停 / seek / 循环都由位置自然成立。
+// 段子的 PCM **一次解码**好交到 DLL（48 kHz 交错 int16），按**绝对帧**摆放，和 MIDI 音符
+// 在同一条音频线程里混音 —— 暂停 / seek / 循环回绕都由"时钟位置"自然成立，页面不再播音频。
+//
+// ── 三条规矩（以后加"往引擎送声音"的功能照这个来，见 audio_bridge.py 的 _PcmBook）──
+//  1. **会话**：这扇窗有一次加载 = 一个 session。只有"作者会话"（正在出声的那扇窗）的摆放
+//     会被引擎接受；别的窗可以把 PCM 传上去备着，但放不响 —— 两扇窗同时放同一段时间线
+//     就是同一声听两遍（切 Mute / 切 Loop 时"突然多一层"就是这么来的）。
+//  2. **片段**：按 clip id 认主，槽位由后端分配；关窗（pagehide）时整批 release，
+//     心跳超期也会被后端回收 —— 关掉的窗不会留在引擎里继续响。
+//  3. **代际**：每次整份状态同步 +1。摆放带 gen，比已应用的旧就丢弃：切 Mute/Loop 会重推
+//     整份状态，乱序与重试的旧推送不能把旧摆放复活。
 //
 // 只上传一次：片段换源才重传；拖动/裁剪/静音只改摆放（pcm_set），不发 PCM。
-// 16 个槽（与 DLL 的 KA_MAX_CLIPS 一致），超出的段子这一版先不发声（会在控制台点名）。
 
+import { PAGE_SESSION } from '../../midi/session';
 import { decodeAudio } from './audio';
 import { audioAudible, type VidProject } from './model';
 
 const RATE = 48000;
-const MAX_SLOTS = 16;
+const PCM_CLIENT_ABI = 3;        // 与 audio_bridge.py 的 PCM_CLIENT_ABI 一致
+const SESSION = PAGE_SESSION;    // 这扇窗这一次加载的身份（播放命令那边也用它定作者）
+
 /** 0.5 s 一块：96 KB int16 / 128 KB base64，本地环回一趟几十毫秒。 */
 const CHUNK_FRAMES = 24000;
 
 type Desired = { start: number; offset: number; length: number; gain: number };
 type Entry = {
   id: string;
-  slot: number;
   src: string;
   frames: number;
   ready: boolean;
-  placed: boolean;      // 引擎确认收下这次摆放
+  placed: boolean;      // 引擎确认收下这次摆放（作者会话才会）
   want: Desired;
-  applied: string;
+  applied: string;      // 已经发出去的那一份摆放（去重用）
   posting: boolean;
   busy: boolean;
+  tries: number;        // 上传轮次：失败要能自己再试（服务端重启/瞬时 500 时不能永久哑）
 };
 
 const entries = new Map<string, Entry>();
-const slots: (string | null)[] = new Array(MAX_SLOTS).fill(null);
 const pcmCache = new Map<string, Promise<{ pcm: Int16Array; frames: number } | null>>();
 
 let active = false;              // 有任何一个段子真的交给了引擎
+/** 整份状态同步的代际：每次 flush +1，摆放带它。 */
+let pushGen = 0;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let chain: Promise<void> = Promise.resolve();
 
@@ -45,11 +56,18 @@ const post = async (op: string, extra: Record<string, unknown>): Promise<Record<
     const r = await fetch('/api/audio', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ op, ...extra }),
+      // v = 时间线 PCM 的客户端协议号；session = 这扇窗这一次加载。
+      // 旧页面两样都没有 —— 后端一律拒收（它那边还有一条 WebAudio 在放同一段时间线）。
+      body: JSON.stringify({ op, v: PCM_CLIENT_ABI, session: SESSION, ...extra }),
     });
     const j = await r.json();
+    if (!r.ok) {
+      console.warn('[pcm] %s failed: HTTP %d %o', op, r.status, j);
+      return null;
+    }
     return (j && typeof j === 'object' ? j : null) as Record<string, unknown> | null;
-  } catch {
+  } catch (err) {
+    console.warn('[pcm] %s failed:', op, err);
     return null;
   }
 };
@@ -102,68 +120,121 @@ const applyPlacement = (e: Entry): void => {
   e.posting = true;
   const want = { ...e.want };
   void post('pcm_set', {
-    slot: e.slot, start: want.start, offset: want.offset,
-    length: want.length, gain: want.gain,
+    clip: e.id, gen: pushGen,
+    start: want.start, offset: want.offset, length: want.length, gain: want.gain,
   }).then(r => {
     e.posting = false;
-    if (r && r.ok === true) {
+    if (!r) return;                              // 网络失败：留着，下一次 flush 重发
+    if (r.ok === true) {
       e.applied = key;
       if (want.gain > 0 && want.length > 0) e.placed = true;
       recomputeActive();
+      return;
+    }
+    // 不是作者 = 这一发已经"落地"（后端明确拒绝），别每帧重发；claim 时会清 applied 重来。
+    if (r.not_owner === true) { e.applied = key; return; }
+    // 引擎不认识这段（数据被回收/引擎重开）：重新上传，别装作摆好了。
+    if (r.error === 'unknown pcm clip') {
+      e.ready = false;
+      e.placed = false;
+      e.applied = '';
+      queue(() => upload(e));
+      return;
     }
   });
 };
 
+/** 传一次 PCM：begin → 分块 → finish。任何一步失败都返回 false（下次整段重来）。 */
+const uploadOnce = async (e: Entry, frames: number, pcm: Int16Array): Promise<boolean> => {
+  const begun = await post('pcm_begin', { clip: e.id, frames, channels: 2 });
+  if (!begun || begun.ok !== true) {
+    if (begun && begun.error) console.warn('[pcm] %s: %s', e.id, begun.error);
+    return false;
+  }
+  const bytes = new Uint8Array(pcm.buffer);
+  for (let off = 0; off < frames; off += CHUNK_FRAMES) {
+    const n = Math.min(CHUNK_FRAMES, frames - off);
+    const res = await post('pcm_chunk', {
+      clip: e.id, offset: off,
+      data: toBase64(bytes.subarray(off * 4, (off + n) * 4)),
+    });
+    if (!res || res.ok !== true) return false;
+  }
+  const fin = await post('pcm_finish', { clip: e.id });
+  return !!fin && fin.ok === true;
+};
+
+/** 上传是**唯一**出声的前提：失败就退避重试，别让一段音频悄悄变成静音。 */
 const upload = async (e: Entry): Promise<void> => {
   if (e.busy) return;
   e.busy = true;
   try {
     const data = await pcmOf(e.src);
-    if (!data) return;
-    const begun = await post('pcm_begin', { slot: e.slot, frames: data.frames, channels: 2 });
-    if (!begun || begun.ok !== true) return;
-    const bytes = new Uint8Array(data.pcm.buffer);
-    for (let off = 0; off < data.frames; off += CHUNK_FRAMES) {
-      const n = Math.min(CHUNK_FRAMES, data.frames - off);
-      const res = await post('pcm_chunk', {
-        slot: e.slot, offset: off,
-        data: toBase64(bytes.subarray(off * 4, (off + n) * 4)),
-      });
-      if (!res || res.ok !== true) return;
+    if (!data) {
+      console.warn('[pcm] cannot decode audio for clip %s', e.id);
+      return;
     }
-    const fin = await post('pcm_finish', { slot: e.slot });
-    if (!fin || fin.ok !== true) return;
-    e.frames = data.frames;
-    e.ready = true;
-    e.applied = '';              // 重新落一次摆放（begin 把 active 关了）
-    applyPlacement(e);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt) await new Promise<void>(r => setTimeout(r, 400 * attempt));
+      if (!await uploadOnce(e, data.frames, data.pcm)) continue;
+      e.frames = data.frames;
+      e.ready = true;
+      e.tries = 0;
+      e.applied = '';              // 重新落一次摆放（begin 把 active 关了）
+      applyPlacement(e);
+      return;
+    }
+    // 三次都失败也**不许就此认定静音**：服务端可能正在重启 / 刚才还是旧协议。
+    // 退避后再来（1.5s → 3s → 6s → 封顶 15s），直到成功或片段被删。
+    const delay = Math.min(15000, 1500 * (1 << Math.min(e.tries, 3)));
+    e.tries++;
+    console.warn('[pcm] clip %s upload failed, retry in %dms', e.id, delay);
+    setTimeout(() => {
+      if (!e.ready && entries.get(e.id) === e) queue(() => upload(e));
+    }, delay);
   } finally {
     e.busy = false;
   }
-};
-
-const slotFor = (id: string): number => {
-  const free = slots.indexOf(null);
-  if (free < 0) return -1;
-  slots[free] = id;
-  return free;
 };
 
 const queue = (fn: () => Promise<void>): void => {
   chain = chain.then(fn).catch(() => { /* 单个失败不拖死队列 */ });
 };
 
+/** 本窗按了播放（后端已把 PCM 作者定成这扇窗）之后调：之前被 not_owner 拒掉的摆放
+ *  整份重落一遍，没传完的补传。见 timelineAudio.ts。 */
+export const refreshPlacements = (): void => {
+  pushGen++;
+  for (const e of entries.values()) e.applied = '';
+  for (const e of entries.values()) {
+    if (e.ready) applyPlacement(e);
+    else queue(() => upload(e));
+  }
+};
+
+/** 关窗 / 刷新：把本会话名下的 PCM 整批还掉（beacon 在卸载时也发得出去）。 */
+const releaseSession = (): void => {
+  try {
+    const body = JSON.stringify({ op: 'pcm_release', v: PCM_CLIENT_ABI, session: SESSION });
+    navigator.sendBeacon('/api/audio', new Blob([body], { type: 'application/json' }));
+  } catch { /* 卸载路上发不出去也没关系：后端有心跳超期兜底 */ }
+};
+
+if (typeof window !== 'undefined') {
+  // bfcache 恢复（persisted）不算关窗：那时不该清，清了回来就哑了。
+  window.addEventListener('pagehide', ev => { if (!ev.persisted) releaseSession(); });
+}
+
 const flush = (project: VidProject, solo: ReadonlySet<string>, mute: ReadonlySet<string>): void => {
+  pushGen++;
   const live = new Set<string>();
   for (const c of project.clips) {
     if (c.kind !== 'audio' || !c.src) continue;
     live.add(c.id);
     let e = entries.get(c.id);
     if (!e) {
-      const slot = slotFor(c.id);
-      if (slot < 0) { console.warn('[pcm] 超过 %d 个音频段，这一段先不发声：%s', MAX_SLOTS, c.id); continue; }
-      e = { id: c.id, slot, src: c.src, frames: 0, ready: false, placed: false,
-        want: { start: 0, offset: 0, length: 0, gain: 0 }, applied: '', posting: false, busy: false };
+      e = { id: c.id, src: c.src, frames: 0, ready: false, placed: false,
+        want: { start: 0, offset: 0, length: 0, gain: 0 }, applied: '', posting: false, busy: false, tries: 0 };
       entries.set(c.id, e);
     }
     const audible = audioAudible(c.trackId, solo, mute);
@@ -187,8 +258,8 @@ const flush = (project: VidProject, solo: ReadonlySet<string>, mute: ReadonlySet
   for (const [id, e] of [...entries]) {
     if (live.has(id)) continue;
     entries.delete(id);
-    slots[e.slot] = null;
-    void post('pcm_clear', { slot: e.slot });
+    void post('pcm_clear', { clip: id, gen: pushGen });
+    if (e.placed) recomputeActive();
   }
 
   recomputeActive();
@@ -221,5 +292,7 @@ if (typeof window !== 'undefined') {
   (window as unknown as Record<string, unknown>).__kolidPcm = {
     sync: syncEngineClips,
     active: engineTimelineActive,
+    refresh: refreshPlacements,
+    session: SESSION,
   };
 }

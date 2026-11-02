@@ -16,8 +16,8 @@ import { audioCtx } from './audio';
 //
 // 不是 WebAudio 出的声(原生引擎: MIDI 的采样乐器/插件)没有这张图,就改用 `levels` 直接报数
 // (见 midi/nativeMonitor.ts)。两条路二选一:有 probe 读 analyser,只有 levels 就按时取一帧。
-// **两条同时在**= 这一路声源两样都有(时间线:音频段走 WebAudio、MIDI 轨走本机引擎,见
-// workbench/video/timelineAudio.ts),Monitor 两路各取峰值后取大的那条 —— 一条时间线一只表。
+// 时间线(音频段 + MIDI 轨)的声音全在本机引擎里,持有者只给 `levels`(见
+// workbench/video/timelineAudio.ts);WebAudio 探头留给 Inspector 这种真在页面里发声的预览。
 
 export type AudioProbe = {
   /** 左/右声道电平探针(时域数据,RMS/峰值都从这里算)。 */

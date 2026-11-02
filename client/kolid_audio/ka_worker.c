@@ -121,6 +121,7 @@ __declspec(dllimport) int32_t __stdcall SetWindowPos(void* hwnd, void* after, in
 __declspec(dllimport) int32_t __stdcall SetForegroundWindow(void* hwnd);
 __declspec(dllimport) void* __stdcall GetForegroundWindow(void);
 __declspec(dllimport) uint32_t __stdcall GetWindowThreadProcessId(void* hwnd, uint32_t* pid);
+__declspec(dllimport) uint32_t __stdcall GetCurrentProcessId(void);
 __declspec(dllimport) int32_t __stdcall AttachThreadInput(uint32_t id_attach, uint32_t id_attach_to,
                                                           int32_t attach);
 __declspec(dllimport) int32_t __stdcall BringWindowToTop(void* hwnd);
@@ -672,25 +673,33 @@ static int64_t wk_block_pos(ka_shm* s) {
 
 static void wk_render(ka_shm* s) {
     const ka_shm_evblock* eb;
-    int32_t rc, playing, aud, mon, ready, i;
+    int32_t rc, playing, aud, mon, ready, i, flushed = 0;
     int64_t fr, pos;
 
     if (!s->live || !s->opened) return;
-    if (ka_shm_pending(s) <= 0) return;                  /* ring 满了：宿主没在取，别白干 */
 
     playing = s->tr_playing ? 1 : 0;
     aud = (s->aud_blocks > 0);
-    /* 插件窗口开着（宿主写的 ed_mon）= 用户正在它自己的界面里试音。那边的键盘/试听按钮
-     * 不会经过我们，声音只从 process() 出来 —— 暂停时不渲，界面里点了就是一片安静。 */
-    mon = (!playing && s->ed_mon) ? 1 : 0;
+    /* 插件窗口开着**且在前台**（宿主写的 ed_mon + worker 写的 ed_front）= 用户正在它自己的
+     * 界面里试音。那边的键盘/试听按钮不会经过我们，声音只从 process() 出来 —— 暂停时不渲，
+     * 界面里点了就是一片安静。
+     * 只看 ed_mon 不够：窗口开着、用户却已经在主界面按了暂停时，继续渲就是把暂停当没按
+     * （长 release 的音听着一直不停）。 */
+    mon = (!playing && s->ed_mon && s->ed_front) ? 1 : 0;
 
     pos = wk_block_pos(s);
 
-    /* 宿主的收声信号（暂停 / seek）先看：这条必须在任何早退之前 —— 停着的时候也得把
-     * evq 里的 note-off 交给 process()，否则"按了暂停声音还在"。 */
+    /* 宿主的收声信号（暂停 / seek）先看：这条必须在**任何**早退之前 —— ring 满的时候宿主
+     * 多半正停着（暂停后不再取块），可 note-off 还是得交出去，否则"按了暂停声音还在"。 */
     if (s->flush_seq != wk_flush_seen) {
         wk_flush_seen = s->flush_seq;
         wk_notes_off_all();
+        flushed = 1;
+    }
+    if (ka_shm_pending(s) <= 0) {
+        /* ring 满了：宿主没在取，别白干。收声是**现在就要**的动作，零输出跑一块把它送出去。 */
+        if (flushed) ka_v3_render(0, s->block, pos);
+        return;
     }
 
     eb = &s->evs[s->w % KA_SHM_EV_SLOTS];
@@ -1054,6 +1063,10 @@ static int wk_cmd_body(ka_shm* s) {
         s->aud_blocks = 0;
         break;
     }
+    case KA_CMD_PRIME:
+        s->ret = ka_v3_prime();
+        s->iv[0] = g_prime_rc;
+        break;
     case KA_CMD_STATE_SAVE:
         s->ret = ka_v3_state_save(s->has_path ? s->path : 0);
         break;
@@ -1169,6 +1182,17 @@ int __stdcall kaMain(void) {
 
     for (;;) {
         s->beat = s->beat + 1;
+
+        /* 编辑器窗口在不在前台（wk_render 的 mon 用它）。前台窗属于本进程 = 用户正在插件
+         * 自己的界面里操作（编辑器或它自己的弹窗）。只在 ed_mon 期间问，播放时用不上。 */
+        if (s->ed_mon) {
+            uint32_t pid = 0;
+            void* fg = GetForegroundWindow();
+            if (fg && g_ed_open) GetWindowThreadProcessId(fg, &pid);
+            s->ed_front = (pid == GetCurrentProcessId()) ? 1 : 0;
+        } else if (s->ed_front) {
+            s->ed_front = 0;
+        }
 
         if (WaitForSingleObject(ev_cmd, 1) == KA_WAIT_OBJECT_0) {
             if (wk_cmd(s) == 0) break;

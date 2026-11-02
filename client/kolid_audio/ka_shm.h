@@ -27,7 +27,7 @@
 #include <stdint.h>
 
 #define KA_SHM_MAGIC  0x4B415348u          /* 'KASH' —— 宿主 attach 时先认它，认不出就是旧版/错名 */
-#define KA_SHM_ABI    4                    /* 4：事件槽 —— 调度归宿主，worker 只按块渲染（3 是 ed_mon） */
+#define KA_SHM_ABI    5                    /* 5：ed_front（编辑器是否在前台；4 是事件槽，3 是 ed_mon） */
 #define KA_SHM_BLOCK  512                  /* 每块帧数，与设备的 KA_FRAMES 对齐 */
 #define KA_SHM_RING   8                    /* ring 里最多压 8 块 ≈ 85ms 的余量 */
 #define KA_SHM_PATH   320
@@ -76,6 +76,7 @@
 #define KA_CMD_EDITOR_OPEN  34             /* 开插件自己的编辑器窗口（worker 的 UI 线程）
                                             * → ret = 0/负, iv[0] = 是否开着, iv[1..2] = 客户区宽高 */
 #define KA_CMD_EDITOR_CLOSE 35             /* 关编辑器（removed + release view）→ ret = 0/负 */
+#define KA_CMD_PRIME     40               /* 组件 setState(空流) 敲一次门 */
 #define KA_CMD_EDITOR_STATE 36             /* → ret = 1 开着, iv[0] = 用户点 X 关过几次, iv[1..2] = 宽高 */
 
 /* 错误码（与插件自己的错误码错开，负数段归"通道"这一层） */
@@ -178,7 +179,14 @@ typedef struct {
                                             * 界面里的键盘/试听按钮只会从 process() 出声，而暂停时
                                             * 本来一块都不渲 —— 于是"编辑界面里完全没声音"。
                                             * 开着窗口 = 用户正在里面试音，照渲；量按 block 压小，
-                                            * 别提前灌满整条 ring（那手感就晚了 85ms）。 */
+                                            * 别提前灌满整条 ring（那手感就晚了 85ms）。
+                                            * **光开着不够**：窗口开着但用户已经在主界面按了暂停时，
+                                            * 继续渲就是把暂停当成没按（长 release 的音听着一直不停）。 */
+    volatile int32_t ed_front;             /* 那个窗口**此刻在前台**（只有 worker 写）。
+                                            * 前台窗属于 worker 进程 = 用户正在插件界面里操作
+                                            * （编辑器或它自己的下拉/预置弹窗）。
+                                            * 宿主也读它：暂停时 ed_mon && ed_front 才留着 ring 混音，
+                                            * 否则照常抽干 —— 不留暂停前渲好的块。 */
 
     /* ── 事件槽（宿主写、worker 读）：调度只有一个作者 ────────────────────────────
      * 宿主每块把 worker 提前量覆盖到的未来块都填好；worker 渲染第 W 块时读 evs[W % SLOTS]，

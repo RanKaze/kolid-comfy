@@ -507,9 +507,11 @@ export interface InterfacePort {
 // 宽 / 高 / 时长 / 帧率 / 首帧 / 末帧 / 视频出口）各绑一个真实端口，时间线上的 video generator
 // 段就照这份绑定去填参数、去接产物。绑哪个端口是用户的事（enum 下拉），槽位本身是死的 ——
 // 这样段那一侧永远知道"提示词往哪口喂、产物从哪口出"，不必认识任何具体接口。
+// 另有一个**可选**的参考槽（Video Reference 开着时才出现）：段选一条时间线视频轨，跑的时候
+// 按段的绝对时间窗把那条轨采样成一列图喂进这一口。
 export type VideoGenSlot =
   | 'prompt' | 'width' | 'height' | 'duration' | 'fps'
-  | 'first_frame' | 'last_frame' | 'video';
+  | 'first_frame' | 'last_frame' | 'reference' | 'video';
 
 /** 槽位 → 端口的绑定表。键是槽位，值是端口号（1 起，与 InterfacePort.num 同一套）。 */
 export type VideoGenPorts = Partial<Record<VideoGenSlot, number>>;
@@ -523,6 +525,10 @@ export interface VideoGenConfig {
   fixed_fps?: boolean;
   /** Fixed FPS 的那个数（1..120）。只在 `fixed_fps` 开着时有意义。 */
   fixed_fps_value?: number;
+  /** Video Reference：开着 = 这台生成器多一个参考视频入口（`ports.reference`，一个 IMAGE
+   *  口）。段上因此多一个"参考通道"选项：选一条时间线视频轨，跑的时候按段的绝对时间窗
+   *  把那条轨采样成一列图喂进这一口。关着 = 那一口整行不出现（绑过也一并解掉）。 */
+  video_ref?: boolean;
 }
 
 /** 槽位表：显示名、在接口的哪一侧、允许绑的端口类型、以及是不是**必绑**。
@@ -546,6 +552,8 @@ export const VIDEO_GEN_SLOTS: {
     tip: 'An image input the segment can bind on its left edge — an image asset or a .cud file.' },
   { key: 'last_frame', label: 'Last frame', side: 'start', types: ['IMAGE'],
     tip: 'An image input the segment can bind on its right edge — an image asset or a .cud file.' },
+  { key: 'reference', label: 'Video ref', side: 'start', types: ['IMAGE'],
+    tip: 'The reference-video input. With Video Reference on, each segment can pick a timeline video track; the run samples that track over the segment\'s absolute time range into an image list here — one frame per generated frame at the generator\'s output FPS. The track must cover the whole range; a gap stops the run before it starts.' },
   { key: 'video', label: 'Video', side: 'end', types: ['VIDEO', 'IMAGE'],
     tip: 'The output — where the finished clip comes back. A VIDEO port hands back a clip as-is; an IMAGE port hands back frames, which the run stitches into a clip at the FPS you bound (same landing spot on the output track either way).' },
 ];
@@ -590,7 +598,7 @@ export interface InterfaceMetaEntry {
   names?: { start?: Record<string, string>; end?: Record<string, string> };
   modes?: { block: boolean; processor: boolean; video_generator?: boolean };
   block_ports?: { in?: number; out?: number };
-  /** Video Generator：开了那个 toggle 才有 —— 八个固定槽各绑一个端口。 */
+  /** Video Generator：开了那个 toggle 才有 —— 八个固定槽 + 可选的参考槽各绑一个端口。 */
   video_gen?: VideoGenConfig;
   /** image/mask 出口的默认落位（键 = 端口号字符串），后端归一化时按枚举收敛。 */
   output_targets?: Partial<Record<string, ProcessorDst>>;

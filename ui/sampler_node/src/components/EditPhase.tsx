@@ -29,7 +29,7 @@ import { MidiWorkspace } from '../midi/Workspace';
 import { patchMidiSettings, useMidiSettings, type LibraryState } from '../midi/settings';
 import { reloadInstruments, useInstrumentLibrary } from '../midi/library';
 import { unitIcon } from '../workbench/icons';
-import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VgenFrameSpec, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenRefImageTrack, setVideoGenRefTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vgenRefFramePlan, vgenRefPlan, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
@@ -410,14 +410,20 @@ const vgenFrameKey = (ref: VidGenFrameRef | null | undefined): string =>
   ref?.kind === 'asset' ? `asset:${ref.hash}` : ref?.kind === 'cud' ? `cud:${ref.path}` : '';
 
 /** 这一段自己那把首帧喂什么、从哪儿来。链着前一段时**链优先**（前段绑了末帧卡用那张，
- *  否则把它产物的末帧交给后端现抽 —— 后端不认识那个文件就当场报错，不静默丢图）。 */
+ *  否则把它产物的末帧交给后端现抽 —— 后端不认识那个文件就当场报错，不静默丢图）。
+ *  显式绑定与链都没占着的首/末帧，才由**参考图通道**兜底（按绝对时间取对应帧）。 */
 const vgenFrameInputsOf = (
   p: VidProject, clip: VidClip,
-): { image_keys: Record<string, string>; chain_frames: Record<string, { src: string; fps?: number }> } => {
+): {
+  image_keys: Record<string, string>;
+  chain_frames: Record<string, { src: string; fps?: number }>;
+  video_frames: Record<string, VgenFrameSpec>;
+} => {
   const v = clip.vgen;
   const image_keys: Record<string, string> = {};
   const chain_frames: Record<string, { src: string; fps?: number }> = {};
-  if (!v) return { image_keys, chain_frames };
+  const video_frames: Record<string, VgenFrameSpec> = {};
+  if (!v) return { image_keys, chain_frames, video_frames };
   const prev = vgenChainPrevOf(p, clip);
   if (v.ports.first_frame) {
     if (prev) {
@@ -439,7 +445,11 @@ const vgenFrameInputsOf = (
     const k = vgenFrameKey(v.last_frame);
     if (k) image_keys[String(v.ports.last_frame)] = k;
   }
-  return { image_keys, chain_frames };
+  // 参考图兜底：显式/链优先，vgenRefFramePlan 只会给出仍空着的槽。
+  const refFrames = vgenRefFramePlan(p, clip);
+  if (refFrames.first) video_frames[String(v.ports.first_frame)] = refFrames.first;
+  if (refFrames.last) video_frames[String(v.ports.last_frame)] = refFrames.last;
+  return { image_keys, chain_frames, video_frames };
 };
 
 /** 跑 target 之前必须先跑的链上前段（早 → 晚，不含自己）。前段绑了末帧卡就没有依赖；
@@ -1689,7 +1699,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   // ── Video Generator ────────────────────────────────────────────────────────────────────
   // 一台"视频生成器"就是一个开了 Video Generator 的 interface：Interface tab 里那八个固定槽
-  // 各绑了一个端口，于是**段**这一侧不必认识任何具体接口 —— 它只知道"提示词往哪口喂、宽高
+  // （外加一个可选的参考槽）各绑了一个端口，于是**段**这一侧不必认识任何具体接口 —— 它只知道"提示词往哪口喂、宽高
   // 时长帧率往哪口喂、首末帧往哪口喂、产物从哪口回来"。段自己揣着这份绑定与参数（快照），
   // 所以接口后来改了绑定、老段仍然按自己当时那份跑。
   /** Video Generator 那份配置以 **interfaceMeta（本地真值）** 为准：interfaces 是后端快照，
@@ -1843,7 +1853,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       throw new Error(`「${v.iface}」 is not connected (package disconnected?).`);
     }
     // 共享帧在**跑的这一刻**才解析：前段可能刚在这一趟里跑完，产物才落位。
-    const { image_keys, chain_frames } = vgenFrameInputsOf(proj, clip);
+    const { image_keys, chain_frames, video_frames } = vgenFrameInputsOf(proj, clip);
     // 分辨率也是跑的这一刻才定：轨上开了 from canvas 就按当下的画布 × scale 覆写宽高口；
     // 轨上没设置过（老存档）就沿用段上那份旧参数。
     const res = vgenResolutionOf(proj, clip, getBlendUi().canvas);
@@ -1858,6 +1868,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     if (trackFps && v.ports.fps && !v.fixed_fps) {
       params = { ...params, [String(v.ports.fps)]: trackFps };
     }
+    // 参考视频：段 [start, start+duration) 映射到选定视频轨的同一时间区间，
+    // 按出片帧率切帧段 —— 覆盖不满在这里就抛，不往下跑。
+    const refPlan = vgenRefPlan(proj, clip);
     setProcFill(clipId, 0);
     try {
       const metas = await executeSeg(idx, params, {}, `Generating with 「${v.iface}」…`, 0, 1,
@@ -1867,6 +1880,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         // 提示词的两颗 preset id 也一并带上：后端按"端口纯文本 → 段 preset → 轨 preset"
         // 的顺序拼成这一段的 prompt。
         { offline: true, image_keys, chain_frames,
+          ...(Object.keys(video_frames).length ? { frame_refs: video_frames } : {}),
+          ...(refPlan ? { reference_video: { [String(refPlan.port)]: {
+            fps: refPlan.fps, expect: refPlan.expect, specs: refPlan.specs,
+          } } } : {}),
           vgen: { ports: v.ports, fixed_fps: !!v.fixed_fps, fixed_fps_value: v.fixed_fps_value,
             ...(v.promptPresetId ? { prompt_preset_id: v.promptPresetId } : {}),
             ...(proj.tracks.find(t => t.id === clip.trackId)?.vgenPromptPresetId
@@ -1907,6 +1924,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       }
       if (procSlotBusy(proj, v.port ?? 0, seg.start, seg.duration, seg.id)) {
         setVidProcRun({ state: 'error', msg: `「${seg.name}」 cannot run — the output track already has a clip over ${seg.start.toFixed(1)}s–${(seg.start + seg.duration).toFixed(1)}s.` });
+        return;
+      }
+      // 开跑前先验：参考视频要求整段被覆盖；参考图只验配置（轨道还在、帧率可算），
+      // 某一头没有对应帧是正常情况（那一头保持空），不在这里拦。
+      try { vgenRefPlan(proj, seg); vgenRefFramePlan(proj, seg); }
+      catch (e: unknown) {
+        setVidProcRun({ state: 'error', msg: `「${seg.name}」 reference — ${e instanceof Error ? e.message : String(e)}` });
         return;
       }
     }
@@ -1965,6 +1989,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       clips: proj.clips.map(c => (c.id === clipId && c.vgen)
         ? { ...c, vgen: { ...c.vgen, [which]: ref } } : c),
     }), 'Bind frame');
+  }, [vidUpdate]);
+
+  /** 参考通道写回（null = 这一段不喂参考）。 */
+  const setVgenRefTrack = useCallback((clipId: string, trackId: string | null) => {
+    vidUpdate(proj => setVideoGenRefTrack(proj, clipId, trackId), 'Generator reference channel');
+  }, [vidUpdate]);
+
+  /** 参考图通道写回（null = 未绑定的首/末帧不喂）。 */
+  const setVgenRefImageTrack = useCallback((clipId: string, trackId: string | null) => {
+    vidUpdate(proj => setVideoGenRefImageTrack(proj, clipId, trackId), 'Generator reference image');
   }, [vidUpdate]);
 
   /** 关键帧录制/加帧的参数快照:向工作台页要**那一套图层集**的 transform + fx 参数
@@ -3757,6 +3791,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     onVGenTrackSettings={setVgenTrackSettingsId}
                     onVGenTrackPrompt={openVgenTrackPrompt}
                     onVGenPrompt={id => { void openVgenSegPrompt(id); }}
+                    vgenRefTracks={vidProject.tracks.filter(t => t.kind === 'video').map(t => ({ id: t.id, name: t.name }))}
+                    onVGenRefTrack={setVgenRefTrack}
+                    onVGenRefImageTrack={setVgenRefImageTrack}
                     onVGenCudOpen={path => { void openVgenCud(path); }} />,
               vassets: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
@@ -5503,6 +5540,14 @@ const InterfaceTab: React.FC<{
     const val = Number.isFinite(n) ? Math.max(1, Math.min(120, n)) : (Number(cur.video_gen?.fixed_fps_value) || 16);
     patchMeta(iface, { video_gen: { ...(cur.video_gen || { ports: {} }), fixed_fps_value: val } });
   };
+  /** Video Reference：开着才给参考槽（段上才会出现参考通道）。关掉时顺手解绑 ——
+   *  留一条绑着但整行不出现的端口，比"没绑"更难解释。 */
+  const setVideoGenVideoRef = (iface: string, on: boolean) => {
+    const cur = metaFor(iface);
+    const ports = { ...((cur.video_gen?.ports) || {}) };
+    if (!on) delete ports.reference;
+    patchMeta(iface, { video_gen: { ...(cur.video_gen || {}), ports, video_ref: on } });
+  };
   const setBlockPort = (iface: string, side: 'in' | 'out', num: number) => {
     const cur = metaFor(iface);
     patchMeta(iface, { block_ports: { ...(cur.block_ports || {}), [side]: num } });
@@ -5684,9 +5729,18 @@ const InterfaceTab: React.FC<{
                             <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.65)', margin: '2px 0 4px' }}>
                               Video Generator ports
                             </div>
+                            {/* Video Reference：开着才出现参考槽。段上据此多一枚参考通道选项 ——
+                                选一条时间线视频轨，跑的时候把那条轨在段的时间窗内采样成一列图。 */}
+                            <div style={{ ...toggleRow, marginBottom: 2 }}
+                              title="Video Reference — adds a reference-video input port. With it bound, every segment can pick a timeline video track; the run samples that track over the segment's absolute time range into an image list (one frame per generated frame at this generator's output FPS). The track must cover the whole range — a gap stops the run before it starts.">
+                              <span style={toggleLabel}>Video Reference</span>
+                              <IOSToggle checked={!!vg.video_ref}
+                                onChange={v => setVideoGenVideoRef(iface.name, v)} />
+                            </div>
                             {/* Fixed FPS 开着 = 帧率是整台生成器写死的（`fixed_fps_value`），
                                 fps 槽那一口因此**整行不出现**（也不必绑）。 */}
-                            {VIDEO_GEN_SLOTS.filter(s => !(s.key === 'fps' && vg.fixed_fps)).map(slot => {
+                            {VIDEO_GEN_SLOTS.filter(s => !(s.key === 'fps' && vg.fixed_fps)
+                              && !(s.key === 'reference' && !vg.video_ref)).map(slot => {
                               const list = ((slot.side === 'start' ? iface.start_ports : iface.end_ports) ?? [])
                                 .filter(p => slot.types.includes(p.type));
                               const cur = ports[slot.key] ?? 0;

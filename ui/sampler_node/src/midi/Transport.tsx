@@ -16,8 +16,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { clock, fmtBarBeat, fmtClock } from './clock';
 import { useClockText } from './hooks';
-import { MAX_TEMPO, MIN_TEMPO, beatToSeconds, clampInt, projectBeats, quantizeTrack, secondsToBeat } from './model';
+import { MAX_TEMPO, MIN_TEMPO, beatToSeconds, clampInt, quantizeTrack, secondsToBeat } from './model';
 import { DEFAULT_PPS, GRID_CHOICES, ZOOM_MAX, ZOOM_MIN } from './PianoRoll';
+import { TransportKeys } from './TransportKeys';
 import type { MidiCtl } from './types';
 
 const C = {
@@ -68,8 +69,6 @@ export const MidiTransport: React.FC<{
   useClockText(timeRef, fmtClock);
   useClockText(barRef, s => fmtBarBeat(s, project.tempo, project.timeSig));
 
-  const end = projectBeats(project);
-  const totalSec = beatToSeconds(end, project.tempo);
 
   const setTempo = (v: number) => {
     update(p => ({ ...p, tempo: clampInt(v, MIN_TEMPO, MAX_TEMPO) }), 'Tempo');
@@ -99,20 +98,21 @@ export const MidiTransport: React.FC<{
 
   return (
     <div style={C.bar}>
+      {/* 走带键与 Video 监视器下那条**同一个组件**（midi/TransportKeys）：回入点、播停、
+          停止、循环四种语义只写一份。这里只把皮肤（C.key）交给它。 */}
       <div style={C.group}>
-        <button style={C.key()} title="回到开头 (Home)"
-          onClick={() => ctl.seekBeat(0)}>⏮</button>
-        <button style={C.key()} title="Stop — 回到循环起点（没设循环就回 0）"
-          onClick={() => ctl.stopAt(beatToSeconds(project.loop.on ? project.loop.a : 0, project.tempo))}>■</button>
-        <button style={C.key(ctl.playing)} title="Play / Pause"
-          onClick={() => (ctl.playing ? ctl.pause() : ctl.play())}>
-          {ctl.playing ? '❙❙' : '▶'}
-        </button>
+        <TransportKeys
+          playing={ctl.playing}
+          range={{ on: project.loop.on, inSec: beatToSeconds(project.loop.a, project.tempo) }}
+          endSec={ctl.endSec}
+          onToggleLoop={ctl.toggleLoop}
+          keyStyle={C.key}
+        />
       </div>
 
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, minWidth: 150 }}>
         <span ref={timeRef} style={C.readout}>0:00.000</span>
-        <span style={C.sub}>of {fmtClock(totalSec)}</span>
+        <span style={C.sub}>of {fmtClock(ctl.endSec)}</span>
       </div>
       <span ref={barRef} style={{ ...C.readout, fontSize: 12, color: 'rgba(255,255,255,0.72)' }}>1.1.000</span>
 
@@ -143,14 +143,6 @@ export const MidiTransport: React.FC<{
           <button key={d} style={{ ...C.key(project.timeSig[1] === d), minWidth: 20, height: 22, padding: '0 5px', fontSize: 10.5, lineHeight: '20px' }}
             onClick={() => update(p => ({ ...p, timeSig: [p.timeSig[0], d] }), 'Time signature')}>{d}</button>
         ))}
-      </div>
-
-      <div style={C.sep} />
-
-      <div style={C.group}>
-        <button style={{ ...C.key(project.loop.on), height: 22, lineHeight: '20px', fontSize: 10.5 }}
-          title="循环：播到 B 就跳回 A。A/B 的位置在卷帘标尺上拖那两枚楔形把手（与 Tracks 的入/出点同一套画法）"
-          onClick={() => update(p => ({ ...p, loop: { ...p.loop, on: !p.loop.on } }), 'Loop')}>LOOP</button>
       </div>
 
       <div style={C.sep} />

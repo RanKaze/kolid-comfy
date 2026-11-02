@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  type VidController, type VidClip, clipAt, clipAtSolo, fmtTime, kfSample, kfU, vidDuration,
+  type VidController, type VidClip, clipAt, clipAtSolo, fmtTime, kfSample, kfU, toggleLoopRange, vidDuration,
 } from './model';
+import { TransportKeys } from '../../midi/TransportKeys';
 import { compositePlanAt, sourceTime, warmSweepAt, type VidCompositePlan } from './composite';
 import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame } from './previews';
 import { markRender } from './perf';
@@ -10,8 +11,8 @@ import { clock } from '../../midi/clock';
 
 // ── Player 窗（监视器）───────────────────────────────────────────────────────────────────────
 // 播放头落在哪，画面就是最上层视频轨命中的那一段（合成口径"最上层优先"）。声音不走 <video>：
-// 它永远静音 —— 音频只从 VidAudio 的 WebAudio 图里出来（音频轨上的片段，含视频拆出来的联动段），
-// 这样画面与声音各走各的、互不抢设备。
+// 它永远静音 —— 音频段（含视频拆出来的联动段）的 PCM 交给本机引擎，和 MIDI 轨在同一个音频
+// 线程里混音（见 pcmClips.ts / timelineAudio.ts），画面与声音互不抢设备。
 //
 // 播放头走外置 transport（vid.transport）：读数/scrub 条每帧直改 DOM，活片段只在**换段**那一刻
 // 走 React（换 src）。**走带归公共时钟**（midi/clock，见 EditPhase 的投影与 timelineAudio.ts）：
@@ -53,7 +54,7 @@ export const VidPlayer: React.FC<{
   // 计划由 compositePlanAt 在 transport 每一次 tick 上现算：命中 layer 段就向工作台页面发一包
   // 「这一帧该看什么」，页面用那一段自己的图层集合成后回一张图 —— 画面只有那些图层，不叠脚下的
   // 视频帧（空段就是空图）。画面与音频各走各的 —— 主 <video> 没有被停掉：它仍然播着脚下那条
-  // 视频轨，给输出定栅格，声音仍然只从 VidAudio 出来。`compMode` 只在换段/进出合成那一刻走
+  // 视频轨，给输出定栅格；声音仍然只从本机引擎出来。`compMode` 只在换段/进出合成那一刻走
   // React；每一帧的回图直改 canvas，不惊动整页。
   // **帧不再从这里抓。** 源帧由工作台页面自己的镜像 <video> 播放（见 blend_node 的 vidSrcSync）：
   // 这一侧只发"哪条轨、源在哪、这一帧源内第几秒"，一个像素都不过界。早先那条路每帧要给每条
@@ -123,12 +124,6 @@ export const VidPlayer: React.FC<{
     const v = videoRef.current;
     if (v) v.style.opacity = '1';
   }, []);
-  const seek = useCallback((t: number) => {
-    // 声源不在这里管：暂停/播放对公共时钟说一句，整条时间线的音频由 timelineAudio 收摊
-    // （一处调度，切模式也不会漏停）。这里只把播放头落过去。
-    vid.seek(Math.max(0, t));
-  }, [vid]);
-
   // 一包「这一帧该看什么」：同一个 reqId 绑一次回图。发包是**同步**的（帧从这里过不了界了）。
   // 发得比页面画得快不要紧 —— 页面把合成与回图都并到同一口 rAF，一帧最多画一次、只认最新的
   // 那一包；这里只拦"同一帧连发两包"。
@@ -913,12 +908,16 @@ export const VidPlayer: React.FC<{
       {/* 走带控制。这一条**不**让工作台画布盖住（EditPhase 量画布高度时按它上沿截断）——
           选中 Layer 段时画布只占上面那块画面，按钮留在原位。 */}
       <div data-vid-transport="" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderTop: '0.5px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
-        <button style={tCtrl} title="Go to In point (or start)" onClick={() => seek(inSet ? p.inPoint : 0)}>⏮</button>
-        <button style={{ ...tCtrl, width: 34 }} title={playing ? 'Pause' : 'Play (loops within In/Out when set)'}
-          onClick={() => vid.setPlaying(!playing)}>
-          {playing ? '⏸' : '▶'}
-        </button>
-        <button style={tCtrl} title="Stop — pause and return to the In point" onClick={() => vid.stopAt(inSet ? p.inPoint : 0)}>⏹</button>
+        {/* 与 MIDI 主窗底部那条**同一个组件**（midi/TransportKeys）：回入点、播停、停止、
+            循环四种语义只写一份。声源不在这里管 —— 暂停/播放对公共时钟说一句，整条时间线的
+            音频由 timelineAudio 收摊（一处调度，切模式也不会漏停）。 */}
+        <TransportKeys
+          playing={playing}
+          range={{ on: inSet, inSec: p.inPoint }}
+          endSec={dur}
+          onToggleLoop={() => vid.update(p2 => toggleLoopRange(p2), 'Loop')}
+          keyStyle={() => tCtrl}
+        />
         {/* 读数靠右：右边原来那条进度条撤掉了 —— 拖游标在时间线的标尺上做（那里才是它的家），
             监视器下面再放一条重复的进度条只会让人以为它是另一个控件。 */}
         <span style={{ marginLeft: 'auto', fontSize: 11, color: 'rgba(255,255,255,0.65)', fontVariantNumeric: 'tabular-nums' }}>

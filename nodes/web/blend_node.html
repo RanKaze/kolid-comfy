@@ -4326,8 +4326,9 @@ const PREVIEW_INTERVAL_MS = 120;
 // 肉眼就是卡（实测 155ms/次 ≈ 6.5fps）。编辑态仍用 120ms —— 笔刷路径对主线程更敏感。
 const PREVIEW_INTERVAL_BASE_MS = 70;
 // 帧包正在推画面时（播放一层带关键帧的 Layer 段）再放一档：那一趟的主线程留给合成，而预览那张
-// JPEG（512 长边编一次 + 一条 base64 出去）是纯附加开销 —— 4/s 足够"看得出在动"。
-const PREVIEW_INTERVAL_FLOW_MS = 250;
+// JPEG（512 长边编一次 + 一条 base64 出去）是纯附加开销 —— 2/s 仍然"看得出在动"，再快就是和
+// 画面抢同一条主线程。
+const PREVIEW_INTERVAL_FLOW_MS = 500;
 const CHECKER_SIZE = 8;                     // must match #blendCanvas background-size
 const CHECKER_DARK = '#1a1a1a';             // must match #blendCanvas background-color
 const CHECKER_LIGHT = '#242424';            // must match the #blendCanvas gradient colour
@@ -4805,7 +4806,7 @@ function foldTrace(l, branch) {
     const t = window.__foldTrace;
     if (t && t.push) t.push({ n: (l && l.name) || '?', b: branch });
 }
-function layerItem(l) {
+function layerItem(l, allowTex) {
     if (!l || !l.visible || !layerCanDraw(l)) return null;
     const opacity = layerOpacity(l);
     if (opacity <= 0) return null;             // 完全透明：这一层这一帧什么都不出
@@ -4829,6 +4830,13 @@ function layerItem(l) {
             // 栅格层的像素就是画布像素，照 drawLayer 的规矩按 1:1 贴（transform 不吃）。
             const tex = fxResolvedTexture(l);
             if (tex) { foldTrace(l, 'tex'); return { tex: tex.tex, transform: isRasterLayer(l) ? null : tr, opacity }; }
+            // 第四条（播放时的主路）：整层折进纹理 —— 与上一条不同，这层带着面（视频帧/Stash 快照），
+            // 所以必须先把底 + 面折进 surf 再跑链；只是链的**出口**走纹理，省掉整幅回读与逐像素还原。
+            // 只有不会进 Stash 累积账的层才许走（见 render 循环的 allowTex）。
+            if (allowTex) {
+                const got = layerTextureViaPlan(l);
+                if (got) { foldTrace(l, 'tex-plan'); return { tex: got.tex, mask: got.mask || null, transform: isRasterLayer(l) ? null : tr, opacity }; }
+            }
         }
     }
     let src = null;
@@ -4919,6 +4927,42 @@ function layerSourceViaPlan(l) {
     __vidPerf.foldPlan = (__vidPerf.foldPlan | 0) + 1;
     foldSrcCache.set(l, { key, cv });
     return cv;
+}
+
+// ── 同一趟折，但结果**留在纹理上**（不落 2D）──────────────────────────────────────────
+// 播放一层带特效链的段时，2D 那条出口每帧要：整幅 readPixels（GPU 同步停等）→ JS 逐像素翻行
+// + 反预乘 → putImageData。832×1216 实测一次 ≈ 13ms（playback 时主线程的一半）。显示面本来就
+// 是 GL（P3.7 全页一台上下文），链的结果纹理可以直接绑上去 —— 这三步一个都不需要。
+// 只在**不会有 Stash 把它抄成 2D** 的层上用（累积账只认 src，见 render 循环里的 stashAbove）。
+// 与 applyLayerEffectsTexture 同一条发布区页（按层固定），所以跨帧缓存回来的纹理不会被别的层覆盖。
+const foldTexCache = new WeakMap();      // layer → { key, got }
+function layerTextureViaPlan(l) {
+    if (!stageGL) return null;
+    if (typeof KLayerFold === 'undefined' || typeof KCompositor === 'undefined' || !KCompositor.foldLayer) return null;
+    if (!l || !layerCanDraw(l)) return null;
+    if (isRasterLayer(l)) return null;
+    syncGeneratorFaces(l);
+    const nat = layerGridOf(l);
+    if (!nat.w || !nat.h) return null;
+    const recs = attrRecordsOf(l);
+    if (!recs.some((r, i) => attrInks(r, l, i, FX_CUT_ALL))) return null;
+    // 钥匙与 layerSourceViaPlan 逐项同 —— 两边只是出口不同，内容身份必须一条口径。
+    const key = fxSignature(l) + '|' + fxMapStamp(l) + '|' + fxExternalStamp(l) + '|'
+        + (l.paintGen | 0) + '|' + attrPaintGens(l) + '|' + stashFaceIds(l) + '|'
+        + vidLayerFrameStamp(l) + '|' + nat.w + 'x' + nat.h;
+    const hit = foldTexCache.get(l);
+    if (hit && hit.key === key) return hit.got || null;
+    let got = null;
+    try {
+        const pl = KLayerFold.compile([l], foldEnvPage()).layers[0];
+        if (pl) got = fxMirrorHidden(l, () => KCompositor.foldLayer(pl, 0, nat.w, nat.h, true, 'viditem:' + l.id));
+    } catch (e) { got = null; }
+    // 链不是"最后一笔墨"（后面还有 decal / 生成器）时 foldLayer 会退回 2D 面 —— 那条路我们不走，
+    // 交给下面原有的 layerSourceViaPlan（它有自己的缓存）。这个"这层不支持纹理"的结论也按 key
+    // 记住：否则每一帧都白折一趟再从 2D 折一遍。
+    if (!got || !got.tex) { foldTexCache.set(l, { key, got: null }); return null; }
+    foldTexCache.set(l, { key, got });
+    return got;
 }
 
 /** render 的**同步不变量**（P3.2 起，改动这一带的人必须知道）。
@@ -5050,7 +5094,12 @@ function render(opts) {
                     // 那两个都只是"顺带装着一张含底片的图"。
                     stashCapture(l, stashAccLive, belowWork);
                 }
-                const it = layerItem(l);
+                // 这一层的像素要不要以**2D 面**交出去：Stash 的累积账只认 `src`（presentItems2D）。
+                // Stash 在循环里更晚被抄到（索引更小 = 压在它上面），所以只要上方有 Stash，这一层
+                // 就必须留在 2D；否则可以走纹理出口（省整幅回读 + 逐像素还原，见 layerTextureViaPlan）。
+                let stashAbove = false;
+                if (stashAccLive) for (let j = 0; j < i && !stashAbove; j++) stashAbove = layerWantsStash(layers[j]);
+                const it = layerItem(l, !stashAbove);
                 if (it) {
                     work.push(it);
                     // 同一次摊平数学（presentItems2D）→ 与 stage 上那几层逐像素同，只少一张底片。

@@ -28,6 +28,7 @@ GetCommandLineW
 GetLastError
 AddVectoredExceptionHandler
 GetCurrentThreadId
+GetCurrentProcessId
 GetTickCount
 TlsGetValue
 GetModuleHandleW

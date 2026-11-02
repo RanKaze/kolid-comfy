@@ -21,7 +21,10 @@ export type MidiEditor = {
   trackId: string;
   /** 这一轨，`notes` 已经换成**段内拍**（0 = 窗口第一拍），只含窗口里看得见的那部分。 */
   track: MidiTrack;
-  /** 窗口长度（拍）= 段在时间线上的时长。音符不许画到它外面。 */
+  /** 段内拍上落在**范围右边界之外**的音符（段内容里右裁掉的那截）。只画不编辑 ——
+   *  压暗画在段尾右边，拖右边界把它们收回范围就重新变成可编辑的音符。 */
+  outsideNotes: MidiNote[];
+  /** 窗口长度（拍）= 段在时间线上的时长，也是范围游标的右边界。音符不许画到它外面。 */
   length: number;
   /** 窗口第一拍在全局拍轴上的位置（seek / 播放头换算用）。 */
   baseBeat: number;
@@ -46,12 +49,19 @@ export type MidiCtl = {
   update: (fn: (p: MidiProject) => MidiProject, label?: string) => void;
   /** 改选中那一段的音符（段内拍进、段内拍出）。 */
   updateEditor: (fn: (t: MidiTrack) => MidiTrack, label?: string) => void;
+  /** 拖范围游标的右边界：把段尾落在某一拍（段内拍）。左边界恒为 0.0，不参与。 */
+  setEditorLength: (beats: number) => void;
   /** 选中音符（给 agent 报 selection 用）；不改选中段。 */
   select: (trackId: string, noteId?: string) => void;
   /** 公共时钟的播放态与动词。位置一律由 clock 给，这里不缓存秒数。 */
   playing: boolean;
   play: () => void;
   pause: () => void;
+  /** 循环开关（两种模式同一个动作）：开 = 圈住整条时间线，关 = 清掉入/出点。 */
+  toggleLoop: () => void;
+  /** 时间线总长（秒）。片尾停止、读数里的 "of …"、走到片尾再按播放的回跳都用它 ——
+   *  与 Video 监视器同一个口径（不是 MIDI 内容自己的长度）。 */
+  endSec: number;
   /** 停止 = 先停再落位（顺序由 clock.stopAt 保证）。 */
   stopAt: (sec: number) => void;
   /** 跳到某一拍（全局拍，会换算成秒交给时钟）。 */

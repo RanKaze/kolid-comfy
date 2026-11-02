@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  type VidClip, type VidClipClipboard, type VidController, type VidPasteResult, type VidTrack, type VidMergeProbe,
-  addLayerClip, addMidiClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, midiClipWindow, midiNotesInClip, moveClip, moveTrack, musicOf, newVidId, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
-  vgenChainPrevOf, vgenSeamsOf, vgenWithDuration,
+  type VidClip, type VidClipClipboard, type VidController, type VgenFrameSpec, type VidPasteResult, type VidTrack, type VidMergeProbe,
+  addLayerClip, addMidiClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, midiClipWindow, midiNotesInClip, moveClip, moveClips, moveTrack, musicOf, newVidId, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
+  vgenChainPrevOf, vgenRefFramePlan, vgenSeamsOf, vgenWithDuration,
 } from './model';
 import { nativeEngine } from '../../midi/engine';
 import type { MidiCtl } from '../../midi/types';
@@ -216,6 +216,12 @@ const IconPaste: React.FC = () => (
     <path d="M6.4 8h3.2M6.4 10.4h3.2" />
   </svg>
 );
+const IconDelete: React.FC = () => (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 4.4h10M6.4 4.4V3h3.2v1.4M4.4 4.4l.7 8.2a1.1 1.1 0 0 0 1.1 1h3.6a1.1 1.1 0 0 0 1.1-1l.7-8.2" />
+  </svg>
+);
 
 
 // 剃刀光标与武装状态都搬进了 workbench/cutStore：时间线、卷帘、画布三处共用一个剪刀、
@@ -248,7 +254,11 @@ const KIND_UI = {
 
 
 type DragState =
-  | { mode: 'move'; id: string; x0: number; start0: number }
+  | { mode: 'move'; id: string; x0: number; start0: number;
+      /** 这次拖动要一起搬的**选中段**（按下那一刻的选中集）。 */
+      ids: string[];
+      /** 选中段 + 联动组同伴的整块时间范围（吸附与左边界夹取都按它算）。 */
+      blockStart: number; blockEnd: number }
   | { mode: 'l' | 'r'; id: string; x0: number }
   | { mode: 'scrub' }
   | { mode: 'in' }
@@ -274,13 +284,19 @@ export const VidTimeline: React.FC<{
   onVGenTrackPrompt?: (trackId: string) => void;
   /** video generator 段的 prompt 图标（段自己的提示词：prompt 弹窗）。 */
   onVGenPrompt?: (clipId: string) => void;
+  /** 生成器段的参考通道候选（时间线视频轨）。接口绑了 reference 口时才有意义。 */
+  vgenRefTracks?: { id: string; name: string }[];
+  /** 生成器段的参考通道写口（null = 不喂参考）。 */
+  onVGenRefTrack?: (clipId: string, trackId: string | null) => void;
+  /** 生成器段的参考图通道写口（null = 未绑定的首/末帧不喂）。 */
+  onVGenRefImageTrack?: (clipId: string, trackId: string | null) => void;
   /** .cud 帧卡预览上的跳转按钮：把那份工程送进 blend 编辑器（已开着就切换过去）。 */
   onVGenCudOpen?: (path: string, name?: string) => void;
   /** 当前文档是哪种模式。**MIDI 模式里这一条上的全局 Delete / Copy / Paste 全部让路**：
    *  那是卷帘的键（删音符），不能被"删掉选中的段"抢走。Cut（C）不受它限制 —— 那一条
    *  按鼠标在哪一面分派，指针停在时间线上就该剪段。 */
   mode: 'image' | 'video' | 'midi';
-}> = ({ vid, midi, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, onVGenCudOpen, mode }) => {
+}> = ({ vid, midi, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, vgenRefTracks, onVGenRefTrack, onVGenRefImageTrack, onVGenCudOpen, mode }) => {
   const { project: p, transport, pps } = vid;
   // 引擎那头每轨的装载结果（装上了没有、是不是 vst3）：MIDI 轨头的乐器键要读它来标红/点亮 Edit。
   // 音符拖动会连着推工程但乐器很少变，nativeEngine 只在"每轨乐器"变了时才叫醒订阅者。
@@ -678,7 +694,9 @@ export const VidTimeline: React.FC<{
       return;
     }
     // 选中口径（多选）：Ctrl/⌘ = 切换这一颗；Shift = 从锚点起同轨连选；普通点击 = 只选它。
-    // 已选中的段再按时保留整组高亮（多选后拖其中一段，其余不该被清掉）。
+    // 已选中的段再按时保留整组高亮（多选后拖其中一段，其余一起搬）。
+    // `dragIds` 按下这一刻就定死：拖动过程中选中集再变也不改这一趟搬谁。
+    let dragIds: string[] = [clip.id];
     if (e.shiftKey) {
       const anchor = selAnchorRef.current
         ? p.clips.find(c => c.id === selAnchorRef.current)
@@ -688,21 +706,41 @@ export const VidTimeline: React.FC<{
       const i1 = row.findIndex(c => c.id === clip.id);
       if (anchor && anchor.trackId === clip.trackId && i0 >= 0 && i1 >= 0) {
         const a = Math.min(i0, i1), b = Math.max(i0, i1);
-        setSelIds(new Set(row.slice(a, b + 1).map(c => c.id)));
+        const ids = row.slice(a, b + 1).map(c => c.id);
+        setSelIds(new Set(ids));
+        dragIds = ids;
       } else selectOnly(clip.id);
     } else if (e.ctrlKey || e.metaKey) {
-      setSelIds(prev => {
-        const next = new Set(prev);
-        if (next.has(clip.id)) next.delete(clip.id); else next.add(clip.id);
-        return next;
-      });
+      const next = new Set(selIds);
+      if (next.has(clip.id)) next.delete(clip.id); else next.add(clip.id);
+      setSelIds(next);
       selAnchorRef.current = clip.id;
+      // Ctrl 点掉的那一颗仍可拖动 —— 这时只搬它自己（选中态已经不含它）。
+      dragIds = next.has(clip.id) ? [...next] : [clip.id];
     } else if (!selIds.has(clip.id)) {
       selectOnly(clip.id);
+    } else {
+      dragIds = [...selIds];
     }
     vid.focusClip(clip);
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 指针已失活/合成事件：不挡手势 */ }
-    dragRef.current = { mode, id: clip.id, x0: e.clientX, start0: clip.start };
+    if (mode === 'move') {
+      // 整块范围 = 选中段 + 它们的联动组同伴。吸附、左边界夹取、跨轨判断都按这一块算。
+      const moving = new Set(dragIds);
+      const gids = new Set(dragIds
+        .map(id => p.clips.find(c => c.id === id)?.groupId)
+        .filter((g): g is string => !!g));
+      for (const c of p.clips) if (c.groupId && gids.has(c.groupId)) moving.add(c.id);
+      const movingClips = p.clips.filter(c => moving.has(c.id));
+      const blockStart = Math.min(...movingClips.map(c => c.start));
+      const blockEnd = Math.max(...movingClips.map(c => c.start + c.duration));
+      dragRef.current = {
+        mode, id: clip.id, x0: e.clientX, start0: clip.start,
+        ids: dragIds, blockStart, blockEnd,
+      };
+    } else {
+      dragRef.current = { mode, id: clip.id, x0: e.clientX };
+    }
     // 按在边缘上 = 即将裁剪：时长浮签从按下的这一刻就跟着指针（还没动也报当前值）。
     if (mode !== 'move') setTrimHint({ id: clip.id, x: e.clientX, y: e.clientY });
   };
@@ -725,10 +763,30 @@ export const VidTimeline: React.FC<{
         const tr = trackOf(p, tid);
         if (tr && clip && tr.kind === clip.kind) trackId = tid;
       }
-      const raw = Math.max(0, d.start0 + (e.clientX - d.x0) / vid.pps);
-      const snap = noSnap || !clip ? null : snapStart(raw, clip.duration, movingIds(clip, linked));
-      showSnap(snap ? snap.hit : null);
-      vid.update(proj => moveClip(proj, dragId, snap ? snap.start : raw, trackId, linked), 'Move clip');
+      if (d.ids.length > 1) {
+        // 多选整块：位移按整块算（含联动组同伴），吸附看整块的外沿；跨轨多选不做纵向移动。
+        const allSameTrack = !!clip && d.ids.every(id =>
+          p.clips.find(c => c.id === id)?.trackId === clip.trackId);
+        const dstTrack = allSameTrack ? trackId : undefined;
+        const moving = new Set(d.ids);
+        const gids = new Set(d.ids
+          .map(id => p.clips.find(c => c.id === id)?.groupId)
+          .filter((g): g is string => !!g));
+        for (const c of p.clips) if (c.groupId && gids.has(c.groupId)) moving.add(c.id);
+        let delta = Math.max((e.clientX - d.x0) / vid.pps, -d.blockStart);
+        const snap = noSnap ? null
+          : snapStart(d.blockStart + delta, d.blockEnd - d.blockStart, moving);
+        if (snap) delta = snap.start - d.blockStart;
+        showSnap(snap ? snap.hit : null);
+        const newDragStart = d.start0 + delta;
+        vid.update(proj => moveClips(proj, d.ids, dragId, newDragStart,
+          { trackId: dstTrack, linked }), 'Move clip');
+      } else {
+        const raw = Math.max(0, d.start0 + (e.clientX - d.x0) / vid.pps);
+        const snap = noSnap || !clip ? null : snapStart(raw, clip.duration, movingIds(clip, linked));
+        showSnap(snap ? snap.hit : null);
+        vid.update(proj => moveClip(proj, dragId, snap ? snap.start : raw, trackId, linked), 'Move clip');
+      }
     } else {
       const edge: 'l' | 'r' = d.mode;
       lastTrimAt = performance.now();
@@ -801,27 +859,10 @@ export const VidTimeline: React.FC<{
       : { ...proj, outPoint: Math.max(proj.inPoint + 0.1, t) }, 'Set range');
   };
 
-  // ── 键删 ── Delete/Backspace 删选中的片段（多选时整批删；输入框里不抢）。
-  // MIDI 模式里整条让路：Delete 在那时是卷帘的"删音符"（拍板 8）。
-  useEffect(() => {
-    if (mode === 'midi') return;
-    const onKey = (e: KeyboardEvent) => {
-      if (!selIds.size) return;
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement | null)?.isContentEditable) return;
-      if (!hit(e, 'timeline.delete')) return;
-      const ids = [...selIds];
-      vid.update(proj => ids.reduce((acc, id) => removeClip(acc, id), proj), 'Delete clip');
-      clearSel();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [selIds, vid, clearSel, mode]);
-
   // ── 右键合并（多选 + 头尾相接）────────────────────────────────────────────────────────────
   // 菜单只在"多选、同轨同类、首尾严格相接"时露头（结构由 vidMergeStructure 判，见 model）。
   // 参数/帧窗口不满足、占位段正在跑、Layer 两套内容不一致时按钮置灰，原因写在下面。
-  // 菜单如今是**段的通用右键菜单**:Copy / Paste 常驻;Merge 只在多选且首尾相接时出现
+  // 菜单如今是**段的通用右键菜单**:Copy / Paste / Delete 常驻;Merge 只在多选且首尾相接时出现
   // (`canMerge`,probe 只在那时有效)。
   type MergeMenuState = {
     x: number;
@@ -836,6 +877,36 @@ export const VidTimeline: React.FC<{
   const [mergeMenu, setMergeMenu] = useState<MergeMenuState | null>(null);
   // 轨头右键菜单:加轨的四个入口(Video / Layer / Audio / MIDI)都从这弹 —— 顶栏撤掉后的去处。
   const [trackMenu, setTrackMenu] = useState<{ x: number; y: number } | null>(null);
+  // 生成器段的参考菜单（参考视频 / 参考图共用一扇）：锚点是段上那颗键的位置（portal 到 body）。
+  const [refMenu, setRefMenu] = useState<{
+    clipId: string; kind: 'video' | 'image'; x: number; y: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!refMenu) return;
+    const inMenu = (t: EventTarget | null): boolean => {
+      const el = t as HTMLElement | null;
+      return !!el && typeof el.closest === 'function' && !!el.closest('[data-vid-vgen-ref-menu]');
+    };
+    const onDown = (e: PointerEvent) => { if (!inMenu(e.target)) setRefMenu(null); };
+    const onCtx = (e: MouseEvent) => { if (!inMenu(e.target)) setRefMenu(null); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      setRefMenu(null);
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    document.addEventListener('contextmenu', onCtx, true);
+    window.addEventListener('keydown', onKey, true);
+    const onBlur = () => setRefMenu(null);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true);
+      document.removeEventListener('contextmenu', onCtx, true);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [refMenu !== null]);
   // MIDI 轨头的乐器弹窗：锚点是那颗键的屏幕矩形（portal 到 body，不受轨道区裁剪）。
   const [instPop, setInstPop] = useState<{ trackId: string; x: number; y: number } | null>(null);
   useEffect(() => {
@@ -868,6 +939,47 @@ export const VidTimeline: React.FC<{
     mergeSeq.current++;
     setMergeMenu(null);
   }, []);
+  // 删选中的段：菜单项与 Delete 键共用这一口。菜单里每一条都是冲着"这一批段"来的 ——
+  // 段没了就把它收掉，别留一扇指着已删 id 的菜单。
+  const doDelete = useCallback(() => {
+    if (!selIds.size) return;
+    const ids = [...selIds];
+    vid.update(proj => ids.reduce((acc, id) => removeClip(acc, id), proj), 'Delete clip');
+    clearSel();
+    closeMergeMenu();
+  }, [selIds, vid, clearSel, closeMergeMenu]);
+  // ── 键删 ── Delete/Backspace 删选中的片段（多选时整批删；输入框里不抢；录快捷键时让路）。
+  // MIDI 模式里整条让路：Delete 在那时是卷帘的"删音符"（拍板 8）。两条入口：
+  //  · 焦点在宿主 document 里 —— 挂在 window 冒泡阶段：Keyframes / Assets 对 Delete 各有
+  //    自己的语义，选中帧时按 Delete 不该连整枚段一起删，所以它们要能先 stopPropagation。
+  //  · 焦点还在画布 iframe 里 —— **右击选中段不会把焦点搬回宿主**（只有左键点击才会），
+  //    这时键只到画布那边的 document，宿主 window 收不到。补一条热键桥（见 hotkeys.ts）：
+  //    只有指针停在时间线上、或段的右键菜单开着时才接手；指针在画布上时 Delete 仍是
+  //    画布的（删图层）。接下的那一下要拦住，别让画布跟着再删一遍。
+  useEffect(() => {
+    if (mode === 'midi') return;
+    const want = (e: KeyboardEvent): boolean => {
+      if (!selIds.size || isRecording()) return false;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || t?.isContentEditable) return false;
+      return hit(e, 'timeline.delete');
+    };
+    const onKey = (e: KeyboardEvent) => { if (want(e)) doDelete(); };
+    const off = onGlobalKey(e => {
+      const t = e.target as Node | null;
+      if (!t || !('ownerDocument' in t) || t.ownerDocument === document) return;   // 宿主那条在管
+      const hover = getCut().hover;
+      if (hover === 'canvas') return;                                              // 指针在画布上：Delete 归画布（删图层）
+      if (hover !== 'timeline' && !mergeMenu) return;
+      if (!want(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      doDelete();
+    });
+    window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('keydown', onKey); off(); };
+  }, [selIds, vid, clearSel, mode, doDelete, mergeMenu]);
   const openMergeMenu = useCallback((e: React.MouseEvent, clip: VidClip) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1628,6 +1740,10 @@ export const VidTimeline: React.FC<{
                   // 生成器段链着的前一段 + 它已经跑出来的产物（首帧卡片的共享预览要用）。
                   const chainPrev = c.vgen ? vgenChainPrevOf(p, c) : null;
                   const chainOut = chainPrev ? outputClipOf(p, chainPrev) : null;
+                  // 参考图兜底出来的首/末帧（只用于卡片预览；解析不了就按"没预览"画）。
+                  const refFrames = c.vgen?.ref_frame_track
+                    ? (() => { try { return vgenRefFramePlan(p, c); } catch { return null; } })()
+                    : null;
                   // 首尾相接的左邻：两段各画各的左边框/右边框，接缝就会叠成 2px
                   // （0.5px 在 1x 屏上各自进成 1px）。只留左邻那条右边框，缝统一 1px。
                   const touchesLeft = p.clips.some(x =>
@@ -1672,6 +1788,14 @@ export const VidTimeline: React.FC<{
                       onVGenRun={onRunVGen}
                       onVGenFrame={onPickVGenFrame}
                       onVGenPrompt={onVGenPrompt}
+                      onOpenVGenRef={onVGenRefTrack
+                        ? (id, e) => setRefMenu({ clipId: id, kind: 'video', x: e.clientX + 8, y: e.clientY + 8 })
+                        : undefined}
+                      onOpenVGenRefImage={onVGenRefImageTrack
+                        ? (id, e) => setRefMenu({ clipId: id, kind: 'image', x: e.clientX + 8, y: e.clientY + 8 })
+                        : undefined}
+                      refTracks={vgenRefTracks}
+                      refFrames={refFrames}
                       onVGenCudOpen={onVGenCudOpen}
                       chainPrev={chainPrev}
                       chainOut={chainOut}
@@ -1828,8 +1952,67 @@ export const VidTimeline: React.FC<{
       {/* 底注：当前播放头下的画面来自哪段（transport 订阅者直改文本）。 */}
       <div ref={noteRef} style={{ padding: '4px 10px', fontSize: 10.5, color: 'rgba(255,255,255,0.4)', borderTop: '0.5px solid rgba(255,255,255,0.06)', flexShrink: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} />
 
+      {/* 生成器段的参考菜单：一列时间线视频轨（None + 全部视频轨），当前那一项打勾。
+          参考视频 = 整段采样成一列图；参考图 = 只兜底未绑定的首/末帧。 */}
+      {refMenu && createPortal((() => {
+        const clip = p.clips.find(c => c.id === refMenu.clipId);
+        const v = clip?.vgen;
+        if (!clip || !v) return null;
+        const isImg = refMenu.kind === 'image';
+        const cur = (isImg ? v.ref_frame_track : v.ref_track) || '';
+        const commit = isImg ? onVGenRefImageTrack : onVGenRefTrack;
+        const tracks = vgenRefTracks || [];
+        const row = (id: string | null, label: string, tip: string) => (
+          <button
+            key={id || 'none'}
+            onClick={() => { commit?.(clip.id, id); setRefMenu(null); }}
+            title={tip}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 7, width: '100%', textAlign: 'left',
+              padding: '6px 9px', borderRadius: 5, border: 'none',
+              background: 'transparent', color: 'rgba(255,255,255,0.92)',
+              fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+          >
+            <span style={{ width: 12, flexShrink: 0, color: '#64d2ff', fontSize: 10 }}>{id === cur ? '✓' : ''}</span>
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+          </button>
+        );
+        return (
+          <div
+            data-vid-vgen-ref-menu="1"
+            onContextMenu={e => e.preventDefault()}
+            style={{
+              position: 'fixed', zIndex: 9999,
+              left: Math.max(8, Math.min(refMenu.x, window.innerWidth - 250)),
+              top: Math.max(8, Math.min(refMenu.y, window.innerHeight - 100 - tracks.length * 26)),
+              minWidth: 210, maxHeight: 320, overflow: 'auto',
+              padding: 4, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 1,
+              background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
+              boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
+            }}
+          >
+            <div style={{ padding: '4px 9px 6px', fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.45)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {isImg ? 'Reference image' : 'Reference channel'} — 「{clip.name}」
+            </div>
+            {row(null, 'None', isImg
+              ? 'Do not take the unbound first / last frames from a video — they stay empty.'
+              : 'Do not feed a reference video for this segment.')}
+            {tracks.length === 0 && (
+              <div style={{ padding: '6px 9px', fontSize: 10.5, color: 'rgba(255,255,255,0.4)' }}>
+                No video tracks — right-click a track header to add one.
+              </div>
+            )}
+            {tracks.map(t => row(t.id, t.name, isImg
+              ? `Take this segment's unbound frames from 「${t.name}」 over its absolute time range (${fmtTime(clip.start)}–${fmtTime(clip.start + clip.duration)}): the first frame at the segment start, the last frame at its last frame time. Only ends that have a corresponding frame are filled — an end with no frame stays empty. Explicit frame cards and chain links still win.`
+              : `Sample 「${t.name}」 over this segment's absolute time range (${fmtTime(clip.start)}–${fmtTime(clip.start + clip.duration)}). One frame per generated frame at the generator's output FPS; any gap blocks the run.`))}
+          </div>
+        );
+      })(), document.body)}
       {/* 右键合并菜单：挂到 body（不受轨道区的滚动/裁剪影响），fixed 定位。 */}
-      {/* 轨头右键菜单:加轨三兄弟。任何一条轨的头上右键都弹这一份。 */}
+      {/* 轨头右键菜单:按 VidTrackKind 逐类给一条。任何一条轨的头上右键都弹这一份。 */}
       {trackMenu && createPortal(
         <div
           data-vid-track-menu="1"
@@ -1837,7 +2020,8 @@ export const VidTimeline: React.FC<{
           style={{
             position: 'fixed', zIndex: 9999,
             left: Math.max(8, Math.min(trackMenu.x, window.innerWidth - 230)),
-            top: Math.max(8, Math.min(trackMenu.y, window.innerHeight - 130)),
+            // 五条轨类型 = 五行，菜单实测约 150px —— 贴窗口底边弹时别把自己顶出屏幕。
+            top: Math.max(8, Math.min(trackMenu.y, window.innerHeight - 160)),
             minWidth: 190, padding: 4, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 1,
             background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
             boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
@@ -1846,9 +2030,10 @@ export const VidTimeline: React.FC<{
           {([
             ['video', 'Add Video Track', 'Add a video track on top'],
             ['layer', 'Add Layer Track', 'Add a Layer track on top — it holds Layer segments, each with its own set of layers, composited over the video below. Only a Layer track that sits above every video track takes effect.'],
+            ['process', 'Add Process Track', 'Add a process track on top — it holds Processor / Preset segment placeholders. Placeholders never play; each finished segment lands on the output track above at the same timeline position, and it can be run again any time. New placeholders come from Run, so an empty track only becomes useful once you move placeholders onto it.'],
             ['audio', 'Add Audio Track', 'Add an audio track at the bottom'],
             ['midi', 'Add MIDI Track', 'Add a MIDI track at the bottom — pick its instrument on the track header; its segments hold notes edited in the MIDI window.'],
-          ] as ['video' | 'layer' | 'audio' | 'midi', string, string][]).map(([kind, label, tip]) => (
+          ] as ['video' | 'layer' | 'process' | 'audio' | 'midi', string, string][]).map(([kind, label, tip]) => (
             <button
               key={kind}
               onClick={() => { vid.update(p2 => addTrack(p2, kind), 'Add track'); setTrackMenu(null); }}
@@ -1913,7 +2098,8 @@ export const VidTimeline: React.FC<{
             style={{
               position: 'fixed', zIndex: 9999,
               left: Math.max(8, Math.min(m.x, window.innerWidth - 342)),
-              top: Math.max(8, Math.min(m.y, window.innerHeight - 140)),
+              // 三条常驻项 + 可能的 Merge 与说明行 —— 贴窗口底边弹时别把自己顶出屏幕。
+              top: Math.max(8, Math.min(m.y, window.innerHeight - 170)),
               minWidth: 230, maxWidth: 330, padding: 4, borderRadius: 8,
               background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
               boxShadow: '0 12px 36px rgba(0,0,0,0.6)', display: 'flex', flexDirection: 'column', gap: 1,
@@ -1923,6 +2109,8 @@ export const VidTimeline: React.FC<{
               'Copy the selected segments, linked partners included (Ctrl+C)')}
             {item('Paste at the playhead', <IconPaste />, () => { doPaste(); closeMergeMenu(); },
               'Paste at the playhead — the leftmost copied segment starts there, the rest keep their spacing (Ctrl+V)')}
+            {item('Delete', <IconDelete />, () => { doDelete(); closeMergeMenu(); },
+              'Delete the selected segments, linked partners included (Delete)')}
             {m.canMerge && (
               <>
                 <div style={{ height: 1, margin: '3px 6px', background: 'rgba(255,255,255,0.10)' }} />
@@ -1974,6 +2162,36 @@ export const VidTimeline: React.FC<{
 };
 
 // ── 一段片段 ────────────────────────────────────────────────────────────────────────────────
+/** 参考图兜底帧的预览图：拖动段时来源帧号每帧都在变，直接把它绑到 <img src> 上等于
+ *  每次 pointermove 都发一次同步抽帧请求（/api/vid_frame），会把后端连接队列和其它
+ *  接口（Assets 的 /api/global_assets 等）一起堵死。这里去抖 180ms：拖动过程中沿用
+ *  上一张，停手后只抽停下来的那一帧；URL 变化时用 key 重挂 <img>，重置失败后的隐藏态。 */
+const RefFrameImage: React.FC<{
+  spec?: VgenFrameSpec;
+  onFail: (e: React.SyntheticEvent<HTMLImageElement>) => void;
+}> = ({ spec, onFail }) => {
+  const file = spec?.file || '';
+  const f0 = spec?.f0 ?? 0;
+  const fps = spec?.fps ?? 0;
+  const key = spec && fps > 0 ? `${file}|${f0}|${fps}` : '';
+  const [url, setUrl] = useState('');
+  const shown = useRef('');
+  useEffect(() => {
+    if (!key) { shown.current = ''; setUrl(''); return; }
+    if (key === shown.current) return;
+    const timer = setTimeout(() => {
+      shown.current = key;
+      setUrl(`/api/vid_frame?f=${encodeURIComponent(file)}&t=${(f0 / fps).toFixed(3)}`);
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [key]);
+  if (!url) return null;
+  return (
+    <img key={url} src={url} alt="" onError={onFail}
+      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+  );
+};
+
 const Clip: React.FC<{
   clip: VidClip;
   pps: number;
@@ -2013,6 +2231,14 @@ const Clip: React.FC<{
   onVGenFrame?: (clipId: string, which: 'first_frame' | 'last_frame') => void;
   /** video generator 段的 prompt 图标（段自己的提示词：prompt 弹窗）。 */
   onVGenPrompt?: (clipId: string) => void;
+  /** 生成器段的参考通道：点 REF 键时把菜单位置交回时间线（null/undefined = 不画这颗键）。 */
+  onOpenVGenRef?: (clipId: string, e: React.MouseEvent) => void;
+  /** 生成器段的参考图：点 IMG 键时把菜单位置交回时间线（null/undefined = 不画这颗键）。 */
+  onOpenVGenRefImage?: (clipId: string, e: React.MouseEvent) => void;
+  /** 参考通道候选（与 VidTimeline 同一份）。 */
+  refTracks?: { id: string; name: string }[];
+  /** 参考图兜底出来的首/末帧（只给帧卡片做预览；null = 没解析出来）。 */
+  refFrames?: { first?: VgenFrameSpec; last?: VgenFrameSpec } | null;
   /** .cud 帧卡预览上的跳转按钮：把那份工程送进 blend 编辑器（已开着就切换过去）。 */
   onVGenCudOpen?: (path: string, name?: string) => void;
   /** 生成器段链着的前一段（null = 没链）：首帧卡片的共享预览与"链优先"语义都要它。 */
@@ -2021,7 +2247,7 @@ const Clip: React.FC<{
   chainOut?: VidClip | null;
   /** 工程速度（BPM）—— MIDI 段的窗口与音符缩略图按它把拍换成段内比例。 */
   tempo?: number;
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onVGenCudOpen, chainPrev, chainOut, tempo }) => {
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onOpenVGenRef, onOpenVGenRefImage, refTracks, refFrames, onVGenCudOpen, chainPrev, chainOut, tempo }) => {
   const isAudio = c.kind === 'audio';
   // MIDI 段：没有源文件，画面/波形都没有；段面画的是"这一窗里有哪些音符"。
   const isMidi = c.kind === 'midi';
@@ -2158,7 +2384,7 @@ const Clip: React.FC<{
       onClick={e => e.stopPropagation()}
       onDoubleClick={e => e.stopPropagation()}
       title={isVGen && c.vgen
-        ? `${c.name} — video generator segment for 「${c.vgen.iface}」 (${fmtTime(c.duration)}${c.vgen.fixed_fps ? ', fixed fps' : ''}). ${chainPrev ? `Linked to 「${chainPrev.name}」 — its last frame is this segment's first frame (Ctrl-click the seam to disconnect). ` : ''}${c.vgen.ports.first_frame ? 'The left frame card binds the first frame; ' : ''}${c.vgen.ports.last_frame ? 'the right frame card binds the last frame; ' : ''}Width / height / fps are the track settings (the gear on the track header) and the track prompt is the speech bubble next to it; ▶ sends the segment's values into the interface and the finished video lands on the output track above at this position. The segment stays, so it can be run again.`
+        ? `${c.name} — video generator segment for 「${c.vgen.iface}」 (${fmtTime(c.duration)}${c.vgen.fixed_fps ? ', fixed fps' : ''}). ${chainPrev ? `Linked to 「${chainPrev.name}」 — its last frame is this segment's first frame (Ctrl-click the seam to disconnect). ` : ''}${c.vgen.ports.first_frame ? 'The left frame card binds the first frame; ' : ''}${c.vgen.ports.last_frame ? 'the right frame card binds the last frame; ' : ''}${c.vgen.ports.reference ? (c.vgen.ref_track ? `the REF key picks the reference channel (now 「${refTracks?.find(t => t.id === c.vgen!.ref_track)?.name || 'missing'}」); ` : 'the REF key picks the reference channel (none picked); ') : ''}${c.vgen.ref_frame_track ? `the IMG key picks the reference image (now 「${refTracks?.find(t => t.id === c.vgen!.ref_frame_track)?.name || 'missing'}」) for unbound first / last frames; ` : ''}Width / height / fps are the track settings (the gear on the track header) and the track prompt is the speech bubble next to it; ▶ sends the segment's values into the interface and the finished video lands on the output track above at this position. The segment stays, so it can be run again.`
         : isMidi
         ? `${c.name} — MIDI segment, ${midiShown.length} note${midiShown.length === 1 ? '' : 's'} in view (${fmtTime(c.duration)}). Its notes are edited in the MIDI window — select this segment and switch to MIDI. Trimming only hides the notes outside the segment; they stay on it. The instrument, MIDI channel and track velocity live on the track header. Drag / trim / split / copy like any clip.`
         : isPending && c.pending
@@ -2315,6 +2541,22 @@ const Clip: React.FC<{
           帧卡片只在这台生成器**绑了那个口**时才出现（没绑首帧口就没有"给它一张首帧"这回事）。 */}
       {isVGen && c.vgen && !micro && (() => {
         const v = c.vgen;
+        const refName = v.ref_track
+          ? (refTracks?.find(t => t.id === v.ref_track)?.name || v.ref_track) : '';
+        const refImgName = v.ref_frame_track
+          ? (refTracks?.find(t => t.id === v.ref_frame_track)?.name || v.ref_frame_track) : '';
+        const hasRefPort = !!v.ports.reference;
+        const hasFramePort = !!(v.ports.first_frame || v.ports.last_frame);
+        // 参考图这一格真正要兜底的槽：显式绑定与链式首帧都不算（它们优先）。
+        const refNeedFirst = !!v.ports.first_frame && !v.first_frame && !chainPrev;
+        const refNeedLast = !!v.ports.last_frame && !v.last_frame;
+        // 选了参考图、也确实有槽要兜底，但两头都解析不出帧 —— 用琥珀色标出来
+        // （参考视频比这一段短、只盖住一头时不算：那一头有预览，这一头留空）。
+        const refImgDead = !!v.ref_frame_track && (refNeedFirst || refNeedLast)
+          && !refFrames?.first && !refFrames?.last;
+        // 参考通道名只在够宽的时候占那 56px；窄一点的段用 22px 的键，
+        // 把宽度留给段名（名字本来也快挤没了）。两颗并排时门槛再高一点。
+        const refWide = clipW >= (hasRefPort && hasFramePort ? 300 : 260);
         const frameCard = (which: 'first_frame' | 'last_frame') => {
           if (!v.ports[which]) return null;
           // 首帧卡在链着前一段时**链优先**：显示的是前一段的末帧（它绑了末帧卡用那张卡，
@@ -2322,6 +2564,11 @@ const Clip: React.FC<{
           const linked = which === 'first_frame' && !!chainPrev;
           const ref = linked ? (chainPrev!.vgen?.last_frame ?? null)
             : which === 'first_frame' ? v.first_frame : v.last_frame;
+          // 参考图兜底：链与显式绑定都没占着这一帧时，卡片直接铺那条轨在
+          // 段起点/最后一帧时刻的画面（与执行时抽的是同一帧）。
+          const fallback = !linked && !ref
+            ? (which === 'first_frame' ? refFrames?.first : refFrames?.last)
+            : undefined;
           // 前段没绑末帧卡 → 共享帧来自它的产物：走 /api/vid_frame 按需取末帧（盘上有缓存）。
           const outFile = linked && !ref && chainOut
             && /^\/api\/(?:vid|asset|global)_media\//.test(chainOut.src)
@@ -2336,14 +2583,20 @@ const Clip: React.FC<{
               : outFile
                 ? `/api/vid_frame?f=${encodeURIComponent(outFile)}&t=${Math.max(0, chainOut!.duration - 0.05).toFixed(2)}`
                 : '';
-          // 绑了东西（图片资产 / .cud 工程 / 链上前段的末帧）就是视频段首/尾帧那种**整高、
-          // 无边框**的预览条；虚线框只留给什么都没有的占位卡 —— 链上的占位卡也算"有内容"，
-          // 它说"末帧会来"。预览图加载失败时底下的 FF/LF/CUD 垫字露出来。
-          const preview = !!thumb;
+          const preview = !!thumb || !!fallback;
           // 卡片贴着段边，四边再各描一条就和段自己的边框叠成双线：只留**朝内**那一条虚线
           // 当分隔（左卡留右、右卡留左），上下和贴边那侧都不画。四边逐条写死宽度 ——
           // 简写碰到 undefined 会被 React 拆成 longhand，掉回浏览器默认的 medium。
-          const divider = `1px dashed ${ref || linked ? 'rgba(255,255,255,0.55)' : PK.edge}`;
+          const divider = `1px dashed ${ref || linked || fallback ? 'rgba(255,255,255,0.55)' : PK.edge}`;
+          const fallbackTip = fallback
+            ? `${which === 'first_frame' ? 'First' : 'Last'} frame — taken from the reference image channel at ${(fallback.f0 / fallback.fps).toFixed(2)}s (not bound). Click to bind an explicit image or .cud; an explicit binding or a chain link overrides this.`
+            : null;
+          // 参考图选了、这一头也确实轮到它，但轨上没有对应帧：把"这一头保持空"说清楚。
+          const refMissing = !!v.ref_frame_track && !fallback
+            && (which === 'first_frame' ? refNeedFirst : refNeedLast);
+          const refMissingTip = refMissing
+            ? `${which === 'first_frame' ? 'First' : 'Last'} frame — the reference image channel 「${refImgName || v.ref_frame_track}」 has no corresponding frame at this segment's ${which === 'first_frame' ? 'start' : 'last frame time'}, so this end stays empty. Click to bind an explicit image or .cud.`
+            : null;
           const chainTip = linked
             ? (chainPrev!.vgen?.last_frame
               ? `First frame is shared with the previous generator segment 「${chainPrev!.name}」 — it uses that segment's bound last-frame card. Ctrl-click the seam to disconnect.`
@@ -2355,7 +2608,8 @@ const Clip: React.FC<{
             <button
               data-vid-vgen-frame={which}
               data-vid-vgen-chain={linked ? '1' : '0'}
-              title={chainTip ?? (which === 'first_frame'
+              data-vid-vgen-frame-ref={fallback ? '1' : '0'}
+              title={chainTip ?? fallbackTip ?? refMissingTip ?? (which === 'first_frame'
                 ? 'First frame — bind an image asset or a .cud project (its canvas is read as the first frame). Click to pick; the value feeds the port this generator declared.' + (ref?.kind === 'cud' ? ' The ⤴ badge on the preview opens that project in the blend editor.' : '')
                 : 'Last frame — bind an image asset or a .cud project (its canvas is read as the last frame). Click to pick; the value feeds the port this generator declared.' + (ref?.kind === 'cud' ? ' The ⤴ badge on the preview opens that project in the blend editor.' : ''))}
               onPointerDown={e => e.stopPropagation()}
@@ -2376,12 +2630,22 @@ const Clip: React.FC<{
               }}
             >
               {/* 占位文字垫在底下：预览图加载失败时它露出来，卡片不会变成一块空白。 */}
-              <span style={{ position: 'relative', opacity: ref || linked ? 0.9 : 0.5 }}>
-                {ref ? (ref.kind === 'cud' ? 'CUD' : 'IMG') : (which === 'first_frame' ? 'FF' : 'LF')}
+              <span style={{ position: 'relative', opacity: ref || linked || fallback ? 0.9 : 0.5 }}>
+                {ref ? (ref.kind === 'cud' ? 'CUD' : 'IMG') : fallback ? 'REF' : (which === 'first_frame' ? 'FF' : 'LF')}
               </span>
-              {preview && (
-                <img src={thumb} alt="" onError={hideImg}
+              {thumb && (
+                <img key={thumb} src={thumb} alt="" onError={hideImg}
                   style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+              )}
+              {/* 参考图兜底帧：去抖后再请求（见 RefFrameImage）。 */}
+              {!thumb && fallback && <RefFrameImage spec={fallback} onFail={hideImg} />}
+              {/* 参考图兜底的标记：右下角一枚小 R —— 与显式绑定一眼区分开（点卡片仍是绑显式图）。 */}
+              {fallback && (
+                <span title="Taken from the reference image channel (not bound)"
+                  style={{ position: 'absolute', right: 1.5, bottom: 1.5, width: 12, height: 12,
+                    borderRadius: 999, background: 'rgba(12,12,14,0.82)', border: '0.5px solid rgba(100,210,255,0.7)',
+                    color: '#64d2ff', fontSize: 7, fontWeight: 800, display: 'flex',
+                    alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>R</span>
               )}
               {linked && (
                 <span style={{ position: 'absolute', right: 1.5, top: 1.5, width: 12, height: 12,
@@ -2415,6 +2679,49 @@ const Clip: React.FC<{
           <>
             {frameCard('first_frame')}
             <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, position: 'relative' }}>
+              {/* 参考通道：接口给这台生成器绑了 reference 口才出现。窄段（tight）先收掉
+                  这颗键 —— 两张帧卡 + 提示词/▶ 已经把那点宽度占满了。 */}
+              {onOpenVGenRef && hasRefPort && !tight && (
+                <button
+                  data-vid-vgen-ref=""
+                  data-vid-vgen-ref-track={v.ref_track || ''}
+                  title={`Reference channel — ${refName || 'none'}. Click to pick a timeline video track; when the segment runs, that track is sampled over this segment's absolute time range into an image list (one frame per generated frame). The track must cover the whole range — a gap stops the run before it starts.`}
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); onOpenVGenRef(c.id, e); }}
+                  style={{
+                    ...iconBtn, width: v.ref_track && refWide ? 56 : 22, padding: '0 3px',
+                    background: 'rgba(0,0,0,0.3)',
+                    border: `0.5px solid ${v.ref_track ? 'rgba(100,210,255,0.7)' : PK.edge}`,
+                    color: v.ref_track ? '#64d2ff' : PK.fg, cursor: 'pointer',
+                    fontSize: 7.5, fontWeight: 800, letterSpacing: 0.15,
+                    overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+                    display: 'block', lineHeight: '16px', textAlign: 'center',
+                  }}
+                >{v.ref_track && refWide ? (refName || 'REF') : 'REF'}</button>
+              )}
+              {/* 参考图：接口至少绑了首帧或末帧才出现。选了它，**没被显式绑定/链占着**
+                  的那一帧就取这条轨在段起点/最后一帧时刻的画面。 */}
+              {onOpenVGenRefImage && hasFramePort && !tight && (
+                <button
+                  data-vid-vgen-ref-image=""
+                  data-vid-vgen-ref-image-track={v.ref_frame_track || ''}
+                  data-vid-vgen-ref-image-dead={refImgDead ? '1' : '0'}
+                  title={`Reference image — ${refImgName || 'none'}${refImgDead ? ' (no corresponding frame for the needed end(s) of this segment — those ends stay empty)' : ''}. Click to pick a timeline video track; an unbound first / last frame is taken from that track at this segment's start / last frame time (absolute time). Only ends that have a frame are filled; explicit frame cards and chain links still win.`}
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); onOpenVGenRefImage(c.id, e); }}
+                  style={{
+                    ...iconBtn, width: v.ref_frame_track && refWide ? 56 : 22, padding: '0 3px',
+                    background: 'rgba(0,0,0,0.3)',
+                    border: `0.5px solid ${v.ref_frame_track
+                      ? (refImgDead ? 'rgba(255,159,10,0.75)' : 'rgba(100,210,255,0.7)') : PK.edge}`,
+                    color: v.ref_frame_track ? (refImgDead ? '#ff9f0a' : '#64d2ff') : PK.fg,
+                    cursor: 'pointer',
+                    fontSize: 7.5, fontWeight: 800, letterSpacing: 0.15,
+                    overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+                    display: 'block', lineHeight: '16px', textAlign: 'center',
+                  }}
+                >{v.ref_frame_track && refWide ? (refImgName || 'IMG') : 'IMG'}</button>
+              )}
               {/* 段自己的提示词：prompt block 同一套编辑弹窗。跑的时候渲染成串，拼在段
                   prompt 口的纯文本后面、轨级 preset 之前（端口在前、段在后、轨最后）。 */}
               {onVGenPrompt && v.ports.prompt && (

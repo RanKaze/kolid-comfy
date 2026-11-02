@@ -623,11 +623,13 @@ IO_FILE_KINDS = {
     },
 }
 
-# Video Generator 的八个固定槽（与前端 types.ts 的 VIDEO_GEN_SLOTS 逐条同名）：
+# Video Generator 的固定槽（与前端 types.ts 的 VIDEO_GEN_SLOTS 逐条同名）：
 # 一个开了 Video Generator 的 interface 被声明成一台视频生成器 —— 这些槽各绑一个真实端口，
 # 时间线上的 generator 段照这份绑定填参数、接产物。
+# `reference`（参考视频）是**可选**的第 9 个槽，只在配置里 video_ref 开着时才允许存在：
+# 它是一个 IMAGE 口，段上选一条时间线视频轨，跑的时候把那条轨在段的时间窗内采样成一列图喂进来。
 VIDEO_GEN_SLOTS = ('prompt', 'width', 'height', 'duration', 'fps',
-                   'first_frame', 'last_frame', 'video')
+                   'first_frame', 'last_frame', 'reference', 'video')
 
 # 工作台自己那三份用户内容（blocks 链与 DEFAULT SETTING、Prompt 预设、最近一份 .cud 的路径）
 # 住 data/sampler/，与 data/prompt、data/switch 同级，整目录进 .gitignore。以前它们躺在 nodes/
@@ -1613,6 +1615,10 @@ def _vid_strip(path, n):
 # 就压到工作分辨率 —— 一列 1080p 的 float32 帧动辄几 GB，抽之前必须缩。
 _VID_FRAME_MAX_W = 720      # ffprobe 量不到源尺寸时的兜底长边（也只缩不放）
 _VID_FRAME_MAX_N = 150      # 一列帧的条数上限（再多内存扛不住，也让用户知道代价）
+# Video Generator 的参考视频是**一层输入**，不参与处理器那种分段落位：它必须与段的
+# 输出逐帧对齐，所以条数按段长 × 输出帧率走，不能套 150 的处理器上限。3600 ≈ 20 分钟
+# @30fps，与处理器那套范围上限同一量级；帧尺寸仍由 _vid_work_size 的 1.5GiB 预算压。
+_VID_REF_MAX_N = 3600
 _VID_FRAME_BUDGET = 1536 * 1024 * 1024   # 一列帧（float32 RGB）的总字节预算 ≈ 1.5 GiB
 _VID_CRF = 18               # 产物重编码质量（20 偏软，18 基本看不出二次编码损失）
 _VID_PRESET = 'medium'      # veryfast 在同 CRF 下细节保留更差；产物都是短片段，medium 代价可接受
@@ -1639,7 +1645,7 @@ def _vid_work_size(sw, sh, n):
     return ow, oh
 
 
-def _vid_frames_av(path, start_f, n, pf, probe):
+def _vid_frames_av(path, start_f, n, pf, probe, work_n=None):
     """PyAV 按**时间戳**精确取帧，返回 [1,H,W,3] float tensor 列表（失败返回 None）。
 
     输出第 k 帧对应源时间 (start_f + k) / pf；取该时刻**正在显示**的源帧 ——
@@ -1654,6 +1660,9 @@ def _vid_frames_av(path, start_f, n, pf, probe):
         最近的关键帧"，选哪一帧完全由解出来的 PTS 决定，seek 落点差一帧也不影响
         结果；
       * seek 到目标前一秒内，逐帧解码到窗口尾，只保留命中的 n 帧，内存与旧路一致。
+
+    `work_n`：算工作尺寸时按这一列**总共**多少帧估预算（参考视频分多片采样时，
+    各片必须用同一个总帧数，画面尺寸才一致）。缺省 = 本片 n。
     """
     try:
         import av
@@ -1677,7 +1686,7 @@ def _vid_frames_av(path, start_f, n, pf, probe):
         targets = [base + (start_f + k) / pf for k in range(n)]
         sw = int(probe.get('width') or st.width or 0)
         sh = int(probe.get('height') or st.height or 0)
-        ow, oh = _vid_work_size(sw, sh, n)
+        ow, oh = _vid_work_size(sw, sh, int(work_n or n))
         if tb > 0:
             try:
                 # backward：落在目标之前最近的关键帧上；之后逐帧解码、按 PTS 选。
@@ -1741,7 +1750,7 @@ def _vid_frames_av(path, start_f, n, pf, probe):
             pass
 
 
-def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None):
+def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None, work_n=None, max_n=None):
     """从 [ss, ss+t] 里抽 n 帧，返回 [1,H,W,3] float tensor 的列表。
 
     入口是**帧段**：`f0` = 源文件内按 fps 的整数起始帧号（优先于 ss），`n` = 帧数。
@@ -1753,6 +1762,8 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None):
     调用方按实际条数落位，不补帧（补出来的帧是重复内容，编码出来是卡顿）。
     帧尺寸在抽取时按帧列内存预算压到工作分辨率（见 _vid_work_size，只缩不放）——
     一列全尺寸的 float32 帧动辄几 GB，抽之前必须缩。
+    `work_n` / `max_n` 只给"一列参考视频"用：前者按整列总帧数算尺寸（多片一致），
+    后者放宽单次条数上限（参考视频要按段长整段对齐，不能被 150 帧的处理器上限截断）。
     返回 None = 抽不了（ffmpeg 不在 / 解不开 / 一帧都没抽到）。
     """
     ff = _ff_bin('ffmpeg')
@@ -1810,10 +1821,17 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None):
             n = int(round(float(fps or 30) * t))
         except (TypeError, ValueError):
             n = 30
-    n = max(1, min(_VID_FRAME_MAX_N, int(n)))
+    n = max(1, int(n))
+    if max_n is not None:
+        try:
+            n = max(1, min(int(max_n), n))
+        except (TypeError, ValueError):
+            n = max(1, min(_VID_FRAME_MAX_N, n))
+    else:
+        n = max(1, min(_VID_FRAME_MAX_N, n))
     # 首选精确路径：PyAV 按帧 PTS 选"该时刻正在显示的源帧"（见 _vid_frames_av）。
     # 它对源帧率元数据、seek 落点都不敏感 —— 下面按帧号切帧的 ffmpeg 路只作兜底。
-    av_frames = _vid_frames_av(path, start_f, n, pf, probe)
+    av_frames = _vid_frames_av(path, start_f, n, pf, probe, work_n=work_n)
     if av_frames:
         print(f'[VidFrames] {os.path.basename(path)} f0={start_f} n={n} pf={pf:.3f} '
               f'→ {len(av_frames)}/{n} frames (pyav pts)')
@@ -1838,7 +1856,7 @@ def _vid_frames(path, ss=0.0, t=None, n=None, fps=None, f0=None):
         need = last_src - start_src + 1
     # 源帧率比工程帧率高太多时（>8×）按源速解码的帧数会爆掉，退回 fps 滤镜那条路。
     by_index = src_fps > 0 and need <= max(8 * n + 8, 600)
-    ow, oh = _vid_work_size(sw, sh, need if by_index else n)
+    ow, oh = _vid_work_size(sw, sh, int(work_n or (need if by_index else n)))
     if ow > 0 and oh > 0:
         scale = f"scale=w={ow}:h={oh}"
     else:
@@ -2896,6 +2914,10 @@ class SnapshotDetailerSamplerServer:
         # 2) Main server
         class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             daemon_threads = True  # server_close() must not join handlers stuck in sendall
+            # 默认 backlog 只有 5：拖动预览这类**成串**的短请求会把 accept 队列塞满，
+            # 其他接口（/api/global_assets 等）会直接连不上、前端看到 "did not answer"。
+            # 线程模型本身能并发，排队长一点即可；真正重的抽帧请求由前端去抖。
+            request_queue_size = 64
         for port in range(8700, 8800):
             try:
                 self.main_server = ThreadedHTTPServer(
@@ -3594,6 +3616,10 @@ class SnapshotDetailerSamplerServer:
                 vg_fixed = bool(vg.get('fixed_fps'))
                 if vg_fixed:
                     vg_ports.pop('fps', None)
+                # Video Reference 关着 = 参考槽整行不出现，绑过也一并解掉（与前端同一口径）。
+                vg_ref = bool(vg.get('video_ref'))
+                if not vg_ref:
+                    vg_ports.pop('reference', None)
                 # 固定帧率：1..120，读不出来退 16（前端同一个兜底）。
                 vg_val = 16.0
                 try:
@@ -3603,7 +3629,7 @@ class SnapshotDetailerSamplerServer:
                 except (TypeError, ValueError):
                     pass
                 one['video_gen'] = {'ports': vg_ports, 'fixed_fps': vg_fixed,
-                                    'fixed_fps_value': vg_val}
+                                    'fixed_fps_value': vg_val, 'video_ref': vg_ref}
             bp = entry.get('block_ports')
             if isinstance(bp, dict):
                 ports = {}
@@ -4644,8 +4670,14 @@ class SnapshotDetailerSamplerServer:
                 _len = int(self.headers.get('Content-Length', 0))
                 _data = json.loads(self.rfile.read(_len)) if _len else {}
                 try:
-                    self._send_json(clock_bridge.get_clock().apply(
-                        str(_data.get('action') or ''), _data.get('value')))
+                    _snap = clock_bridge.get_clock().apply(
+                        str(_data.get('action') or ''), _data.get('value'))
+                    # **谁按了播放，时间线的 PCM 就归谁**：这条是音频作者的唯一来源。
+                    # 多窗不会互相抢（各自只看到"在播"是镜像）；旧页面点播不带 session，
+                    # 就把作者清空 —— 它那边另有 WebAudio，引擎这边不该再叠一份。
+                    if audio_bridge is not None and isinstance(_snap, dict) and _snap.get('playing'):
+                        audio_bridge.get_engine().pcm_set_owner(str(_data.get('session') or ''))
+                    self._send_json(_snap)
                 except Exception as _exc:      # noqa: BLE001 —— 参数错了要说清，不是 500
                     self._send_json({'error': str(_exc)}, 400)
                 return
@@ -9144,6 +9176,74 @@ class SnapshotDetailerSamplerNode:
                     dbg.record_image(f'视频输入 · {_pname}', vals[0], detail=f'{fname} 抽 {len(vals)} 帧')
             print(f"[InterfaceExec] Port {port_num_str} video input: {fname} → {len(vals)} frames")
 
+        # Video Generator 的参考视频：段的绝对时间窗映射到一条时间线视频轨，前端按输出
+        # 帧率把它切成若干**帧段**（跨片段时一片一段），这里逐片按同一套帧号网格抽帧，
+        # 拼成一整列喂给参考口。行的条数与段长严格对齐 —— 少了就报错（映射位置有空、
+        # 或源比声明的时长还短），不静默补/截。
+        reference_video = exec_options.get('reference_video') or {}
+        for port_num_str, spec in reference_video.items():
+            if not isinstance(spec, dict):
+                continue
+            try:
+                rfps = float(spec.get('fps') or 0)
+            except (TypeError, ValueError):
+                rfps = 0.0
+            if rfps <= 0:
+                raise ValueError(f'Reference video for port {port_num_str}: no sampling FPS was sent.')
+            pieces = spec.get('specs') if isinstance(spec.get('specs'), list) else []
+            try:
+                expect = int(spec.get('expect') or 0)
+            except (TypeError, ValueError):
+                expect = 0
+            want_total = expect or sum(
+                max(0, int(p.get('n') or 0)) for p in pieces if isinstance(p, dict))
+            want_total = max(1, min(_VID_REF_MAX_N, want_total))
+            frames = []
+            used = []
+            for idx, piece in enumerate(pieces):
+                if not isinstance(piece, dict):
+                    continue
+                fname = os.path.basename(str(piece.get('file') or ''))
+                try:
+                    want = max(1, int(piece.get('n') or 0))
+                except (TypeError, ValueError):
+                    want = 1
+                vpath = _vid_media_path(piece.get('file')) or os.path.join(_vid_media_dir(), fname)
+                if not vpath or not os.path.isfile(vpath):
+                    raise ValueError(
+                        f'Reference video for port {port_num_str}: media {fname!r} is missing '
+                        f'from the asset store (piece {idx + 1}/{len(pieces)}).')
+                got = _vid_frames(vpath, n=want, fps=rfps, f0=piece.get('f0'),
+                                  work_n=want_total, max_n=_VID_REF_MAX_N)
+                if not got:
+                    raise ValueError(
+                        f'Reference video for port {port_num_str}: no frames extracted from '
+                        f'{fname} (piece {idx + 1}/{len(pieces)}).')
+                if len(got) < want:
+                    raise ValueError(
+                        f'Reference video for port {port_num_str}: {fname} yielded '
+                        f'{len(got)}/{want} frames — the mapped range is not fully covered.')
+                frames.extend(got)
+                used.append(f'{fname}[{int(piece.get("f0") or 0)}+{want}]')
+            if not frames:
+                raise ValueError(f'Reference video for port {port_num_str}: empty reference range.')
+            if expect and len(frames) != expect:
+                raise ValueError(
+                    f'Reference video for port {port_num_str}: expected {expect} frames, got '
+                    f'{len(frames)} — the mapped range is not fully covered.')
+            declared = start_types.get(str(port_num_str))
+            vals = [staging_image_to_mask(f) for f in frames] if declared == 'MASK' else frames
+            port_overrides[int(port_num_str)] = vals
+            if own_trace:
+                _pname = _start_names.get(str(port_num_str)) or f'value{port_num_str}'
+                _detail = f'{len(vals)} 帧 @ {rfps:.3f}fps · ' + ', '.join(used)
+                if declared == 'MASK':
+                    dbg.record_mask(f'参考视频 · {_pname}', vals[0], detail=_detail)
+                else:
+                    dbg.record_image(f'参考视频 · {_pname}', vals[0], detail=_detail)
+            print(f"[InterfaceExec] Port {port_num_str} reference video: "
+                  f"{len(vals)} frames @ {rfps:.3f}fps from {', '.join(used)}")
+
         # 生成器链条的共享帧：前一段的**产物末帧**喂进这一段的首帧口。src 是 placeProcOutput
         # 落位时入库的那份（资产库/媒体库 URL），这里解回盘上路径、按源帧号抽末帧 ——
         # 前段绑了末帧卡时前端直接给 image_keys，不走这里。
@@ -9189,6 +9289,48 @@ class SnapshotDetailerSamplerNode:
                     dbg.record_image(f'链式首帧 · {_pname}', val, detail=_detail)
             print(f"[InterfaceExec] Port {port_num_str} chained first frame: "
                   f"{os.path.basename(vpath)} f0={last_f} ({declared or 'IMAGE'})")
+
+        # 生成器的**参考图**：未绑定（且没有链式首帧）的首/末帧由前端按绝对时间解析成
+        # {file, f0, fps} —— 这里只抽那一帧、单张注入。已经由 image_keys / chain_frames
+        # 占着的口一律不覆盖（显式绑定与链永远优先）。
+        frame_refs = exec_options.get('frame_refs') or {}
+        for port_num_str, spec in frame_refs.items():
+            if not isinstance(spec, dict):
+                continue
+            pnum = int(port_num_str)
+            if pnum in port_overrides:
+                continue
+            fname = os.path.basename(str(spec.get('file') or ''))
+            vpath = _vid_media_path(spec.get('file')) or os.path.join(_vid_media_dir(), fname)
+            if not vpath or not os.path.isfile(vpath):
+                raise ValueError(f'Reference frame for port {port_num_str}: media {fname!r} '
+                                 f'is missing from the asset store.')
+            try:
+                rfps = float(spec.get('fps') or 0)
+            except (TypeError, ValueError):
+                rfps = 0.0
+            if rfps <= 0:
+                rfps = 30.0
+            try:
+                rf0 = max(0, int(spec.get('f0') or 0))
+            except (TypeError, ValueError):
+                rf0 = 0
+            frames = _vid_frames(vpath, n=1, fps=rfps, f0=rf0)
+            if not frames:
+                raise ValueError(f'Reference frame for port {port_num_str}: no frame extracted '
+                                 f'from {fname} at f0={rf0} ({rfps:.3f}fps).')
+            declared = start_types.get(str(port_num_str))
+            val = staging_image_to_mask(frames[0]) if declared == 'MASK' else frames[0]
+            port_overrides[pnum] = val
+            if own_trace:
+                _pname = _start_names.get(str(port_num_str)) or f'value{port_num_str}'
+                _detail = f'{fname} 第 {rf0} 帧 @ {rfps:.3f}fps'
+                if declared == 'MASK':
+                    dbg.record_mask(f'参考图 · {_pname}', val, detail=_detail)
+                else:
+                    dbg.record_image(f'参考图 · {_pname}', val, detail=_detail)
+            print(f"[InterfaceExec] Port {port_num_str} reference frame: "
+                  f"{fname} f0={rf0} @ {rfps:.3f}fps")
 
         # 生成器的**提示词 preset**（段级 + 轨级）：各自渲染成串**按序追加**在段 prompt 口
         # 的纯文本后面 —— 端口纯文本在前、段 preset 在后、轨级 preset 最后（与前端约定的

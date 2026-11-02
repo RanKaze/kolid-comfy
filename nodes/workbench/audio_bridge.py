@@ -22,6 +22,7 @@ import base64
 import ctypes
 import os
 import threading
+import time
 from typing import List, Optional
 
 try:                                   # 正常是包内相对导入；下面那条给 `python audio_bridge.py` 用
@@ -39,6 +40,122 @@ MAX_TRACKS = 32
 
 # 试听音长：与内置合成器那条 0.7 秒对齐。插件那边按"渲了几块"数，所以换算成块数。
 AUDITION_SECONDS = 0.7
+# 时间线 PCM 的客户端协议版本。3 = 会话 + 片段 + 代际（见 _PcmBook）。旧页面不带这个字段 ——
+# 它那边还有一条 WebAudio 在放同一段时间线，让它再交一份 PCM 就是双声，一律拒收。
+PCM_CLIENT_ABI = 3
+# 会话心跳超期：超过这么久没任何 PCM 操作，它名下的槽整批回收（关掉的窗/崩掉的页不留在引擎里）。
+PCM_SESSION_TTL = 15.0
+PCM_MAX_SLOTS = 64                 # 与 kolid_audio.c 的 KA_MAX_CLIPS 一致
+
+
+# ── 时间线 PCM 的会话账本 ─────────────────────────────────────────────────────────────────────
+# **以后任何"往引擎里送声音"的新功能都照这三条来**：
+#   1. 同一时刻只有一个 owner 会话，只有 owner 的**摆放**会被接受 —— 两扇窗同时交同一段
+#      PCM 就是同一段声音放两遍（切 Mute / 切 Loop 时"突然多一层"就是这么来的）。
+#   2. 槽按 (会话, 片段) 认主：别人的槽看不见也拿不走；作者失联（心跳超期）或 release
+#      （关窗 / 刷新）时整批回收 —— 关掉的窗不会留在引擎里继续响。
+#   3. 摆放带**代际 gen**：比已应用的小就丢弃。切 Mute/Loop 会重推整份状态，乱序与重试
+#      不能把旧摆放复活。
+# 账本只在 Engine._lock 里读写（音频线程不碰它）。
+
+class _PcmBook:
+    def __init__(self) -> None:
+        self._slots = {}        # slot -> {'sid', 'clip', 'gen'}
+        self._sessions = {}     # sid -> {'seen': monotonic}
+        self._owner = ''        # 唯一作者；**只由 POST /api/clock 的播放命令来定**
+
+    def touch(self, sid: str, now: float) -> dict:
+        st = self._sessions.get(sid)
+        if st is None:
+            st = self._sessions[sid] = {'seen': now}
+        st['seen'] = now
+        return st
+
+    def sweep(self, now: float) -> list:
+        dead = [sid for sid, st in self._sessions.items() if now - st['seen'] > PCM_SESSION_TTL]
+        out = []
+        for sid in dead:
+            out.extend(self._drop_session(sid))
+        return out
+
+    def set_owner(self, sid: str, now: float) -> list:
+        """把作者定成 sid（'' = 没有作者），返回**别人**的槽（调用方把它们静音，数据保留）。
+
+        作者只由走带的播放命令来定（见 snapshot_sampler_node 的 /api/clock），所以
+        "谁在出声"和"谁按了播放"是同一件事 —— 多扇窗各跑一份调度也不会互相抢。"""
+        if sid:
+            self.touch(sid, now)
+        if sid == self._owner:
+            return []
+        self._owner = sid
+        out = []
+        for other in self._sessions:
+            if other == sid:
+                continue
+            out.extend(s for s, e in self._slots.items() if e['sid'] == other)
+        return out
+
+    def claim(self, sid: str, now: float) -> list:
+        """老客户端的主动认领：**只在还没有作者时**生效，已有作者一律不动（防多窗互抢）。"""
+        self.touch(sid, now)
+        if self._owner:
+            return []
+        return self.set_owner(sid, now)
+
+    def owner(self) -> str:
+        return self._owner
+
+    def is_owner(self, sid: str) -> bool:
+        return bool(sid) and sid == self._owner
+
+    def slot_for(self, sid: str, clip: str) -> Optional[int]:
+        slot = self.slot_of(sid, clip)
+        if slot is not None:
+            return slot
+        for slot in range(PCM_MAX_SLOTS):
+            if slot not in self._slots:
+                self._slots[slot] = {'sid': sid, 'clip': clip, 'gen': 0}
+                return slot
+        return None
+
+    def slot_of(self, sid: str, clip: str) -> Optional[int]:
+        for slot, e in self._slots.items():
+            if e['sid'] == sid and e['clip'] == clip:
+                return slot
+        return None
+
+    def gen_ok(self, sid: str, clip: str, gen: int) -> bool:
+        """代际闸：比这条片段已应用的旧就丢弃。gen=0 表示"不带代际"，照收。"""
+        slot = self.slot_of(sid, clip)
+        if slot is None:
+            return False
+        e = self._slots[slot]
+        if gen and gen < e['gen']:
+            return False
+        if gen:
+            e['gen'] = gen
+        return True
+
+    def drop_clip(self, sid: str, clip: str) -> Optional[int]:
+        slot = self.slot_of(sid, clip)
+        if slot is not None:
+            self._slots.pop(slot, None)
+        return slot
+
+    def release(self, sid: str) -> list:
+        out = self._drop_session(sid)
+        if self._owner == sid:
+            self._owner = ''
+        return out
+
+    def _drop_session(self, sid: str) -> list:
+        out = [s for s, e in self._slots.items() if e['sid'] == sid]
+        for s in out:
+            self._slots.pop(s, None)
+        self._sessions.pop(sid, None)
+        if self._owner == sid:
+            self._owner = ''
+        return out
 _WORKER_CLASS = None                  # plugin_worker.PluginWorker，首次用的时候才按路径加载
 
 # 2b：一条 MIDI 轨 = 一支插件实例（一个 worker 进程）。槽 0..14 归轨，槽 15 是试听。
@@ -46,6 +163,9 @@ _WORKER_CLASS = None                  # plugin_worker.PluginWorker，首次用�
 KA_MAX_PLUG = 16
 PREVIEW_SLOT = 15
 TRACK_SLOTS = PREVIEW_SLOT
+# 工程里暂时消失的槽（关文档/删轨）先留着：大采样器的程序只活在实例里，
+# 按 .vstpreset 重装回来是没有程序的（HALion）。最多留这么多个，多的按先后放掉。
+PARKED_SLOTS_MAX = 3
 
 
 class _KaTrack(ctypes.Structure):
@@ -321,6 +441,8 @@ class Engine:
         self._sfz = {'path': '', 'slot': None, 'zones': 0, 'failed': 0, 'kb': 0, 'error': ''}
         # `open()` 里也会调一次对账；那道闸只防重入，不改变"最终都会对上"。
         self._reconciling = False
+        # 时间线 PCM 的会话账本（谁在出声、每段落在哪个槽、推到第几代）。
+        self._pcm = _PcmBook()
 
     # ── 生命周期 ──
     def open(self, rate: int = 0) -> dict:
@@ -464,19 +586,67 @@ class Engine:
             # 没装乐器就不再出声（内置合成器常闭）—— 报 'none'，别让界面以为它响了。
             return {'ok': True, 'via': 'none'}
 
-    # ── 时间线音频段（PCM）─────────────────────────────────────────────────────────────────
-    def pcm_begin(self, slot: int, frames: int, channels: int = 2) -> dict:
+    # ── 时间线音频段（PCM）：会话 + 片段 + 代际（见 _PcmBook 顶部三条不变量）─────────────
+    def _pcm_sweep_locked(self) -> None:
+        for slot in self._pcm.sweep(time.monotonic()):
+            self._lib.ka_pcm_clear(slot)
+
+    def pcm_set_owner(self, sid: str) -> dict:
+        """走带的播放命令就是音频作者（`POST /api/clock` 调这里）。`sid = ''` = 没有作者，
+        连同所有摆放一起静音（旧页面按播放时不带会话，它那边另外有一条 WebAudio，不该再叠引擎）。"""
+        with self._lock:
+            if not self.available:
+                return {'ok': False}
+            self._pcm_sweep_locked()
+            others = self._pcm.set_owner(sid, time.monotonic())
+            for slot in others:
+                self._lib.ka_pcm_set(slot, 0, 0, 0, 0.0)
+            return {'ok': True, 'deactivated': len(others), 'owner': sid}
+
+    def pcm_claim(self, sid: str) -> dict:
+        """老客户端的主动认领：只在**还没有作者**时生效（作者由播放命令定，见上）。"""
+        with self._lock:
+            if not self.available:
+                return {'ok': False, 'error': 'pcm unavailable'}
+            self._pcm_sweep_locked()
+            others = self._pcm.claim(sid, time.monotonic())
+            for slot in others:
+                self._lib.ka_pcm_set(slot, 0, 0, 0, 0.0)
+            return {'ok': True, 'deactivated': len(others)}
+
+    def pcm_release(self, sid: str) -> dict:
+        """关窗 / 刷新：把它名下的 PCM 整批还掉（否则关掉的窗还在引擎里响）。"""
+        with self._lock:
+            if not self.available:
+                return {'ok': True, 'released': 0}
+            self._pcm_sweep_locked()
+            slots = self._pcm.release(sid)
+            for slot in slots:
+                self._lib.ka_pcm_clear(slot)
+            return {'ok': True, 'released': len(slots)}
+
+    def pcm_begin(self, sid: str, clip: str, frames: int, channels: int = 2) -> dict:
         with self._lock:
             if not self.available or not hasattr(self._lib, 'ka_pcm_begin'):
                 return {'ok': False, 'error': 'pcm unavailable'}
+            self._pcm_sweep_locked()
+            self._pcm.touch(sid, time.monotonic())
+            slot = self._pcm.slot_for(sid, clip)
+            if slot is None:
+                return {'ok': False, 'error': 'no free pcm slot'}
             rc = int(self._lib.ka_pcm_begin(int(slot), int(frames), int(channels)))
-            return {'ok': rc == 0, 'slot': int(slot), 'frames': int(frames), 'rc': rc}
+            return {'ok': rc == 0, 'slot': slot, 'frames': int(frames), 'rc': rc}
 
-    def pcm_chunk(self, slot: int, offset: int, data_b64: str) -> dict:
+    def pcm_chunk(self, sid: str, clip: str, offset: int, data_b64: str) -> dict:
         """写入一段交错立体声 int16（base64）。chunk 只搬字节，不做解码。"""
         with self._lock:
             if not self.available or not hasattr(self._lib, 'ka_pcm_write'):
                 return {'ok': False, 'error': 'pcm unavailable'}
+            self._pcm_sweep_locked()
+            self._pcm.touch(sid, time.monotonic())
+            slot = self._pcm.slot_of(sid, clip)
+            if slot is None:
+                return {'ok': False, 'error': 'unknown pcm clip'}
             raw = base64.b64decode(data_b64 or '')
             frames = len(raw) // 4
             if frames <= 0:
@@ -484,27 +654,52 @@ class Engine:
             buf = ctypes.create_string_buffer(raw, len(raw))
             rc = int(self._lib.ka_pcm_write(int(slot), int(offset),
                                             ctypes.cast(buf, ctypes.c_void_p), int(frames)))
-            return {'ok': rc == frames, 'slot': int(slot), 'offset': int(offset),
+            return {'ok': rc == frames, 'slot': slot, 'offset': int(offset),
                     'frames': frames, 'rc': rc}
 
-    def pcm_finish(self, slot: int) -> dict:
+    def pcm_finish(self, sid: str, clip: str) -> dict:
         with self._lock:
             if not self.available or not hasattr(self._lib, 'ka_pcm_finish'):
                 return {'ok': False, 'error': 'pcm unavailable'}
+            self._pcm_sweep_locked()
+            self._pcm.touch(sid, time.monotonic())
+            slot = self._pcm.slot_of(sid, clip)
+            if slot is None:
+                return {'ok': False, 'error': 'unknown pcm clip'}
             return {'ok': int(self._lib.ka_pcm_finish(int(slot))) == 0}
 
-    def pcm_set(self, slot: int, start: int, offset: int, length: int, gain: float = 1.0) -> dict:
+    def pcm_set(self, sid: str, clip: str, gen: int, start: int, offset: int,
+                length: int, gain: float = 1.0) -> dict:
         with self._lock:
             if not self.available or not hasattr(self._lib, 'ka_pcm_set'):
                 return {'ok': False, 'error': 'pcm unavailable'}
-            rc = int(self._lib.ka_pcm_set(int(slot), int(start), int(offset), int(length), float(gain)))
+            self._pcm_sweep_locked()
+            self._pcm.touch(sid, time.monotonic())
+            if self._pcm.slot_of(sid, clip) is None:
+                return {'ok': False, 'error': 'unknown pcm clip'}
+            # 只有作者能摆放：别的窗交上来的摆放一律不激活（同一段时间线只准一条声音）。
+            if not self._pcm.is_owner(sid):
+                return {'ok': False, 'not_owner': True}
+            if not self._pcm.gen_ok(sid, clip, gen):
+                return {'ok': True, 'dropped': 1}
+            slot = self._pcm.slot_of(sid, clip)
+            rc = int(self._lib.ka_pcm_set(int(slot), int(start), int(offset),
+                                          int(length), float(gain)))
             return {'ok': rc == 0}
 
-    def pcm_clear(self, slot: int) -> dict:
+    def pcm_clear(self, sid: str, clip: str, gen: int = 0) -> dict:
         with self._lock:
             if not self.available or not hasattr(self._lib, 'ka_pcm_clear'):
                 return {'ok': False, 'error': 'pcm unavailable'}
-            return {'ok': int(self._lib.ka_pcm_clear(int(slot))) == 0}
+            self._pcm.touch(sid, time.monotonic())
+            slot = self._pcm.slot_of(sid, clip)
+            if slot is None:
+                return {'ok': True}
+            if gen and not self._pcm.gen_ok(sid, clip, gen):
+                return {'ok': True, 'dropped': 1}
+            rc = int(self._lib.ka_pcm_clear(int(slot)))
+            self._pcm.drop_clip(sid, clip)
+            return {'ok': rc == 0}
 
     def panic(self) -> dict:
         with self._lock:
@@ -540,7 +735,7 @@ class Engine:
         if st is None:
             st = {'worker': None, 'track': None, 'want': '', 'bound': -2, 'kind': '',
                   'open': False, 'path': '', 'pluginPath': '', 'cls': 0, 'name': '',
-                  'vendor': '', 'preset': '', 'cid': '', 'error': '',
+                  'vendor': '', 'preset': '', 'cid': '', 'parked': '', 'parked_at': 0.0, 'error': '',
                   'editor': False, 'editorSize': [],
                   'zones': 0, 'failed': 0, 'kb': 0}
             self._slots[slot] = st
@@ -716,7 +911,7 @@ class Engine:
                 self._unload_sfz()
         st.update({'open': False, 'path': '', 'pluginPath': '', 'kind': '', 'name': '',
                    'zones': 0, 'failed': 0, 'kb': 0, 'error': '', 'preset': '', 'cid': '',
-                   'editor': False, 'editorSize': []})
+                   'parked': '', 'parked_at': 0.0, 'editor': False, 'editorSize': []})
 
     def _free_slot(self, slot: int) -> None:
         """整槽放掉：乐器 + worker 进程 + 共享内存。空出来的槽给下一条轨用。"""
@@ -794,6 +989,14 @@ class Engine:
             st['error'] = _plugin_reason(rc, stage.value)
             return {'ok': False, 'error': st['error'], 'plugin': self._slot_public(slot)}
         st.update({'open': True, 'kind': 'vst3', 'pluginPath': full, 'cls': int(cls), 'error': ''})
+        # 给组件 setState 敲一次门（空流，回执通常是被拒）：HALion 这类引擎在"从未被
+        # setState 过"时 `IComponent::getState` 恒回 0 字节 —— 程序只活在实例里、不进状态。
+        # Cubase 每次实例化都会 setState；我们照做，之后普通"存状态"就能带上程序本体。
+        if st.get('kind') == 'vst3' and hasattr(self._lib, 'ka_vst3_prime'):
+            try:
+                self._lib.ka_vst3_prime()
+            except Exception:
+                pass
         if hasattr(self._lib, 'ka_vst3_live'):
             self._lib.ka_vst3_live(1)         # 开始往 ring 里渲（宿主音频线程取走混进输出）
         if st['track'] is None and hasattr(self._lib, 'ka_vst3_bind'):
@@ -955,6 +1158,56 @@ class Engine:
                 self._lib.ka_vst3_bind(slot, idx)
             st['bound'] = idx
 
+    # ── 挂起 / 领回：关文档再打开同一份工程时，实例还在就还能出声 ─────────────────────
+    def _park_slot(self, slot: int) -> None:
+        """这一轨从工程里消失了：先不卸，挂起来（停渲染、解绑）。"""
+        st = self._slots[slot]
+        if st is None:
+            return
+        if st.get('kind') != 'vst3' or not st.get('open') or not self._slot_open(slot):
+            self._free_slot(slot)
+            return
+        st['parked'] = st.get('track') or st.get('parked') or ''
+        st['parked_at'] = time.monotonic()
+        st['track'] = None
+        st['bound'] = -2
+        try:
+            self._select(slot)
+            self._lib.ka_vst3_live(0)          # 停渲染：挂起的实例不该继续混进输出
+            if hasattr(self._lib, 'ka_vst3_bind'):
+                self._lib.ka_vst3_bind(slot, -1)
+        except Exception:
+            pass
+        self._trim_parked()
+
+    def _parked(self):
+        return [(i, st) for i, st in enumerate(self._slots)
+                if st is not None and not st.get('track') and st.get('parked')]
+
+    def _trim_parked(self) -> None:
+        parked = sorted(self._parked(), key=lambda x: x[1].get('parked_at') or 0.0)
+        for slot, _st in parked[:-PARKED_SLOTS_MAX]:
+            self._free_slot(slot)
+
+    def _adopt_parked(self, tid: str, path: str):
+        """挂起的实例里装着同一件乐器 → 接着用它（不重装：程序还在）。"""
+        want = os.path.normcase(os.path.abspath(path))
+        for slot, st in sorted(self._parked(), key=lambda x: -(x[1].get('parked_at') or 0.0)):
+            if os.path.normcase(os.path.abspath(str(st.get('want') or ''))) != want:
+                continue
+            if not self._slot_open(slot):
+                continue
+            try:
+                self._select(slot)
+                self._lib.ka_vst3_live(1)
+            except Exception:
+                continue
+            st['track'] = tid
+            st['parked'] = ''
+            st['bound'] = -2
+            return slot
+        return None
+
     def _reconcile(self) -> None:
         """让槽跟上工程：装了的不重装、删了的放掉、挪了位置的只重绑。"""
         if not self.available or self._reconciling:
@@ -985,18 +1238,27 @@ class Engine:
                     continue
                 self._unload_slot(slot)
                 self._load_into(slot, path)
-            # 2) 主人不在的槽 → 放掉
+            # 2) 主人不在的槽 → 先挂起（关文档再打开时还要用它，见 _park_slot）
             for slot, st in enumerate(list(self._slots)):
                 if st is not None and st.get('track') and st['track'] not in byid:
-                    self._free_slot(slot)
-            # 3) 新乐器 → 找空槽装上
+                    self._park_slot(slot)
+            # 3) 新乐器 → 先领回挂起的那件，没有再找空槽装上
             taken = self._slot_of()
             for tid, path in byid.items():
                 if tid in taken:
                     continue
+                if self._adopt_parked(tid, path) is not None:
+                    taken[tid] = True
+                    continue
                 slot = next((s for s in range(TRACK_SLOTS) if self._slots[s] is None), None)
                 if slot is None:
-                    continue               # 槽用完了：多出来的轨先走内置合成器
+                    # 槽用完了：放掉最旧的挂起实例再试一次
+                    parked = self._parked()
+                    if parked:
+                        self._free_slot(parked[0][0])
+                        slot = parked[0][0]
+                if slot is None:
+                    continue               # 还是没有：多出来的轨先走内置合成器
                 st = self._slot(slot)
                 st['track'] = tid
                 self._load_into(slot, path)
@@ -1370,20 +1632,39 @@ class Engine:
                                  _i(payload.get('track'), 0))
         if op == 'panic':
             return self.panic()
-        if op == 'pcm_begin':
-            return self.pcm_begin(_i(payload.get('slot')), _i(payload.get('frames')),
-                                  _i(payload.get('channels'), 2))
-        if op == 'pcm_chunk':
-            return self.pcm_chunk(_i(payload.get('slot')), _i(payload.get('offset')),
-                                  str(payload.get('data') or ''))
-        if op == 'pcm_finish':
-            return self.pcm_finish(_i(payload.get('slot')))
-        if op == 'pcm_set':
-            return self.pcm_set(_i(payload.get('slot')), _i(payload.get('start')),
-                                _i(payload.get('offset')), _i(payload.get('length')),
-                                1.0 if payload.get('gain') is None else float(payload.get('gain')))
-        if op == 'pcm_clear':
-            return self.pcm_clear(_i(payload.get('slot')))
+        # 时间线 PCM 只有一个合法作者（PCM_CLIENT_ABI 里说的会话）。**旧页面不带会话** ——
+        # 它那边还在用 WebAudio 播同一段时间线，放它交 PCM 进引擎就是同一声放两遍。
+        if op.startswith('pcm_'):
+            if _i(payload.get('v'), 0) != PCM_CLIENT_ABI:
+                print('[audio] rejected pcm_%s from a pre-unification page (reload the page)'
+                      % op[4:], flush=True)
+                return {'ok': False, 'error': 'stale pcm client (reload the page)'}
+            sid = str(payload.get('session') or '')
+            if not sid:
+                return {'ok': False, 'error': 'pcm session required'}
+            if op == 'pcm_claim':
+                return self.pcm_claim(sid)
+            if op == 'pcm_release':
+                return self.pcm_release(sid)
+            clip = str(payload.get('clip') or '')
+            if not clip:
+                return {'ok': False, 'error': 'pcm clip required'}
+            if op == 'pcm_begin':
+                return self.pcm_begin(sid, clip, _i(payload.get('frames'), 0),
+                                      _i(payload.get('channels'), 2))
+            if op == 'pcm_chunk':
+                return self.pcm_chunk(sid, clip, _i(payload.get('offset'), 0),
+                                      str(payload.get('data') or ''))
+            if op == 'pcm_finish':
+                return self.pcm_finish(sid, clip)
+            if op == 'pcm_set':
+                return self.pcm_set(sid, clip, _i(payload.get('gen'), 0),
+                                    _i(payload.get('start'), 0), _i(payload.get('offset'), 0),
+                                    _i(payload.get('length'), 0),
+                                    1.0 if payload.get('gain') is None else float(payload.get('gain')))
+            if op == 'pcm_clear':
+                return self.pcm_clear(sid, clip, _i(payload.get('gen'), 0))
+            return {'ok': False, 'error': 'unknown pcm op'}
         if op == 'track_instrument':
             return self.track_instrument(payload.get('track'), payload.get('path') or '')
         if op == 'track_unload':

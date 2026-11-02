@@ -2073,6 +2073,23 @@ static int32_t ka_file_write(const uint16_t* path, const unsigned char* buf, int
     return (int32_t)total;
 }
 
+/** 给组件的 setState 敲一次门（空流，回执通常是被拒）。
+ *
+ * 为什么要敲：HALion 的实例在**从未被 setState 过**的时候，`IComponent::getState` 恒回 0
+ * 字节 —— 程序只活在实例里、不进状态；被 setState 过一次之后它才开始正常序列化（实测：
+ * 空流被拒 rc=-1 也算数，之后 UI 里换程序 getState 就跟着变）。Cubase 每次实例化都会
+ * setState，所以我们照做：新实例开出来先敲一下，之后普通"存状态"就能带上程序。
+ */
+static int32_t g_prime_rc = 0;
+static int32_t ka_v3_prime(void) {
+    ka_stream st;
+    static unsigned char dummy = 0;
+    if (!g_v3.comp) return -1;
+    st.vtbl = g_st_vtbl; st.refs = 1; st.data = &dummy; st.size = 0; st.cap = 0; st.pos = 0;
+    g_prime_rc = (int32_t)KA_VT(g_v3.comp, ka_component_vtbl)->setState(g_v3.comp, &st);
+    return 0;
+}
+
 /** 读 .vstpreset 并交给插件。ret = 0 / 负；字节数写进 out_bytes。 */
 static int32_t ka_v3_state_load(const uint16_t* path, int64_t* out_bytes) {
     unsigned char* buf = 0;

@@ -40,9 +40,9 @@ const levels = () => {
   return { l: a, r: a };
 };
 
-/** 时间线那只表用：本机引擎此刻的线性峰值。输出不在本机 / 没轮询 = 0（别把上一轮的旧峰值
- *  当成"现在还在响"）。传输在播时槽归时间线（见 workbench/video/timelineAudio.ts），峰值由
- *  这里供出去，与 WebAudio 探头合在同一只表上。 */
+/** 时间线那只表用：本机引擎此刻的线性峰值（音频段的 PCM 与 MIDI 轨已经混在一起）。
+ *  输出不在本机 / 没轮询 = 0（别把上一轮的旧峰值当成"现在还在响"）。传输在播时槽归时间线
+ *  （见 workbench/video/timelineAudio.ts），峰值由这里供出去。 */
 export const nativeLevels = (): { l: number; r: number } =>
   (isNativeOutput() || engineTimelineActive()) && poll ? levels() : { l: 0, r: 0 };
 

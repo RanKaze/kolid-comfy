@@ -561,6 +561,14 @@ export type VidGenPending = {
   params: Record<string, unknown>;
   first_frame?: VidGenFrameRef | null;
   last_frame?: VidGenFrameRef | null;
+  /** 参考视频通道（= 一条时间线视频轨的 id）。只在接口把 reference 槽绑了时有意义：
+   *  跑的时候把这条轨在本段 [start, start+duration) 里的画面按**出片帧率**采样成一列图，
+   *  喂进 reference 口。轨必须完整覆盖这一段 —— 任何空档在开跑前就报错（见 vgenRefPlan）。 */
+  ref_track?: string;
+  /** 参考图通道（= 一条时间线视频轨的 id）。只有在首/末帧那一口没被显式绑定、也没有链式
+   *  首帧时才兜底：首帧取这条轨在段起点时刻的画面，末帧取段最后一帧时刻的画面（绝对时间
+   *  对齐，见 vgenRefFramePlan）。空 = 不用参考图，未绑定的帧就真的不喂。 */
+  ref_frame_track?: string;
   /** 链着的前一段（= 前一段的 clip id）：后一段的首帧用前一段的末帧。
    *  只在同轨且首尾紧贴时成立，挪开就自动断开（见 pruneVgenChains）。 */
   chainPrev?: string;
@@ -619,6 +627,161 @@ export const vgenFpsOf = (p: VidProject, clip: VidClip): number | null => {
   const cfg = p.tracks.find(t => t.id === clip.trackId)?.vgenCfg;
   const n = Number(cfg?.fps);
   return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/** 这一段**实际出片**的帧率：Fixed FPS 写死的数 > 轨级 fps > 段上 fps 口的值。
+ *  参考视频的采样网格必须与出片帧率是同一个数，否则参考列与产物帧对不齐 ——
+ *  执行时那套覆写顺序（execVgenClip 里的 trackFps）在这里一对一复刻。 */
+export const vgenOutputFpsOf = (p: VidProject, clip: VidClip): number => {
+  const v = clip.vgen;
+  if (!v) return 0;
+  if (v.fixed_fps) {
+    const n = Number(v.fixed_fps_value);
+    return Number.isFinite(n) && n > 0 ? n : 16;
+  }
+  const track = vgenFpsOf(p, clip);
+  if (track) return track;
+  const port = v.ports.fps;
+  const n = port ? Number(v.params[String(port)]) : 0;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+
+/** 参考视频一列最多多少帧（与后端 `_VID_REF_MAX_N` 同一个数）。超过这个数不是
+ *  "内存扛不住"（尺寸会按预算缩），而是段长/帧率的组合明显不可能是想要的东西。 */
+const VGEN_REF_MAX_FRAMES = 3600;
+
+export type VgenRefPiece = { file: string; f0: number; n: number };
+export type VgenRefPlan = {
+  /** 喂进哪个端口（接口 start 侧的 IMAGE 口）。 */
+  port: number;
+  track: string;
+  trackName: string;
+  /** 采样/出片共用帧率。 */
+  fps: number;
+  /** 必须凑齐的帧数（= round(段长 × fps)）。 */
+  expect: number;
+  /** 按时间线顺序切的帧段：同一片段里的连续帧合成一片。 */
+  specs: VgenRefPiece[];
+};
+
+/** 这一段要喂的参考视频怎么采。**绝对时间对齐**：段 [start, start+duration) 直接映射到
+ *  参考轨的同一时间区间；帧 k 的时刻 = start + k/fps，落在哪个片段就取那个片段的源画面
+ *  （源内时刻 = 片段 offset + 时间线偏移）。整段必须被片段**完整覆盖**：轨上任何空档、
+ *  或缺字节的片段，都在这里抛出带区间的错误 —— 不开跑、不静默补帧。
+ *  没绑参考口或没选通道返回 null（这一趟不喂参考）。 */
+export const vgenRefPlan = (p: VidProject, clip: VidClip): VgenRefPlan | null => {
+  const v = clip.vgen;
+  if (!v || !v.ports.reference || !v.ref_track) return null;
+  const track = p.tracks.find(t => t.id === v.ref_track);
+  if (!track || track.kind !== 'video') {
+    throw new Error('The reference channel is gone — pick another video track on this segment.');
+  }
+  const fps = vgenOutputFpsOf(p, clip);
+  if (!(fps > 0)) {
+    throw new Error(`「${clip.name}」 has no output FPS — set the FPS port or turn on Fixed FPS before sampling the reference.`);
+  }
+  const expect = Math.max(1, Math.round(clip.duration * fps));
+  if (expect > VGEN_REF_MAX_FRAMES) {
+    throw new Error(`The reference needs ${expect} frames at ${fps}fps — the cap is ${VGEN_REF_MAX_FRAMES}. Shorten the segment or lower the output FPS.`);
+  }
+  const t0 = clip.start;
+  const sec = (t: number): string => `${Math.max(0, t).toFixed(2)}s`;
+  const covers = (c: VidClip, t: number): boolean =>
+    t >= c.start - 1e-6 && t < c.start + c.duration - 1e-6;
+  const onTrack = p.clips.filter(c =>
+    c.trackId === track.id && c.kind === 'video' && !c.pending && !c.vgen);
+  const withSrc = onTrack.filter(c => !!c.src);
+  const specs: VgenRefPiece[] = [];
+  let cur: VidClip | null = null;
+  for (let k = 0; k < expect; k++) {
+    const t = t0 + k / fps;
+    const c = withSrc.find(x => covers(x, t));
+    if (!c) {
+      // 轨上这一段**有片段但没字节**：说清楚是缺素材，而不是"空档"。
+      if (onTrack.some(x => covers(x, t))) {
+        throw new Error(`Reference channel 「${track.name}」 has a clip with missing media at ${sec(t)} — relink it in the Assets window.`);
+      }
+      // 找连续空档的尾巴，报一条能直接对上时间线的区间。
+      let k1 = k;
+      while (k1 + 1 < expect && !withSrc.some(x => covers(x, t0 + (k1 + 1) / fps))) k1++;
+      throw new Error(`Reference channel 「${track.name}」 is empty over ${sec(t)}–${sec(t0 + (k1 + 1) / fps)} (frames ${k + 1}–${k1 + 1} of ${expect}) — the segment's mapped time range must be fully covered.`);
+    }
+    if (c !== cur) {
+      const srcT = c.offset + (t - c.start);
+      const file = c.src.split('/').pop() || '';
+      if (!file) {
+        throw new Error(`Reference channel 「${track.name}」 has a clip with no media file at ${sec(t)} — relink it in the Assets window.`);
+      }
+      specs.push({ file, f0: Math.max(0, Math.floor(srcT * fps + 1e-6)), n: 0 });
+      cur = c;
+    }
+    specs[specs.length - 1].n += 1;
+  }
+  return { port: v.ports.reference, track: track.id, trackName: track.name, fps, expect, specs };
+};
+
+/** 段上的参考通道（一条时间线视频轨的 id）。传 null/空 = 不喂参考。 */
+export const setVideoGenRefTrack = (p: VidProject, clipId: string, trackId: string | null): VidProject => {
+  const tr = trackId ? p.tracks.find(t => t.id === trackId && t.kind === 'video') : null;
+  return {
+    ...p,
+    clips: p.clips.map(c => (c.id === clipId && c.vgen)
+      ? { ...c, vgen: { ...c.vgen, ref_track: tr ? tr.id : undefined } } : c),
+  };
+};
+
+/** 参考图通道（一条时间线视频轨的 id）。传 null/空 = 不用参考图。 */
+export const setVideoGenRefImageTrack = (p: VidProject, clipId: string, trackId: string | null): VidProject => {
+  const tr = trackId ? p.tracks.find(t => t.id === trackId && t.kind === 'video') : null;
+  return {
+    ...p,
+    clips: p.clips.map(c => (c.id === clipId && c.vgen)
+      ? { ...c, vgen: { ...c.vgen, ref_frame_track: tr ? tr.id : undefined } } : c),
+  };
+};
+
+/** 参考图：从哪条视频源取哪一帧（后端 frame_refs 一项）。 */
+export type VgenFrameSpec = { file: string; f0: number; fps: number };
+
+/** 未绑定的首/末帧从**参考图通道**兜底取哪一帧。
+ *  - 首帧 = 段起点时刻（绝对时间）在那条轨上正在显示的帧；
+ *  - 末帧 = 段最后一帧的时刻（start + duration - 1/fps）对应的帧；
+ *  - 显式绑定（段上的首/末帧卡）与链式首帧**优先** —— 被它们占着的槽不在这里解析；
+ *  - **两头各自独立**：某一头在该时刻没有片段 / 片段缺字节，就只跳过这一头（那一头
+ *    保持空），不影响另一头；参考轨比段短、只盖住一头是正常情况，不报错。
+ *  没选参考图通道、或两个槽都被显式占着时返回空表。 */
+export const vgenRefFramePlan = (
+  p: VidProject, clip: VidClip,
+): { first?: VgenFrameSpec; last?: VgenFrameSpec } => {
+  const v = clip.vgen;
+  if (!v || (!v.ports.first_frame && !v.ports.last_frame)) return {};
+  const needFirst = !!v.ports.first_frame && !v.first_frame && !vgenChainPrevOf(p, clip);
+  const needLast = !!v.ports.last_frame && !v.last_frame;
+  if (!v.ref_frame_track || (!needFirst && !needLast)) return {};
+  const track = p.tracks.find(t => t.id === v.ref_frame_track);
+  if (!track || track.kind !== 'video') {
+    throw new Error('The reference-image channel is gone — pick another video track on this segment.');
+  }
+  const fps = vgenOutputFpsOf(p, clip);
+  if (!(fps > 0)) {
+    throw new Error(`「${clip.name}」 has no output FPS — set the FPS port or turn on Fixed FPS before taking reference frames.`);
+  }
+  const covers = (c: VidClip, t: number): boolean =>
+    t >= c.start - 1e-6 && t < c.start + c.duration - 1e-6;
+  const withSrc = p.clips.filter(c =>
+    c.trackId === track.id && c.kind === 'video' && !c.pending && !c.vgen && !!c.src);
+  const resolve = (t: number): VgenFrameSpec | null => {
+    const c = withSrc.find(x => covers(x, t));
+    if (!c) return null;                 // 这一头没有对应帧：只跳过它
+    const srcT = c.offset + (t - c.start);
+    const file = c.src.split('/').pop() || '';
+    if (!file) return null;
+    return { file, f0: Math.max(0, Math.floor(srcT * fps + 1e-6)), fps };
+  };
+  const first = needFirst ? resolve(clip.start) : null;
+  const lastTime = Math.max(clip.start, clip.start + clip.duration - 1 / fps);
+  const last = needLast ? resolve(lastTime) : null;
+  return { ...(first ? { first } : {}), ...(last ? { last } : {}) };
 };
 
 /** 把轨上的**轨级提示词**（prompt preset id）写回去；传 null/空 = 清掉。 */
@@ -867,6 +1030,23 @@ export const vidDuration = (p: VidProject): number =>
 export const loopRangeOf = (p: VidProject): { on: boolean; a: number; b: number } =>
   p.outPoint > p.inPoint ? { on: true, a: p.inPoint, b: p.outPoint } : { on: false, a: 0, b: 0 };
 
+/** LOOP 开关：区间只有一份（时间线入/出点）。开 = 圈住整条时间线，关 = 清掉。
+ *  MIDI 与 Video 的传输条都调这一句 —— 别让两种模式各拼一份"打开/关闭循环"的写法。 */
+export const toggleLoopRange = (p: VidProject): VidProject => {
+  const music = musicOf(p);
+  if (loopRangeOf(p).on) {
+    return { ...p, inPoint: 0, outPoint: 0, music: { ...music, loop: { on: false, a: 0, b: 0 } } };
+  }
+  const total = vidDuration(p);
+  if (!(total > 0)) return p;
+  return {
+    ...p,
+    inPoint: 0,
+    outPoint: total,
+    music: { ...music, loop: { on: true, a: 0, b: Math.max(secondsToBeat(total, music.tempo), 1) } },
+  };
+};
+
 /** 循环区间的**拍**口径（卷帘的 A/B 画在这里）。没设时给 [0, 整条内容] ——
  *  正好是"打开 LOOP 就循环全曲"，不必先让用户去拉一对把手。 */
 export const loopRangeBeatsOf = (p: VidProject): { on: boolean; a: number; b: number } => {
@@ -1000,6 +1180,54 @@ export const moveClip = (p: VidProject, id: string, newStart: number, newTrackId
       return c;
     }),
   };
+};
+
+/** 多选拖动：把 `ids`（当前选中集）按**同一位移**搬走。与 moveClip 的差别：
+ *  - 位移按**整块**夹到 0（块内最左那段不越界，也不破坏相对间距）；
+ *  - `linked`（没按 Alt）时把选中段的联动组同伴一起搬；
+ *  - 只有**选中段全在被拖段同一条轨**上时，才把 trackId 应用到选中段（联动同伴保持自己的轨道）；
+ *    跨轨多选取向不明 —— 只做水平移动，纵向目标忽略。
+ *  `newDragStart` 是**被拖那一段**的新起点；`dragId` 必须也在 ids 里。 */
+export const moveClips = (
+  p: VidProject,
+  ids: readonly string[],
+  dragId: string,
+  newDragStart: number,
+  opts?: { trackId?: string | null; linked?: boolean },
+): VidProject => {
+  const byId = new Map(p.clips.map(c => [c.id, c] as const));
+  const drag = byId.get(dragId);
+  if (!drag) return p;
+  const base = ids.filter(id => byId.has(id));
+  if (!base.length) return p;
+  const moving = new Set(base);
+  if (opts?.linked !== false) {
+    const gids = new Set<string>();
+    for (const id of base) {
+      const g = byId.get(id)?.groupId;
+      if (g) gids.add(g);
+    }
+    if (gids.size) {
+      for (const c of p.clips) if (c.groupId && gids.has(c.groupId)) moving.add(c.id);
+    }
+  }
+  let delta = Math.max(0, newDragStart) - drag.start;
+  let minStart = Infinity;
+  for (const id of moving) minStart = Math.min(minStart, byId.get(id)!.start);
+  if (minStart + delta < 0) delta = -minStart;
+  const sameTrack = base.every(id => byId.get(id)!.trackId === drag.trackId);
+  const dst = opts?.trackId && sameTrack && opts.trackId !== drag.trackId ? opts.trackId : '';
+  const baseSet = new Set(base);
+  let changed = false;
+  const clips = p.clips.map(c => {
+    if (!moving.has(c.id)) return c;
+    const start = Math.max(0, c.start + delta);
+    const trackId = dst && baseSet.has(c.id) ? dst : c.trackId;
+    if (start === c.start && trackId === c.trackId) return c;
+    changed = true;
+    return { ...c, start, trackId };
+  });
+  return changed ? { ...p, clips } : p;
 };
 
 /** 裁剪片段的一条边。`t` 是边要去的时刻（时间线坐标）。默认联动组的成员各自按同一份意图裁，
@@ -1398,7 +1626,7 @@ export const midiEditorOf = (p: VidProject, clipId: string | null | undefined): 
   const tr = p.tracks.find(t => t.id === c.trackId && t.kind === 'midi');
   if (!tr) return null;
   const music = musicOf(p);
-  const { from } = midiClipWindow(c, music.tempo);
+  const { from, to } = midiClipWindow(c, music.tempo);
   const origin = midiClipOriginBeat(p, c);
   const muted = new Set(p.muteIds ?? []);
   const soloed = new Set(p.soloAudioIds ?? []);
@@ -1418,6 +1646,12 @@ export const midiEditorOf = (p: VidProject, clipId: string | null | undefined): 
     clipId: c.id,
     trackId: tr.id,
     track,
+    // 右边界之外（段尾右边）的音符：窗口里看不见，但段内容还留着。卷帘把它们压暗画出来，
+    // 右边界再拖回来就重新属于窗口。左边界之外（offset>0 左裁掉的）本地拍是负数，不在这里。
+    outsideNotes: (c.notes ?? [])
+      .filter(n => n.start >= to - 1e-9)
+      .map(n => ({ ...n, start: n.start - from }))
+      .sort((a, b) => a.start - b.start || a.pitch - b.pitch),
     length: Math.max(MIN_DUR, secondsToBeat(Math.max(0, c.duration), music.tempo)),
     baseBeat: origin + from,
     contentOffset: from,
@@ -1710,7 +1944,21 @@ export const addLayerClip = (p: VidProject, trackId: string, at: number, duratio
 export const removeTrack = (p: VidProject, trackId: string): VidProject => ({
   ...p,
   tracks: p.tracks.filter(t => t.id !== trackId),
-  clips: p.clips.filter(c => c.trackId !== trackId),
+  // 生成器段的参考通道/参考图通道指向这条轨的话一并断开（留着悬空 id 只会在开跑时才发现）。
+  clips: p.clips
+    .filter(c => c.trackId !== trackId)
+    .map(c => {
+      if (!c.vgen) return c;
+      if (c.vgen.ref_track !== trackId && c.vgen.ref_frame_track !== trackId) return c;
+      return {
+        ...c,
+        vgen: {
+          ...c.vgen,
+          ...(c.vgen.ref_track === trackId ? { ref_track: undefined } : {}),
+          ...(c.vgen.ref_frame_track === trackId ? { ref_frame_track: undefined } : {}),
+        },
+      };
+    }),
   // 删掉的就是 Mask 轨 → 绑定跟着断（留一条指向不存在轨的 id 等于"绑着但取不到"，
   // 比"没绑"更难解释）。
   ...(p.maskTrackId === trackId ? { maskTrackId: undefined } : {}),
@@ -2650,6 +2898,22 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
         // 换过之后 unit='norm'，再读原样放过 —— 只做一次。
         const keyframes = kfMigrate(c.keyframes, c.duration);
         return { ...c, src: '', layerKey: c.layerKey || c.id, ...(keyframes ? { keyframes } : {}) };
+      }
+      if (c.vgen) {
+        // 参考通道/参考图通道只认还活着的视频轨；轨被删/改类了就当没选（与 removeTrack 同一口径）。
+        const rt = c.vgen.ref_track;
+        const rf = c.vgen.ref_frame_track;
+        const alive = (id?: string): boolean =>
+          typeof id === 'string' && trackIds.has(id) && trackKind.get(id) === 'video';
+        if ((!rt || alive(rt)) && (!rf || alive(rf))) return c;
+        return {
+          ...c,
+          vgen: {
+            ...c.vgen,
+            ...(rt && !alive(rt) ? { ref_track: undefined } : {}),
+            ...(rf && !alive(rf) ? { ref_frame_track: undefined } : {}),
+          },
+        };
       }
       const src = recover(c);
       return src === c.src ? c : { ...c, src };
