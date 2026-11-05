@@ -14,7 +14,7 @@ export function Sidebar({ selectedTags, customPrompts, onCustomPromptsChange, on
   return (
     <div className="sidebar">
       <div className="sidebar-header">
-        <h3>Selected Prompts</h3>
+        <h3>Prompts</h3>
         <span className="selected-count">{selectedTags.length}</span>
       </div>
       <div className="selected-tags">

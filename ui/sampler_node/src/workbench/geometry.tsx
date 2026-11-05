@@ -1,3 +1,4 @@
+import { useDockWindow } from '../dock/docScope';
 import React from 'react';
 import { wbStyles } from './skin';
 import { useBlendUi } from './store';
@@ -237,6 +238,7 @@ const STAGE_TITLE = 'The world the image lies in: the canvas plane (textured wit
   + 'to switch move / rotate, X to toggle global / local.';
 
 const GeometryBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
+  const hostWin = useDockWindow();
   const ui = useBlendUi();
   const g = ui.geometry;
   const [ready, setReady] = React.useState(false);
@@ -341,13 +343,13 @@ const GeometryBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
       orbit = null;
       if (canvas && !drag) canvas.style.cursor = hover ? 'grab' : 'default';
     };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-    window.addEventListener('blur', blur);
+    hostWin.addEventListener('mousemove', move);
+    hostWin.addEventListener('mouseup', up);
+    hostWin.addEventListener('blur', blur);
     return () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-      window.removeEventListener('blur', blur);
+      hostWin.removeEventListener('mousemove', move);
+      hostWin.removeEventListener('mouseup', up);
+      hostWin.removeEventListener('blur', blur);
     };
   }, []);
 

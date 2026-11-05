@@ -5,9 +5,13 @@ import { DebugPanel } from './DebugModal';
 import { LogPanel } from './LogModal';
 import RunStatusSeg from './RunStatusSeg';
 import VidSegModal from './VidSegModal';
-import { type DockMode, type DockRules, type UnitId, type Dock, defaultDock, docUnit, docUidOf, dockUnits, fitLayout, loadDock, revealDoc, setBlockMode, setToolbarDock, setToolbarDirDock, syncDocUnits } from '../dock/model';
+import { type DockMode, type DockRules, type UnitId, type Dock, defaultDock, docUnit, docUidOf, dockUnits, dockBackDock, fitLayout, loadDock, revealDoc, setBlockMode, setToolbarDock, setToolbarDirDock, setUnitHidden, showUnit, syncDocUnits, allFloats, findFloat, floatContaining, floatKey, floatUnits, mapFloatsDeep, removeFloat, dockAllUnits, unitInChild, pruneEmptyFrames } from '../dock/model';
+import { ownerScopeOf } from '../dock/dockScopes';
 import { fetchLayouts, queueCurrentLayout, readBootLayout } from '../dock/layoutStore';
 import { type DockDrag, type DockOver, DockPanel } from '../dock/DockView';
+import { DetachedDocBody } from '../dock/DetachedDocBody';
+import { closeDockChild } from '../dock/childWindow';
+import { childIds, dockBackToLocal, engineWindow, forgetChild, isDetached as isDetachedDoc, isEngineSource, onEngineMessage, sendForUid, setLocalIframe } from '../dock/docEngine';
 import { registerProbe, note } from '../debug/probe';
 import { ProbePanelBody } from '../debug/ProbePanel';
 import { probePanelOpen, setProbePanelOpen, subscribePanel } from '../debug/install';
@@ -29,8 +33,13 @@ import { MidiWorkspace } from '../midi/Workspace';
 import { patchMidiSettings, useMidiSettings, type LibraryState } from '../midi/settings';
 import { reloadInstruments, useInstrumentLibrary } from '../midi/library';
 import { unitIcon } from '../workbench/icons';
-import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VgenFrameSpec, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenRefImageTrack, setVideoGenRefTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vgenRefFramePlan, vgenRefPlan, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VgenFrameSpec, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, clipAtSolo, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeDetectClip, placeDetectTrack, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenRefImageTrack, setVideoGenRefTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vgenRefFramePlan, vgenRefPlan, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { compositePlanAt } from '../workbench/video/composite';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
+// Prompt 窗与 sampler 页不同 origin：拖拽载荷走 postMessage，target 在这里登记。
+import { registerPromptWindow, setVideoPickHandler, sendTagBytesToPane, type VideoPickRequest } from '../workbench/video/assetDragBus';
+// 视频资产拖进 Prompt 窗 → 在主页面挑一帧（弹窗必须在本页，不在 Prompt 窗里）。
+import VideoFramePicker from '../workbench/video/VideoFramePicker';
 import { getVidProcPicks } from '../workbench/video/procPicks';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
 import { setLayerEditBlocked } from '../workbench/editGate';
@@ -47,6 +56,7 @@ import { markRender } from '../workbench/video/perf';
 import { beginVidProcRun, clearProcFill, clearProcQueue, dequeueProcClip, endVidProcRun, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, setVidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets, Card, type StoreAsset } from '../workbench/video/Assets';
+import { VidEagleAssets } from '../workbench/video/EagleAssets';
 import { VidInspector, type InspectSel } from '../workbench/video/Inspector';
 import { VidAudioMonitor } from '../workbench/video/AudioMonitor';
 import { VidKeyframes } from '../workbench/video/Keyframes';
@@ -86,7 +96,7 @@ const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', '
 // MIDI 模式**不占任何 dock 窗**：它是模式主窗（文档窗）的正文，一整块铺在那里面
 // （卷帘在上、Transport 横贯底部）。乐器/轨道/片段都在 Tracks 窗里选 ——
 // 乐器挂在轨道头上，MIDI 段与音频段是同一条时间线上的兄弟。窗一多，编曲就变成窗口管理。
-const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'];
+const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, 'promptManager', 'prompt', ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'veagle', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'];
 // 工具窗的标识色:Log / Debug / Probe 三扇"看现场"的窗,图标与 tab 名同穿一件颜色的衣服,
 // 与内容窗(素色)一眼分开。icon 的着色与 titleColor 都从这里来 —— 一处定色,两处生效。
 const UNIT_COLORS: Partial<Record<string, string>> = {
@@ -98,7 +108,7 @@ const UNIT_COLORS: Partial<Record<string, string>> = {
 const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'presets', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
   toolbar: 'File', context: 'Context', pipeline: 'Pipeline', presets: 'Pipeline Presets',
-  blocks: 'Pipeline Graph', vtracks: 'Tracks', vassets: 'Assets', vinspector: 'Inspector', vkf: 'Keyframes',
+  blocks: 'Pipeline Graph', promptManager: 'Prompt Manager', prompt: 'Prompt', vtracks: 'Tracks', vassets: 'Assets', veagle: 'Eagle', vinspector: 'Inspector', vkf: 'Keyframes',
   vaudio: 'Audio Monitor',
   log: 'Log', debug: 'Debug', probe: 'Probe', agent: 'Agent',
   ...WORKBENCH_TITLES,
@@ -106,6 +116,12 @@ const UNIT_TITLES: Record<string, string> = {
 const COLUMN_W = 340;
 // 工作台那一列原来就是 280 宽（页面的 `SIDE_W_DEFAULT`），搬过来照抄这颗数。
 const RIGHT_W = 280;
+// Prompt 窗是画布右边的一整列（不是右栏里的一张卡）：提示词编辑需要宽度。
+const PROMPT_W = 380;
+/** 同一份 prompt 页面在一扇窗里只画一半：`manager` = 左侧提示词库，`dock` = 右侧选择栏。
+ *  两窗同源（不同 iframe），靠 BroadcastChannel 同步选择状态。 */
+const paneSrc = (url: string, pane: 'manager' | 'dock') =>
+  (url || '/prompt_node.html') + (url.includes('?') ? '&' : '?') + 'pane=' + pane;
 const TOP_H = 60;
 const DOCK_STORE = 'sampler.drawDock';
 // ── Video 模式 ── **同一棵 dock 树**的第二种活法：切过去时只动一处 —— Workbench 那格
@@ -146,6 +162,9 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     store: DOCK_STORE,
     panels: PANEL_IDS,
     known: (id: UnitId) => PANEL_IDS.includes(id) || isDocUnit(id),
+    // Layout 是唯一不能隐藏的一格：藏了它就没有地方把别的窗再叫回来。Prompt 也不能藏：
+    // 它的正文是一份常驻的 iframe（页面与 Agent 都靠它），藏掉就等于把它拆了。
+    canHide: (id: UnitId) => id !== 'layout' && id !== 'prompt' && id !== 'promptManager',
     // 名字条只列**此刻真有工程认领它**的文档格。关掉最后一份后那格成了保留位 —— 窗留着
     // （用户摆的位置不动），但一条 tab 都不挂，上面什么也不写。
     listed: (id: UnitId) => PANEL_IDS.includes(id) || byUnit.has(id),
@@ -175,19 +194,23 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
       const c = UNIT_COLORS[id];
       return c ? <span style={{ color: c, display: 'flex' }}><Icon size={15} /></span> : <Icon size={15} />;
     },
-    keepMounted: isDocUnit,
+    // Eagle 的筛选 / 搜索 / 滚动是这一窗自己的活状态 —— 切走再切回来不该把它清掉。
+    // Prompt 更是如此：那份 iframe 里是没保存的选择，卸载就没了。
+    keepMounted: (id: UnitId) => isDocUnit(id) || id === 'veagle' || id === 'prompt' || id === 'promptManager',
+    // 一条 toolbar 条没有正文，收进去就会把 iframe 卸载 —— 常驻正文的窗不能收。
+    canToolbar: (id: UnitId) => id !== 'prompt' && id !== 'promptManager',
     // A document window never folds: its fold would be stored under a uid the workbench re-issues from
     // 1 on its next boot, and a collapsed canvas box leaves the live frame with nowhere to be. Its title
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDocUnit(id),
-    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'context' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vkf' || id === 'vaudio' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent' || id === 'blocks',
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'context' || id === 'prompt' || id === 'promptManager' || id === 'vtracks' || id === 'vassets' || id === 'veagle' || id === 'vinspector' || id === 'vkf' || id === 'vaudio' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent' || id === 'blocks',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
     // 时间线与资产库同理：两份会一直长的列表。
     // Context 也进 grows:预览图要吃满窗的余量(图片 fit dock window),左列里它是那个"看图"的窗,
     // 与 Inspector 同一待遇;Pipeline/Presets 照旧按内容定高。
-    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'vinspector' || id === 'vkf' || id === 'context' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent',
+    grows: (id: UnitId) => isDocUnit(id) || id === 'prompt' || id === 'promptManager' || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'veagle' || id === 'vinspector' || id === 'vkf' || id === 'context' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent',
     top: 'toolbar',
     // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
     // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
@@ -196,8 +219,10 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     columnW: COLUMN_W,
     // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里，Assets / Tracks 是普通成员
     // （默认窗，不靠任何切换逻辑出现）。
-    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'],
+    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'veagle', 'vtracks', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'],
     rightW: RIGHT_W,
+    // Prompt 不是右栏里的一张卡：它是画布右边独立的一列（默认布局就在这儿），宽 380。
+    afterWork: { ids: ['promptManager', 'prompt'], w: PROMPT_W },
     // The size a NEW block opens at — asked per unit and per axis, because which axis the block will be
     // measured on is decided by the side it was dropped on (under a block it is a height, beside one it
     // is a width). It is a preference: the frame caps it so the block it is taken from keeps its floor.
@@ -206,6 +231,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
       if (isDoc(id)) return axis === 'v' ? DOC_BLOCK_H : DOC_BLOCK_W;
       if (id === 'vtracks') return axis === 'v' ? 320 : 900;
       if (id === 'vassets') return axis === 'v' ? 260 : PANEL_BLOCK_W;
+      if (id === 'veagle') return axis === 'v' ? 460 : 660;
       if (id === 'vinspector') return axis === 'v' ? 300 : 460;
       if (id === 'vkf') return axis === 'v' ? 360 : 900;
       if (id === 'vaudio') return axis === 'v' ? 240 : 200;
@@ -213,6 +239,8 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
       if (id === 'debug') return axis === 'v' ? 380 : 460;
       if (id === 'probe') return axis === 'v' ? 420 : 540;
       if (id === 'agent') return axis === 'v' ? 480 : 640;
+      if (id === 'promptManager') return axis === 'v' ? 460 : PROMPT_W;
+      if (id === 'prompt') return axis === 'v' ? 420 : PROMPT_W;
       return axis === 'v' ? PANEL_BLOCK_H : PANEL_BLOCK_W;
     },
   };
@@ -471,7 +499,6 @@ interface EditPhaseProps {
   tab: Tab;
   onTabChange: (tab: Tab) => void;
   promptUrl: string;
-  promptReady: boolean;
   detailStatus: 'idle' | 'running' | 'done' | 'error';
   staging: StagingItem[];
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
@@ -562,6 +589,10 @@ interface EditPhaseProps {
   /** 图池的两个后端写口 —— 工作台那条 Staging 底栏拖文件进来 / ✕ 移除时直接调用，不再绕 iframe 消息。 */
   stageUpload: (images: string[], names: string[]) => void;
   stageRemove: (id: string) => void;
+  /** 文档窗弹进 owned 子窗口：交接完成 / 泊回 / 子窗口被直接关掉。App 维护 detached 文档集。 */
+  onDocDetached?: (doc: BlendDoc) => void;
+  onDocDocked?: (uid: number) => void;
+  onDocLost?: (uid: number) => void;
 }
 
 // 视频分段跑完一段，通知 Kolid Desktop 的壳页摇一次铃。响不响由桌面端的铃铛总开关
@@ -575,7 +606,7 @@ function ringSegmentDone() {
 
 const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, promptUrl,
-  promptReady, detailStatus,
+  detailStatus,
   staging, promptIframeRef,
   architecture, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal,
   refPixelsVal, refAlignVal, tgenPixelsVal, tgenAlignVal,
@@ -590,7 +621,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   archSettings, onArchSettingsChange, onAddArchRule, onDuplicateArchRule, onRemoveArchRule, onReorderArchRules,
   openWithApp, onOpenWithAppChange,
   actionLog, pushLog, blendDocs, docStills, onDocCommand, onBlendUiCommand,
-  stageUpload, stageRemove,
+  stageUpload, stageRemove, onDocDetached, onDocDocked, onDocLost,
 }) => {
   markRender('EditPhase');
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
@@ -668,13 +699,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     if (vidDirty.current.has(uid)) return;
     vidDirty.current.add(uid);
     bumpVidDirty();
-    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-vid-dirty', uid }, '*');
+    sendForUid({ type: 'blend-vid-dirty', uid }, uid);
   }, [blendIframeRef]);
   // 每跑完一段就让工作台把 .cud 落盘一次。**只对已经绑过文件的文档生效**（有没有绑定
   // 只有工作台知道）：没落过盘的项目不该被自动保存，更不该自己弹出"另存为"目录框 ——
   // 这两种情况它那边直接返回。连续几段挨得很近时它会把多发的一发排队、合并成一次写。
   const autoSaveCud = useCallback(() => {
-    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-autosave' }, '*');
+    sendForUid({ type: 'blend-autosave' }, blendDocs.activeUid);
   }, [blendIframeRef]);
   const dockRules = useMemo(
     () => dockRulesFor(blendDocs.docs, vidDirty.current), [blendDocs, vidDirtyTick],
@@ -717,21 +748,182 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // effect 的依赖 —— 那会让它每次动一下布局就跑一遍。
   const dockRef = useRef(dock);
   dockRef.current = dock;
-  const applyDock = useCallback((next: Dock, persist = true, sync = false) => {
-    setDockState(next);
+  useEffect(() => { setLocalIframe(blendIframeRef.current); }, [blendIframeRef]);
+  // 文档被关掉（或它的子窗口记录被剪掉）时，docEngine 里那一份登记也要跟着走：子窗口一卸，
+  // 那台引擎就没了，留着只会让以后同 uid 的命令发进一扇空窗。
+  useEffect(() => {
+    const open = new Set(blendDocs.docs.map(d => d.uid));
+    const held = new Set(dockAllUnits(dock));
+    for (const uid of childIds()) {
+      if (!open.has(uid) || !held.has(docUnit(uid))) forgetChild(uid);
+    }
+  }, [dock, blendDocs.docs]);
+  const applyDock = useCallback((next: Dock | ((prev: Dock) => Dock), persist = true, sync = false) => {
+    // 同步写 ref：同一事件里可能连着两次写（跨窗口拖拽先从另一页拿走、再落到这一页），
+    // 第二次必须看见第一次的结果，不能拿一份早于它的快照把它盖回去。
+    const raw = typeof next === 'function' ? next(dockRef.current) : next;
+    const resolved = pruneEmptyFrames(raw);
+    dockRef.current = resolved;
+    setDockState(resolved);
     if (!persist) return;
-    try { localStorage.setItem(DOCK_STORE, JSON.stringify(next)); } catch { /* in-memory only */ }
+    try { localStorage.setItem(DOCK_STORE, JSON.stringify(resolved)); } catch { /* in-memory only */ }
     // 盘上那一份（实时）：用户动的每一次都排进写队列（去抖 600ms，手停下来才算数）。
     // **文档来去**那种内部整理只在 `dockArmed` 之后才写 —— 见上面那段注释。
     if (!sync) dockArmed.current = true;
-    if (!sync || dockArmed.current) queueCurrentLayout(next);
+    if (!sync || dockArmed.current) queueCurrentLayout(resolved);
   }, []);
   // 把一扇面板**切到前台**:折叠的开回来(sections),tab 组/块选中项拨到它(revealDoc 对任意
   // 单元通用,浮窗原样 —— 已经看得见)。Assets 卡片双击"自动切出 Inspector"走这条。
   const revealPanel = useCallback((id: UnitId) => {
     setFold(id, true);
-    applyDock(revealDoc(dockRef.current, id));
+    // 目标可能正被隐藏：先让它回到可见（必要时放回树/浮窗），再切到它那一格。
+    applyDock(revealDoc(showUnit(dockRef.current, id), id));
   }, [applyDock, setFold]);
+  // Hide = 可见性，不是把窗从布局里删掉：树/浮窗里留着原位置，显示时原地回来。
+  // 子窗口化的一格：面板直接关子窗再隐藏；文档还在子引擎里时，必须先按泊回那条路把字节导回
+  // 本地引擎（弹窗一关，那台引擎就没了），再隐藏 —— 文档本身仍然开着，只是窗不画。
+  const hideUnitNow = useCallback((id: UnitId) => {
+    if (dockRules.canHide?.(id) === false) return;
+    // 隐藏之前，若这份文档正活在**子窗口里的一台引擎**上，先把字节导回本地引擎 —— 那扇窗马上
+    // 就要关，子引擎会跟着没。文档本身仍然开着，只是窗不画。
+    const finish = () => {
+      // 隐藏只动可见性，**不动 child 标记**：这条浮窗记录（frame、位置、它是真窗口这件事）原样
+      // 留着。窗口由根上的 closeChildrenNotIn 收掉；从 Layout 叫回来时 ChildWindowHost 会补开一扇。
+      applyDock(setUnitHidden(dockRef.current, id, true));
+    };
+    const uid = docUidOf(id);
+    if (uid !== null && isDetachedDoc(Number(uid))) {
+      void dockBackToLocal(Number(uid)).then(() => {
+        onDocDocked?.(Number(uid));
+        finish();
+      }).catch(e => {
+        pushLog?.(`Could not hide the document window — ${String((e as Error)?.message || e)}`, 'error');
+      });
+      return;
+    }
+    finish();
+  }, [applyDock, dockRules, onDocDocked, pushLog]);
+  const showUnitNow = useCallback((id: UnitId) => {
+    applyDock(revealDoc(showUnit(dockRef.current, id), id));
+  }, [applyDock]);
+  const setUnitVisible = useCallback((id: UnitId, visible: boolean) => {
+    if (visible) showUnitNow(id); else hideUnitNow(id);
+  }, [showUnitNow, hideUnitNow]);
+  // 子窗口那一页自己的写口：只改那条浮窗的 frame，外层其余部分（包括别的子窗口）一格不动。
+  const setFrame = useCallback((key: string, next: Dock | ((prev: Dock) => Dock), persist = true) => {
+    const d = dockRef.current;
+    const f = findFloat(d, key);
+    if (!f) return;
+    const base: Dock = f.frame ?? { tree: { t: 'b', ids: [f.id], sel: 0, mode: 'default' }, floats: [] };
+    const out = typeof next === 'function' ? next(base) : next;
+    // 这一页被搬空了（最后一扇窗被拖走 / 泊回）：那条浮窗记录当场收掉，别在存档里留一扇空窗。
+    // 它的 OS 窗口由根上的 closeChildrenNotIn 跟着收。
+    if (!dockAllUnits({ tree: out.tree, floats: out.floats }).length) {
+      applyDock(removeFloat(d, key), persist);
+      return;
+    }
+    applyDock(mapFloatsDeep(d, g => (floatKey(g) === key
+      ? { ...g, frame: { tree: out.tree, floats: out.floats } }
+      : g)), persist);
+  }, [applyDock]);
+  // 一扇浮窗的窗条 ✕（页面内浮窗 / 弹窗被拦时的那条）：安全关闭。文档先导出，能隐藏的进 hidden，
+  // Layout 那种"永远显示"的留在布局里。收窗在模型收尾之后 —— 窗口一关，它的引擎就没了。
+  const closeFrame = useCallback((key: string) => {
+    const f0 = findFloat(dockRef.current, key);
+    if (!f0) return;
+    const docs = floatUnits(f0)
+      .map(u => docUidOf(u))
+      .filter((u): u is string => u !== null)
+      .map(Number)
+      .filter(uid => isDetachedDoc(uid));
+    const finish = () => {
+      const d = dockRef.current;
+      const f = findFloat(d, key);
+      if (!f) return;
+      // 关窗 = **隐藏**，位置、这一页的摆法和"它是一扇真窗口"都留着：下次从 Layout 叫回来，
+      // ChildWindowHost 会把同一扇窗口重新开在原位。只有"永远显示"的 Layout 例外 ——
+      // 它泊回主布局，不跟着藏起来。
+      let next = d;
+      const stay: UnitId[] = [];
+      for (const u of floatUnits(f)) {
+        if (dockRules.canHide?.(u) === false) next = dockBackDock(next, u);
+        else stay.push(u);
+      }
+      next = { ...next, hidden: [...(next.hidden ?? []).filter(u => !stay.includes(u)), ...stay] };
+      applyDock(next);
+      closeDockChild(key);
+    };
+    if (!docs.length) { finish(); return; }
+    void Promise.all(docs.map(uid => dockBackToLocal(uid).then(() => onDocDocked?.(uid))))
+      .then(finish)
+      .catch(e => {
+        // 导出没成：**不收窗**。关掉就等于把那份工程一起带走，宁可不关。
+        pushLog?.(`Could not close the window — ${String((e as Error)?.message || e)}`, 'error');
+      });
+  }, [applyDock, dockRules, onDocDocked, pushLog]);
+  // 原生关窗（Alt+F4 / 宿主收窗）来不及导出：如实收掉这一格，并把损失写进日志。
+  // 走窗条上的 ✕ 才会先导出（见 closeFrame）。
+  const onChildClosed = useCallback((key: string) => {
+    const d = dockRef.current;
+    const f = findFloat(d, key);
+    if (!f) return;
+    const units = floatUnits(f);
+    for (const u of units) {
+      const uid = docUidOf(u);
+      if (uid !== null && isDetachedDoc(Number(uid))) {
+        forgetChild(Number(uid));
+        onDocLost?.(Number(uid));
+        pushLog?.('A detached document window was closed natively — its unsaved changes are gone. Use the window bar or the Layout list to close it safely.', 'error');
+      }
+    }
+    // 和窗条 ✕ 同一套模型：**隐藏**在它原来的位置（浮窗记录与 child 标记都留着）；只有 Layout
+    // 会把它泊回主布局。下次从 Layout 叫回来时，ChildWindowHost 会把这扇窗口重新开出来。
+    let next = d;
+    const stay: UnitId[] = [];
+    for (const u of units) {
+      if (dockRules.canHide?.(u) === false) next = dockBackDock(next, u);
+      else stay.push(u);
+    }
+    next = { ...next, hidden: [...(next.hidden ?? []).filter(u => !stay.includes(u)), ...stay] };
+    applyDock(next);
+  }, [applyDock, dockRules, onDocLost, pushLog]);
+  // 页面内的一整页重新变成 owned 子窗口：窗是**同一条**浮窗记录（位置、内部的摆法都不动），
+// 只是把 child 标回去；portal 由根上的渲染接住。子窗口没有顶栏，拖动交给 dock 窗自己的标题条。
+  const promoteFrame = useCallback((key: string) => {
+    applyDock(mapFloatsDeep(dockRef.current, f => (floatKey(f) === key ? { ...f, child: true } : f)));
+  }, [applyDock]);
+  const dockBackChild = useCallback((id: UnitId) => {
+    const uid = docUidOf(id);
+    const finish = () => applyDock(prev => dockBackDock(prev, id));
+    if (uid !== null && isDetachedDoc(Number(uid))) {
+      void dockBackToLocal(Number(uid)).then(() => {
+        onDocDocked?.(Number(uid));
+        finish();
+      }).catch(e => {
+        pushLog?.(`Could not dock the document back — ${String((e as Error)?.message || e)}`, 'error');
+      });
+      return;
+    }
+    finish();
+  }, [applyDock, onDocDocked, pushLog]);
+  // 跨窗口拖拽的收尾：手里若还有活在**别的**子窗口引擎里的文档，先导出、再让它搬。失败就放弃
+  // 这次落点 —— 搬过去的那一页会要一台新引擎，而旧的那台已经跟着源窗口没了。
+  const prepareMove = useCallback(async (ids: readonly UnitId[], except: string): Promise<boolean> => {
+    for (const id of ids) {
+      const uid = docUidOf(id);
+      if (uid === null || !isDetachedDoc(Number(uid))) continue;
+      const owner = ownerScopeOf(id);
+      if (!owner || owner === except) continue;
+      try {
+        await dockBackToLocal(Number(uid));
+        onDocDocked?.(Number(uid));
+      } catch (e) {
+        pushLog?.(`Could not move 「${id}」 out of its window — ${String((e as Error)?.message || e)}`, 'error');
+        return false;
+      }
+    }
+    return true;
+  }, [onDocDocked, pushLog]);
   // Alt+D(探针热键)住在 debug/install 里,它只会掀 `probePanelOpen` 这口铃 —— 探针如今是
   // 一扇 dock 窗,宿主在这里听铃:有人按了 Alt+D 就把 Probe 窗切到前台,并把开关消费掉。
   useEffect(() => subscribePanel(() => {
@@ -854,7 +1046,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // **先把账记到页面那边**：这条去抖在换文档之后会自己放弃（那时的 autoSaveCud 写的已经是新
     // 文档），而页面只能在那份还活跃时写得进它自己的文件 —— 于是由它在换人之前补这一笔
     // （blend-vid-owe → flushVidSave）。账是幂等的，写成功才销，见页面 announceSaved。
-    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-vid-owe', uid }, '*');
+    sendForUid({ type: 'blend-vid-owe', uid }, uid);
     if (metaSaveTimer.current) clearTimeout(metaSaveTimer.current);
     metaSaveTimer.current = setTimeout(() => {
       metaSaveTimer.current = null;
@@ -1166,7 +1358,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       // 页面报"每套图层集吃哪几条视频轨的帧"（只在内容变了时发一条，见页面 pushVidFrameNeed）。
       // 播放器拿它判"Frame source 引用了静音轨 ⇒ 这一段跳过"，所以必须认来源窗口。
       if (d.type === 'blend-vid-frame-need') {
-        if (e.source !== blendIframeRef.current?.contentWindow) return;
+        if (!isEngineSource(e.source as Window | null)) return;
         const raw = (d.need && typeof d.need === 'object') ? d.need as Record<string, unknown> : {};
         const need: Record<string, string[]> = {};
         for (const [k, v] of Object.entries(raw)) {
@@ -1176,7 +1368,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         return;
       }
       if (d.type === 'blend-vid-layer-sig') {
-        if (e.source !== blendIframeRef.current?.contentWindow) return;
+        if (!isEngineSource(e.source as Window | null)) return;
         const rid = Math.round(Number(d.reqId) || 0);
         const finish = layerSigWaiters.current.get(rid);
         if (finish) {
@@ -1186,7 +1378,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         return;
       }
       if (d.type === 'blend-vid-kf') {
-        if (e.source !== blendIframeRef.current?.contentWindow) return;
+        if (!isEngineSource(e.source as Window | null)) return;
         const rid = Math.round(Number(d.reqId) || 0);
         const finish = kfWaiters.current.get(rid);
         if (finish) {
@@ -1197,7 +1389,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         return;
       }
       if (d.type === 'blend-vid-layer-copied') {
-        if (e.source !== blendIframeRef.current?.contentWindow) return;
+        if (!isEngineSource(e.source as Window | null)) return;
         const rid = Math.round(Number(d.reqId) || 0);
         const finish = layerCopyWaiters.current.get(rid);
         if (finish) {
@@ -1293,7 +1485,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       }
     };
     window.addEventListener('message', onMsg);
-    return () => window.removeEventListener('message', onMsg);
+    // 弹进子窗口的文档：视频消息从弹窗里的子引擎来，docEngine 转成同一个事件形状。
+    const offEngine = onEngineMessage((data, source) => onMsg({ data, source } as MessageEvent));
+    return () => { offEngine(); window.removeEventListener('message', onMsg); };
     // syncVidMode 恒稳（[] 依赖）：写进来只是给 lint 看，订阅不会因此重建。
   }, [syncVidMode]);
   // History 那一格读的是**只读投影**：图层步（页面播报的）在前、视频步接在后面。
@@ -1373,6 +1567,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 占位段设置 modal：打开时记下这一批 id（时间线多选的选择集在打开那一刻定住 —— 之后
   // 时间线里点选变化不该把 modal 的作用对象偷换掉）。
   const [procSettingsIds, setProcSettingsIds] = useState<string[] | null>(null);
+  // 视频资产拖到 Prompt 窗时弹的挑帧窗（主页面里的，不在 Prompt 窗内）。
+  const [videoPick, setVideoPick] = useState<VideoPickRequest | null>(null);
+  useEffect(() => {
+    setVideoPickHandler(setVideoPick);
+    return () => setVideoPickHandler(null);
+  }, []);
   // 视频 list 跑的公共前置：接口选中、每个 image/mask 入口解析出源窗口。返回字符串 =
   // 拒绝原因（播报用），对象 = 可以跑。总帧数上限不在这里卡 —— 范围由用户在 modal 里
   // 圈，大片段圈一小段完全合理；cap 按**选中的范围**查（modal 里禁用 Run，宿主开跑前
@@ -2006,7 +2206,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
    *  不再照"活跃那套"报:活跃集跟着播放头走,录进选中段的值必须是选中段自己的层,否则回放的
    *  那一趟按层 id 找不到层,关键帧就成了哑帧。与 layerSigs 同一条 reqId/waiter 模式,1.5s 超时兜底。 */
   const layerKfParams = useCallback((layerKey: string): Promise<VidKfSnapshot | null> => {
-    const win = blendIframeRef.current?.contentWindow;
+    const win = engineWindow(blendDocs.activeUid);
     if (!win) return Promise.resolve(null);
     return new Promise(resolve => {
       const reqId = ++kfSeq.current;
@@ -2022,7 +2222,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       kfWaiters.current.set(reqId, finish);
       win.postMessage({ type: 'blend-vid-kf-get', reqId, layerKey }, '*');
     });
-  }, [blendIframeRef]);
+  }, [blendDocs.activeUid]);
 
   // ── 关键帧录制 ── Record 钮(kfArmed store,住在 Keyframes 窗的工具条里)亮着时:播放头每停一个
   // 位置(暂停态的 scrub、播放头拖动),就把**当前选中的那枚 Layer 段**的图层参数快照写成关键帧
@@ -2531,18 +2731,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     }
   }, [vidMode, vidLayerKey, onBlendUiCommand]);
   // 逐帧合成那条边界：取帧结果（ImageBitmap）转交给工作台页面，回图同样只认这一个 window。
-  const blendWindow = useCallback(() => blendIframeRef.current?.contentWindow ?? null, [blendIframeRef]);
+  const blendWindow = useCallback(() => engineWindow(blendDocs.activeUid), [blendDocs.activeUid]);
   const blendPost = useCallback((msg: unknown, transfer?: Transferable[]) => {
-    const win = blendIframeRef.current?.contentWindow;
-    if (!win) return false;
-    win.postMessage(msg, '*', transfer);
+    const uid = msg && typeof msg === 'object' && typeof (msg as { uid?: unknown }).uid === 'number'
+      ? (msg as { uid: number }).uid : blendDocs.activeUid;
+    if (!engineWindow(uid)) return false;
+    sendForUid(msg, uid, transfer);
     return true;
-  }, [blendIframeRef]);
+  }, [blendDocs.activeUid]);
   // Layer 段粘贴：把源段那套图层整套克隆到新 key（见页面 copyLayerSetTo）。**成套克隆**是必须的：
   // 共用一套的话，改副本的图层会把原件一起改掉（"复制"在用户眼里不是"链接"）。
   // 回包是旧层 id → 新层 id 的映射：调用方拿它把段上关键帧通道换到新 id（否则一个变量会占两行）。
   const layerCopy = useCallback((from: string, to: string): Promise<Record<string, string> | null> => {
-    const win = blendIframeRef.current?.contentWindow;
+    const win = engineWindow(blendDocs.activeUid);
     if (!win || !from || !to || from === to) return Promise.resolve(null);
     return new Promise(resolve => {
       const reqId = layerCopySeq.current++;
@@ -2559,10 +2760,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       layerCopyWaiters.current.set(reqId, finish);
       win.postMessage({ type: 'blend-vid-layer-copy', reqId, from, to }, '*');
     });
-  }, [blendIframeRef]);
+  }, [blendDocs.activeUid]);
   // Layer 段合并的"内容是否同一套"：向页面要素材签名（见页面 replyVidLayerSigs）。
   const layerSigs = useCallback((keys: string[]): Promise<Record<string, string>> => {
-    const win = blendIframeRef.current?.contentWindow;
+    const win = engineWindow(blendDocs.activeUid);
     const uniq = [...new Set((Array.isArray(keys) ? keys : []).map(String).filter(Boolean))];
     if (!win || !uniq.length) return Promise.resolve({});
     return new Promise(resolve => {
@@ -2580,7 +2781,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       layerSigWaiters.current.set(reqId, finish);
       win.postMessage({ type: 'blend-vid-layer-sig', reqId, keys: uniq }, '*');
     });
-  }, [blendIframeRef]);
+  }, [blendDocs.activeUid]);
   // 播放器报"游标底下是哪一段 Layer 段"：画布内容、Layers 面板的作用对象、Transform 的开工条件
   // 全跟着游标走 —— 离开段就回到主图层集（画布转成视频底片，见页面 vidBaseOn）。
   // ── 缺失 / relink（A5）：工程引用的每个哈希，仓库里还有没有 ────────────────────────────────
@@ -2728,9 +2929,267 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const c = vidProject.clips.find(c => vidSel.has(c.id));
     return c && c.kind === 'video' ? { name: c.name } : null;
   }, [vidSel, vidProject.clips]);
+  // ── Video Detect ─────────────────────────────────────────────────────────────────────────
+  // Detector 窗的 Video 分支：三路来源 ——
+  //   video        : 整条时间线的**合成画面**（Layer 轨、叠加都在里面），逐帧判"这一刻归谁"；
+  //   sel_track    : 选中的那一整轨，轨上每个非占位段各成一段；
+  //   sel_segment  : 时间线上当前选中的那一枚段。
+  // 非 Layer 的段由后端原生抽帧（像素不出画布）；Layer 段（或整条时间线里压在 Layer 上的帧）
+  // 由 Player 把监视器的合成画面逐帧抓成 JPEG 送后端。产物按 Canvas 的 Frame / fps 编码成
+  // 一列 mask mp4，整趟跑完**一次性**落到一条新的 Detect 轨上（一步撤销），并自动绑成 Mask track。
+  const DETECT_SEG_FRAMES = 30;    // 后端单次抽帧检测的帧数（内存预算）
+  const DETECT_BATCH = 6;          // 合成帧一批送几帧（跨窗搬像素，别一次搬太多）
+  const DETECT_TOTAL_CAP = 36000;  // 与 Processor 同一条总量上限（≈20 分钟 @30fps）
+  // Sel Video Segment 的原料：恰好选中一枚 video / Layer 段时 = 它的名字与种类。
+  const detectSel = useMemo(() => {
+    if (vidSel.size !== 1) return null;
+    const c = vidProject.clips.find(c => vidSel.has(c.id));
+    return c && (c.kind === 'video' || c.kind === 'layer')
+      ? { name: c.name, kind: c.kind as 'video' | 'layer' } : null;
+  }, [vidSel, vidProject.clips]);
+  // Sel Video Track 的候选：video 与 layer 两类轨（音频 / process / MIDI 没有画面）。
+  const vidDetectTracks = useMemo(
+    () => vidProject.tracks.filter(t => t.kind === 'video' || t.kind === 'layer')
+      .map(t => ({ id: t.id, name: t.name, kind: t.kind as 'video' | 'layer' })),
+    [vidProject.tracks],
+  );
+  const runVidDetect = useCallback(async (args: {
+    source: 'video' | 'sel_track' | 'sel_segment'; trackId?: string;
+    prompt: string; threshold: number; invert: boolean;
+  }) => {
+    if (vidProcBusy.current) {
+      setVidProcRun({ state: 'error', msg: 'Another video run is in flight — wait for it or cancel it first.' });
+      return;
+    }
+    const proj = vidProjectRef.current;
+    const ui = getBlendUi();
+    if (!ui.detector.available) {
+      setVidProcRun({ state: 'error', msg: 'No detector is connected to the node — wire one into its detector input first.' });
+      return;
+    }
+    const fps = clampFps(proj.fps);
+    // 输出分辨率 = Canvas 的 Frame 尺寸（0 = 跟随源帧 / 合成位图自身尺寸）。
+    const cw = Math.max(0, Math.round(ui.canvas.w || 0));
+    const ch = Math.max(0, Math.round(ui.canvas.h || 0));
+    const soloV = new Set(proj.soloVideoIds ?? []);
+    const muted = new Set(proj.muteIds ?? []);
+
+    type Tgt = { kind: 'layer'; key: string; clipId: string } | { kind: 'raw'; clip: VidClip };
+    type Seg = { f0: number; f1: number; tgt: Tgt };
+    const segs: Seg[] = [];
+
+    // 这一刻监视器上出的是谁：有 video solo 时 Layer 合成被压掉（与 Player 的读法一致）。
+    const classify = (t: number): Tgt | null => {
+      if (soloV.size === 0) {
+        const plan = compositePlanAt(proj, t, muted, frameNeedRef.current);
+        if (plan) return { kind: 'layer', key: plan.layerKey, clipId: plan.layer.id };
+      }
+      const c = clipAtSolo(proj, t, soloV, muted);
+      return c && c.src ? { kind: 'raw', clip: c } : null;
+    };
+    const sameTgt = (a: Tgt | null, b: Tgt | null): boolean => {
+      if (!a || !b || a.kind !== b.kind) return false;
+      if (a.kind === 'raw' && b.kind === 'raw') return a.clip.id === b.clip.id;
+      if (a.kind === 'layer' && b.kind === 'layer') return a.key === b.key && a.clipId === b.clipId;
+      return false;
+    };
+    // 把 [f0, f1) 这段帧按"归谁"切成连续块；没画面的帧跳过（不产出空段）。
+    const collect = (f0: number, f1: number) => {
+      let cur: Tgt | null = null;
+      let start = Math.max(0, f0);
+      for (let f = Math.max(0, f0); f <= f1; f++) {
+        const tgt = f < f1 ? classify(f / fps) : null;
+        if (f === f1 || !sameTgt(cur, tgt)) {
+          if (cur && f > start) segs.push({ f0: start, f1: f, tgt: cur });
+          cur = tgt;
+          start = f;
+        }
+      }
+    };
+    const clipRange = (c: VidClip): [number, number] => [
+      Math.ceil(c.start * fps - 1e-6), Math.floor((c.start + c.duration) * fps + 1e-6),
+    ];
+
+    if (args.source === 'video') {
+      // 整条时间线的视频内容：从 0 到最后一枚 video / Layer 段的尾（空档由 classify 判成 null 跳过）。
+      const end = proj.clips.reduce((m, c) =>
+        (c.pending || c.kind !== 'video' && c.kind !== 'layer') ? m : Math.max(m, c.start + c.duration), 0);
+      collect(0, Math.floor(end * fps + 1e-6));
+    } else if (args.source === 'sel_track') {
+      const tr = proj.tracks.find(t => t.id === args.trackId && (t.kind === 'video' || t.kind === 'layer'));
+      if (!tr) {
+        setVidProcRun({ state: 'error', msg: 'Pick a video or Layer track first.' });
+        return;
+      }
+      const list = proj.clips
+        .filter(c => c.trackId === tr.id && !c.pending && c.kind === tr.kind)
+        .sort((a, b) => a.start - b.start);
+      if (!list.length) {
+        setVidProcRun({ state: 'error', msg: `「${tr.name}」 has no segments to detect.` });
+        return;
+      }
+      for (const c of list) {
+        const [f0, f1] = clipRange(c);
+        if (f1 <= f0) continue;
+        let tgt: Tgt | null = null;
+        if (tr.kind === 'layer') tgt = { kind: 'layer', key: c.layerKey || c.id, clipId: c.id };
+        else if (c.src) tgt = { kind: 'raw', clip: c };
+        if (tgt) segs.push({ f0, f1, tgt });
+      }
+    } else {
+      const sel = getVidSelection();
+      const c = sel.size === 1 ? proj.clips.find(x => sel.has(x.id)) : undefined;
+      if (!c || (c.kind !== 'video' && c.kind !== 'layer')) {
+        setVidProcRun({ state: 'error', msg: 'Select exactly one video or Layer segment on the timeline first.' });
+        return;
+      }
+      const [f0, f1] = clipRange(c);
+      if (f1 <= f0) {
+        setVidProcRun({ state: 'error', msg: `「${c.name}」 is shorter than one frame — nothing to detect.` });
+        return;
+      }
+      let tgt: Tgt | null = null;
+      if (c.kind === 'layer') tgt = { kind: 'layer', key: c.layerKey || c.id, clipId: c.id };
+      else if (c.src) tgt = { kind: 'raw', clip: c };
+      if (!tgt) {
+        setVidProcRun({ state: 'error', msg: `「${c.name}」 has no video source the backend can read.` });
+        return;
+      }
+      segs.push({ f0, f1, tgt });
+    }
+
+    const total = segs.reduce((n, s) => n + (s.f1 - s.f0), 0);
+    if (!total) {
+      setVidProcRun({ state: 'error', msg: 'Nothing to detect — no video or Layer content under the chosen source.' });
+      return;
+    }
+    if (total > DETECT_TOTAL_CAP) {
+      setVidProcRun({ state: 'error', msg: `That source is ${total} frames — the cap is ${DETECT_TOTAL_CAP} (about 20 min at 30fps). Pick a shorter source.` });
+      return;
+    }
+
+    // 后端那一条 detect_video 入口：kind='video' = 后端自己抽帧；kind='frames' = 页面抓来的合成帧。
+    const postDetect = async (dv: Record<string, unknown>): Promise<{ video: string; frames: number }> => {
+      const res = await fetch('/api/blend_action', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'detect',
+          detect: { prompt: args.prompt, threshold: args.threshold, invert: args.invert },
+          detect_video: dv,
+        }),
+      });
+      let j: { success?: boolean; video?: string; frames?: number; error?: string } | null = null;
+      try { j = await res.json(); } catch { j = null; }
+      if (!j || !j.success || !j.video) {
+        throw new Error((j && j.error) || `The backend refused the detect chunk (HTTP ${res.status}).`);
+      }
+      return { video: j.video, frames: Math.max(1, Math.round(j.frames || 0)) };
+    };
+    const dataUrlOf = (b: Blob) => new Promise<string>((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result || ''));
+      fr.onerror = () => reject(new Error('Could not read a captured frame.'));
+      fr.readAsDataURL(b);
+    });
+
+    // 每块帧数还要按**输出像素量**折算：mask 是 float32，4K 一帧 33MB —— 只按固定条数切块
+    // 会把内存冲爆（与 Processor 的分段约束同一条）。按 160MB / 块封顶，不少于 5 帧。
+    const perFrameBytes = Math.max(1, (cw > 0 ? cw : 1280) * (ch > 0 ? ch : 720)) * 4;
+    const chunkCap = Math.max(5, Math.min(DETECT_SEG_FRAMES, Math.floor((160 * 1024 * 1024) / perFrameBytes)));
+    const batchCap = Math.max(2, Math.min(DETECT_BATCH, chunkCap));
+
+    vidProcBusy.current = true;
+    beginVidProcRun(getActiveBlendUid());
+    vidCancelRef.current = false;
+    const results: { src: string; f0: number; frames: number }[] = [];
+    let done = 0;
+    let placedTrack = '';
+    let placed = false;
+    const setProgress = (msg: string) => {
+      const p = total > 0 ? Math.min(1, done / total) : 0;
+      setVidStagingOverlay({ progress: p });
+      pushVidStaging({ progress: p });
+      setVidProcRun({ state: 'running', msg });
+    };
+    // 整趟（或已跑完的那几块）**一次性**落位：新开一条 Detect 轨、逐段铺上、自动绑成 Mask track。
+    // 一部分也算——失败/取消时已完成的那几块不丢。
+    const place = () => {
+      if (placed || !results.length) return;
+      placed = true;
+      vidUpdate(p => {
+        const { p: withTrack, track } = placeDetectTrack(p);
+        placedTrack = track.name;
+        let out = withTrack;
+        results.forEach((r, i) => {
+          out = placeDetectClip(out, track.id, r.src, `${track.name} ${i + 1}`, r.f0 / fps, r.frames / fps);
+        });
+        return setMaskTrack(out, track.id);
+      }, 'Detect video');
+      autoSaveCud();
+    };
+
+    setVidStagingOverlay({ busy: true, progress: 0 });
+    pushVidStaging({ busy: true, cancelLive: true, progress: 0 });
+    setVidProcRun({ state: 'running', msg: `Detecting ${total} frames…` });
+    try {
+      for (const s of segs) {
+        if (vidCancelRef.current) throw new Error('cancelled');
+        if (s.tgt.kind === 'raw') {
+          const c = s.tgt.clip;
+          const file = c.src.split('/').pop() || '';
+          if (!file) throw new Error(`「${c.name}」 has no source file the backend can read.`);
+          for (let f = s.f0; f < s.f1; f += chunkCap) {
+            if (vidCancelRef.current) throw new Error('cancelled');
+            const n = Math.min(chunkCap, s.f1 - f);
+            // 源内帧号：段内时刻 = f/fps，再按这段自己的 offset 折回源。
+            const sf = Math.max(0, Math.floor((c.offset + (f / fps - c.start)) * fps + 1e-6));
+            setProgress(`Detecting 「${c.name}」 — ${done}/${total} frames…`);
+            const r = await postDetect({ kind: 'video', file, f0: sf, n, fps, w: cw, h: ch, name: 'detect' });
+            results.push({ src: r.video, f0: f, frames: r.frames });
+            done += n;
+          }
+        } else {
+          const cap = vidCtl.captureFrame;
+          if (!cap) throw new Error('The player is not available — open Video mode with the player visible first.');
+          for (let f = s.f0; f < s.f1; f += batchCap) {
+            if (vidCancelRef.current) throw new Error('cancelled');
+            const n = Math.min(batchCap, s.f1 - f);
+            const frames: string[] = [];
+            for (let k = 0; k < n; k++) {
+              const t = (f + k) / fps;
+              const blob = await cap(t, cw, ch);
+              if (!blob) {
+                throw new Error(`Could not capture the composite frame at ${t.toFixed(2)}s — is the Layer segment visible (track muted / player not ready)?`);
+              }
+              frames.push(await dataUrlOf(blob));
+            }
+            setProgress(`Detecting composite frames — ${done}/${total} frames…`);
+            const r = await postDetect({ kind: 'frames', frames, fps, w: cw, h: ch, name: 'detect' });
+            results.push({ src: r.video, f0: f, frames: r.frames });
+            done += n;
+          }
+        }
+      }
+      place();
+      setVidProcRun({ state: 'done', msg: `Done — ${results.length} mask segment${results.length === 1 ? '' : 's'} on 「${placedTrack}」, bound as the Mask track.` });
+    } catch (e: unknown) {
+      place();
+      const tail = results.length
+        ? ` — ${results.length} segment${results.length === 1 ? '' : 's'} already placed on 「${placedTrack}」` : '';
+      setVidProcRun(vidCancelRef.current
+        ? { state: 'cancelled', msg: `Detect cancelled${tail}` }
+        : { state: 'error', msg: `Detect failed — ${e instanceof Error ? e.message : String(e)}${tail}` });
+    } finally {
+      setVidStagingOverlay({ busy: false, progress: -1 });
+      pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
+      vidCancelRef.current = false;
+      vidProcBusy.current = false;
+      endVidProcRun();
+    }
+  }, [vidCtl, vidUpdate, autoSaveCud]);
   const wbHost = useMemo(() => ({
     staging, blendPreview, guidanceCard, stageUpload, stageRemove,
-    layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock },
+    layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock, setVisible: setUnitVisible },
     video: {
       // 三态照传：Video 专属的正文只看 `=== 'video'`（MIDI 与 Image 同待遇，不出播放器、不抢画布），
       // 而 Cut 那一格要按模式换命令（裁画布 / 剪段 / 剪音符），必须能分出 midi。
@@ -2746,9 +3205,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         tracks: vidTrackList,
         set: (id: string | null) => vidUpdate(proj => setMaskTrack(proj, id || null), 'Mask track'),
       },
+      // Video Detect：三个来源（整条时间线合成 / 某一整轨 / 当前选中段），产物落到新开的
+      // Detect 轨上并自动绑成 Mask track（见 runVidDetect）。
+      detect: { run: runVidDetect, sel: detectSel, tracks: vidDetectTracks },
     },
-  }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock,
-    vidMode, vidProject.fps, vidProject.maskTrackId, setVidFps, vidTrackList, vidAssetList, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment, vidUpdate]);
+  }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock, setUnitVisible,
+    vidMode, vidProject.fps, vidProject.maskTrackId, setVidFps, vidTrackList, vidAssetList, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment, vidUpdate,
+    runVidDetect, detectSel, vidDetectTracks]);
   // Agent 窗的 ctx:工具执行体(runAgentTool)要碰的宿主事实与写口捆成一份。AgentPanel 经 ref
   // 永远取最新一份用,所以这份对象只影响它自身重渲的频率,不影响工具执行的正确性。
   // dsh 的工作区 = 当前 cud 的所在目录(Agent 窗把它报给 sidecar,再由插件钉进 dsh 页面)。
@@ -2922,7 +3385,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       // 所以这里只挡 textarea / contenteditable 这类"文字优先"的地方）。
       if (tag !== 'textarea' && !(t && t.isContentEditable)) {
         e.preventDefault(); e.stopPropagation();
-        blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-save' }, '*');
+        sendForUid({ type: 'blend-save' }, blendDocs.activeUid);
         return;
       }
     }
@@ -2933,7 +3396,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const setMode = (id: UnitId, mode: DockMode) => {
     // 改模式是纯布局动作，而且它会就地重排整块（见 switchMode），所以它是轨迹里必须有的一笔。
     note('block.mode', { id, mode });
-    applyDock(setBlockMode(dock, id, mode));
+    applyDock(prev => setBlockMode(prev, id, mode));
   };
   // 界面探针的登记口：把"活的 dock"交出去，探针只读它。放在这里是因为这一层同时握着三样它需要
   // 的东西 —— 树、规则（尺寸偏好与 store key）、编辑模式 —— 而探针不该顺着组件树去猜它们。
@@ -3028,10 +3491,31 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 活跃那一份"画好了没有"：只有工作台说它把第一帧真画面画上台了，活画布才有资格盖在这扇窗上。
   // 没画好之前这一格显示它**自己**那张静帧（不是上一份的画面，也不是一块黑）。
   const liveReady = blendDocs.activeUid !== null && paintedUid === blendDocs.activeUid;
+  // 已经弹进 owned 子窗口的文档格：正文换成子窗口里那台 workbench 的 iframe。
+  // 已经弹进 owned 子窗口的文档格：**任意一层**子窗口都算（子窗口里还能再弹子窗口）。
+  const childDocIds = new Set(
+    allFloats(dock).filter(f => f.child).flatMap(f => floatUnits(f)).filter(u => docUidOf(u) !== null),
+  );
   for (const d of blendDocs.docs) {
+    const unit = docUnit(d.uid);
+    const docMode = vidByDoc.current.get(d.uid)?.mode ?? 'image';
+    if (childDocIds.has(unit) && docMode !== 'midi' && docMode !== 'video') {
+      // image 模式：子窗口里从零起一台 workbench，用字节交接（见 dock/docEngine.ts）。
+      // 交接失败就把单元泊回布局；主引擎那边已经用同一份字节重开，不丢工程。
+      docBodies[unit] = (
+        <DetachedDocBody doc={d}
+          onDetached={doc => onDocDetached?.(doc)}
+          onFail={(doc, err) => {
+            pushLog?.(`Could not move 「${doc.name}」 into a child window — ${String((err as Error)?.message || err)}`, 'error');
+            onDocDocked?.(doc.uid);
+            applyDock(dockBackDock(dockRef.current, unit));
+          }} />
+      );
+      continue;
+    }
     const active = d.uid === blendDocs.activeUid;
     const still = active && liveReady ? null : docStills[d.uid];
-    docBodies[docUnit(d.uid)] = active && vidMode === 'video'
+    docBodies[unit] = active && vidMode === 'video'
       ? <VidPlayer vid={vidCtl} visible={tab === 'draw'}
           stageCovers={!!frameRect && vidMode === 'video'} />
       : active && vidMode === 'midi'
@@ -3067,7 +3551,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           // 这里再补一发是兜底：万一工作台那本账丢过（iframe 重载后 entry.dirty 归零，
           // 而宿主还记着这份脏），关之前照样问一句。两条消息同目标同源，保序。
           if (vidDirty.current.has(d.uid)) {
-            blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-vid-dirty', uid: d.uid }, '*');
+            sendForUid({ type: 'blend-vid-dirty', uid: d.uid }, d.uid);
           }
           onDocCommand('close', d.uid);
         }}>
@@ -3078,7 +3562,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }
   // The frame is painted into this page's stacking order; a popped-out window is at the float layer, so
   // following one means going above it — otherwise the window's own background hides its canvas.
-  const activeIsWindow = !!activeUnit && dock.floats.some(f => f.id === activeUnit);
+  const activeIsWindow = !!activeUnit && !!floatContaining(dock, activeUnit);
   // 左栏不再有自己的把手：它就是 dock 树里的一个嵌套，宽度跟着画布那枚单元的边角一起改。
   // 右键某个 preset 行才出现的菜单；null = 没有菜单。
   const [presetMenu, setPresetMenu] = useState<{ x: number; y: number; setId: string } | null>(null);
@@ -3194,8 +3678,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         body: JSON.stringify({ path }),
       }).then(x => x.json());
       if (r?.ok && r.doc) {
-        blendIframeRef.current?.contentWindow?.postMessage(
-          { type: 'blend-reopen-cud', doc: r.doc, reason: '' }, '*');
+        sendForUid({ type: 'blend-reopen-cud', doc: r.doc, reason: '' }, blendDocs.activeUid);
       } else {
         pushLog?.(`Jump refused: ${(r && r.error) || 'not a readable .cud'} — ${path}`, 'error');
       }
@@ -3334,7 +3817,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   const applyPreviewTint = useCallback((v: number) => {
     setPreviewTint(v);
-    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-preview-tint', value: v }, '*');
+    sendForUid({ type: 'blend-preview-tint', value: v }, blendDocs.activeUid);
   }, [blendIframeRef]);
 
   // `draw` is the Blend workbench: the canvas composite is the Context Image and the pure Mask
@@ -3342,14 +3825,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // workbench toolbar). `context` and `pipeline` followed them — the pipeline switch now lives in
   // the Draw panel's Pipeline Settings section, and nothing reads a separately-picked context.
   const tabs: { id: Tab; icon: string; color: string }[] = [
-    { id: 'prompt', icon: 'prompt', color: '#0a84ff' },
     { id: 'draw', icon: 'draw', color: '#30d158' },
     ...(interfaces.length > 0 ? [{ id: 'interface' as Tab, icon: 'interface', color: '#bf5af2' }] : []),
     { id: 'settings', icon: 'settings', color: '#5e5ce6' },
   ];
   // Sidebar tabs are icon-only; this is the name their tooltip shows. `draw` stays the internal
   // id (the Tab type, stores and message channels all key on it) — only the display name changed.
-  const TAB_LABELS: Record<Tab, string> = { prompt: 'Prompt', draw: 'Workbench', interface: 'Interface', settings: 'Settings' };
+  const TAB_LABELS: Record<Tab, string> = { draw: 'Workbench', interface: 'Interface', settings: 'Settings' };
 
   // An interface block is MISSING when its bound interface no longer exists (package removed or
   // renamed). Blocks saved before name-binding only carry interface_idx — fall back to that.
@@ -3681,8 +4163,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           {tabs.map(t => (
             <button
               key={t.id}
-              // agent 脉冲的锚点：Prompt 那一组工具作用在侧栏的 tab 上（prompt_node 是独立
-              // iframe，不是 dock 窗），所以它们的"那扇窗"就是这个按钮。
+              // agent 脉冲的锚点：现在所有工具都作用在 dock 窗上（prompt 也是 dock 窗，见 bodies.prompt），
+              // 侧栏只剩页面级的几个 tab。
               data-dock-win={`tab:${t.id}`}
               title={TAB_LABELS[t.id]}
               style={{
@@ -3694,7 +4176,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               onClick={() => onTabChange(t.id)}
             >
               <TabIcon icon={t.icon} />
-              {t.id === 'prompt' && promptReady && <span style={styles.sidebarDot} />}
               {t.id === 'draw' && detailStatus === 'done' && <span style={styles.sidebarDot} />}
             </button>
           ))}
@@ -3710,26 +4191,28 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
       {/* Tab content — iframes always mounted, hidden via display:none */}
       <div style={styles.content}>
-        {/* Prompt — always mounted */}
-        <div style={{ ...styles.iframeWrap, display: tab === 'prompt' ? 'flex' : 'none' }}>
-          <iframe ref={promptIframeRef} src={promptUrl} style={styles.iframe} title="Prompt" allow="clipboard-write" />
-        </div>
-
         {/* Blend workbench — this tab stays mounted for the whole session: the iframe owns
             the layer stack and the Mask layer, so unmounting it would lose them. */}
         <div ref={drawRef} style={{ ...styles.drawLayout, display: tab === 'draw' ? 'flex' : 'none' }}>
           {/* One dock, the whole page: the settings column and the canvas are two sides of a split the
               user restacks, not a panel bolted beside a frame. */}
-          <DockPanel ctx={{
+          <DockPanel top ctx={{
                 rules: dockRules,
+                // 主页面这一页；子窗口里的每一页由 DockView 自己派生（scope/frameKey 换成窗口名）。
+                scope: 'root', win: window,
+                setFrame, closeFrame, promoteFrame, prepareMove,
                 isOpen: (id: UnitId) => openSections[id] !== false, fold: setFold,
                 edit: blockEdit, setMode,
                 // toolbar 模式的三个写口：收成条 / 放回窗 / 条子上的横竖。开关存在 dock 树里（容器
                 // 是每格一位、default 块与浮窗在节点上），所以刷新之后还是那个形状。
-                setToolbar: (id: UnitId, on: boolean, dir?: 'h' | 'v') => applyDock(setToolbarDock(dock, id, on, dir)),
-                setToolbarDir: (id: UnitId, dir: 'h' | 'v') => applyDock(setToolbarDirDock(dock, id, dir)),
+                setToolbar: (id: UnitId, on: boolean, dir?: 'h' | 'v') => applyDock(prev => setToolbarDock(prev, id, on, dir)),
+                setToolbarDir: (id: UnitId, dir: 'h' | 'v') => applyDock(prev => setToolbarDirDock(prev, id, dir)),
                 tbPopover, onToolbarPopover: setTbPopover,
                 dock, setDock: applyDock,
+                hidden: new Set(dock.hidden ?? []),
+                hideChild: hideUnitNow,
+                dockBackChild,
+                onChildClosed,
                 drag: dockDrag, setDrag: setDockDrag,
                 over: dockOver, setOver: setDockOver,
                 // 文档窗口的标题条是"切到这个项目"，不是折叠它：整页只有一颗画布是激活的，
@@ -3744,8 +4227,29 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 hint: (id: UnitId) => WORKBENCH_HINTS[id],
                 // 小窗按内容自适应,但内容自己撑不出高度的那几格要把盒子报出来(iframe 没有内在高度)。
                 popSize: (id: UnitId) => docUidOf(id) ? { w: DOC_POP_W, h: DOC_POP_H }
-                  : id === 'agent' ? { w: 560, h: 520 } : null,
+                  : id === 'agent' ? { w: 560, h: 520 }
+                    : id === 'promptManager' ? { w: 640, h: 640 }
+                    : id === 'prompt' ? { w: 520, h: 560 }
+                    : id === 'veagle' ? { w: 780, h: 580 } : null,
+                // 文档画布弹窗：MIDI 的主窗正文是纯 React（MidiWorkspace），image 的正文用
+                // 子窗口里新起的一台 workbench + .cud 字节交接（见 dock/DetachedDocBody.tsx）。
+                // video 还要把播放器/走带一起搬过去，暂时留在页面内。
+                childWindowBlocked: (id: UnitId) => {
+                  const uid = docUidOf(id);
+                  if (uid === null) return false;
+                  return (vidByDoc.current.get(Number(uid))?.mode ?? 'image') === 'video';
+                },
+                childWindowHint: (id: UnitId) => {
+                  const uid = docUidOf(id);
+                  if (uid === null) return undefined;
+                  return (vidByDoc.current.get(Number(uid))?.mode ?? 'image') === 'video'
+                    ? 'Video-mode canvases keep the player in the page for now — this document pops out inside the page'
+                    : undefined;
+                },
                 bodyRef: (id: UnitId, el: HTMLDivElement | null) => {
+                  // 子窗口的正文住在弹窗文档里：它的坐标属于另一个视口，不能拿来摆主页面的
+                  // 活画布。记成"没有盒子"，活画布就停在屏外，不会跟着错位。
+                  if (el && el.ownerDocument !== document) { frameBodyEls.current.delete(id); return; }
                   if (el) frameBodyEls.current.set(id, el); else frameBodyEls.current.delete(id);
                 },
                 // 文档的 ✕ 不在这条栏上 —— 它跟着 tab 走（见 docTabOps / tabOps）。
@@ -3755,13 +4259,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   // 按钮左边 —— 那扇窗就是 Video 模式的播放器宿主，别的窗一概不给。运行状态
                   // （进度条 + Cancel）排在它的**左边**：同一扇窗，同一句话 —— "这一趟 run 属于
                   // 这份工程"。（Log / Debug 曾住这里,现在各自是一扇正式的 dock 窗。）
-                  ...Object.fromEntries(blendDocs.docs.map(d => [docUnit(d.uid), (
-                    <>
-                      {/* 原本那颗 Cancel：视频 list 跑在飞时打断宿主这趟，否则照旧转页面的 staging-cancel */}
-                      <RunStatusSeg onCancel={cancelActiveRun} />
-                      {vidModeSeg}
-                    </>
-                  )])),
+                  ...Object.fromEntries(blendDocs.docs.map(d => {
+                    const unit = docUnit(d.uid);
+                    // 子窗口里的 MIDI 文档窗不给模式切换：切到 image/video 会把正文换成
+                    // 常驻在主页面里的活画布，而子窗口里没有它。要换模式先泊回布局。
+                    const inChild = unitInChild(dock, unit);
+                    return [unit, (
+                      <>
+                        {/* 原本那颗 Cancel：视频 list 跑在飞时打断宿主这趟，否则照旧转页面的 staging-cancel */}
+                        <RunStatusSeg onCancel={cancelActiveRun} />
+                        {!inChild && vidModeSeg}
+                      </>
+                    )];
+                  })),
                 },
                 bodies: {
               // 顶栏那一排就是原来 File 菜单的六项，一项一个入口，说明全在 tooltip 里。
@@ -3776,6 +4286,31 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               ),
               ...docBodies,
+              // Prompt 拆成两扇窗：同一份页面各画一半。左半边（提示词库）进 Prompt Manager，
+              // 右半边（选择栏，去掉 Keep confirm / Confirm）进 Prompt。两份 iframe 不能隐藏、
+              // 不能收成 toolbar（见 rules.canHide / canToolbar），所以一直挂在页面上 —— Agent
+              // 与宿主都靠 promptIframeRef 找到右侧那扇。
+              promptManager: (
+                <div style={styles.iframeWrap} data-prompt-pane="manager">
+                  <iframe
+                    ref={el => registerPromptWindow('manager', el ? el.contentWindow : null)}
+                    src={paneSrc(promptUrl, 'manager')} style={styles.iframe} title="Prompt Manager" allow="clipboard-write"
+                  />
+                </div>
+              ),
+              prompt: (
+                <div style={styles.iframeWrap} data-prompt-pane="dock">
+                  <iframe
+                    ref={el => {
+                      // 这两扇 Prompt iframe 和 sampler 页是**不同 origin**：拖拽落点与资产字节
+                      // 都只能走 postMessage（见 video/assetDragBus），所以这里把 window 登记下来。
+                      (promptIframeRef as React.MutableRefObject<HTMLIFrameElement | null>).current = el;
+                      registerPromptWindow('dock', el ? el.contentWindow : null);
+                    }}
+                    src={paneSrc(promptUrl, 'dock')} style={styles.iframe} title="Prompt" allow="clipboard-write"
+                  />
+                </div>
+              ),
               // 工作台搬出来的那几格：宿主只发指令，正文每格自己读那份快照。Staging 那一格还要
               // 一小把宿主事实 —— 图池镜像、画布合成预览、以及图池的两个后端写口（`wbHost`）。
               ...workbenchBodies(uiSend, wbHost),
@@ -3799,11 +4334,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
                 : <VidAssets vid={vidCtl} midi={midiHost.ctl} sel={vidInspect?.key ?? null} onSel={setVidInspect}
                     onActivate={() => revealPanel('vinspector')} />,
-              // Inspector:放大看 Assets 里选中的那一件(图/音/视频)。与 vassets 同一道文档闸 ——
-              // 没有工程就没有资产可挑,选中态也随文档切换被清掉(见上方 effect)。
-              vinspector: blendDocs.activeUid === null
-                ? <div style={styles.vidVoid}>No project open — inspect assets from the Assets window.</div>
-                : <VidInspector sel={vidInspect} />,
+              // Eagle：用户自己的外部素材库。**不挂文档闸** —— 它就是拿来翻素材的，没有工程也该能看；
+              // 拖进工程 / 收进工程那两颗动作才需要工程（canClaim）。
+              veagle: <VidEagleAssets vid={vidCtl} canClaim={blendDocs.activeUid !== null}
+                onInspect={sel => { setVidInspect(sel); revealPanel('vinspector'); }} />,
+              // Inspector:放大看选中的那一件(图/音/视频)。**不挂文档闸** —— Eagle 是文档外的库,
+              // 双击它的一张卡就该能看图;选中态本身仍按文档分桶(见上方 effect)。
+              vinspector: <VidInspector sel={vidInspect} />,
               // Keyframes:Dopesheet —— 选中的那枚 Layer 段里,一行一个参数,右侧泳道按段内秒摊开
               // 关键帧菱形,一根播放头贯穿两列。与 Tracks 同一道文档闸 —— 关键帧住在段上,没有工程就没有段。
               vkf: blendDocs.activeUid === null
@@ -4077,7 +4614,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 // focus in sync with where the user is actually working.
                 // Guarded so it never steals focus from an open dialog.
                 if (document.activeElement?.tagName === 'INPUT') return;
-                blendIframeRef.current?.contentWindow?.focus();
+                engineWindow(blendDocs.activeUid)?.focus();
               }}
             />
           </div>
@@ -4381,6 +4918,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           />
         );
       })()}
+      {/* 视频资产拖进 Prompt 窗：在这一页挑一帧，挑好的那一帧交给 Prompt 窗打标。 */}
+      {videoPick && (
+        <VideoFramePicker
+          url={videoPick.url}
+          name={videoPick.name}
+          onClose={() => setVideoPick(null)}
+          onCapture={async frame => {
+            const buf = await frame.arrayBuffer();
+            sendTagBytesToPane(videoPick.pane, buf, videoPick.name);
+            setVideoPick(null);
+          }}
+        />
+      )}
       {/* 占位段批量设置：多选后点齿轮，一批一起改；值不一样的字段显示 — 且不写回。 */}
       {procSettingsIds && (() => {
         const ids = procSettingsIds;

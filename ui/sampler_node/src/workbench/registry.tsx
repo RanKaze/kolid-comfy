@@ -38,7 +38,11 @@ export type WorkbenchHostCtx = {
   /** Layout 那一格要的两样：**现在**的布局（存下去的就是它）和一个写口（载入就是把它交给 `apply`）。
    *  `rules` 是校验的同一套口径 —— 一份旧布局里谁还认得、谁不认得，跟页面自己读档时一模一样；
    *  `openDocs` 是此刻开着的那几份文档窗口，载入时按它收一遍（关掉的剪走、新开的补进来）。 */
-  layout: { dock: Dock; rules: DockRules; openDocs: UnitId[]; apply: (next: Dock) => void };
+  layout: {
+    dock: Dock; rules: DockRules; openDocs: UnitId[]; apply: (next: Dock) => void;
+    /** 从 Layout 的窗口清单显示/隐藏一格。Layout 自己 canHide=false。 */
+    setVisible: (id: UnitId, visible: boolean) => void;
+  };
   /** Video 模式给 Canvas 与 Effects 两格的三样：模式本身（决定画哪一版正文）、**输出帧率**，以及
    *  视频轨清单（面 attribute 的 Frame source 下拉从这里挑轨道）。帧率与轨道都住在 Video 工程里
    *  （宿主 state），不是页面快照 —— 所以从这里递进去，写法同 `layout`。`tracks` 只列视频轨：
@@ -66,6 +70,18 @@ export type WorkbenchHostCtx = {
     /** Video 模式的 Mask = 一条轨的绑定(Tracks 窗顶栏撤掉后的去处):当前绑的轨 id
      *  ('' = 没绑)、视频轨清单、写口。Guidances 的 MaskRow 用它画 Bind。 */
     maskTrack: { id: string; tracks: { id: string; name: string }[]; set: (id: string | null) => void };
+    /** Video Detect（Detector 那一格用）：三个来源（整条时间线合成 / 某一整轨 / 当前选中段）、
+     *  prompt / threshold / invert，跑完在新开的 Detect 轨上落段并自动绑成 Mask track。
+     *  `sel` = 时间线上恰好选中一枚 video / Layer 段时的原料；`tracks` 只列有画面的轨
+     *  （video 与 layer 两类，音频 / process / MIDI 没有帧）。 */
+    detect: {
+      run: (args: {
+        source: 'video' | 'sel_track' | 'sel_segment'; trackId?: string;
+        prompt: string; threshold: number; invert: boolean;
+      }) => void;
+      sel: { name: string; kind: 'video' | 'layer' } | null;
+      tracks: { id: string; name: string; kind: 'video' | 'layer' }[];
+    };
   };
 };
 

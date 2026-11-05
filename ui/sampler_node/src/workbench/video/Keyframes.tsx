@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
+import { useDockDocument, useDockWindow } from '../../dock/docScope';
 import {
   KF_EPS, fmtTime, kfChannelInfo, kfMoveKey, kfRecord, kfRemoveChannel, kfRemoveKey, kfSample,
   kfLocalTimes, kfSnapshotMeta, kfSnapshotValues, kfU, kfSec, rulerStep,
@@ -139,6 +140,8 @@ const reg = <T,>(map: React.MutableRefObject<Map<string, T>>, key: string, val: 
 };
 
 export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
+  const hostDoc = useDockDocument();
+  const hostWin = useDockWindow();
   const { project: p, transport } = vid;
   markRender('VidKeyframes');
   const sel = useSyncExternalStore(subscribeVidSelection, getVidSelection);
@@ -793,13 +796,13 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
       if ((ev as MouseEvent).type === 'contextmenu' && (ev.target as HTMLElement)?.closest?.('[data-kf-menu]')) return;
       setMenu(null);
     };
-    window.addEventListener('pointerdown', close, true);
-    window.addEventListener('blur', close);
-    window.addEventListener('scroll', close, true);
+    hostWin.addEventListener('pointerdown', close, true);
+    hostWin.addEventListener('blur', close);
+    hostWin.addEventListener('scroll', close, true);
     return () => {
-      window.removeEventListener('pointerdown', close, true);
-      window.removeEventListener('blur', close);
-      window.removeEventListener('scroll', close, true);
+      hostWin.removeEventListener('pointerdown', close, true);
+      hostWin.removeEventListener('blur', close);
+      hostWin.removeEventListener('scroll', close, true);
     };
   }, [menu !== null]);
 
@@ -1101,8 +1104,8 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
             onContextMenu={e => e.preventDefault()}
             style={{
               position: 'fixed', zIndex: 9999,
-              left: Math.max(8, Math.min(menu.x, window.innerWidth - 250)),
-              top: Math.max(8, Math.min(menu.y, window.innerHeight - 40 - 30 * items.length)),
+              left: Math.max(8, Math.min(menu.x, hostWin.innerWidth - 250)),
+              top: Math.max(8, Math.min(menu.y, hostWin.innerHeight - 40 - 30 * items.length)),
               minWidth: 210, padding: 4, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 1,
               background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
               boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
@@ -1123,7 +1126,7 @@ export const VidKeyframes: React.FC<{ vid: VidController }> = ({ vid }) => {
               >{it.label}</button>
             ))}
           </div>,
-          document.body,
+          hostDoc.body,
         );
       })()}
     </div>

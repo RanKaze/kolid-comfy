@@ -491,7 +491,7 @@ export interface InterfaceExecOptions {
  * `settings` is the numeric home: the Default Setting (nine values) plus the architecture rules
  * that may override them, taken out of the Draw panel so the workbench gets the width back.
  */
-export type Tab = 'prompt' | 'draw' | 'interface' | 'settings';
+export type Tab = 'draw' | 'interface' | 'settings';
 
 export interface InterfacePort {
   num: number;

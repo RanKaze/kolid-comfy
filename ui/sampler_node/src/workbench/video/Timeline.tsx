@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
+import { useDockDocument, useDockWindow } from '../../dock/docScope';
 import {
   type VidClip, type VidClipClipboard, type VidController, type VgenFrameSpec, type VidPasteResult, type VidTrack, type VidMergeProbe,
   addLayerClip, addMidiClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, midiClipWindow, midiNotesInClip, moveClip, moveClips, moveTrack, musicOf, newVidId, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
@@ -297,6 +298,8 @@ export const VidTimeline: React.FC<{
    *  按鼠标在哪一面分派，指针停在时间线上就该剪段。 */
   mode: 'image' | 'video' | 'midi';
 }> = ({ vid, midi, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, vgenRefTracks, onVGenRefTrack, onVGenRefImageTrack, onVGenCudOpen, mode }) => {
+  const hostDoc = useDockDocument();
+  const hostWin = useDockWindow();
   const { project: p, transport, pps } = vid;
   // 引擎那头每轨的装载结果（装上了没有、是不是 vst3）：MIDI 轨头的乐器键要读它来标红/点亮 Edit。
   // 音符拖动会连着推工程但乐器很少变，nativeEngine 只在"每轨乐器"变了时才叫醒订阅者。
@@ -661,8 +664,8 @@ export const VidTimeline: React.FC<{
     const blur = () => set(false);
     const un1 = onGlobalKey(down);
     const un2 = onGlobalKeyUp(up);
-    window.addEventListener('blur', blur);
-    return () => { un1(); un2(); window.removeEventListener('blur', blur); };
+    hostWin.addEventListener('blur', blur);
+    return () => { un1(); un2(); hostWin.removeEventListener('blur', blur); };
   }, []);
 
   // 这一段的哪一边是可连的生成器接缝：'r' = 接在它后面的那颗，'l' = 在它前面的那颗。
@@ -895,16 +898,16 @@ export const VidTimeline: React.FC<{
       e.stopPropagation();
       setRefMenu(null);
     };
-    document.addEventListener('pointerdown', onDown, true);
-    document.addEventListener('contextmenu', onCtx, true);
+    hostDoc.addEventListener('pointerdown', onDown, true);
+    hostDoc.addEventListener('contextmenu', onCtx, true);
     window.addEventListener('keydown', onKey, true);
     const onBlur = () => setRefMenu(null);
-    window.addEventListener('blur', onBlur);
+    hostWin.addEventListener('blur', onBlur);
     return () => {
-      document.removeEventListener('pointerdown', onDown, true);
-      document.removeEventListener('contextmenu', onCtx, true);
+      hostDoc.removeEventListener('pointerdown', onDown, true);
+      hostDoc.removeEventListener('contextmenu', onCtx, true);
       window.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('blur', onBlur);
+      hostWin.removeEventListener('blur', onBlur);
     };
   }, [refMenu !== null]);
   // MIDI 轨头的乐器弹窗：锚点是那颗键的屏幕矩形（portal 到 body，不受轨道区裁剪）。
@@ -923,13 +926,13 @@ export const VidTimeline: React.FC<{
       e.stopPropagation();
       setTrackMenu(null);
     };
-    document.addEventListener('pointerdown', onDown, true);
-    document.addEventListener('contextmenu', onCtx, true);
+    hostDoc.addEventListener('pointerdown', onDown, true);
+    hostDoc.addEventListener('contextmenu', onCtx, true);
     window.addEventListener('keydown', onKey, true);
-    window.addEventListener('blur', () => setTrackMenu(null));
+    hostWin.addEventListener('blur', () => setTrackMenu(null));
     return () => {
-      document.removeEventListener('pointerdown', onDown, true);
-      document.removeEventListener('contextmenu', onCtx, true);
+      hostDoc.removeEventListener('pointerdown', onDown, true);
+      hostDoc.removeEventListener('contextmenu', onCtx, true);
       window.removeEventListener('keydown', onKey, true);
     };
   }, [trackMenu !== null]);
@@ -1032,15 +1035,15 @@ export const VidTimeline: React.FC<{
       e.stopPropagation();
       closeMergeMenu();
     };
-    document.addEventListener('pointerdown', onDown, true);
-    document.addEventListener('contextmenu', onCtx, true);
+    hostDoc.addEventListener('pointerdown', onDown, true);
+    hostDoc.addEventListener('contextmenu', onCtx, true);
     window.addEventListener('keydown', onKey, true);
-    window.addEventListener('blur', closeMergeMenu);
+    hostWin.addEventListener('blur', closeMergeMenu);
     return () => {
-      document.removeEventListener('pointerdown', onDown, true);
-      document.removeEventListener('contextmenu', onCtx, true);
+      hostDoc.removeEventListener('pointerdown', onDown, true);
+      hostDoc.removeEventListener('contextmenu', onCtx, true);
       window.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('blur', closeMergeMenu);
+      hostWin.removeEventListener('blur', closeMergeMenu);
     };
   }, [mergeMenu !== null, closeMergeMenu]);
   const runMerge = async () => {
@@ -1759,7 +1762,7 @@ export const VidTimeline: React.FC<{
                       touchesLeft={touchesLeft}
                       missing={!!((c.asset && vid.missing.has(c.asset)) || (c.play && vid.missing.has(c.play)))}
                       wave={assetBySrc.get(c.src)?.waveform}
-                      mediaFile={/^\/api\/(?:vid|asset|global)_media\//.test(c.src) ? c.src.split('/').pop() : undefined}
+                      mediaFile={/^\/api\/(?:vid|asset|global|eagle)_media\//.test(c.src) ? c.src.split('/').pop() : undefined}
                       onStartDrag={startClipDrag} onPointerMove={onClipPointerMove} onPointerUp={endClipDrag}
                       onContextMenu={openMergeMenu}
                       onUnlink={() => { if (gid) vid.update(proj => unlinkGroup(proj, gid), 'Unlink'); }}
@@ -1986,8 +1989,8 @@ export const VidTimeline: React.FC<{
             onContextMenu={e => e.preventDefault()}
             style={{
               position: 'fixed', zIndex: 9999,
-              left: Math.max(8, Math.min(refMenu.x, window.innerWidth - 250)),
-              top: Math.max(8, Math.min(refMenu.y, window.innerHeight - 100 - tracks.length * 26)),
+              left: Math.max(8, Math.min(refMenu.x, hostWin.innerWidth - 250)),
+              top: Math.max(8, Math.min(refMenu.y, hostWin.innerHeight - 100 - tracks.length * 26)),
               minWidth: 210, maxHeight: 320, overflow: 'auto',
               padding: 4, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 1,
               background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
@@ -2010,7 +2013,7 @@ export const VidTimeline: React.FC<{
               : `Sample 「${t.name}」 over this segment's absolute time range (${fmtTime(clip.start)}–${fmtTime(clip.start + clip.duration)}). One frame per generated frame at the generator's output FPS; any gap blocks the run.`))}
           </div>
         );
-      })(), document.body)}
+      })(), hostDoc.body)}
       {/* 右键合并菜单：挂到 body（不受轨道区的滚动/裁剪影响），fixed 定位。 */}
       {/* 轨头右键菜单:按 VidTrackKind 逐类给一条。任何一条轨的头上右键都弹这一份。 */}
       {trackMenu && createPortal(
@@ -2019,9 +2022,9 @@ export const VidTimeline: React.FC<{
           onContextMenu={e => e.preventDefault()}
           style={{
             position: 'fixed', zIndex: 9999,
-            left: Math.max(8, Math.min(trackMenu.x, window.innerWidth - 230)),
+            left: Math.max(8, Math.min(trackMenu.x, hostWin.innerWidth - 230)),
             // 五条轨类型 = 五行，菜单实测约 150px —— 贴窗口底边弹时别把自己顶出屏幕。
-            top: Math.max(8, Math.min(trackMenu.y, window.innerHeight - 160)),
+            top: Math.max(8, Math.min(trackMenu.y, hostWin.innerHeight - 160)),
             minWidth: 190, padding: 4, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 1,
             background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
             boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
@@ -2049,7 +2052,7 @@ export const VidTimeline: React.FC<{
             >{label}</button>
           ))}
         </div>,
-        document.body,
+        hostDoc.body,
       )}
       {/* MIDI 轨头的乐器弹窗：轨头那颗键说是"这条轨装什么"，挑音色/开插件窗/通道/力度都在里面。 */}
       {instPop && (() => {
@@ -2097,9 +2100,9 @@ export const VidTimeline: React.FC<{
             onContextMenu={e => e.preventDefault()}
             style={{
               position: 'fixed', zIndex: 9999,
-              left: Math.max(8, Math.min(m.x, window.innerWidth - 342)),
+              left: Math.max(8, Math.min(m.x, hostWin.innerWidth - 342)),
               // 三条常驻项 + 可能的 Merge 与说明行 —— 贴窗口底边弹时别把自己顶出屏幕。
-              top: Math.max(8, Math.min(m.y, window.innerHeight - 170)),
+              top: Math.max(8, Math.min(m.y, hostWin.innerHeight - 170)),
               minWidth: 230, maxWidth: 330, padding: 4, borderRadius: 8,
               background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
               boxShadow: '0 12px 36px rgba(0,0,0,0.6)', display: 'flex', flexDirection: 'column', gap: 1,
@@ -2137,7 +2140,7 @@ export const VidTimeline: React.FC<{
             )}
           </div>
         );
-      })(), document.body)}
+      })(), hostDoc.body)}
 
       {/* 裁剪时长浮签：段上平时不写时长，只有按着左右边缘拖的时候才把当前长度报出来。
           挂 body 上 fixed 定位（不受轨道滚动/裁剪），跟着指针走，不吃任何指针事件。 */}
@@ -2147,14 +2150,14 @@ export const VidTimeline: React.FC<{
         return createPortal(
           <div data-vid-trim-hint="1" style={{
             position: 'fixed', zIndex: 9999, pointerEvents: 'none', whiteSpace: 'nowrap',
-            left: Math.max(8, Math.min(trimHint.x + 14, window.innerWidth - 88)),
+            left: Math.max(8, Math.min(trimHint.x + 14, hostWin.innerWidth - 88)),
             top: Math.max(8, trimHint.y - 28),
             padding: '2px 7px', borderRadius: 5, fontSize: 10.5, fontWeight: 700,
             fontVariantNumeric: 'tabular-nums', color: '#241c00',
             background: 'rgba(255,214,10,0.94)', border: '0.5px solid rgba(0,0,0,0.25)',
             boxShadow: '0 3px 10px rgba(0,0,0,0.45)',
           }}>{fmtTime(c.duration)}</div>,
-          document.body,
+          hostDoc.body,
         );
       })()}
     </div>

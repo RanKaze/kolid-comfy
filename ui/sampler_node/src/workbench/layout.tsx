@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { dockUnits, fitLayout, syncDocUnits, type Dock } from '../dock/model';
+import { dockAllUnits, fitLayout, syncDocUnits, type Dock } from '../dock/model';
 import {
   fetchLayouts, layoutsAction, readLocalLayouts, writeLocalLayouts,
   LAYOUT_MAX, type LayoutStore, type SavedLayout,
@@ -28,7 +28,7 @@ const when = (at: number): string => {
 // 一份布局有多"大"：这是**用户唯一能凭它认出一份存档**的东西 —— 名字是他自己起的，数字是这份
 // 布局自己说的（几扇窗、几扇浮在外面）。
 const summary = (dock: Dock): string => {
-  const n = dockUnits(dock.tree).length;
+  const n = dockAllUnits(dock).length;
   const f = dock.floats.length;
   return `${n} panel${n === 1 ? '' : 's'}${f ? ` · ${f} floating` : ''}`;
 };
@@ -44,7 +44,7 @@ const SEEDED_KEY = 'sampler.drawLayouts.seeded';
 let syncedOnce = false;
 
 const LayoutBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
-  const { dock, rules, openDocs, apply } = host.layout;
+  const { dock, rules, openDocs, apply, setVisible } = host.layout;
   const [store, setStore] = useState<LayoutStore>(readLocalLayouts);
   const [name, setName] = useState('');
   const [flash, setFlashState] = useState(lastFlash);
@@ -150,6 +150,9 @@ const LayoutBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
   };
 
   const def = store.default;
+  // 窗口清单：固定面板 + 此刻开着的文档窗。隐藏的仍然留在布局里（可见性），眼睛只是不画它。
+  const hidden = new Set(dock.hidden ?? []);
+  const units = [...rules.panels, ...openDocs.filter(id => !rules.panels.includes(id))];
 
   return (
     <div style={{ ...wbStyles.stack, gap: 6 }}>
@@ -226,8 +229,43 @@ const LayoutBody: React.FC<WorkbenchUnitProps> = ({ host }) => {
           })}
         </div>
       )}
+      <div style={{ ...wbStyles.groupHead, marginTop: 4 }}
+        title="Every dock window on this page. Hidden windows keep their place in the layout — the eye brings them back where they were.">
+        Windows
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }} data-layout-windows>
+        {units.map(id => {
+          const isHidden = hidden.has(id);
+          const canHide = rules.canHide?.(id) !== false;
+          const label = rules.title(id) || id;
+          const color = rules.titleColor?.(id);
+          return (
+            <div key={id} data-layout-unit={id} data-layout-visible={isHidden ? '0' : '1'}
+              style={{ ...unitRow, opacity: isHidden ? 0.55 : 1 }}>
+              <span style={{ display: 'flex', flexShrink: 0 }}>{rules.icon(id)}</span>
+              <span style={{ ...nameStyle, flex: '1 1 0', color }} title={label}>{label}</span>
+              {canHide ? (
+                <button style={wbStyles.iconBtn} data-layout-eye={id} data-hidden={isHidden ? '1' : '0'}
+                  title={isHidden ? `Show “${label}”` : `Hide “${label}”`}
+                  onClick={() => setVisible(id, isHidden)}>
+                  <Eye off={isHidden} />
+                </button>
+              ) : (
+                <span style={{ ...wbStyles.iconBtn, opacity: 0.35, cursor: 'default' }}
+                  title="Always shown — the Layout window cannot be hidden">
+                  <Eye />
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
+};
+
+const unitRow: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, padding: '2px 3px', borderRadius: 6,
 };
 
 const rowStyle: React.CSSProperties = {
@@ -246,6 +284,16 @@ const metaStyle: React.CSSProperties = {
   fontSize: 9.5, color: 'rgba(255,255,255,0.34)', lineHeight: 1.4,
   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
 };
+
+// 窗口清单的眼睛：开着 = 看得见，划一道 = 隐藏。画法照 icons 那条 16 格栅格。
+const Eye: React.FC<{ off?: boolean }> = ({ off }) => (
+  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3"
+    strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+    <path d="M1.7 8s2.3-4 6.3-4 6.3 4 6.3 4-2.3 4-6.3 4S1.7 8 1.7 8Z" />
+    <circle cx="8" cy="8" r="1.8" />
+    {off && <path d="M2.4 2.4 13.6 13.6" />}
+  </svg>
+);
 
 // 默认那颗星：实心 = 现在就是默认，空心 = 可以点成默认。10px，照无字按钮的墨色。
 const Star: React.FC<{ on?: boolean }> = ({ on }) => (
@@ -268,6 +316,7 @@ export const layoutUnit: WorkbenchUnit = {
   title: 'Layout',
   hint: 'Named copies of the window arrangement, kept on disk (so they survive a restart and a new port). '
     + 'The arrangement on screen is saved by itself — the page opens where you left it. Save a named copy to '
-    + 'come back to it later; the ★ is only what a page with no history of its own starts from.',
+    + 'come back to it later; the ★ is only what a page with no history of its own starts from. '
+    + 'The Windows list shows or hides every dock window; hidden windows keep their place, and this Layout window itself is always shown.',
   Body: LayoutBody,
 };

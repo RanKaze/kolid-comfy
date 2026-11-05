@@ -4,16 +4,32 @@
 <script>
 /* Kolid Desktop(跨源 iframe 页签):window.close() 是 no-op,转发给宿主壳页关页签;
    宿主点页签 × 时发来 {__kolid:'pageClose'},补一次 beforeunload 让本页的通知照常发出。
-   独立在普通浏览器里打开时(window.parent===window)整段不生效。 */
+   独立在普通浏览器里打开时(window.parent===window)整段不生效。
+
+   dock 子窗口能力同样走这条握手:只有 Kolid Desktop 的壳页会回 hostHello。普通浏览器里
+   没有窗口化,存档里的浮窗会泊回布局(见 dock/childWindow.tsx)。 */
 (function () {
   if (window.parent === window) return;
+  window.__kolidDockHost = false;
   window.close = function () {
     try { window.top.postMessage({ __kolid: 'closeTab' }, '*'); } catch (e) {}
   };
   window.addEventListener('message', function (e) {
-    if (e.data && e.data.__kolid === 'pageClose') {
+    if (!e.data) return;
+    if (e.data.__kolid === 'pageClose') {
       try { window.dispatchEvent(new Event('beforeunload')); } catch (err) {}
+    } else if (e.data.__kolid === 'hostHello'
+               && Array.isArray(e.data.caps) && e.data.caps.indexOf('dockChild') >= 0) {
+      window.__kolidDockHost = true;
     }
+  });
+  // 壳页可能比本页晚就绪:前几秒多问几次。收到 hostHello 之后就不再需要应答。
+  var pings = [0, 350, 900, 1800, 3200];
+  pings.forEach(function (ms) {
+    setTimeout(function () {
+      if (window.__kolidDockHost) return;
+      try { window.parent.postMessage({ __kolid: 'hostPing' }, '*'); } catch (err) {}
+    }, ms);
   });
 })();
 </script>

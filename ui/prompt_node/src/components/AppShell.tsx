@@ -30,7 +30,7 @@ import {
 import { useApi } from '../hooks/useApi';
 import { useTempContext } from '../hooks/useTempContext';
 import { useProgram, buildAllTagsLookup, enrichTagGroups, buildLoraSelectionData } from '../hooks/useProgram';
-import { PRESET_SCOPE, QUERY_SCOPE, answerQuerySelection, savePromptPresetSelection } from '../blockScope';
+import { PRESET_SCOPE, PROMPT_PANE, QUERY_SCOPE, answerQuerySelection, savePromptPresetSelection } from '../blockScope';
 import { SearchBar } from './SearchBar';
 import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
@@ -173,6 +173,8 @@ function buildPromptText(ctx: PromptContextBase, findPrefabByGuid: (guid: string
 }
 
 export function AppShell() {
+  // 拆窗模式：'' = 完整页面；'manager' = 只要左边提示词库；'dock' = 只要右边选择栏（无确认按钮）。
+  const pane = PROMPT_PANE;
   const api = useApi();
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
     customPrompts, setCustomPrompts, temporaryPrompts, setTemporaryPrompts, loadData: apiLoadData, submitSelection, syncSelection, closeWindow, loraRegex,
@@ -257,6 +259,60 @@ export function AppShell() {
   const selectedPrefabsRef = useRef(selectedPrefabs); selectedPrefabsRef.current = selectedPrefabs;
   const customPromptsRef = useRef(customPrompts); customPromptsRef.current = customPrompts;
   const selectedProgramsRef = useRef(selectedPrograms); selectedProgramsRef.current = selectedPrograms;
+
+  // ── 两扇 Prompt 窗之间的同步（Prompt Manager / Prompt）─────────────────────────────
+  // 拆窗 = 同一页面的两份文档（同源 iframe）。**选择**是共享的那一份：一边改了就把整份状态
+  // 广播过去，另一边照着摆。否则左边挑了卡，右边的选择栏什么也不会发生。只同步选择本身，
+  // 不同步浏览状态（搜索词、展开项、滚动位置都是各窗自己的）。
+  const paneChRef = useRef<BroadcastChannel | null>(null);
+  // **两窗此刻共同持有的那一份**的签名。收到时更新，**发出时也更新** —— 只记"收到的"会让
+  // 取消选中失效：取消后状态往往正好等于某个早先收到过的签名（最常见是启动时的空选择），
+  // 于是一句"对方已经有了"就把这次广播吞了（选中能同步、取消不同步）。
+  const paneSharedSig = useRef('');
+  // 本窗自己的那份数据还没拉回来之前**不收也不发**：否则晚挂载的那一窗会先把「空选择」发过去，
+  // 把另一窗已经恢复好的选择当场清空（并且顺着实时上下文推给 prompt_server）。
+  const paneReadyRef = useRef(false);
+  useEffect(() => {
+    if (!pane || PRESET_SCOPE || QUERY_SCOPE || typeof BroadcastChannel === 'undefined') return;
+    const ch = new BroadcastChannel('kolid-prompt-panes');
+    ch.onmessage = (ev) => {
+      const d = ev.data as { __kolid?: string; sig?: string; state?: any };
+      if (!d || d.__kolid !== 'prompt-panes' || !d.state) return;
+      if (!paneReadyRef.current) return;
+      paneSharedSig.current = String(d.sig || '');
+      const s = d.state;
+      setSelectedTags(Array.isArray(s.tags) ? s.tags : []);
+      setSelectedLoras(Array.isArray(s.loras) ? s.loras : []);
+      setLoraSelections(s.loraSel && typeof s.loraSel === 'object' ? s.loraSel : {});
+      setSelectedPrefabs(Array.isArray(s.prefabs) ? s.prefabs : []);
+      setSelectedPrograms(Array.isArray(s.programs) ? s.programs : []);
+      setCustomPrompts(typeof s.custom === 'string' ? s.custom : '');
+      setTemporaryPrompts(Array.isArray(s.temp) ? s.temp : []);
+    };
+    paneChRef.current = ch;
+    return () => { ch.close(); paneChRef.current = null; };
+  }, [pane]);
+
+  // 改了就广播（200ms 合流）；和"两窗共同持有的那一份"相同就不发（收到别人的那一份时不回声）。
+  useEffect(() => {
+    if (!pane || PRESET_SCOPE || QUERY_SCOPE || typeof BroadcastChannel === 'undefined') return;
+    const state = {
+      tags: selectedTags, loras: selectedLoras, loraSel: loraSelections,
+      prefabs: selectedPrefabs, programs: selectedPrograms, custom: customPrompts, temp: temporaryPrompts,
+    };
+    if (!paneReadyRef.current || isReloadingRef.current) return;
+    const sig = JSON.stringify(state);
+    if (sig === paneSharedSig.current) return;
+    const t = window.setTimeout(() => {
+      const ch = paneChRef.current;
+      if (!ch) return;
+      // 记在**发**的时候 (不是收到的时候)：这才是"两窗共同持有"的定义。
+      paneSharedSig.current = sig;
+      ch.postMessage({ __kolid: 'prompt-panes', sig, state });
+    }, 200);
+    return () => window.clearTimeout(t);
+  }, [pane, selectedTags, selectedLoras, loraSelections, selectedPrefabs, selectedPrograms, customPrompts, temporaryPrompts]);
+
   // Agent 桥需要的“最新值”引用（与上面同一套做法：监听只注册一次,读最新状态用 ref）。
   const allPromptsRef = useRef(allPrompts); allPromptsRef.current = allPrompts;
   const loraDataRef = useRef(loraData); loraDataRef.current = loraData;
@@ -532,6 +588,7 @@ export function AppShell() {
 
   useEffect(() => {
     loadData().then(() => {
+      paneReadyRef.current = true;
       try { const s = localStorage.getItem('kolid_focus_points'); if (s) setFocusPoints(JSON.parse(s)); } catch {}
       try { const s = localStorage.getItem('kolid_category_focus_points'); if (s) setCategoryFocusPoints(JSON.parse(s)); } catch {}
       try { const s = localStorage.getItem('kolid_video_volumes'); if (s) setVideoVolumes(JSON.parse(s)); } catch {}
@@ -3062,6 +3119,22 @@ export function AppShell() {
     }
   }, [loadFromImageData, allPrompts, loraData, loraSliderConfigs, findPrefabByGuid, setSelectedTags, setCustomPrompts, setSelectedLoras, setLoraSelections, setSelectedPrefabs, setSelectedPrograms]);
 
+  // tagger 回来的每一行（"1girl, solo"）拆成一个 tag 组，接在现有选择后面。
+  // 三颗"从图 / 从屏 / 从资产"按钮和资产卡拖拽落点都用这一份，免得四份逻辑各长各的。
+  const appendTagSegments = useCallback((segs: string[]) => {
+    if (!segs.length) return;
+    const newTagGroups: TagGroup[] = segs.map((seg: string) => {
+      const tg = parseStringToTags(seg, allPrompts);
+      return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: 'parsing' as const };
+    });
+    if (!newTagGroups.length) return;
+    setSelectedTags(prev => {
+      const existing = new Set(prev.map(g => tagsToDisplayString(g)));
+      const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
+      return [...prev, ...toAdd];
+    });
+  }, [allPrompts, setSelectedTags]);
+
   // ========== Tag From Image ==========
   const handleTagFromImageClick = useCallback(() => {
     tagFileInputRef.current?.click();
@@ -3076,17 +3149,7 @@ export function AppShell() {
       const res = await fetch('/tag_from_image', { method: 'POST', body: buffer });
       const result = await res.json();
       if (result.success && result.tags) {
-        const newTagGroups: TagGroup[] = (result.tags as string[]).map((seg: string) => {
-          const tg = parseStringToTags(seg, allPrompts);
-          return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: 'parsing' as const };
-        });
-        if (newTagGroups.length > 0) {
-          setSelectedTags(prev => {
-            const existing = new Set(prev.map(g => tagsToDisplayString(g)));
-            const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
-            return [...prev, ...toAdd];
-          });
-        }
+        appendTagSegments(result.tags as string[]);
       } else {
         alert(result.error || 'Tagging failed');
       }
@@ -3096,7 +3159,7 @@ export function AppShell() {
       setTagging(false);
     }
     e.target.value = '';
-  }, [allPrompts, setSelectedTags]);
+  }, [appendTagSegments]);
 
   // ========== Tag From Capture ==========
   const [capturing, setCapturing] = useState(false);
@@ -3106,17 +3169,7 @@ export function AppShell() {
       const res = await fetch('/tag_from_capture', { method: 'POST' });
       const result = await res.json();
       if (result.success && result.tags) {
-        const newTagGroups: TagGroup[] = (result.tags as string[]).map((seg: string) => {
-          const tg = parseStringToTags(seg, allPrompts);
-          return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: 'parsing' as const };
-        });
-        if (newTagGroups.length > 0) {
-          setSelectedTags(prev => {
-            const existing = new Set(prev.map(g => tagsToDisplayString(g)));
-            const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
-            return [...prev, ...toAdd];
-          });
-        }
+        appendTagSegments(result.tags as string[]);
       } else {
         if (result.error && result.error !== 'Capture canceled by user') {
           alert(result.error);
@@ -3127,7 +3180,7 @@ export function AppShell() {
     } finally {
       setCapturing(false);
     }
-  }, [allPrompts, setSelectedTags]);
+  }, [appendTagSegments]);
 
   // ========== Lora cache refresh ==========
   // 运行中途往 loras 文件夹丢的新文件不会自己出现：后端扫的是启动时的快照。
@@ -3155,17 +3208,7 @@ export function AppShell() {
       const res = await fetch('/tag_from_assets', { method: 'POST' });
       const result = await res.json();
       if (result.success && result.tags) {
-        const newTagGroups: TagGroup[] = (result.tags as string[]).map((seg: string) => {
-          const tg = parseStringToTags(seg, allPrompts);
-          return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: 'parsing' as const };
-        });
-        if (newTagGroups.length > 0) {
-          setSelectedTags(prev => {
-            const existing = new Set(prev.map(g => tagsToDisplayString(g)));
-            const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
-            return [...prev, ...toAdd];
-          });
-        }
+        appendTagSegments(result.tags as string[]);
       } else {
         if (result.error && !result.error.includes('canceled')) {
           alert(result.error);
@@ -3176,7 +3219,177 @@ export function AppShell() {
     } finally {
       setAssetsLoading(false);
     }
-  }, [allPrompts, setSelectedTags]);
+  }, [appendTagSegments]);
+
+  // ========== 资产卡拖进来 → 自动打标 ==========
+  // Assets / Eagle 的卡片带 `application/x-asset`（见 sampler 的 video/Assets.tsx），拖到任一
+  // Prompt 窗里就取那张图跑一次 tagger，把结果接在当前选择后面（两窗都收，靠 BroadcastChannel
+  // 同步选择）。**两扇窗都要能接**：Manager 是"往库里加"，Dock 是"往当前选择里加"。
+  //
+  // 关键：卡片常从**另一个顶层窗口**（Assets/Eagle 的 owned 子窗）拖过来，跨窗口的 HTML5 拖拽
+  // 只稳定保证 `text/plain` / `Files`；自定义 MIME 在 drop 时常常读不出来，`dragover` 里的
+  // `types` 也可能为空 —— 所以这里不拿 types 当开关，而是：
+  //   1) 只要不是本页自己的拖拽（`isDragging`），就 preventDefault 允许落下；
+  //   2) 载荷先从 dataTransfer 取，取不到再去拖拽旁路（sampler 侧 dragstart 广播的那一份）兜底。
+  useEffect(() => {
+    const ASSET_DROP_TYPES = ['application/x-asset', 'application/x-vid-asset', 'application/x-vid-global'];
+    type Payload = { url?: string; kind?: string; name?: string };
+    let lastDrag: { at: number; payload: Payload } | null = null;
+    const takeDrag = (d: unknown): void => {
+      const m = d as { __kolid?: string; at?: number; payload?: Payload };
+      if (!m || (m.__kolid !== 'asset-drag' && m.__kolid !== 'kolid-asset-drag') || !m.payload) return;
+      if (typeof m.payload.url !== 'string') return;
+      lastDrag = { at: Number(m.at) || Date.now(), payload: m.payload };
+    };
+    // sampler 页与 Prompt 窗是**不同 origin**（两个端口），BroadcastChannel 到不了；
+    // 拖拽开始时 sampler 直接 postMessage 过来，这是跨 origin 唯一可靠的那条通道。
+    // 更常用的是 `kolid-asset-tag`：sampler 页自己接住落点、读完字节再投过来（见
+    // sampler 的 video/assetDragBus），这边只跑自己那一步 tagger。
+    const tagFromBytes = async (bytes: ArrayBuffer, name?: string, error?: string) => {
+      if (error) { alert('Auto tag error: ' + error); return; }
+      setTagging(true);
+      try {
+        const res = await fetch('/tag_from_image', { method: 'POST', body: bytes });
+        const result = await res.json();
+        if (result.success && result.tags) appendTagSegments(result.tags as string[]);
+        else throw new Error(result.error || 'Tagging failed');
+      } catch (err) {
+        alert(`Auto tag error (${name || 'asset'}): ` + (err as Error).message);
+      } finally {
+        setTagging(false);
+      }
+    };
+    const onMsg = (ev: MessageEvent) => {
+      const d = ev.data as {
+        __kolid?: string; name?: string; error?: string; bytes?: ArrayBuffer; contentType?: string;
+      };
+      if (d && d.__kolid === 'kolid-asset-tag') {
+        if (d.bytes instanceof ArrayBuffer) void tagFromBytes(d.bytes, d.name, d.error);
+        else if (d.error) alert('Auto tag error: ' + d.error);
+        return;
+      }
+      takeDrag(ev.data);
+    };
+    window.addEventListener('message', onMsg);
+    let bus: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        bus = new BroadcastChannel('kolid-asset-drag');
+        bus.onmessage = (ev) => takeDrag(ev.data);
+      } catch { bus = null; }
+    }
+    // 资产字节：资产与 sampler 同源、与本页不同源 —— 直接 fetch 会被 CORS 挡，先请 parent
+    // 代取（sampler 侧装着 `assetDragBus` 的代取服务）。parent 不在（独立打开的 prompt 节点）
+    // 或者代取失败时，才退回直取。
+    const askParentForBytes = (url: string): Promise<{ buf: ArrayBuffer; ct: string }> =>
+      new Promise((resolve, reject) => {
+        const id = 'ab' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+        let timer = 0;
+        const cleanup = () => {
+          window.clearTimeout(timer);
+          window.removeEventListener('message', onBytes);
+        };
+        const onBytes = (ev: MessageEvent) => {
+          const d = ev.data as {
+            __kolid?: string; id?: string; ok?: boolean;
+            bytes?: ArrayBuffer; contentType?: string; error?: string;
+          };
+          if (!d || d.__kolid !== 'kolid-asset-bytes' || d.id !== id) return;
+          cleanup();
+          if (!d.ok) { reject(new Error(d.error || 'asset fetch failed')); return; }
+          resolve({ buf: d.bytes as ArrayBuffer, ct: String(d.contentType || '').toLowerCase() });
+        };
+        timer = window.setTimeout(() => { cleanup(); reject(new Error('asset fetch timeout')); }, 15000);
+        window.addEventListener('message', onBytes);
+        try {
+          window.parent.postMessage({ __kolid: 'kolid-asset-bytes-get', id, url }, '*');
+        } catch (err) {
+          cleanup();
+          reject(err as Error);
+        }
+      });
+
+    const readAsset = async (url: string): Promise<{ buf: ArrayBuffer; ct: string }> => {
+      const direct = async (): Promise<{ buf: ArrayBuffer; ct: string }> => {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`asset fetch failed (${res.status})`);
+        return { buf: await res.arrayBuffer(), ct: (res.headers.get('content-type') || '').toLowerCase() };
+      };
+      if (window.parent && window.parent !== window) {
+        try { return await askParentForBytes(url); } catch { /* 退回直取 */ }
+      }
+      return direct();
+    };
+
+    const onOver = (e: DragEvent) => {
+      // 本页自己的拖拽（提示词组/卡片排序）走既有逻辑，别抢它。
+      if (isDragging || !e.dataTransfer) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      document.body.classList.add('asset-drop-target');
+    };
+    const onLeave = (e: DragEvent) => {
+      if (!e.relatedTarget) document.body.classList.remove('asset-drop-target');
+    };
+    const onDrop = (e: DragEvent) => {
+      const dt = e.dataTransfer;
+      if (!dt || isDragging) return;
+      let payload: Payload | null = null;
+      for (const t of ASSET_DROP_TYPES) {
+        const raw = dt.getData(t);
+        if (!raw) continue;
+        try {
+          const p = JSON.parse(raw) as Payload;
+          if (p && typeof p.url === 'string') { payload = p; break; }
+        } catch { /* 换下一种类型 */ }
+      }
+      if (!payload && lastDrag && Date.now() - lastDrag.at < 15000) payload = lastDrag.payload;
+      e.preventDefault();
+      document.body.classList.remove('asset-drop-target');
+      const url = typeof payload?.url === 'string' ? payload.url : '';
+      // 拖进来的不是资产卡（文字、链接之类）：放过，不打扰。留一行诊断，方便判断
+      // 到底是"没收到载荷"还是"收到了但类型不对"。
+      if (!url) {
+        console.info('[kolid] asset drop without payload', Array.from(dt.types || []), lastDrag);
+        return;
+      }
+      void (async () => {
+        try {
+          // 资产文件与 sampler 同源、与本页不同源：直接 fetch 会被 CORS 挡，先请 parent 代取。
+          const { buf, ct } = await readAsset(url);
+          const kind = payload?.kind || (ct.startsWith('video/') ? 'video' : ct.startsWith('audio/') ? 'audio' : 'image');
+          if (kind === 'audio') throw new Error(`「${payload?.name || url}」是音频，不是图片/视频`);
+          if (kind === 'video') {
+            // 挑帧弹窗在 sampler 主页面那边；这扇窗自己接住落点时没有视频播放器的上下文。
+            throw new Error('视频请从 sampler 页面拖入 Prompt 窗，挑帧弹窗在主页面弹出');
+          }
+          setTagging(true);
+          const res = await fetch('/tag_from_image', { method: 'POST', body: buf });
+          const result = await res.json();
+          if (result.success && result.tags) appendTagSegments(result.tags as string[]);
+          else throw new Error(result.error || 'Tagging failed');
+        } catch (err) {
+          alert('Auto tag error: ' + (err as Error).message);
+        } finally {
+          setTagging(false);
+        }
+      })();
+    };
+    const onEnd = () => document.body.classList.remove('asset-drop-target');
+    document.addEventListener('dragover', onOver);
+    document.addEventListener('dragleave', onLeave);
+    document.addEventListener('drop', onDrop);
+    document.addEventListener('dragend', onEnd);
+    return () => {
+      window.removeEventListener('message', onMsg);
+      document.removeEventListener('dragover', onOver);
+      document.removeEventListener('dragleave', onLeave);
+      document.removeEventListener('drop', onDrop);
+      document.removeEventListener('dragend', onEnd);
+      document.body.classList.remove('asset-drop-target');
+      bus?.close();
+    };
+  }, [appendTagSegments]);
 
   // ========== Confirm ==========
   const handleConfirm = useCallback((keepParsing = false) => {
@@ -4719,7 +4932,7 @@ export function AppShell() {
   return (
     <div className="app-container">
       {/* Region canvas panel — leftmost when enable_region is on */}
-      {enableRegion ? (
+      {enableRegion && pane !== 'dock' ? (
         <div style={{ width: '50%', flexShrink: 0, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border-color)', background: '#000' }}>
           <RegionCanvas
             imageSrc={regionImage}
@@ -4857,6 +5070,8 @@ export function AppShell() {
       ) : null}
 
       <div className="main-wrapper">
+        {/* 拆窗时只画一半：manager 窗 = 左侧提示词库；dock 窗 = 右侧选择栏。 */}
+        {pane !== 'dock' ? (
         <div className="scroll-container">
           <div className="container">
             <div className="header">
@@ -5423,13 +5638,16 @@ export function AppShell() {
 
           </div>
         </div>
+        ) : null}
 
-        <div className="right-bar">
+        {pane !== 'manager' ? (
+        // dock 窗里右栏是**整窗**的内容，不再是页面左侧栏旁边的 320px 侧条 —— 让它铺满。
+        <div className="right-bar" style={pane === 'dock' ? { width: '100%', height: '100%' } : undefined}>
           <div className="selected-bar">
             {tempCtx.mode === 'prefab' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <h3 style={{ marginBottom: 0 }}>Selected Prefabs ({(tempCtx.current?.selections || []).length})</h3>
+                  <h3 style={{ marginBottom: 0 }}>Prefabs ({(tempCtx.current?.selections || []).length})</h3>
                   <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
                 </div>
                 <div className="prefab-list">
@@ -5620,7 +5838,7 @@ export function AppShell() {
             {tempCtx.mode === 'program' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <h3 style={{ marginBottom: 0 }}>Selected Sub-programs ({(tempCtx.current?.selections || []).length})</h3>
+                  <h3 style={{ marginBottom: 0 }}>Sub-programs ({(tempCtx.current?.selections || []).length})</h3>
                   <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
                 </div>
                 <div className="prefab-list">
@@ -5651,7 +5869,7 @@ export function AppShell() {
             {tempCtx.mode === 'lora' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <h3 style={{ marginBottom: 0 }}>Selected Loras ({(tempCtx.current?.selections || []).length})</h3>
+                  <h3 style={{ marginBottom: 0 }}>Loras ({(tempCtx.current?.selections || []).length})</h3>
                   <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [], loraStates: {} }))} title="Clear">{iconX}</button>
                 </div>
                 <div className="lora-list">
@@ -5682,7 +5900,7 @@ export function AppShell() {
                 {!isTemporary ? (
                   <>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                      <h3 style={{ marginBottom: 0 }}>Selected Prefabs ({selectedPrefabs.length + programResult.gen_prefabs.length})</h3>
+                      <h3 style={{ marginBottom: 0 }}>Prefabs ({selectedPrefabs.length + programResult.gen_prefabs.length})</h3>
                       <button className="clear-btn" onClick={() => setSelectedPrefabs([])} title="Clear">{iconX}</button>
                     </div>
                     <div className="prefab-list">
@@ -5733,7 +5951,7 @@ export function AppShell() {
                     </div>
 
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, ...((selectedPrefabs.length > 0 || programResult.gen_prefabs.length > 0) ? { marginTop: 12 } : {}) }}>
-                      <h3 style={{ marginBottom: 0 }}>Selected Loras ({selectedLoras.length + programResult.gen_loras.length})</h3>
+                      <h3 style={{ marginBottom: 0 }}>Loras ({selectedLoras.length + programResult.gen_loras.length})</h3>
                       <button className="clear-btn" onClick={() => { setSelectedLoras([]); setLoraSelections({}); }} title="Clear">{iconX}</button>
                     </div>
                     <div className="lora-list">
@@ -5799,7 +6017,7 @@ export function AppShell() {
                 ) : null}
 
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, ...((selectedPrefabs.length > 0 || selectedLoras.length > 0 || programResult.gen_prefabs.length > 0 || programResult.gen_loras.length > 0) && !isTemporary ? { marginTop: 12 } : {}) }}>
-                  <h3 style={{ marginBottom: 0 }}>Selected Prompts ({isTemporary && currentCtx ? currentCtx!.tagGroups!.length : selectedTags.length + programResult.gen_tag_groups.length})</h3>
+                  <h3 style={{ marginBottom: 0 }}>Prompts ({isTemporary && currentCtx ? currentCtx!.tagGroups!.length : selectedTags.length + programResult.gen_tag_groups.length})</h3>
                   <div style={{ display: 'flex', gap: '6px' }}>
                     <button className="clear-btn" onClick={() => setSelectedTags(prev => prev.filter(g => g.source !== 'normal'))} title="Clear normal" style={{ color: '#0a84ff' }}>{iconX}</button>
                     <button className="clear-btn" onClick={() => setSelectedTags(prev => prev.filter(g => g.source !== 'parsing'))} title="Clear parsing" style={{ color: '#8b5cf6' }}>{iconX}</button>
@@ -5862,7 +6080,7 @@ export function AppShell() {
           {!tempCtx.mode && !isTemporary ? (
             <>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                <h3 style={{ marginBottom: 0 }}>Selected Programs ({selectedPrograms.length})</h3>
+                <h3 style={{ marginBottom: 0 }}>Programs ({selectedPrograms.length})</h3>
                 <button className="clear-btn" onClick={() => setSelectedPrograms([])} title="Clear">{iconX}</button>
               </div>
               <div className="program-list">
@@ -6143,15 +6361,19 @@ export function AppShell() {
                 />
               </div>
 
+              {/* dock 窗（右侧选择栏）不带 Keep confirm / Confirm 两颗按钮。 */}
+              {pane !== 'dock' ? (
               <div className="footer">
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <button className="btn btn-primary" onClick={() => handleConfirm(true)} style={{ background: '#8b5cf6' }}>Keep Confirm</button>
                   <button className="btn btn-primary" onClick={() => handleConfirm()}>Confirm</button>
                 </div>
               </div>
+              ) : null}
             </>
           ) : null}
         </div>
+        ) : null}
       </div>
 
       {modal?.type === 'addCategory' ? (

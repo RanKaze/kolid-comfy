@@ -16,6 +16,11 @@ export const QUERY_SCOPE = params.get('scope') === 'query';
 export const PRESET_ID = params.get('preset_id') || '';
 export const SAMPLER_BASE = params.get('sampler_base') || '';
 
+/** 拆成两扇 dock 窗之后，同一份页面在一个窗里只画一半：
+ *  `?pane=manager` = 左侧的提示词库（浏览/挑选）；`?pane=dock` = 右侧的选择栏（不带
+ *  Keep confirm / Confirm）。空 = 完整页面（独立的 prompt 节点，行为不变）。 */
+export const PROMPT_PANE = params.get('pane') || '';
+
 export interface PromptPresetSelectionPayload {
   tags: any[];
   custom_prompts: string;

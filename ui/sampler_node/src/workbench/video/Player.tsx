@@ -232,6 +232,67 @@ export const VidPlayer: React.FC<{
       planSigRef.current = '';
     },
   });
+
+  // ── 视频 Detect 取帧口 ────────────────────────────────────────────────────────────────────
+  // Detect 要的是"这一刻监视器上的合成画面"：与播放共用同一条 blend-vid-frame（页面把镜像视频
+  // 对到 want、把关键帧临时打进图层再折），但回图不进监视器画布 —— 用独立的 reqId 记账接住，
+  // 直接在离屏 canvas 上按 contain 贴进 Canvas 尺寸转成 JPEG。视频段不在这里取（走后端原生抽帧）。
+  const captureSeq = useRef(900000);
+  const captureWaiters = useRef(new Map<number, (bmp: ImageBitmap | null) => void>());
+  const captureFrame = useCallback(async (t: number, w = 0, h = 0): Promise<Blob | null> => {
+    if (!visible) return null;
+    const proj = projectRef.current;
+    const plan = compositePlanAt(proj, t, muteRef.current, frameNeed.current);
+    if (!plan) return null;
+    const q = Math.max(0, Math.floor(t * proj.fps + 1e-6) / proj.fps);
+    const reqId = ++captureSeq.current;
+    const tracks = plan.sources.map(s => ({ trackId: s.trackId, src: s.clip.src, want: sourceTime(s.clip, q) }));
+    const kf = kfSampleAll(plan.layer, q);
+    const kfMeta = kf ? (plan.layer.keyframes?.meta ?? null) : null;
+    const needList = (frameNeed.current && plan.layerKey) ? frameNeed.current[plan.layerKey] : null;
+    const haveTracks = new Set(tracks.map(x => x.trackId));
+    const emptyTracks = (needList || []).filter(id => !haveTracks.has(id));
+    const baseClip = plan.sources.find(s => s.trackId === plan.baseTrackId)?.clip ?? null;
+    const bmp = await new Promise<ImageBitmap | null>(resolve => {
+      const timer = window.setTimeout(() => { captureWaiters.current.delete(reqId); resolve(null); }, 8000);
+      captureWaiters.current.set(reqId, b => { window.clearTimeout(timer); resolve(b); });
+      const ok = vid.blendPost({
+        type: 'blend-vid-frame', reqId, t: q, layerKey: plan.layerKey, uid: vid.docUid ?? null,
+        baseTrackId: plan.baseTrackId, tracks, ...(kf ? { kf } : {}), ...(kfMeta ? { kfMeta } : {}),
+        clip: {
+          clipId: plan.layer.id, start: plan.layer.start, duration: plan.layer.duration,
+          offset: plan.layer.offset || 0, srcDuration: plan.layer.srcDuration,
+        },
+        planT: q, planRev: planRevRef.current, emptyTracks, sentAt: Date.now(),
+        baseT: baseClip ? sourceTime(baseClip, q) : null,
+        sync: true, stageCovers: false,
+      });
+      if (!ok) { window.clearTimeout(timer); captureWaiters.current.delete(reqId); resolve(null); }
+    });
+    if (!bmp) return null;
+    try {
+      const cw = w > 0 ? w : bmp.width;
+      const ch = h > 0 ? h : bmp.height;
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(2, cw);
+      cv.height = Math.max(2, ch);
+      const ctx = cv.getContext('2d');
+      if (!ctx) { bmp.close(); return null; }
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      const sc = Math.min(cv.width / bmp.width, cv.height / bmp.height);
+      const dw = Math.max(1, Math.round(bmp.width * sc));
+      const dh = Math.max(1, Math.round(bmp.height * sc));
+      ctx.drawImage(bmp, Math.round((cv.width - dw) / 2), Math.round((cv.height - dh) / 2), dw, dh);
+      bmp.close();
+      return await new Promise<Blob | null>(res => cv.toBlob(res, 'image/jpeg', 0.82));
+    } catch { try { bmp.close(); } catch { /* gone */ } return null; }
+  }, [vid, visible, frameNeed]);
+  useEffect(() => {
+    vid.captureFrame = captureFrame;
+    return () => { if (vid.captureFrame === captureFrame) delete vid.captureFrame; };
+  }, [vid, captureFrame]);
+
   const requestComposite = useCallback((plan: VidCompositePlan | null, t: number, force = false, sync = false) => {
     if (!visible) return;
     const r = compReq.current;
@@ -515,6 +576,13 @@ export const VidPlayer: React.FC<{
         cached?: boolean; frameless?: boolean; usedTracks?: string[];
         kf?: { keys: number; applied: number; noLayer: number; noFx: number; noParam: number; bad: number; sample: string[] } | null } | null;
       if (!d || d.type !== 'blend-vid-composite') return;
+      // Detect 的取帧回包走独立记账：不进监视器画布，直接交给等待的离屏编码。
+      const cap = typeof d.reqId === 'number' ? captureWaiters.current.get(d.reqId) : undefined;
+      if (cap) {
+        captureWaiters.current.delete(d.reqId as number);
+        cap(d.bitmap ?? null);
+        return;
+      }
       const r = compReq.current;
       // 页面那一趟关键帧注入的读数：宿主侧 __compPerf.kf 与之配对（见 blend_node 的 vidKfInject）。
       if (d.kf) {

@@ -14,6 +14,7 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useDockDocument } from '../dock/docScope';
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, MiniMap, Handle, Position,
   useNodesState, useEdgesState, addEdge, reconnectEdge, useReactFlow, useNodesInitialized,
@@ -536,6 +537,7 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
   graph, onChange, presets, interfaces, staging,
   onCreatePreset, onRenamePreset, onEditPreset, onDeletePreset, architecture, height = 460,
 }) => {
+  const doc = useDockDocument();
   const rf = useReactFlow();
   // 自定义节点**量到尺寸之后**才算初始化 —— 在那之前 ReactFlow 不知道每个节点多大，
   // `fitView` 算出来的边界是坏的（这是官方 `fitView` prop 在自定义节点上的经典坑：它只在挂载
@@ -768,8 +770,9 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
       if ((e.target as HTMLElement | null)?.closest?.('.pg-menu')) return;
       setPaneMenu(null);
     };
-    window.addEventListener('pointerdown', close);
-    return () => window.removeEventListener('pointerdown', close);
+    const win = doc.defaultView ?? window;
+    win.addEventListener('pointerdown', close);
+    return () => win.removeEventListener('pointerdown', close);
   }, [paneMenu]);
 
   const issues = useMemo(() => validateGraph(graph), [graph]);
@@ -854,7 +857,7 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
             onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'rgba(10,132,255,0.25)'}
             onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'transparent'}
           >Add Node…</div>
-        </div>, document.body)}
+        </div>, doc.body)}
 
       {/* 选类型的 modal */}
       {picker && createPortal(
@@ -881,7 +884,7 @@ const PipelineGraphEditorInner: React.FC<PipelineGraphEditorProps> = ({
               ))}
             </div>
           </div>
-        </div>, document.body)}
+        </div>, doc.body)}
     </GraphEditCtx.Provider>
   );
 };

@@ -139,6 +139,11 @@ const VAssets: UnitIcon = p => <Svg {...p}>
   <path d="M5.4 6.4V3.4h5.2v3" />
   <path d="M7 9.1 9.7 10.5 7 11.9z" fill="currentColor" stroke="none" />
 </Svg>;
+// Eagle：外部素材库 —— 一只文件夹 + 一个向下的箭头（在别处、就地读，不搬字节）。
+const VEagle: UnitIcon = p => <Svg {...p}>
+  <path d="M2 5.4A1.4 1.4 0 0 1 3.4 4h2.9l1.4 1.6h4.9A1.4 1.4 0 0 1 14 7v5.6a1.4 1.4 0 0 1-1.4 1.4H3.4A1.4 1.4 0 0 1 2 12.6z" />
+  <path d="M6.2 8.2l1.8 1.8 1.8-1.8" />
+</Svg>;
 // Inspector：一帧素材 + 一柄放大镜 —— 这扇窗是"把 Assets 里选中的那一件凑近了看"，
 // 与 VPlayer 那块幕布(放映)分开：它不动时间线，自己看自己的。
 const VInspector: UnitIcon = p => <Svg {...p}>
@@ -248,6 +253,18 @@ const Document: UnitIcon = p => <Svg {...p}>
   <path d="M6.1 7.6 9.5 9.4 6.1 11.2z" fill="currentColor" stroke="none" />
 </Svg>;
 
+// Prompt：几行提示词 + 一个"送去跑"的箭头（和侧栏那颗 tab 记号同一形状）。
+const Prompt: UnitIcon = p => <Svg {...p}>
+  <path d="M1.9 3.2h12.2M1.9 6.4h9.2M1.9 9.6h10.6M1.9 12.8h7.6" />
+  <path d="M12.6 11.4l2.6 2-2.6 2" />
+</Svg>;
+// Prompt Manager：提示词**库** —— 一叠卡片（后面一张露出边缘），与 Prompt 的"行 + 箭头"区分开。
+const PromptManager: UnitIcon = p => <Svg {...p}>
+  <rect x="4.4" y="1.9" width="9.7" height="7" rx="0.9" />
+  <path d="M2.8 4.6v6.7a1 1 0 0 0 1 1h6.6" />
+  <path d="M6.5 4.6h5.5M6.5 6.7h3.8" />
+</Svg>;
+
 export const UNIT_ICONS: Record<string, UnitIcon> = {
   // 工作台
   staging: Staging, canvas: Canvas, transform: Transform, mask: Mask, color: Color,
@@ -256,11 +273,12 @@ export const UNIT_ICONS: Record<string, UnitIcon> = {
   processor: Processor, guidances: Guidances, layers: Layers, history: History, fxParams: FxParams,
   layout: Layout, videoGen: VideoGen,
   // Video 模式
-  vplayer: VPlayer, vtracks: VTracks, vassets: VAssets, vinspector: VInspector, vkf: VKf, vaudio: VAudio,
+  vplayer: VPlayer, vtracks: VTracks, vassets: VAssets, veagle: VEagle, vinspector: VInspector, vkf: VKf, vaudio: VAudio,
   // 工具窗(彩色,见 UNIT_COLORS)
   log: PLog, debug: PDebug, probe: PProbe, agent: Agent,
   // 宿主
   toolbar: File, context: Context, pipeline: Pipeline, presets: Presets, blocks: Blocks,
+  prompt: Prompt, promptManager: PromptManager,
 };
 export const DOC_ICON: UnitIcon = Document;
 

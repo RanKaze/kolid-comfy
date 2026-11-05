@@ -26,7 +26,7 @@ import comfy.model_management as mm
 # =============================================================================
 from ...libs.utils import AlwaysEqualProxy
 from ...libs.data_paths import PACK_ROOT, data_dir, data_file, web_file
-from ...libs import asset_store
+from ...libs import asset_store, eagle_library
 
 try:
     from .prompt_node import SnapshotPromptServer, SnapshotPromptNode
@@ -1187,7 +1187,14 @@ def _layouts_boot_payload():
 
 
 def _inject_boot_layout(html):
-    """把上面那份塞进 `</head>` 之前。塞不进去就把页面原样发出去 —— 一份布局不该挡住页面。"""
+    """把上面那份塞进**真正的 `<head>` 开始标签之后**。塞不进去就把页面原样发出去。
+
+    锚点不能是 `</head>`：页面是 vite-plugin-singlefile 的单文件产物，**整个 app bundle 内联在
+    头里**，而 bundle 自己的 JS 字符串里就可能出现 `</head>`（例如子窗口文档的 skeleton
+    `<!doctype html><html><head>…</head>…`）。按第一个 `</head>` 插会**插进那段字符串**，
+    插入脚本的 `</script>` 把 module 从中间截断 —— 剩下的 bundle 源码会作为正文文字显示出来。
+    真正的 `<head>` 开标签一定在 bundle 之前，且不会落在任何 JS 文本里。
+    """
     try:
         payload = _layouts_boot_payload()
         if payload is None:
@@ -1196,9 +1203,10 @@ def _inject_boot_layout(html):
         # 树里只有 id / 数字，可 JSON 里万一出现 `</script` 就会把脚本提前截断 —— 一律打断。
         blob = blob.replace('</', '<\\/')
         tag = '<script>window.__DOCK_BOOT__=%s;</script>' % blob
-        at = html.find('</head>')
-        if at < 0:
+        m = re.search(r'<head[^>]*>', html, re.I)
+        if not m:
             return html
+        at = m.end()
         return html[:at] + tag + '\n  ' + html[at:]
     except Exception:
         return html
@@ -1240,6 +1248,10 @@ def _vid_media_path(ref):
     s = str(ref or '').strip()
     if not s:
         return None
+    # Eagle 库的字节就地读（零拷贝）：URL 只带 Eagle 的条目 id，路径由库模块按缓存认。
+    if s.startswith('/api/eagle_media/'):
+        return eagle_library.media_path(
+            unquote(s[len('/api/eagle_media/'):]).split('?', 1)[0].strip('/'))
     for pre in ('/api/vid_media/', '/api/asset_media/', '/api/global_media/'):
         if s.startswith(pre):
             s = s[len(pre):]
@@ -1253,7 +1265,11 @@ def _vid_media_path(ref):
         return p
     # 仓库认 hash（带不带扩展名都行：`<md5>`、`<md5>.mp4`）。
     rec = asset_store.get(name) or asset_store.get(os.path.splitext(name)[0])
-    return rec['path'] if rec else None
+    if rec:
+        return rec['path']
+    # 最后认 Eagle 的条目 id：抽帧/缩略条只把 URL 的最后一段当 `f` 传回来，
+    # 裸 id 也必须能就地解析（Eagle 只在内存清单里查，不读盘）。
+    return eagle_library.media_path(os.path.splitext(name)[0])
 
 
 # =============================================================================
@@ -1292,7 +1308,9 @@ def _global_probe(name, path, size, mtime):
     except Exception:
         probe = {}
     info = {'hasAudio': bool(probe.get('acodec')) if probe else None,
-            'duration': float(probe.get('duration') or 0)}
+            'duration': float(probe.get('duration') or 0),
+            'width': int(probe.get('width') or 0) if probe else 0,
+            'height': int(probe.get('height') or 0) if probe else 0}
     with _GA_PROBE_LOCK:
         _GA_PROBE_CACHE[name] = (size, mtime, info)
     return info
@@ -1323,6 +1341,10 @@ def _global_assets_list():
         for rec in recs:
             if (rec.get('meta') or {}).get('proxyOf'):
                 continue
+            # 卡片按宽高比排流式网格：图片现量一次（进程内缓存），视频等下面 ffprobe 那一趟。
+            w = h = 0
+            if rec['kind'] == 'image':
+                w, h = asset_store.dimensions(rec)
             items.append({
                 'name': rec['file'],
                 'url': '/api/global_media/' + quote(rec['file']),
@@ -1331,6 +1353,7 @@ def _global_assets_list():
                 'mtime': rec['mtime'],
                 'hasAudio': None,
                 'duration': 0,
+                'w': w, 'h': h,
                 'hash': rec['id'],
                 'playHash': proxy_of.get(rec['id']),
                 'inLibrary': rec['inLibrary'],
@@ -1354,6 +1377,8 @@ def _global_assets_list():
             for it, info in zip(media, infos):
                 it['hasAudio'] = info['hasAudio']
                 it['duration'] = info['duration']
+                it['w'] = int(info.get('width') or 0)
+                it['h'] = int(info.get('height') or 0)
         except Exception:
             pass          # 并发那套没起来：角标不画、扫片退回首帧，清单照给
     return items
@@ -2069,6 +2094,83 @@ def _vid_encode(frames, fps=30, name='proc'):
         return None
     print(f'[VidEncode] {len(frames)} frames {w}x{h}@{fps:.0f}fps → {os.path.basename(out)}')
     return '/api/vid_media/' + os.path.basename(out)
+
+
+def _vid_detect_size(w, h):
+    """Detect 的工作尺寸：与 _vid_work_size 同一个思路，但目标不是"装进内存的帧列"，
+    而是**检测分辨率**。长边封在 1280（再大 EOVSAM 逐帧推理代价陡增），奇数砍成偶数，
+    返回 (0, 0) 表示调用方没给画布尺寸、按源帧自己的尺寸检测。
+    """
+    try:
+        w, h = int(w or 0), int(h or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    if w <= 0 or h <= 0:
+        return 0, 0
+    long_edge = max(w, h)
+    if long_edge > 1280:
+        s = 1280.0 / long_edge
+        w, h = int(round(w * s)), int(round(h * s))
+    return max(2, w - w % 2), max(2, h - h % 2)
+
+
+def _vid_fit_canvas(frame, w, h):
+    """把一帧按 contain 贴进 w×h 画布（周围补黑），与监视器里 <video> 的 object-fit:contain
+    同一口径 —— mask 才能和画面逐像素对齐。w/h 为 0 时原样返回。返回 [1,H,W,3] float。"""
+    import torch.nn.functional as F
+    t = frame if torch.is_tensor(frame) else torch.as_tensor(frame)
+    if t.dim() == 3:
+        t = t.unsqueeze(0)
+    if t.dim() == 4 and t.shape[-1] not in (3, 4):
+        t = t.permute(0, 2, 3, 1)
+    if t.shape[-1] == 4:
+        t = t[..., :3]
+    if w <= 0 or h <= 0:
+        return t
+    _, ch, cw, _ = t.shape
+    if cw == w and ch == h:
+        return t
+    scale = min(w / float(cw), h / float(ch))
+    nw, nh = max(1, int(round(cw * scale))), max(1, int(round(ch * scale)))
+    resized = F.interpolate(t.permute(0, 3, 1, 2), size=(nh, nw),
+                            mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+    canvas = torch.zeros((1, h, w, 3), dtype=t.dtype, device=t.device)
+    x, y = (w - nw) // 2, (h - nh) // 2
+    canvas[:, y:y + nh, x:x + nw, :] = resized
+    return canvas
+
+
+def _vid_resize_mask(mask, w, h):
+    """检测在工作分辨率上跑，落盘回到画布尺寸 —— mask 轨要按画布读取。"""
+    import torch.nn.functional as F
+    m = mask if torch.is_tensor(mask) else torch.as_tensor(mask)
+    if m.dim() == 3:
+        m = m[0]
+    if w <= 0 or h <= 0 or (m.shape[-2] == h and m.shape[-1] == w):
+        return m
+    return F.interpolate(m[None, None], size=(h, w), mode='bilinear',
+                         align_corners=False)[0, 0]
+
+
+def _vid_detect_result(detector, image, prompt, threshold, invert):
+    """与 /api/blend_action detect 同一套掩码表达式语义，但只取 mask（视频逐帧用）。"""
+    from ...libs.detect_utils import detect_mask
+    from ...libs.mask_utils import combine_masks
+    from ...libs.mask_expression import parse_mask_expression, collect_terms, eval_expression
+    if prompt:
+        root = parse_mask_expression(prompt, threshold)
+        term_masks = {}
+        for name, t in collect_terms(root):
+            term_masks[(name, float(t))] = combine_masks(
+                detect_mask(detector=detector, image=image, threshold=float(t), prompt=name),
+                mode='max')
+        result = eval_expression(root, term_masks)
+    else:
+        result = combine_masks(detect_mask(detector=detector, image=image,
+                                           threshold=threshold, prompt=''), mode='max')
+    if invert:
+        result = 1.0 - result
+    return result
 
 
 def _vid_publish(val, name='vgen', want_fps=None):
@@ -3964,7 +4066,7 @@ class SnapshotDetailerSamplerServer:
                 file_path = web_file(name)
                 if os.path.exists(file_path):
                     self.send_response(200)
-                    self.send_header('Content-type', 'text/html')
+                    self.send_header('Content-type', 'text/html; charset=utf-8')
                     self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
                     self.end_headers()
                     with open(file_path, 'rb') as f:
@@ -4484,6 +4586,32 @@ class SnapshotDetailerSamplerServer:
                     self.send_error(404)
                 return
 
+            # ── Eagle 素材库（只读、零拷贝）──────────────────────────────────────────
+            #   GET /api/eagle_lib[?refresh=1]   清单 + 文件夹树 + 标签（独立的 Eagle 窗）
+            #   GET /api/eagle_media/<id>        原件字节（带 Range；直接从 Eagle 目录读）
+            #   GET /api/eagle_thumb/<id>        Eagle 自己生成的 _thumbnail.png
+            # 不往 data/assets 写任何东西：Eagle 是用户自己的库，这里只是另一个只读面。
+            if self.path.startswith('/api/eagle_lib'):
+                qs = parse_qs(urlparse(self.path).query)
+                refresh = (qs.get('refresh') or ['0'])[0].lower() in ('1', 'true', 'yes')
+                self._send_json(eagle_library.snapshot(refresh=refresh))
+                return
+
+            if self.path.startswith('/api/eagle_media/'):
+                aid = unquote(urlparse(self.path).path[len('/api/eagle_media/'):]).strip('/')
+                path = eagle_library.media_path(aid)
+                # 不做长缓存：Eagle 里同一 id 的原件可能被替换，URL 带不了版本号。
+                if not (path and _send_media_file(self, path, cacheable=False)):
+                    self.send_error(404)
+                return
+
+            if self.path.startswith('/api/eagle_thumb/'):
+                aid = unquote(urlparse(self.path).path[len('/api/eagle_thumb/'):]).strip('/')
+                path = eagle_library.thumb_path(aid)
+                if not (path and _send_media_file(self, path, cacheable=False)):
+                    self.send_error(404)
+                return
+
             # ── 资产仓库（A0）───────────────────────────────────────────────────────
             # 设计见 docs/assets_single_store_design.md。这里只开"仓库"的**读口**，不改任何既有语义：
             #   GET /api/assets              清单（?scope=library|session|all  &kind=  &q=  &refresh=1）
@@ -4988,6 +5116,23 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
+            if urlparse(self.path).path == '/api/eagle_lib':
+                # 用户点选用哪个 Eagle 库（父目录里恰好一个 .library 时也认）。只记路径，
+                # 不动 Eagle 自己的配置；下次启动按这份记录直接打开。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    root = eagle_library.set_path((body or {}).get('path'))
+                    if not root:
+                        self._send_json({'ok': False,
+                                         'error': 'That folder is not an Eagle library '
+                                                  '(needs images/ and metadata.json)'}, 400)
+                        return
+                    self._send_json(eagle_library.snapshot(refresh=True))
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
+                return
+
             if urlparse(self.path).path in ('/api/asset_update', '/api/asset_delete'):
                 # 仓库的管理口（A1 起的"改造/删除"）：
                 #   update {id, name?, tags?}  —— 只改表里的元数据，不碰字节
@@ -5365,6 +5510,77 @@ class SnapshotDetailerSamplerServer:
                     # 蒙版边缘产生的灰色条带。解不出图（旧前端 / 画布被污染）时回落到
                     # 后端合成。Layer Tag 也走这条：前端把「合成图按该 Layer 原生网格抠好 +
                     # 该 Layer 自带蒙版」预制送来，后端直接复用现成的 mask/covered/full 语义喂 tagger。
+                    # 视频模式 Detect：整段视频/整条轨道/单个片段按帧检测。两路来源 ——
+                    #   frames : 前端从工作台页面抓来的**合成帧**（已按画布尺寸合成好，
+                    #            Layer 轨、叠加都在里面），一列 dataURL；
+                    #   video  : 视频媒体库里的源文件帧段（{file,f0,n,fps}），后端自己抽帧。
+                    # 产物按画布尺寸（Canvas 的 Frame/fps）编码成一列 mask mp4，交给前端落到新轨。
+                    dv = body.get('detect_video') or {} if action == 'detect' else None
+                    if dv:
+                        if inst.detector is None:
+                            self._send_json({'success': False, 'error': 'No detector is connected to the node'})
+                            return
+                        params = body.get('detect') or {}
+                        prompt = str(params.get('prompt') or '').strip()
+                        try:
+                            threshold = float(params.get('threshold', 0.5))
+                        except (TypeError, ValueError):
+                            threshold = 0.5
+                        threshold = min(1.0, max(0.0, threshold))
+                        invert = bool(params.get('invert'))
+                        try:
+                            vfps = float(dv.get('fps') or 30)
+                        except (TypeError, ValueError):
+                            vfps = 30.0
+                        vfps = max(1.0, min(120.0, vfps))
+                        try:
+                            out_w = int(dv.get('w') or 0)
+                            out_h = int(dv.get('h') or 0)
+                        except (TypeError, ValueError):
+                            out_w = out_h = 0
+                        work_w, work_h = _vid_detect_size(out_w, out_h)
+                        kind = str(dv.get('kind') or 'video')
+                        frames = []
+                        if kind == 'frames':
+                            for item in (dv.get('frames') or []):
+                                fr = decode_image_dataurl(str(item))
+                                if fr is None:
+                                    continue
+                                frames.append(fr if fr.dim() == 3 else fr[0])
+                            if not frames:
+                                self._send_json({'success': False, 'error': 'Detect video: no frames decoded'})
+                                return
+                            if work_w <= 0 or work_h <= 0:
+                                # decode_image_dataurl 回的是 [H,W,4]（RGBA）：宽高在倒数第二、三
+                                # 维，最后一维是通道数 —— 不能拿 shape[-1] 当宽。
+                                work_w, work_h = _vid_detect_size(int(frames[0].shape[-2]),
+                                                                  int(frames[0].shape[-3]))
+                        else:
+                            spec = dv.get('video') if isinstance(dv.get('video'), dict) else dv
+                            fname = os.path.basename(str(spec.get('file') or ''))
+                            vpath = _vid_media_path(spec.get('file')) or os.path.join(_vid_media_dir(), fname)
+                            frames = _vid_frames(vpath, ss=spec.get('ss', 0), t=spec.get('t'),
+                                                 n=spec.get('n'), fps=vfps, f0=spec.get('f0'))
+                            if not frames:
+                                self._send_json({'success': False, 'error': f'Detect video: no frames extracted from {fname}'})
+                                return
+                            if work_w <= 0 or work_h <= 0:
+                                work_w, work_h = int(frames[0].shape[2]), int(frames[0].shape[1])
+                        prepared = [_vid_fit_canvas(fr, work_w, work_h) for fr in frames]
+                        masks = []
+                        for fr in prepared:
+                            m = _vid_detect_result(inst.detector, fr, prompt, threshold, invert)
+                            # 一律回成 2D [H,W] 再编码：_vid_encode 的 _rgb 只认裸 mask / [H,W,C]，
+                            # combine_masks 吐的 [1,H,W] 会被它读成"1 行 W 列"而编不出来。
+                            masks.append(_vid_resize_mask(m, out_w, out_h))
+                        url = _vid_encode(masks, vfps, str(dv.get('name') or 'detect'))
+                        if not url:
+                            self._send_json({'success': False, 'error': 'Detect video: encoding the mask failed'})
+                            return
+                        self._send_json({'success': True, 'video': url, 'frames': len(masks),
+                                         'fps': vfps, 'w': out_w or work_w, 'h': out_h or work_h})
+                        return
+
                     comp = decode_image_dataurl(body.get('composite')) if action in ('detailer', 'tag', 'detect') else None
                     if comp is not None:
                         if comp.dim() == 3:

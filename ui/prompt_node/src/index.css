@@ -1483,3 +1483,22 @@ body {
     box-shadow: 0 0 8px rgba(10, 132, 255, 0.4);
     border-color: rgba(10, 132, 255, 0.4);
 }
+
+/* 外部资产卡拖进提示词管理窗：整窗亮一圈，松手即自动打标。 */
+body.asset-drop-target::after {
+    content: "Drop image / video to auto-tag";
+    position: fixed;
+    inset: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1.5px dashed rgba(10, 132, 255, 0.85);
+    border-radius: 10px;
+    background: rgba(10, 132, 255, 0.08);
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    pointer-events: none;
+    z-index: 9999;
+}

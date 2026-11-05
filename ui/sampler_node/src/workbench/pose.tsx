@@ -1,3 +1,4 @@
+import { useDockWindow } from '../dock/docScope';
 import React from 'react';
 import { wbStyles } from './skin';
 import { useBlendUi } from './store';
@@ -448,6 +449,7 @@ const STAGE_TITLE = 'A 3D mannequin (a MakeHuman mesh) in its own window. Left-c
   + 'the capture (FOV 30, distance 45).';
 
 const PoseBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
+  const hostWin = useDockWindow();
   const ui = useBlendUi();
   const p = ui.pose;
   const [ready, setReady] = React.useState(false);
@@ -480,13 +482,13 @@ const PoseBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
 
   // 拖动关节点 / 轨道转动的那几条在 window 上（指针拖出舞台边界也不断），挂载一次。
   React.useEffect(() => {
-    window.addEventListener('pointermove', onWinMove);
-    window.addEventListener('pointerup', onWinUp);
-    window.addEventListener('blur', onWinUp);
+    hostWin.addEventListener('pointermove', onWinMove);
+    hostWin.addEventListener('pointerup', onWinUp);
+    hostWin.addEventListener('blur', onWinUp);
     return () => {
-      window.removeEventListener('pointermove', onWinMove);
-      window.removeEventListener('pointerup', onWinUp);
-      window.removeEventListener('blur', onWinUp);
+      hostWin.removeEventListener('pointermove', onWinMove);
+      hostWin.removeEventListener('pointerup', onWinUp);
+      hostWin.removeEventListener('blur', onWinUp);
     };
   }, []);
 

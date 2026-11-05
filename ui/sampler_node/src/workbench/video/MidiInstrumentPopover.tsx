@@ -9,6 +9,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useDockDocument, useDockWindow } from '../../dock/docScope';
 import { nativeEngine } from '../../midi/engine';
 import { loadInstrumentOnTrack } from '../../midi/instrumentOps';
 import { instrumentAbsPath, reloadInstruments, useInstrumentLibrary, type InstrumentItem } from '../../midi/library';
@@ -79,6 +80,8 @@ export const MidiInstrumentPopover: React.FC<{
   midi: MidiCtl;
   onClose: () => void;
 }> = ({ track, x, y, midi, onClose }) => {
+  const hostDoc = useDockDocument();
+  const hostWin = useDockWindow();
   const lib = useInstrumentLibrary();
   // 引擎那头这一轨的装载结果（装上了没有、卡在哪）。乐器很少变，订阅只在"每轨乐器"变了才响。
   const [, bump] = React.useReducer((n: number) => n + 1, 0);
@@ -110,11 +113,11 @@ export const MidiInstrumentPopover: React.FC<{
       e.stopPropagation();
       onClose();
     };
-    document.addEventListener('pointerdown', onDown, true);
-    window.addEventListener('keydown', onKey, true);
+    hostDoc.addEventListener('pointerdown', onDown, true);
+    hostWin.addEventListener('keydown', onKey, true);
     return () => {
-      document.removeEventListener('pointerdown', onDown, true);
-      window.removeEventListener('keydown', onKey, true);
+      hostDoc.removeEventListener('pointerdown', onDown, true);
+      hostWin.removeEventListener('keydown', onKey, true);
     };
   }, [onClose]);
 
@@ -157,10 +160,10 @@ export const MidiInstrumentPopover: React.FC<{
   };
 
   // 竖屏放不下就往锚点上方翻；高度封在视口里，列表自己滚。
-  const openUp = y + 420 > window.innerHeight - 8;
+  const openUp = y + 420 > hostWin.innerHeight - 8;
   const top = Math.max(8, openUp ? y - 28 - 420 : y);
-  const left = Math.max(8, Math.min(x, window.innerWidth - W - 8));
-  const maxHeight = Math.max(220, window.innerHeight - top - 8);
+  const left = Math.max(8, Math.min(x, hostWin.innerWidth - W - 8));
+  const maxHeight = Math.max(220, hostWin.innerHeight - top - 8);
 
   return createPortal(
     <div
@@ -328,6 +331,6 @@ export const MidiInstrumentPopover: React.FC<{
         {total && lib.lib?.truncated ? ' · list truncated' : ''}
       </div>
     </div>,
-    document.body,
+    hostDoc.body,
   );
 };

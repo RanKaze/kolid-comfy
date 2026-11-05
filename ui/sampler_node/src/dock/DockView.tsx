@@ -3,10 +3,16 @@ import { createPortal } from 'react-dom';
 import {
   type Dock, type DockBlock, type DockFit, type DockFloat, type DockMode, type DockNode, type DockRules, type UnitId, type Zone,
   type ZonePoint, type ZoneRect,
-  DOCK_GROW_MIN_H, DOCK_MIN_SZ, DOCK_SPLIT, FLOAT_MIN_H, FLOAT_MIN_W,
-  defaultDock, dead, clampSz, dockBackDock, dockFloor, docUidOf, dragOutUnits, dragSplit, dropUnits, flexOf, floorPct, freezeAt, nodeAt, popOutDock,
+  DOCK_GROW_MIN_H, DOCK_MIN_SZ, DOCK_SPLIT, FLOAT_MIN_H, FLOAT_MIN_W, FLOAT_W,
+  defaultDock, dead, clampSz, dockBackDock, dockFloor, docUidOf, dragOutUnits, dragSplit, dropUnits, flexOf, floorPct, freezeAt, nodeAt,
+  floatFrame, floatKey, floatUnits, floatVisible, popOutUnitsDock, newFloatKey,
   rewriteHolder, setFloatDock, sizeAt, mergeIntoMember, insertCellAt, pullOutAt, cellsOf, cellTbs, shapeOf, zoneAxis, zoneOf, zonePoly, zoneRect,
+  childFloatKeys, collectDock, dockAllUnits,
 } from './model';
+import { ChildWindowHost, closeChildrenNotIn, openDockChild } from './childWindow';
+import { dockChildWindows } from './hostMode';
+import { registerDockScope, takeUnitsFromOtherScopes } from './dockScopes';
+import { useDockDocument, useDockWindow } from './docScope';
 // 探针的轨迹钩子。这里只发"发生了什么"，不做判断、不读布局 —— 判断留在探针那边，
 // 免得把排查规则散进渲染层（那才是第二份真相）。
 import { note } from '../debug/probe';
@@ -128,12 +134,17 @@ const dockStyles: Record<string, React.CSSProperties> = {
   tbPopIcon: { flexShrink: 0, display: 'flex', color: 'rgba(255,255,255,0.55)' },
 };
 
+// WebView2 的 app-region：子窗口没有原生标题栏，dock 窗自己的标题条就是拖 OS 窗口的地方。
+// 窗口过程里已开 IsNonClientRegionSupportEnabled；这里只负责把可拖/不可拖的区域标出来。
+const dragRegion = { WebkitAppRegion: 'drag' } as unknown as React.CSSProperties;
+const noDragRegion = { WebkitAppRegion: 'no-drag' } as unknown as React.CSSProperties;
+
 // What the pointer is carrying. The dock has exactly TWO drag gestures on a window, and the only thing
 // that tells them apart is how much is in here:
 //   * ONE id — an ITEM's title, a tab, pulled out of the group it was sharing a window with;
 //   * EVERY id of a window — the window's HANDLE (the grip in its bar), which moves the window whole,
 //     tab group and all, because a window is one thing and the user grabbed the thing, not a tab.
-export type DockDrag = { ids: readonly UnitId[] };
+export type DockDrag = { ids: readonly UnitId[]; shape?: { tb: boolean; dir: 'h' | 'v' } };
 
 // The landing preview: which block, which band of it, the block's box in VIEWPORT coordinates, and the
 // sentence that says what the drop will do.
@@ -146,12 +157,40 @@ export type DockDrag = { ids: readonly UnitId[] };
 // 拖拽时按住 Alt 就是对容器里的**某一格**说"和它叠成一个 tab 组"（见 mergeIntoMember）。那不是
 // 块的四分里的一片，而是一个成员本身，所以它另开一条判据、另画一个形状：整格的一个框，不是梯形带。
 // `merge` 记的就是那一格的单元 id。
-export type DockOver = { id: UnitId; zone: Zone; box: { x: number; y: number; w: number; h: number }; label: string; merge?: UnitId };
+// `scope` 是**量出这个盒子的那一页**。盒子按视口坐标算，而每一扇窗口有自己的一套视口 ——
+// 落点预览只能由那一页自己画，否则同一个盒子会被主窗口按它的坐标再画一遍（拖进子窗口时，
+// 主窗口里凭空多出一块提示框，位置还不对）。见 DockPanel 里的绘制条件。
+export type DockOver = { id: UnitId; zone: Zone; box: { x: number; y: number; w: number; h: number }; label: string; merge?: UnitId; scope: string };
 
 // Everything the dock chrome needs, passed down as one object so a box and a branch take the same
 // three props (the node they render, the axis their parent measures them on, this context).
+export type SetDock = (next: Dock | ((prev: Dock) => Dock), persist?: boolean) => void;
+
 export type DockCtx = {
   rules: DockRules;
+  // 这一页 dock 的身份（主页面 'root'，子窗口里是那条浮窗的稳定名字）。跨窗口拖拽靠它分清
+  // "手里这些单元原来归哪一页" —— 见 dockScopes.ts。
+  scope: string;
+  // 这一页画在哪个窗口里。子窗口里弹出的浮窗要按**它自己**的视口摆，不能拿主页面的尺寸算。
+  win: Window;
+  // 子窗口那一页把自己的一次改动写回外层浮窗的 frame。只有页面根（EditPhase）提供。
+  setFrame?: (key: string, next: Dock | ((prev: Dock) => Dock), persist?: boolean) => void;
+  // 一扇浮窗被它自己的窗条 ✕ 关掉：页面先做收尾（导出引擎/隐藏/泊回），再收窗。
+  closeFrame?: (key: string) => void;
+  // 把**当前这一页**重新标成 owned 子窗口（它在父页面里那条浮窗记录上打 child）。
+  // 用于"这一页只有一扇窗，用户又点了窗口化"：不该再套一层，而是让这一页自己回到 OS 窗口。
+  promoteFrame?: (key: string) => void;
+  // 这一页是某扇子窗口的 frame（值是那条浮窗的稳定名字）；主页面没有这一项。
+  frameKey?: string;
+  // 这一页画在 owned 子窗口里：窗自己的标题条是 OS 窗口的抓处，✕ 是"隐藏"而不是"关窗"。
+  osChild?: boolean;
+  // 这一页在 owned 子窗口里、但窗口自己没有一条专门的窗条：每一扇 dock 窗的标题条就是这扇 OS 窗的
+  // 抓处（app-region: drag），而 tab / 六点 / 动作按钮各自 no-drag，保住原来的手势。
+  // 页面内浮窗与主页面都不置这一项（它们各自有拖拽的落点/坐标）。
+  osBar?: boolean;
+  // 跨页拖拽落下的最后一道准备：手里若有还活在**别的**子窗口引擎里的文档，先把它导回本地引擎。
+  // 返回 false = 这一步没成，落点放弃（别把工程弄丢）。
+  prepareMove?: (ids: readonly UnitId[], except: string) => Promise<boolean>;
   bodies: Record<UnitId, React.ReactNode>;
   // Anything a unit wants pinned UNDER its body — the row of actions that must not scroll away with a
   // long list. Keyed by unit, drawn by the frame, so a unit still owns what it puts there.
@@ -181,7 +220,9 @@ export type DockCtx = {
   dock: Dock;
   // persist=false while a pointer drag is still running — the layout lands in localStorage when the
   // pointer comes up, not once per mousemove.
-  setDock: (next: Dock, persist?: boolean) => void;
+  // 也可以是一枚 updater：跨页拖拽会先把单元从另一页上拿走，落点这一页必须基于**那一刻**的样子
+  // 再写，不能拿一份早于那一步的快照把它盖回去。
+  setDock: SetDock;
   drag: DockDrag | null;
   setDrag: (d: DockDrag | null) => void;
   over: DockOver | null;
@@ -196,6 +237,19 @@ export type DockCtx = {
   hint?: (id: UnitId) => string | undefined;
   // A workbench wants a bigger window than a settings card, so the page may ask for the size it pops.
   popSize?: (id: UnitId) => { w: number; h: number } | null;
+  // 这一页此刻隐藏的单元。**可见性**，不是成员：树/浮窗里仍留着它们的位置，只是不画。
+  hidden: ReadonlySet<UnitId>;
+  // 这扇文档窗能不能弹成 owned 子窗口（Kolid Desktop）。目前只有 MIDI 模式可以 —— 它的正文是
+  // 纯 React；image/video 的活画布住在常驻 workbench iframe 里，跨 document 搬会重载。
+  // 返回 true 时 popOut 退回页面内浮窗，`childWindowHint` 是那颗按钮的 title。
+  childWindowBlocked?: (id: UnitId) => boolean;
+  childWindowHint?: (id: UnitId) => string | undefined;
+  // 子窗口泊回：页面先做自己的收尾（文档引擎交接/保存），成功后再把单元收回布局。
+  dockBackChild?: (id: UnitId) => void;
+  // 子窗口的「关闭」：把它切成隐藏（Layout 里再叫回来），而不是泊回布局。
+  hideChild?: (id: UnitId) => void;
+  // 子窗口被用户直接关掉（没走泊回）：页面清理它自己的记录。
+  onChildClosed?: (id: UnitId) => void;
   // The page measures a unit's body box — the live workbench is pinned over the active document's — so
   // the frame hands the mounted element back. Null is that body leaving the DOM, not the unit closing:
   // a unit that is hidden keeps its element (`keepMounted`), and an unmounted one has nothing to measure.
@@ -233,7 +287,8 @@ const grab = (ctx: DockCtx, ids: readonly UnitId[]) => ({
     e.dataTransfer.setData(DOCK_MIME, JSON.stringify(ids));
     e.dataTransfer.setData('text/plain', ids[0]);
     e.dataTransfer.effectAllowed = 'move';
-    ctx.setDrag({ ids });
+    // 形状跟着**拖拽**走，不跟着落点那页走：拖进另一扇子窗口时，那页里根本没有这些单元可问。
+    ctx.setDrag({ ids, shape: shapeOf(ctx.dock, ids) });
   },
   onDragEnd: () => { ctx.setDrag(null); ctx.setOver(null); },
 });
@@ -258,9 +313,39 @@ const grabBar = (ctx: DockCtx, ids: readonly UnitId[]) => ({
 });
 
 // Both pop-out paths — the ⤢ button and dropping a unit on the dock's dead space — land the same window.
-const popOut = (ctx: DockCtx, id: UnitId): void => {
-  const s = ctx.popSize?.(id);
-  ctx.setDock(popOutDock(ctx.dock, id, undefined, undefined, s?.w, s?.h));
+// **窗口化只属于 Kolid Desktop**：普通浏览器 / 普通 iframe 里没有真窗口可开，就什么都不做 ——
+// 不再退回页面内浮窗（那个"嵌入式的子窗口"已经取消）。
+//
+// 弹出去的是**一扇窗**，不是一颗 tab：一条 tab 组被窗口化时整组一起走（`ids` 是这一扇窗里所有
+// 看得见的单元）。落进子窗口的是一整页（`frame`），所以那一扇窗里可以再分割、再拖、再叠 — 和
+// 主窗口同一套 Block 系统。
+const popTitle = (ctx: DockCtx, ids: readonly UnitId[]): string => {
+  const base = ctx.rules.title(ids[0]);
+  return ids.length > 1 ? `${base} +${ids.length - 1}` : base;
+};
+const popOut = (ctx: DockCtx, ids: readonly UnitId[]): void => {
+  const list = ids.filter(id => ctx.rules.known(id));
+  if (!list.length) return;
+  // 宿主不是 Kolid Desktop：没有可开的 OS 窗口，也就没有"窗口化"这件事。
+  if (!dockChildWindows()) return;
+  const s = ctx.popSize?.(list[0]);
+  const w = s?.w ?? FLOAT_W, h = s?.h ?? 320;
+  const blocked = list.some(id => ctx.childWindowBlocked?.(id));
+  // 这一页**只有这几扇看得见的窗**：窗口化它 = 让这一页自己重新成为 OS 窗口，而不是在大窗口里
+  // 再套一扇小窗口。关掉之后从 Layout 叫回来是页面内的一整页，再点窗口化就回到这里。
+  const visible = dockAllUnits(ctx.dock).filter(u => !ctx.hidden.has(u));
+  if (ctx.frameKey && ctx.promoteFrame && visible.length > 0 && visible.every(u => list.includes(u))
+    && !blocked && openDockChild(ctx.frameKey, popTitle(ctx, list), w, h, ctx.win)) {
+    ctx.promoteFrame(ctx.frameKey);
+    return;
+  }
+  // 新窗口的名字先定下来：它不跟锚点走，锚点被拖走也还是这一扇。
+  const key = newFloatKey();
+  if (!blocked && openDockChild(key, popTitle(ctx, list), w, h, ctx.win)) {
+    takeUnitsFromOtherScopes(list, ctx.scope);
+    ctx.setDock(prev => popOutUnitsDock(prev, list, undefined, undefined, w, h, true, key, ctx.win));
+  }
+  // 开不出来（宿主收紧了权限 / 这扇窗暂时不能进子窗口）：保持原样，不制造一扇假的"浮窗"。
 };
 
 // The three shapes a block can have, in the order the picker offers them.
@@ -396,7 +481,7 @@ const ZONE_WORD: Record<Zone, string> = {
 
 // 两个落点是不是同一件事：块、带、框、话。框也算，因为块的盒子会随布局/滚动变。
 const sameOver = (a: DockOver | null, b: DockOver): boolean =>
-  !!a && a.id === b.id && a.zone === b.zone && a.label === b.label && a.merge === b.merge
+  !!a && a.scope === b.scope && a.id === b.id && a.zone === b.zone && a.label === b.label && a.merge === b.merge
   && Math.round(a.box.x) === Math.round(b.box.x) && Math.round(a.box.y) === Math.round(b.box.y)
   && Math.round(a.box.w) === Math.round(b.box.w) && Math.round(a.box.h) === Math.round(b.box.h);
 
@@ -436,6 +521,9 @@ const ToolbarStrip: React.FC<{
     onPointerCancel: React.PointerEventHandler<HTMLDivElement>;
   };
 }> = ({ ids, ctx, dir, float, canDir, onDir, onUnshrink, onPick, bar }) => {
+  // 这一条画在哪个文档/窗口里：子窗口自己的那条 bar，小窗和"点外面"都要跟着它走。
+  const doc = useDockDocument();
+  const win = useDockWindow();
   const [open, setOpen] = useState<UnitId | null>(null);
   const [anchor, setAnchor] = useState<{ x: number; y: number; right: number; bottom: number } | null>(null);
   // 收起小窗的判据：点**条子**（换一颗图标、切回窗口、浮出）不算"点外面" —— 那正是这个控件自己的
@@ -450,9 +538,9 @@ const ToolbarStrip: React.FC<{
       setOpen(null);
     };
     // capture：赶在条子上那些按钮自己的 onClick 之前判，但不拦它们（只决定要不要关小窗）。
-    document.addEventListener('mousedown', onDown, true);
-    return () => document.removeEventListener('mousedown', onDown, true);
-  }, [open]);
+    doc.addEventListener('mousedown', onDown, true);
+    return () => doc.removeEventListener('mousedown', onDown, true);
+  }, [open, doc]);
   // 上报"这一条现在开着哪一格"：页面拿它把活的工作台那一层提到浮层之上（DockCtx.tbPopover）。
   // 回调走 ref，effect 只跟 `open` 走 —— ctx 每渲染一次都是新对象，写进依赖就会每渲染跑一遍。
   const report = useRef(ctx.onToolbarPopover);
@@ -465,6 +553,11 @@ const ToolbarStrip: React.FC<{
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctx.tbPopover]);
   const V = dir === 'v';
+  const vis = ids.map((u, i) => ({ u, i })).filter(({ u }) => !ctx.hidden.has(u));
+  // 正在看的那一格被隐藏了：小窗跟着收起，别留一扇指着不可见单元的浮层。
+  useEffect(() => {
+    if (open && ctx.hidden.has(open)) setOpen(null);
+  }, [ctx.hidden, open]);
   const close = () => setOpen(null);
   const pick = (u: UnitId, i: number, el: HTMLElement) => {
     if (open === u) { setOpen(null); return; }
@@ -493,15 +586,16 @@ const ToolbarStrip: React.FC<{
   // 在 paint 前完成补量,不闪)。
   const pop = (() => {
     if (!open || !anchor) return null;
-    const W = Math.min(popSz?.w ?? TB_POP_W, window.innerWidth - 12);
-    const H = Math.min(popSz?.h ?? TB_POP_H, window.innerHeight - 12);
+    const W = Math.min(popSz?.w ?? TB_POP_W, win.innerWidth - 12);
+    const H = Math.min(popSz?.h ?? TB_POP_H, win.innerHeight - 12);
     if (V) {
-      const x = anchor.right + 6 + W <= window.innerWidth - 6 ? anchor.right + 6 : Math.max(6, anchor.x - 6 - W);
-      return { x, y: Math.min(Math.max(6, anchor.y), window.innerHeight - H - 6), w: W, h: H };
+      const x = anchor.right + 6 + W <= win.innerWidth - 6 ? anchor.right + 6 : Math.max(6, anchor.x - 6 - W);
+      return { x, y: Math.min(Math.max(6, anchor.y), win.innerHeight - H - 6), w: W, h: H };
     }
-    const y = anchor.bottom + 6 + H <= window.innerHeight - 6 ? anchor.bottom + 6 : Math.max(6, anchor.y - 6 - H);
-    return { x: Math.min(Math.max(6, anchor.x), window.innerWidth - W - 6), y, w: W, h: H };
+    const y = anchor.bottom + 6 + H <= win.innerHeight - 6 ? anchor.bottom + 6 : Math.max(6, anchor.y - 6 - H);
+    return { x: Math.min(Math.max(6, anchor.x), win.innerWidth - W - 6), y, w: W, h: H };
   })();
+  if (!vis.length) return null;
   const act = dockStyles.tbAct;
   // 条上的动作按钮是控件，不是把手：让每颗按钮自己当拖拽源并当场取消，整条 bar 的 dragstart 就不会
   // 从按钮底下发起。少了这一手，按着按钮稍微一移，浏览器归给最近的可拖祖先 —— 整条 toolbar 被搬走。
@@ -531,7 +625,7 @@ const ToolbarStrip: React.FC<{
             onClick={e => {
               e.stopPropagation();
               close();
-              if (float) ctx.setDock(dockBackDock(ctx.dock, ids[0])); else popOut(ctx, ids[0]);
+              if (float) ctx.setDock(prev => dockBackDock(prev, ids[0])); else popOut(ctx, vis.map(v => v.u));
             }}>
             {float ? <DockBackIcon /> : <PopIcon />}
           </button>
@@ -546,7 +640,7 @@ const ToolbarStrip: React.FC<{
         </div>
         <span style={V ? dockStyles.tbDividerV : dockStyles.tbDividerH} />
         <div style={V ? dockStyles.tbUnitsV : dockStyles.tbUnitsH}>
-          {ids.map((u, i) => (
+          {vis.map(({ u, i }) => (
             // 和名字条上的 tab 同一个身份：拖它只带走这一个单元，拖条子空白处 / 六点才带走整扇窗。
             <button key={u} data-dock-tb-icon={u} style={{ ...dockStyles.tbUnit, ...(open === u ? dockStyles.tbUnitOn : null) }}
               title={nameTip(ctx, u) + ' — click for its panel beside this strip; drag to pull just this one out'}
@@ -588,7 +682,7 @@ const ToolbarStrip: React.FC<{
             {ctx.foots?.[open] && <div style={dockStyles.dockFoot}>{ctx.foots[open]}</div>}
           </div>
         </>,
-        document.body,
+        doc.body,
       )}
     </>
   );
@@ -630,29 +724,34 @@ const nameTip = (ctx: DockCtx, id: UnitId): string => ctx.rules.title(id) || 'Em
 
 const DockWindow: React.FC<{
   node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; stacked?: boolean; float?: DockFloat; solo?: boolean;
-}> = ({ node, ctx, axis, stacked, float, solo }) => {
+  /** 这扇窗在 Kolid Desktop 的 owned 子窗口里：整张卡片铺满弹窗，标题栏负责拖 OS 窗口。 */
+  child?: boolean;
+}> = ({ node, ctx, axis, stacked, float, solo, child }) => {
   const ids = node.ids;
+  // 隐藏的单元仍然在 ids 里（位置归它），但这一扇窗只画看得见的那些。
+  const visible = ids.filter(u => !ctx.hidden.has(u));
   // 工作台播报前，树里存档的 doc:* 尚未验证（rules.known 为 false）：sel 指着它时就先显示这一格
   // 第一个已验证的单元 —— 既不闪一扇标题为 "doc:1" 的空窗，也不让整格无端消失；播报一到，sel 指的
   // 文档验证通过，显示自然回到它身上。
   const picked = ids[Math.min(node.sel, Math.max(0, ids.length - 1))];
-  const id = ctx.rules.known(picked) ? picked : (ids.find(u => ctx.rules.known(u)) ?? picked);
+  const pickedVisible = picked && !ctx.hidden.has(picked) ? picked : (visible[0] ?? picked);
+  const id = ctx.rules.known(pickedVisible) ? pickedVisible : (visible.find(u => ctx.rules.known(u)) ?? pickedVisible);
   // 名字条上要列出哪些单元（口径见 DockRules.listed）。树里照样留着保留位（窗不蒸发），
   // 但那一条上什么都不列 —— 一份工程都没有的时候，上面就该是空的。
   const named = ctx.rules.listed ?? ctx.rules.known;
-  const shown = ids.map((u, i) => ({ u, i })).filter(({ u }) => named(u));
+  const shown = ids.map((u, i) => ({ u, i })).filter(({ u }) => !ctx.hidden.has(u) && named(u));
   const nameOf = (u: UnitId) => nameTip(ctx, u);
   // A fold only has somewhere to go inside a container: a window that fills its block (a `default`
   // block, a float) hides its body and there would be nothing left to show for it, so it is always open
   // and has no fold button at all.
-  const folds = stacked ? ids.filter(u => ctx.rules.known(u) && ctx.rules.foldable(u)) : [];
+  const folds = stacked ? visible.filter(u => ctx.rules.known(u) && ctx.rules.foldable(u)) : [];
   const open = stacked && folds.length ? folds.some(u => ctx.isOpen(u)) : true;
   const fold = (v: boolean) => { for (const u of folds) ctx.fold(u, v); };
   // A unit with nothing to size itself by takes a share of the block instead of collapsing to a strip.
   // So does the LAST member of a container: once every grows unit has left, the members that remain
   // size to their content and a block taller than that content would sit half empty — the space the
   // departed windows used to fill, reading as "they never left". One window left alone owns the block.
-  const grow = !!solo || ids.some(u => ctx.rules.grows(u));
+  const grow = !!solo || visible.some(u => ctx.rules.grows(u));
   // 收起来的那一格：只剩一条标题条。`open` 对不是容器成员的窗口恒为 true，所以这一句只在容器里生效。
   const folded = !open;
   // toolbar 模式：这一格现在是不是一条图标条，以及条子朝哪边。
@@ -661,6 +760,9 @@ const DockWindow: React.FC<{
   //   * `default` 块 / 浮窗 → 方向存在节点上（`tbDir`），用户用条上那颗很小的小键改。
   const tb = !!node.tb;
   const tbDir: 'h' | 'v' = node.tbDir ?? 'h';
+  // 标题条是不是拿去当 OS 窗口的抓处：这一扇窗本身**就是**那扇 OS 窗（`child`，窗口化后只有它），
+  // 或者这一页整个画在 owned 子窗口里（`ctx.osBar`）。页面内浮窗有自己的坐标，不走 app-region。
+  const osBar = !float && (!!child || !!ctx.osBar);
   // Dragging a window by its title bar moves it; the grip beside it still means "move this unit".
   // The bar's own click folds, so a move has to suppress the click that follows it.
   const winDrag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
@@ -668,9 +770,9 @@ const DockWindow: React.FC<{
   // 整格一个验证过的单元都没有（播报前只剩存档 doc:* 的一扇窗）：什么都不画。位置在模型里留着
   // （死块不占屏幕，见 dead），等工作台播报（EditPhase 的 announced 闸门）这扇窗原地出现。守卫放在
   // 所有 hook 之后，免得条件渲染撞上 hook 顺序。
-  if (!ctx.rules.known(id)) return null;
+  if (!visible.length || !ctx.rules.known(id)) return null;
   const barDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!float || e.button !== 0 || (e.target as HTMLElement).closest('button,[draggable]')) return;
+    if (!float || child || e.button !== 0 || (e.target as HTMLElement).closest('button,[draggable]')) return;
     e.stopPropagation();
     winDrag.current = { dx: e.clientX - float.x, dy: e.clientY - float.y, moved: false };
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* fall back to bubbling events */ }
@@ -680,8 +782,8 @@ const DockWindow: React.FC<{
     if (!b) return;
     b.moved = true;
     ctx.setDock(setFloatDock(ctx.dock, id, {
-      x: Math.round(Math.min(Math.max(8, e.clientX - b.dx), window.innerWidth - 60)),
-      y: Math.round(Math.min(Math.max(8, e.clientY - b.dy), window.innerHeight - 40)),
+      x: Math.round(Math.min(Math.max(8, e.clientX - b.dx), ctx.win.innerWidth - 60)),
+      y: Math.round(Math.min(Math.max(8, e.clientY - b.dy), ctx.win.innerHeight - 40)),
     }), false);
   };
   const barUp = () => {
@@ -709,17 +811,22 @@ const DockWindow: React.FC<{
   const showBody = (u: UnitId, mounted: boolean, visible: boolean, key?: string) =>
     (!mounted || !ctx.bodies[u]) ? null : (
       <div key={key} ref={el => ctx.bodyRef?.(u, el)} className="dark-scroll"
-        style={{ ...bodyStyle(u, ctx.rules), display: visible ? undefined : 'none' }}>
+        // 隐藏才写 `display:none`。可见时**不要**把 display 覆盖成 undefined —— 那会把
+        // `dockBodyFull` 的 `display:flex` 一起抹掉，正文层退化成 block，里面靠
+        // `flex:1` + `height:100%` 撑满的 iframe（Prompt 窗）就解析不出高度、退回 150px。
+        style={{ ...bodyStyle(u, ctx.rules), ...(visible ? null : { display: 'none' }) }}>
         {ctx.bodies[u]}
       </div>
     );
   const head = (
     <div className="dock-bar" data-dock-bar
-      style={{ ...dockStyles.dockBar, borderBottom: open ? dockStyles.dockBar.borderBottom : undefined }}
+      style={{ ...dockStyles.dockBar, borderBottom: open ? dockStyles.dockBar.borderBottom : undefined,
+        ...(osBar ? dragRegion : null) }}
       // 浮窗的栏走指针拖拽（它不在任何 split 里，没有"落点"可言）；其余每一扇窗的栏都是 HTML5
       // 拖拽源 —— 抓这条栏就是搬这扇窗，和抓左边的六点是同一件事，只是抓处大得多。
-      {...(float ? {} : grabBar(ctx, ids))}
-      onPointerDown={barDown} onPointerMove={barMove} onPointerUp={barUp} onPointerCancel={barUp}
+      // owned 子窗口里的栏不拖载荷：它是 OS 窗口的标题栏（app-region: drag），拖它就搬那扇 OS 窗。
+      {...(float || osBar ? {} : grabBar(ctx, ids))}
+      {...(float && !osBar ? { onPointerDown: barDown, onPointerMove: barMove, onPointerUp: barUp, onPointerCancel: barUp } : null)}
       onClick={e => {
         if (suppressFold.current) { suppressFold.current = false; return; }
         // `[draggable]` 只看**里面**那颗（tab、六点把手），不是这条栏自己 —— 栏本身就是抓处，
@@ -736,21 +843,23 @@ const DockWindow: React.FC<{
           travels with it, because a window is one thing and this is the thing the user grabbed. The
           tabs opposite are the items' own titles, and a drag on one of those takes that item ALONE out
           of the group — which is the whole difference between the two gestures (see DockDrag). */}
-      <span className="dock-h" data-dock-grip {...grab(ctx, ids)}
-        title={'Drag to move this whole window.\nAn edge splits a new block off, the centre puts it in that block.\nDropped on the seam between two members of its own block = take that slot instead.'}
+      <span className="dock-h" data-dock-grip {...(child ? {} : grab(ctx, ids))}
+        title={child
+          ? 'Drag this bar to move the window'
+          : 'Drag to move this whole window.\nAn edge splits a new block off, the centre puts it in that block.\nDropped on the seam between two members of its own block = take that slot instead.'}
         onClick={e => e.stopPropagation()}
-        style={dockStyles.dockGrip}><GripDots /></span>
+        style={{ ...dockStyles.dockGrip, ...(osBar ? noDragRegion : null), ...(child ? { cursor: 'move' } : null) }}><GripDots /></span>
       {/* 名字条：cud 一份起就走 tab 条（口径与多份一致），普通面板孤单位只是光杆名字。
           一个都不用挂的时候（典型：最后一份工程关掉后留的**保留位**）整条都不画 ——
           窗和位置留着，上面干干净净。 */}
-      {shown.length ? (shown.length > 1 || ids.length > 1 || docUidOf(shown[0].u) !== null ? (
+      {shown.length ? (shown.length > 1 || visible.length > 1 || docUidOf(shown[0].u) !== null ? (
         <div style={dockStyles.dockTabs}>
           {/* 播报前存档的 doc:* 还没验证：不出现在 tab 条上（它此刻的标题只是内部 id）。下标仍按
               `ids` 算，pick 用的还是原下标。 */}
           {shown.map(({ u, i }) => (
-            <span key={u} data-dock-unit={u} style={dockTabStyle(u === id)}
+            <span key={u} data-dock-unit={u} style={{ ...dockTabStyle(u === id), ...(osBar ? noDragRegion : null) }}
               title={'Show ' + nameOf(u) + ' in this block — drag the title to pull just this one out into a window of its own'}
-              {...grab(ctx, [u])} onClick={() => pick(i)}>
+              {...(child ? {} : grab(ctx, [u]))} onClick={() => pick(i)}>
               {/* Each tab carries its own mark: in a strip of documents, the dot is the only thing that
                   can say which one the workbench is actually running on. */}
               <span style={{ ...dockTabName, color: ctx.rules.titleColor?.(u) }}>{ctx.badge?.(u)}{ctx.rules.title(u)}</span>
@@ -772,22 +881,65 @@ const DockWindow: React.FC<{
       )) : null}
       {/* A unit's own actions are part of its body, not of its frame: a collapsed unit must not keep
           an action that works on what the user just hid (Log, Debug, Add +). */}
-      {open && ctx.heads[id] && <span style={dockStyles.dockHeadSlot}>{ctx.heads[id]}</span>}
+      {open && ctx.heads[id] && <span style={{ ...dockStyles.dockHeadSlot, ...(osBar ? noDragRegion : null) }}>{ctx.heads[id]}</span>}
       {/* 收成一条 toolbar：位置就在浮出键的左边（用户点的是"换个形状"，不是"换个地方"）。
-          条子上的回程票是同一颗按钮的反向（见 ToolbarStrip）。 */}
-      <button className="dock-h" data-dock-tb-toggle="" style={dockStyles.dockAct}
-        title="Shrink this window to a toolbar — one icon per unit; click an icon and its panel opens beside the strip"
-        onClick={e => { e.stopPropagation(); ctx.setToolbar(id, true, tbDir); }}>
-        <ToToolbarGlyph />
-      </button>
-      <button className="dock-h" style={dockStyles.dockAct}
-        title={float ? 'Dock this window back into the layout' : 'Pop this unit out as a floating window'}
-        onClick={() => { if (float) ctx.setDock(dockBackDock(ctx.dock, id)); else popOut(ctx, id); }}>
+          条子上的回程票是同一颗按钮的反向（见 ToolbarStrip）。子窗口里没有这一手：一条 34px 的
+          条子装不满一扇 OS 窗口，形状与窗口尺寸对不上。 */}
+      {!child && (ctx.rules.canToolbar?.(id) ?? true) && (
+        <button className="dock-h" data-dock-tb-toggle="" style={{ ...dockStyles.dockAct, ...(osBar ? noDragRegion : null) }}
+          title="Shrink this window to a toolbar — one icon per unit; click an icon and its panel opens beside the strip"
+          onClick={e => { e.stopPropagation(); ctx.setToolbar(id, true, tbDir); }}>
+          <ToToolbarGlyph />
+        </button>
+      )}
+      {/* 窗口化只属于 Kolid Desktop：浏览器里没有这颗按钮（也拖不出窗口）。 */}
+      {(float || dockChildWindows()) && (
+      <button className="dock-h" style={{ ...dockStyles.dockAct, ...(osBar ? noDragRegion : null) }}
+        title={float ? 'Dock this window back into the layout'
+          : (dockChildWindows() && ctx.childWindowHint?.(id))
+            || 'Pop this window out into a window of its own'}
+        onClick={() => {
+          // 窗口化搬的是**这扇窗**（这条 tab 组里的每一格），不是当前这一颗 tab。
+          if (float && visible.length > 1) {
+            visible.forEach(u => {
+              if (ctx.dockBackChild) ctx.dockBackChild(u);
+              else ctx.setDock(prev => dockBackDock(prev, u));
+            });
+            return;
+          }
+          if (float && ctx.dockBackChild) ctx.dockBackChild(id);
+          else if (float) ctx.setDock(prev => dockBackDock(prev, id));
+          else popOut(ctx, visible);
+        }}>
         {float ? <DockBackIcon /> : <PopIcon />}
       </button>
+      )}
+      {/* 子窗口是无边框的（没有系统 ✕）：这颗就是关窗。
+          - 普通窗：关闭 = **隐藏**（从 Layout 窗的窗口清单里再叫回来），不是泊回；
+          - Layout：它是唯一永远显示的窗，关掉只能泊回布局。
+          两者与左边那颗「泊回」键分工不同：那颗永远是把窗放回布局。 */}
+      {child && (
+        <button className="dock-h" style={{ ...dockStyles.dockAct, ...noDragRegion }}
+          title={ctx.rules.canHide?.(id) === false
+            ? 'Layout is always shown — close docks it back into the layout'
+            : 'Close this window — it is hidden; bring it back from the Layout window'}
+          onClick={e => {
+            e.stopPropagation();
+            // 一扇窗的 ✕ 关的是**这扇窗**：它背后是一条 tab 组时，组里每一格一起走
+            // （Layout 那扇例外 —— 它永远显示，只能泊回布局）。
+            for (const u of visible) {
+              if (ctx.rules.canHide?.(u) !== false && ctx.hideChild) { ctx.hideChild(u); continue; }
+              if (ctx.dockBackChild) ctx.dockBackChild(u);
+              else ctx.setDock(prev => dockBackDock(prev, u));
+            }
+          }}>
+          <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+            strokeWidth="1.7" strokeLinecap="round"><path d="M3 3l6 6M9 3l-6 6" /></svg>
+        </button>
+      )}
       {/* Only a member of a container has a fold to show. */}
       {folds.length > 0 && (
-        <button className="dock-h" style={{ ...dockStyles.dockAct, transform: open ? 'none' : 'rotate(-90deg)' }}
+        <button className="dock-h" style={{ ...dockStyles.dockAct, ...(osBar ? noDragRegion : null), transform: open ? 'none' : 'rotate(-90deg)' }}
           title={open ? 'Collapse this unit' : 'Expand this unit'} onClick={() => fold(!open)}>
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6"
             strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
@@ -811,17 +963,28 @@ const DockWindow: React.FC<{
       {showBody(id, open || ctx.rules.keepMounted(id), open)}
       {/* A keep-mounted unit that shares its block behind a tab strip stays mounted while another tab
           is showing, for the same reason a hidden one does not unmount. */}
-      {ids.map(u => (u === id || !ctx.rules.keepMounted(u)) ? null : showBody(u, true, false, u))}
+      {visible.map(u => (u === id || !ctx.rules.keepMounted(u)) ? null : showBody(u, true, false, u))}
       {/* The unit's action row, if it has one: under the body and outside its scroller, so it stays
           put no matter how long the list gets. */}
       {open && ctx.foots?.[id] && <div style={dockStyles.dockFoot}>{ctx.foots[id]}</div>}
       {/* A float is in no split, so it has no block boundary to drag: it keeps its own corner. */}
-      {float && createPortal(
+      {float && !child && createPortal(
         <FloatCorner id={id} ctx={ctx} spot={{ x: float.x, y: float.y, w: float.w, h: float.h }} />,
-        document.body,
+        ctx.win.document.body,
       )}
     </>
   );
+  // 子窗口：卡片铺满弹窗文档的根。没有 fixed 坐标、没有角落把手 —— OS 窗口自己管几何。
+  if (float && child) {
+    return (
+      <div data-dock-float={float.id} data-dock-win={id} style={{
+        ...dockStyles.dockFloatBox, position: 'absolute', inset: 0, width: '100%', height: '100%',
+        borderRadius: 0, border: 0, boxShadow: 'none',
+      }}>
+        {inner}
+      </div>
+    );
+  }
   // A floated window is a card pinned to the viewport: the one place a window still decides its own size.
   // 收成 toolbar 之后那条边由条子说了算：横条压到 TB_SZ 高、竖条压到 TB_SZ 宽，另一头还归用户。
   if (float) {
@@ -857,7 +1020,7 @@ const DockWindow: React.FC<{
       : tbDir === 'v' ? { width: TB_SZ, minWidth: TB_SZ, maxWidth: TB_SZ }
         : { height: TB_SZ, minHeight: TB_SZ, maxHeight: TB_SZ };
     return (
-      <div data-dock-member={node.ids[0]} data-dock-win={id} style={{
+      <div data-dock-member={id} data-dock-win={id} style={{
         ...dockStyles.dockBox,
         // 收起（折叠）的格**不再吃份额**，否则它收起来也还是那么高 —— 那正是 "Guidances / Layers
         // 收不起来"：这两格是这一列里唯一两个 `grows` 的单元，份额（`1 1 0` + 地板）压在它们身上，
@@ -1018,7 +1181,7 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
         // 换了落点就要换话：这条蓝线说的是"插在第几位"，现在说的是"并进这一格" —— 留着它，
         // 用户会以为松手同时做两件事。预览永远只有一句。
         clearGap();
-        const next: DockOver = { id: target, zone: 'center', merge: hit.id, label: MERGE_WORD, box: hit.box };
+        const next: DockOver = { id: target, zone: 'center', merge: hit.id, label: MERGE_WORD, box: hit.box, scope: ctx.scope };
         if (!sameOver(ctx.over, next)) ctx.setOver(next);
         return;
       }
@@ -1072,6 +1235,7 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     const next: DockOver = {
       id: target, zone, label: wordOf(zone, ids),
       box: { x: box.left, y: box.top, w: box.width, h: box.height },
+      scope: ctx.scope,
     };
     if (!sameOver(ctx.over, next)) ctx.setOver(next);
   };
@@ -1092,6 +1256,20 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
     const ids = carried(ctx, e);
     if (!ids) return;
+    const shape = ctx.drag?.shape ?? shapeOf(ctx.dock, ids);
+    // 真正落地：先把这些单元从**别的页**（别的子窗口）上拿走，再按落点那一页此刻的样子摆。
+    // 手里若还有活在别处子引擎里的文档，先把它导回本地引擎 —— 子窗口一卸，那台引擎就没了。
+    // 两种都走 updater：前面那一步改了同一棵 dock，这一页不能拿早于它的快照盖回去。
+    const commit = (run: (dock: Dock) => Dock) => {
+      e.preventDefault(); e.stopPropagation();
+      const go = () => {
+        takeUnitsFromOtherScopes(ids, ctx.scope);
+        ctx.setDock(prev => run(prev));
+      };
+      if (ctx.prepareMove) {
+        void ctx.prepareMove(ids, ctx.scope).then(ok => { if (ok) go(); }).catch(() => { /* 落点放弃 */ });
+      } else go();
+    };
     const mine = node.ids.filter(i => ids.includes(i));
     const whole = mine.length === node.ids.length;
     // 缝的落点对谁都在：本块成员（`gap.from >= 0`）或别处的窗口 —— 后者没有 Alt 也认缝。
@@ -1099,34 +1277,31 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
       const hit = memberUnder(node, boxRef.current, e);
       e.stopPropagation();
       if (hit && !ids.includes(hit.id) && (e.altKey || mine.length) && ids.every(i => ctx.rules.known(i))) {
-        e.preventDefault();
         // 一格只有一种形状，而 tab 条是**格**的东西：一条 toolbar 与一扇窗口合成不了同一条 tab 条 ——
         // 合成哪一边，另一边就"解体"了。用户报的正是这个：把 toolbar 拖进一个垂直块，它变回普通窗。
         //
         // 所以形状不同就不合并，改成**在旁边插一格**：拖来的是什么形状，落下来还是什么形状，两边都保住。
         // （形状相同照旧合并：两扇窗口并成 tab，两条 toolbar 并成一排图标 —— 那是同一格能表达的东西。）
-        const arrive = shapeOf(ctx.dock, ids).tb ? 1 : 0;
+        const arrive = shape.tb ? 1 : 0;
         const there = cells.findIndex(c => c.includes(hit.id));
         const bit = there < 0 ? 0 : cellTbs(node)[there];
         if (arrive !== bit) {
           note('merge', { ids: ids.join(','), into: hit.id, block: target, cells: cells.length, shape: 'split' });
-          ctx.setDock(insertCellAt(ctx.dock, ids, target, there + 1));
+          commit(prev => insertCellAt(prev, ids, target, there + 1, shape));
         } else {
           note('merge', { ids: ids.join(','), into: hit.id, block: target, cells: cells.length });
-          ctx.setDock(mergeIntoMember(ctx.dock, ids, hit.id));
+          commit(prev => mergeIntoMember(prev, ids, hit.id));
         }
       } else if (mine.length && gap && (gap.partial || gap.to !== gap.from) && ids.every(i => ctx.rules.known(i))) {
         // 松手在缝上 = 排到那一位去（和拖动把手那条蓝线同一个落点、同一个动作）。
         // 格子才论"并 tab 组"，缝只论"排第几" —— 一次拖拽里两种目标各占一块地，互不抢。
         // 手里是组里的某几个 tab 时用 `pullOutAt`：源格收缩，它们自立门户插到那一位。
-        e.preventDefault();
         note('reorder', { block: target, unit: ids[0], from: gap.from, to: gap.to, via: 'gap', partial: gap.partial ? 1 : 0 });
-        ctx.setDock(pullOutAt(ctx.dock, ids, gap.to));
+        commit(prev => pullOutAt(prev, ids, gap.to));
       } else if (!mine.length && gap && ids.every(i => ctx.rules.known(i))) {
         // 别处的窗口松手在缝上：作为新的一格插到那一位。容器不拆，只是多出一格。
-        e.preventDefault();
         note('reorder', { block: target, unit: ids[0], to: gap.to, via: 'gap-new' });
-        ctx.setDock(insertCellAt(ctx.dock, ids, target, gap.to));
+        commit(prev => insertCellAt(prev, ids, target, gap.to, shape));
       }
       setGap(null);
       ctx.setOver(null);
@@ -1141,19 +1316,20 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
       return;
     }
     if (!ids.every(i => ctx.rules.known(i))) { e.stopPropagation(); return; }
-    e.preventDefault(); e.stopPropagation();
     const fit = zone === 'center' ? undefined : fitOf(ids, zone, e.currentTarget);
     if (mine.length) {
       // Pulled out of their own block: what stays anchors them, and they land beside it. One id here is
       // a tab leaving its group; several would be a whole window, which cannot leave itself — handled
       // above as "nothing to anchor to".
       const anchor = node.ids.find(i => !ids.includes(i));
-      if (anchor) ctx.setDock(dragOutUnits(ctx.dock, ids, anchor, zone, fit));
-    } else {
-      // Landed on another block: the set arrives together and stays together, so a window that was
-      // moved by its handle is still a window with its tab strip when it gets there.
-      ctx.setDock(dropUnits(ctx.dock, ids, target, zone, fit));
+      if (anchor) commit(prev => dragOutUnits(prev, ids, anchor, zone, fit));
+      else { e.preventDefault(); e.stopPropagation(); }
+      ctx.setOver(null);
+      return;
     }
+    // Landed on another block: the set arrives together and stays together, so a window that was
+    // moved by its handle is still a window with its tab strip when it gets there.
+    commit(prev => dropUnits(prev, ids, target, zone, fit, shape));
     ctx.setOver(null);
     // A drop is the other half of the evidence a drag gives: what arrived, where it landed, and the
     // size the page asked for against the room the block beside it was showing. When a drop "creates a
@@ -1299,7 +1475,7 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     return (
       <div data-dock-block={target} style={{ ...dockStyles.dockBox, ...chrome, ...bar, ...edit }}
         onDragEnterCapture={onDragIn} onDragOverCapture={onDragOver} onDropCapture={onDrop}>
-        <DockWindow node={node} ctx={ctx} axis={axis} />
+        <DockWindow node={node} ctx={ctx} axis={axis} child={ctx.osChild} />
         {picker}
       </div>
     );
@@ -1311,12 +1487,15 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
   // `bar` 在这一支同样要戴：每一格都收成条子之后，容器自己就是一条 bar 的框 —— 它不能再按抽屉里
   // 那份 `sz` 占着整列（用户截图里那两条"过大的宽度"，一条来自块、一条来自外面那个自由 split）。
   const flags = cellTbs(node);
+  // 一整格都被隐藏时这一格不画；容器其余格照旧。格子仍留在模型里，显示时回原位。
+  const rendered = cells.map((cell, i) => ({ cell, i }))
+    .filter(({ cell }) => cell.some(u => !ctx.hidden.has(u)));
   return (
     <div className="dark-scroll" data-dock-block={target} ref={boxRef}
       style={{ ...stackStyle(dir), ...chrome, ...bar, ...edit }}
       onDragEnterCapture={onDragIn} onDragOverCapture={onDragOver} onDragLeaveCapture={onDragLeaveCapture} onDropCapture={onDrop}>
-      {cells.map((cell, i) => (
-        <DockWindow key={cell[0]} ctx={ctx} axis={dir} stacked solo={cells.length === 1}
+      {rendered.map(({ cell, i }) => (
+        <DockWindow key={cell[0]} ctx={ctx} axis={dir} stacked solo={rendered.length === 1} child={ctx.osChild}
           node={{
             t: 'b', ids: cell, sel: shownSel(node, cell), mode: 'default',
             tb: flags[i] === 1, tbDir: dir,
@@ -1425,7 +1604,7 @@ const SplitHandle: React.FC<{
     if (!box || !startNode || startNode.t !== 's') return out;
     const start = startNode;
     const liveKids = (n: DockNode) =>
-      n.t === 's' ? n.ks.map((k, i) => ({ k, i })).filter(({ k }) => !dead(k, ctx.rules.known)) : [];
+      n.t === 's' ? n.ks.map((k, i) => ({ k, i })).filter(({ k }) => !dead(k, ctx.rules.known, ctx.hidden)) : [];
     const sized = (n: DockNode, i: number) => {
       const sz = n.t === 's' ? n.ks[i].sz : undefined;
       return typeof sz === 'number' && sz > 0;
@@ -1662,14 +1841,14 @@ const DockBranch: React.FC<{
     if (node.t === 'b') return <BlockBox node={node} ctx={ctx} axis={axis} count={count} fill={fill} />;
     // A hole in the model is not a hole on the screen — unless this branch IS the page.
     // `known` 一起传下去：播报前只剩未验证文档的那条分支也算空洞，不占屏幕。
-    if (!root && dead(node, ctx.rules.known)) return null;
+    if (!root && dead(node, ctx.rules.known, ctx.hidden)) return null;
     const d = node.d;
     const pinned = typeof node.sz === 'number' && node.sz > 0;
     // Only the children with something to show are drawn, and a handle is the boundary between two
     // DRAWN boxes: a folded-away nest between two live blocks leaves no pair of handles around an
     // invisible box — the two live blocks simply become neighbours, and the boundary the user grabs
     // is the one they can see. Paths still address the model, so a drag lands on the right nodes.
-    const live = node.ks.map((k, i) => ({ k, i })).filter(({ k }) => !dead(k, ctx.rules.known));
+    const live = node.ks.map((k, i) => ({ k, i })).filter(({ k }) => !dead(k, ctx.rules.known, ctx.hidden));
     // ── 全是条子的 split 不该再吃"剩下的地方" ───────────────────────────────────────────────
     // 一个自由 split 的份额是 `1 1 0`：父行剩下的宽度全归它。里面装窗口时这正是想要的（画布吃掉
     // 中间那片），可装条子时就荒唐了 —— 两根 34px 的竖条住在一个 681px 的容器里，屏幕上看到的是
@@ -1725,11 +1904,65 @@ const DockBranch: React.FC<{
     );
   };
 
+// 这一页 dock 在跨窗口拖拽注册表里的身份。子窗口里的那一页也是一页 —— 主页面和每一扇子窗口
+// 都登记，落下时才知道"这些单元原来归哪一页"（见 dockScopes.ts）。
+const useDockScope = (ctx: DockCtx): void => {
+  const live = useRef(ctx);
+  live.current = ctx;
+  useEffect(() => registerDockScope({
+    id: ctx.scope,
+    get: () => live.current.dock,
+    set: next => live.current.setDock(next),
+  }), [ctx.scope]);
+};
+
+const frameTitle = (ctx: DockCtx, f: DockFloat): string => {
+  const n = floatUnits(f).length;
+  const base = ctx.rules.title(f.id);
+  return n > 1 ? `${base} +${n - 1}` : base;
+};
+
+// 一扇子窗口里的那一页。它和主页面用的是**同一个 DockPanel**，只是 `dock` 换成了这条浮窗的
+// frame、`setDock` 写回 frame。于是块、分割、容器、tab 组、toolbar、页面内浮窗、嵌套子窗口
+// 全都自动成立 —— 这里不复制任何一套布局逻辑。
+const FrameBody: React.FC<{ float: DockFloat; ctx: DockCtx }> = ({ float, ctx }) => {
+  const key = floatKey(float);
+  const frame = floatFrame(float);
+  const doc = useDockDocument();
+  const win = doc.defaultView ?? ctx.win;
+  const fctx: DockCtx = {
+    ...ctx,
+    scope: key,
+    win,
+    frameKey: key,
+    // 里面的每一扇窗仍是**普通 dock 窗**：它们是这一页里的块成员。标题条就是 OS 窗口的抓处
+    // （见 ctx.osBar），tab / 六点仍是 HTML5 拖拽源。这里没有"窗条"那一条 —— 也没地方放它。
+    osChild: false,
+    osBar: true,
+    dock: { tree: frame.tree, floats: frame.floats, hidden: ctx.dock.hidden },
+    setDock: (next, persist) => ctx.setFrame?.(key, prev => {
+      const base: Dock = { tree: prev.tree, floats: prev.floats, hidden: ctx.dock.hidden };
+      const out = typeof next === 'function' ? next(base) : next;
+      return { tree: out.tree, floats: out.floats, hidden: out.hidden };
+    }, persist),
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: 0, minWidth: 0 }}>
+      <DockPanel ctx={fctx} />
+    </div>
+  );
+};
+
 // The whole dock: the tree, plus every popped-out window (which are positioned against the viewport,
 // so they can sit over the workbench). Dropping a unit on the dock's background — the gap between
 // blocks, the work area with no document in it — pops it out, which is a second way to reach a window
 // beside the ⤢ button and needs no aiming. Alt+P adds the mode pickers and the reset, and nothing else.
-export const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
+// `top` 只有主页面那一份：子窗口的存活判据（closeChildrenNotIn）要看**整棵**树里所有子窗口，
+// 由它一个人收；子窗口里那一页只管画自己。
+export const DockPanel: React.FC<{ ctx: DockCtx; top?: boolean }> = ({ ctx, top }) => {
+  useDockScope(ctx);
+  const doc = useDockDocument();
+  const win = useDockWindow();
   // 拖拽期间让页面上每一个 iframe 都"让开"。
   //
   // 这是"拖到画布旁边什么也没发生"的根因：HTML5 拖拽的 dragover/drop 是**按文档**派发的，指针一旦
@@ -1746,7 +1979,7 @@ export const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
   const dragging = !!ctx.drag;
   useEffect(() => {
     if (!dragging) return;
-    const frames = [...document.querySelectorAll<HTMLIFrameElement>('iframe')];
+    const frames = [...doc.querySelectorAll<HTMLIFrameElement>('iframe')];
     if (!frames.length) return;
     const prev = frames.map(f => f.style.pointerEvents);
     const restore = () => { frames.forEach((f, i) => { f.style.pointerEvents = prev[i]; }); };
@@ -1754,34 +1987,45 @@ export const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
     // 兜底，而且是必须的那一种：`onDragEnd` 只在拖拽源还活着时派发。Esc 取消、拖拽源被重渲染换掉、
     // 窗口失焦，这几种都收不到它 —— 一旦漏掉，iframe 就永久 `pointer-events:none`，画布再也点不动，
     // 只能刷新。所以除 React 状态外，事件本身也直接负责把指针还回去（restore 幂等，多执行无妨）。
-    document.addEventListener('dragend', restore, true);
-    document.addEventListener('drop', restore, true);
-    window.addEventListener('blur', restore);
+    doc.addEventListener('dragend', restore, true);
+    doc.addEventListener('drop', restore, true);
+    win.addEventListener('blur', restore);
     return () => {
-      document.removeEventListener('dragend', restore, true);
-      document.removeEventListener('drop', restore, true);
-      window.removeEventListener('blur', restore);
+      doc.removeEventListener('dragend', restore, true);
+      doc.removeEventListener('drop', restore, true);
+      win.removeEventListener('blur', restore);
       restore();
     };
-  }, [dragging]);
+  }, [dragging, doc, win]);
+  // 子窗口的存活判据 = 布局里还留着这条 float。泊回、重置、单元被拿走都由这一句收窗；
+  // 关窗动作**不放在 ChildWindowHost 的 unmount**里 —— StrictMode 的开发态会卸载重挂，
+  // 那样会把刚开的窗口当场关掉。
+  // 递归算：子窗口里还能再弹子窗口，主页面这一层要把**每一层**都收得到。
+  const childFloatKey = top ? childFloatKeys(ctx.dock, ctx.hidden).join('\u0000') : '';
+  useEffect(() => {
+    if (!top) return;
+    closeChildrenNotIn(new Set(childFloatKeys(ctx.dock, ctx.hidden)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [top, childFloatKey]);
   const onDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     // 走到这里就说明指针**不在任何一个会接它的块上**（块接住或主动拒绝时都会 stopPropagation），
     // 所以先收掉残留的落点预览。以前这一句写在多单元判断之后，拖着一个窗口掠过块与块之间的缝时，
     // 上一块的线框会一直亮着 —— 一个永远等不到松手的承诺，比不画更糟。
     if (ctx.over) ctx.setOver(null);
-    // The dock's own background takes ONE unit, and pops it out as a window. A whole window dropped
-    // here has nowhere to go — a float holds one unit, and quietly keeping some of them would lose the
-    // rest — so the gesture is refused (leaving `preventDefault` uncalled is what shows the pointer a
-    // "not allowed" cursor instead of a drop preview that would lie).
-    if (!ctx.drag || ctx.drag.ids.length > 1) return;
+    // The dock's own background takes whatever the pointer holds and pops it out as a window.
+    // 一整扇窗（tab 组、或者从别的子窗口拖来的一组）落到空处，就是"把这一整扇再弹出去" ——
+    // 子窗口里现在装得下一整页，所以不必再拒绝多单元。
+    if (!ctx.drag?.ids.length) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
   };
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
     const ids = carried(ctx, e);
-    if (!ids || ids.length !== 1 || !ctx.rules.known(ids[0])) return;
+    if (!ids || !ids.every(i => ctx.rules.known(i))) return;
     e.preventDefault();
-    popOut(ctx, ids[0]);
+    const run = () => popOut(ctx, ids);
+    if (ctx.prepareMove) void ctx.prepareMove(ids, ctx.scope).then(ok => { if (ok) run(); });
+    else run();
     ctx.setDrag(null); ctx.setOver(null);
   };
   return (
@@ -1792,27 +2036,37 @@ export const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
     <div className="dark-scroll" data-dock-frame style={dockStyles.dockRoot}
       onDragEnter={onDragOver} onDragOver={onDragOver} onDrop={onDrop}>
       <DockBranch node={ctx.dock.tree} ctx={ctx} axis="v" path={[]} root />
-      {ctx.dock.floats.map(f => (
-        // 浮窗的 toolbar 开关存在 float 上（它不在树里），所以这里把它带进合成节点 —— 浮窗就是
-        // 一个 default 块的一扇窗，形状的口径与块里那扇一模一样。
-        <DockWindow key={f.id} ctx={ctx} axis="v" float={f}
-          node={{ t: 'b', ids: [f.id], sel: 0, mode: 'default', tb: f.tb, tbDir: f.tbDir }} />
-      ))}
+      {ctx.dock.floats.filter(f => floatVisible(f, ctx.hidden)).map(f => {
+        const key = floatKey(f);
+        // 浮窗 = 一扇 OS 窗口（窗口化只属于 Kolid Desktop）。主页面里不留任何节点；宿主没有开窗
+        // 能力时由 ChildWindowHost 把这些单元泊回布局 —— 不存在"嵌入式的子窗口"。
+        return (
+          <ChildWindowHost key={key} id={key} ctx={ctx} title={frameTitle(ctx, f)}
+            w={f.w} h={f.h} x={f.x} y={f.y}>
+            {f.frame ? <FrameBody float={f} ctx={ctx} /> : (
+              <DockWindow ctx={ctx} axis="v" float={f} child
+                node={{ t: 'b', ids: [f.id], sel: 0, mode: 'default', tb: f.tb, tbDir: f.tbDir }} />
+            )}
+          </ChildWindowHost>
+        );
+      })}
       {/* 落点预览：整页只有这一块。它按**视口坐标**画（见 DockOver），所以块的滚动、裁剪、圆角
-          都影响不到它 —— 用户看到的形状，就是松手后会出现的那块地方。 */}
-      {ctx.drag && ctx.over && (
+          都影响不到它 —— 用户看到的形状，就是松手后会出现的那块地方。
+          `over.scope` 必须是**这一页**：盒子量的是哪一扇窗口的视口，预览就画在哪扇窗口。
+          主窗口那一页拿到子窗口里量的盒子时什么都不画（否则提示框会凭空出现在主窗口里）。 */}
+      {ctx.drag && ctx.over && ctx.over.scope === ctx.scope && (
         <ZonePreview zone={ctx.over.zone} box={ctx.over.box} label={ctx.over.label} merge={ctx.over.merge} />
       )}
       {ctx.edit && (
         <div data-dock-edit="" style={dockStyles.dockEditBar}>
           <span style={dockStyles.dockEditHint}>Block 编辑 · 顶上三选一改模式 · 拖分界线改大小 · 拖标题栏或六点搬窗口 · 箭头只在本块内换位 · 竖排/横排块里拖到另一格＝并成 tab 组（别处的窗口按住 Alt 也一样） · 再按 Alt+P 或 Esc 退出</span>
           <button style={dockStyles.dockResetBtn} title="Put every unit back in its column, in order"
-            onClick={() => ctx.setDock(defaultDock(ctx.rules))}>Reset layout</button>
+            onClick={() => ctx.setDock(ctx.frameKey ? (prev => collectDock(prev)) : defaultDock(ctx.rules))}>Reset layout</button>
         </div>
       )}
       {/* agent 脉冲层：MCP 碰到哪扇窗就在它外沿画一圈淡淡的绿（见 workbench/AgentPulseLayer.tsx）。
           fixed 定位，不参与这里的布局；没有脉冲时它返回 null，连一个节点都不留。 */}
-      <AgentPulseLayer />
+      {top && <AgentPulseLayer />}
     </div>
   );
 };

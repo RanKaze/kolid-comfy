@@ -26,7 +26,7 @@ const probeFor = (v: HTMLVideoElement): AudioProbe => {
  *  快照**,不是资产的活引用:之后资产改名/删除,Inspector 保持原样,直到选中被撤(卡片
  *  消失 / 文档关闭时 Assets 与宿主会把它清掉)。 */
 export type InspectSel = {
-  /** 与 Assets 卡片同一套键:'p:<id>'(工程资产)/ 's:<hash|name>'(仓库条目)。 */
+  /** 与资产卡同一套键:'p:<id>'(工程资产)/ 's:<hash|name>'(仓库条目)/ 'e:<Eagle id>'。 */
   key: string;
   name: string;
   kind: 'image' | 'video' | 'audio';
@@ -152,7 +152,7 @@ export const VidInspector: React.FC<{ sel: InspectSel | null }> = ({ sel }) => {
       // dock 对 fullBleed 单元的 body 包装是 display:block(定高)—— 填满它用 height:100%,
       // 不是 flex:1(block 父级里 flex 无效,会塌成内容高,画面区跟着归零)。
       <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, textAlign: 'center', fontSize: 11, color: 'rgba(255,255,255,0.35)', lineHeight: 1.9, background: '#0f0f11' }}>
-        No asset selected — click a card in the Assets window.<br />Video, audio and image all inspect here, each with its own playhead.
+        No asset selected — click a card in Assets or Eagle.<br />Video, audio and image all inspect here, each with its own playhead.
       </div>
     );
   }

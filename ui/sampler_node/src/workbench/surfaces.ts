@@ -39,8 +39,8 @@ const PANEL_PREFIXES = new Set([
   'staging', 'canvas', 'transform', 'color', 'brush', 'bucket', 'eraser', 'selection', 'cut', 'cursor', 'view',
   'text', 'geometry', 'scene3d', 'pose', 'detector', 'processor', 'videogen', 'guidances',
   'layers', 'history', 'layout',
-  'toolbar', 'context', 'pipeline', 'presets', 'blocks',
-  'vtracks', 'vassets', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent',
+  'toolbar', 'context', 'pipeline', 'presets', 'blocks', 'prompt',
+  'vtracks', 'vassets', 'veagle', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent',
 ]);
 
 /** 一个动作键作用在哪扇窗。认不出来就记在画布上（绝大多数没登记的键最终都改画布）。 */
@@ -95,14 +95,14 @@ export const TOOL_SURFACE: Record<AgentToolName, AgentSurface> = {
   // ── 文档 ──
   document: 'toolbar',
 
-  // ── Prompt 那一组：prompt_node 是侧栏 tab 里的独立 iframe，不是 dock 窗 —— 锚点是那个 tab ──
-  get_prompt_state: 'tab:prompt', set_prompt: 'tab:prompt',
-  prompt_library: 'tab:prompt', lora_library: 'tab:prompt',
-  prefab_library: 'tab:prompt', program_library: 'tab:prompt',
-  prefab_add: 'tab:prompt', prefab_update: 'tab:prompt', prefab_delete: 'tab:prompt',
-  program_add: 'tab:prompt', program_update: 'tab:prompt', program_delete: 'tab:prompt',
-  lora_refresh: 'tab:prompt', lora_update: 'tab:prompt',
-  prompt_card_add: 'tab:prompt', prompt_card_update: 'tab:prompt', prompt_card_delete: 'tab:prompt',
+  // ── Prompt 那一组：prompt_node 是一扇 dock 窗（正文是它自己的 iframe）──
+  get_prompt_state: 'prompt', set_prompt: 'prompt',
+  prompt_library: 'prompt', lora_library: 'prompt',
+  prefab_library: 'prompt', program_library: 'prompt',
+  prefab_add: 'prompt', prefab_update: 'prompt', prefab_delete: 'prompt',
+  program_add: 'prompt', program_update: 'prompt', program_delete: 'prompt',
+  lora_refresh: 'prompt', lora_update: 'prompt',
+  prompt_card_add: 'prompt', prompt_card_update: 'prompt', prompt_card_delete: 'prompt',
 
   // ── 目录本身只读 ──
   get_ui_actions: 'none',

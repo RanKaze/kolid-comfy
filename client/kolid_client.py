@@ -58,17 +58,29 @@ import socket
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import webview
 import webview.platforms.winforms as winforms_impl  # 确保引用 System.Windows.Forms
+import webview.platforms.edgechromium as _edgechromium
 
 from System.Drawing import Size
+# ── dock 子窗口（owned）用的 .NET 类型 ──
+# edgechromium 的导入已经把 WebView2 的两个互操作程序集 AddReference 过了。
+from System import Action as _CsAction, IntPtr
+from System.Drawing import Color as _Color, Rectangle as _Rectangle
+from System.Windows.Forms import (Form as _CsForm, FormBorderStyle as _CsFormBorderStyle,
+                                  DockStyle as _CsDockStyle, FormStartPosition as _CsStartPosition,
+                                  Screen as _CsScreen)
+from System.Threading.Tasks import TaskScheduler as _CsTaskScheduler, Task as _CsTask
+from Microsoft.Web.WebView2.WinForms import WebView2 as _CsWebView2
 
 # 不要重新引入"启动期 gc.disable() + 稍后 gc.freeze()/gc.enable()"的 GC hack:
 # exe 栈(CPython 3.14 + pythonnet 3.2.0)上 gc.freeze() 必 AV(python314.dll,
@@ -652,6 +664,9 @@ _user32.SetForegroundWindow.argtypes = [wt.HWND]
 _user32.GetForegroundWindow.restype = wt.HWND
 _user32.BringWindowToTop.restype = wt.BOOL
 _user32.BringWindowToTop.argtypes = [wt.HWND]
+# owned 子窗口的参照物：它的 owner（GW_OWNER=4）。见 _child_geom。
+_user32.GetWindow.restype = wt.HWND
+_user32.GetWindow.argtypes = [wt.HWND, wt.UINT]
 _user32.AttachThreadInput.restype = wt.BOOL
 _user32.AttachThreadInput.argtypes = [wt.DWORD, wt.DWORD, wt.BOOL]
 _kernel32.GetCurrentThreadId.restype = wt.DWORD
@@ -952,6 +967,443 @@ def _find_main_hwnd():
             return hwnd
     print(f'[KolidUI] main window not found: {found}', file=sys.stderr)
     return 0
+
+
+# =============================================================================
+# dock 子窗口（owned）—— Kolid Desktop 专属
+# =============================================================================
+# 页面用 window.open('', 'kolid-dock:<token>', 'popup,...') 要一扇窗。WebView2 把这件事
+# 报成 NewWindowRequested；这里不另开浏览器窗口，而是新建一个**主窗口拥有的无边框
+# Form + WebView2**，与主控件同一 Environment/Profile，再把它的 CoreWebView2 交回
+# args.NewWindow —— 浏览器于是把那个窗口当成 window.open 的返回目标，opener、跨窗口
+# DOM、同源脚本全部照常。页面侧用 React portal 把 dock 窗口的正文画进那个文档。
+#
+# 为什么必须同一 Environment/Profile：WebView2 对 NewWindow 的硬要求（不同则 set 抛
+# ArgumentException），而 pywebview 的私有模式 profile 是内存档 —— 只传 Environment 不够，
+# 还要 CreateCoreWebView2ControllerOptions 把 ProfileName/IsInPrivateModeEnabled 对齐。
+#
+# 关闭生命周期：
+#   * 页面里 window.close() / Alt+F4 → 子核 WindowCloseRequested → form.Close()；
+#   * FormClosed → 从表里摘掉并 Dispose WebView2；
+#   * 主窗口关闭时 owned 窗口由系统一起销毁（Win32 owner 语义），不需要代码收尾。
+DOCK_CHILD_PREFIX = 'kolid-dock:'
+DOCK_CHILD_MIN_W, DOCK_CHILD_MIN_H = 260, 160
+
+_child_forms = {}          # 窗口名 -> 记录
+_child_by_hwnd = {}        # hwnd -> 同一条记录（窗口过程只拿得到 hwnd）
+_child_lock = threading.Lock()
+_child_seq = 0
+_PYWEBVIEW_NEW_WINDOW = _edgechromium.EdgeChrome.on_new_window_request
+
+
+def _main_form():
+    """主窗体实例（只在 UI 线程调用；hwnd 由 loaded 线程写进 _shell）。"""
+    hwnd = _shell.get('hwnd') or 0
+    if not hwnd:
+        hwnd = _find_main_hwnd()
+    try:
+        return _CsForm.FromHandle(IntPtr(int(hwnd))) if hwnd else None
+    except Exception:
+        return None
+
+
+def _dpi_of(hwnd):
+    try:
+        return _user32.GetDpiForWindow(wt.HWND(int(hwnd))) or 96
+    except Exception:
+        return 96
+
+
+def _child_border_px(hwnd):
+    # 缩放命中带：至少 5px，高 DPI 跟着放大。
+    return max(5, int(round(6 * _dpi_of(hwnd) / 96)))
+
+
+# 无边框 Form 的缩放命中带：WebView2 是一个铺满客户区的子 HWND，落在它身上的指针
+# 不会回到 Form 的 WM_NCHITTEST —— 所以和主窗口同一套办法，在最外圈盖 8 个透明
+# 子窗口答 HT 码。它们只回答命中，缩放循环仍由 Form 的 DefWndProc 跑。
+_child_strips = {}          # strip hwnd -> (role, form hwnd)
+_child_strip_proc = None
+_child_strip_class = False
+
+
+def _child_strip_wndproc(hwnd, msg, wparam, lparam):
+    info = _child_strips.get(int(hwnd))
+    if not info:
+        return _user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+    role, form_hwnd = info
+    try:
+        if msg == WM_NCHITTEST:
+            return ROLE_CODES[role]
+        if msg == WM_SETCURSOR:
+            _user32.SetCursor(_user32.LoadCursorW(None, ROLE_CURSORS[role]))
+            return 1
+        if msg == WM_NCLBUTTONDOWN or msg == WM_NCLBUTTONDBLCLK:
+            _user32.ReleaseCapture()
+            _user32.SendMessageW(wt.HWND(form_hwnd), msg, wparam, lparam)
+            return 0
+        if msg == WM_ERASEBKGND:
+            return 1
+        if msg == WM_PAINT:
+            ps = ctypes.create_string_buffer(64)
+            _user32.BeginPaint(wt.HWND(hwnd), ps)
+            _user32.EndPaint(wt.HWND(hwnd), ps)
+            return 0
+    except Exception:
+        pass
+    return _user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+
+def _create_child_strips(form_hwnd):
+    global _child_strip_proc, _child_strip_class
+    if not _child_strip_class:
+        hinst = _kernel32.GetModuleHandleW(None)
+        wc = _WNDCLASSEXW()
+        wc.cbSize = ctypes.sizeof(_WNDCLASSEXW)
+        wc.style = 0x0008
+        _child_strip_proc = _WNDPROC_T(_child_strip_wndproc)
+        wc.lpfnWndProc = ctypes.cast(_child_strip_proc, ctypes.c_void_p)
+        wc.hInstance = hinst
+        wc.lpszClassName = 'KolidChildEdgeStrip'
+        _user32.RegisterClassExW(ctypes.byref(wc))
+        _child_strip_class = True
+    hinst = _kernel32.GetModuleHandleW(None)
+    made = []
+    for role in ROLE_CODES:
+        strip = _user32.CreateWindowExW(WS_EX_TRANSPARENT, 'KolidChildEdgeStrip', '',
+                                        WS_CHILD | WS_VISIBLE, 0, 0, 8, 8,
+                                        wt.HWND(form_hwnd), 0, hinst, None)
+        if strip:
+            _child_strips[int(strip)] = (role, int(form_hwnd))
+            made.append(int(strip))
+    _place_child_strips(form_hwnd, made)
+    return made
+
+
+def _place_child_strips(form_hwnd, strips=None):
+    if strips is None:
+        strips = [h for h, (_, owner) in _child_strips.items() if owner == int(form_hwnd)]
+    if not strips:
+        return
+    _, _, w, h = _rect_of(form_hwnd)
+    b = _child_border_px(form_hwnd)
+    geo = {'n': (0, 0, w, b), 's': (0, h - b, w, b), 'w': (0, 0, b, h), 'e': (w - b, 0, b, h),
+           'nw': (0, 0, b, b), 'ne': (w - b, 0, b, b),
+           'sw': (0, h - b, b, b), 'se': (w - b, h - b, b, b)}
+    for strip in strips:
+        info = _child_strips.get(int(strip))
+        if not info:
+            continue
+        gx, gy, gw, gh = geo[info[0]]
+        _user32.SetWindowPos(wt.HWND(strip), wt.HWND(0), gx, gy, gw, gh, SWP_NOACTIVATE)
+
+
+def _child_wndproc(hwnd, msg, wparam, lparam):
+    rec = _child_by_hwnd.get(int(hwnd))
+    prev = rec.get('prev') if rec else None
+    try:
+        if msg == WM_NCCALCSIZE and wparam:
+            # 全幅客户区：WS_THICKFRAME 只留缩放命中，原生边框不画。
+            p = ctypes.cast(lparam, ctypes.POINTER(_NCCALCSIZE_PARAMS)).contents
+            cur = wt.RECT()
+            _user32.GetWindowRect(hwnd, ctypes.byref(cur))
+            r = wt.RECT(cur.left, cur.top, cur.right, cur.bottom)
+            if p.lppos:
+                wp = ctypes.cast(p.lppos, ctypes.POINTER(_WINDOWPOS)).contents
+                if not (wp.flags & SWP_NOMOVE):
+                    r.left, r.top = wp.x, wp.y
+                if not (wp.flags & SWP_NOSIZE):
+                    r.right, r.bottom = wp.x + wp.cx, wp.y + wp.cy
+            p.rgrc[0] = r
+            return 0
+        if msg == WM_NCHITTEST:
+            gx = ctypes.c_short(lparam & 0xFFFF).value
+            gy = ctypes.c_short((lparam >> 16) & 0xFFFF).value
+            r = wt.RECT()
+            _user32.GetWindowRect(hwnd, ctypes.byref(r))
+            b = _child_border_px(hwnd)
+            left, right = gx < r.left + b, gx >= r.right - b
+            top, bottom = gy < r.top + b, gy >= r.bottom - b
+            if top and left: return 13       # HTTOPLEFT
+            if top and right: return 14      # HTTOPRIGHT
+            if bottom and left: return 16    # HTBOTTOMLEFT
+            if bottom and right: return 17   # HTBOTTOMRIGHT
+            if left: return 10
+            if right: return 11
+            if top: return 12
+            if bottom: return 15
+            return HTCLIENT
+        if msg == WM_GETMINMAXINFO:
+            mmi = ctypes.cast(lparam, ctypes.POINTER(_MINMAXINFO)).contents
+            dpi = _dpi_of(hwnd)
+            mmi.ptMinTrackSize.x = DOCK_CHILD_MIN_W * dpi // 96
+            mmi.ptMinTrackSize.y = DOCK_CHILD_MIN_H * dpi // 96
+            return 0
+        if msg == WM_SIZE:
+            _place_child_strips(int(hwnd), (rec or {}).get('strips'))
+        if msg == WM_ERASEBKGND:
+            return 1
+    except Exception:
+        pass
+    if prev:
+        return _user32.CallWindowProcW(prev, hwnd, msg, wparam, lparam)
+    return _user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+
+def _child_spot(owner, features):
+    """新窗几何：页面给了 left/top/size 就用，否则级联在主窗口右侧。
+
+    window.open 的尺寸是 CSS px（= DIP），Win32 窗口是物理像素 —— 按主窗口所在屏幕的
+    DPI 换算一次。级联位夹进主窗口那块屏的工作区，免得落到看不见的地方。
+    """
+    global _child_seq
+    dpi = _dpi_of(owner.Handle.ToInt64()) if owner is not None else 96
+    k = dpi / 96.0
+    w = int(features.Width) if features.HasSize else 360
+    h = int(features.Height) if features.HasSize else 320
+    w, h = max(DOCK_CHILD_MIN_W, w), max(DOCK_CHILD_MIN_H, h)
+    pw, ph = int(round(w * k)), int(round(h * k))
+    if features.HasPosition:
+        px, py = int(round(int(features.Left) * k)), int(round(int(features.Top) * k))
+        # 位置是页面存档里的（用户亲手摆过，由 _child_geom 记下来）。夹到**虚拟桌面**而不是
+        # 主窗口那一块屏 —— 副屏上的窗不该被拖回主屏；只有虚拟桌面之外（换了显示器配置）
+        # 才收回边界。
+        try:
+            vx, vy = _user32.GetSystemMetrics(76), _user32.GetSystemMetrics(77)
+            vw, vh = _user32.GetSystemMetrics(78), _user32.GetSystemMetrics(79)
+            if vw > 0 and vh > 0:
+                px = max(vx + 8, min(px, vx + vw - pw - 8))
+                py = max(vy + 8, min(py, vy + vh - ph - 8))
+        except Exception:
+            pass
+        return px, py, pw, ph
+    _child_seq += 1
+    base = wt.RECT()
+    if owner is not None:
+        _user32.GetWindowRect(wt.HWND(owner.Handle.ToInt64()), ctypes.byref(base))
+    else:
+        base.left, base.top, base.right, base.bottom = 80, 80, 900, 700
+    px = base.right - pw - int(24 * k)
+    py = base.top + int(48 * k) + ((_child_seq % 6) * int(28 * k))
+    try:
+        mon = _user32.MonitorFromWindow(
+            wt.HWND(owner.Handle.ToInt64()) if owner is not None else 0, 2)
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        _user32.GetMonitorInfoW(mon, ctypes.byref(mi))
+        wa = mi.rcWork
+        px = max(wa.left + 8, min(px, wa.right - pw - 8))
+        py = max(wa.top + 8, min(py, wa.bottom - ph - 8))
+    except Exception:
+        pass
+    return px, py, pw, ph
+
+
+def _child_geom(name):
+    """owned 子窗口**现在**的几何，换算成页面那套 CSS px（相对主窗口左上角）。
+
+    子窗口的正文是页面用 portal 画的，但窗口本身是 WinForms 的 Form：用户拖边框改大小、
+    拖标题条把窗搬走之后，页面既没有 move 事件，也读不到可靠的 screenX。所以由这里读真实
+    窗口矩形（GetWindowRect，纯 ctypes，HTTP 线程安全，不碰 .NET），页面按拍子取回去写进
+    布局里那条浮窗记录 —— 关掉再从 Layout 唤回，才会回到用户留下的位置和大小。
+    """
+    with _child_lock:
+        rec = _child_forms.get(name)
+    main = _shell.get('hwnd') or 0
+    if not rec or not main:
+        return {'ok': False}
+    hwnd = int(rec['hwnd'])
+    # 参照物是**它的 owner**（顶层子是主窗口，嵌套子窗是父窗）：存档里的 x/y 是"相对宿主
+    # 视口"的，唤回时页面也是拿 owner.screenX 加上这个偏移。
+    owner = int(_user32.GetWindow(wt.HWND(hwnd), 4) or 0) or int(main)
+    try:
+        cx, cy, cw, ch = _rect_of(hwnd)
+        ox, oy, _, _ = _rect_of(owner)
+    except Exception:
+        return {'ok': False}
+    if cw <= 0 or ch <= 0:
+        return {'ok': False}
+    k = max(1.0, _dpi_of(hwnd) / 96.0)
+    ko = max(1.0, _dpi_of(owner) / 96.0)
+    return {'ok': True,
+            'x': int(round((cx - ox) / ko)), 'y': int(round((cy - oy) / ko)),
+            'w': int(round(cw / k)), 'h': int(round(ch / k))}
+
+
+def _adopt_dock_child(sender, args, name, owner=None):
+    """在 UI 线程上把一个 window.open 请求变成 owned 子窗口。
+
+    `owner`：发起这个 window.open 的那个窗口。主页面发起时是主窗体；**子窗口里再弹一扇**
+    时是那个子窗体 —— Win32 的 owner 语义于是自然嵌套：关掉父窗，属于它的子窗一起走。
+    """
+    deferral = args.GetDeferral()
+    args.Handled = True
+    try:
+        old = _child_forms.get(name)
+        if old is not None:
+            try:
+                old['form'].Close()
+            except Exception:
+                pass
+        env = sender.Environment
+        prof = sender.Profile
+        if owner is None:
+            owner = _main_form()
+        x, y, w, h = _child_spot(owner, args.WindowFeatures)
+        form = _CsForm()
+        form.Text = 'KolidUI'
+        form.FormBorderStyle = getattr(_CsFormBorderStyle, 'None')
+        form.ShowInTaskbar = False
+        form.StartPosition = _CsStartPosition.Manual
+        form.BackColor = _Color.FromArgb(255, 28, 28, 30)
+        form.Bounds = _Rectangle(x, y, w, h)
+        web = _CsWebView2()
+        web.Dock = _CsDockStyle.Fill
+        web.DefaultBackgroundColor = _Color.FromArgb(255, 16, 16, 20)
+        form.Controls.Add(web)
+        if owner is not None:
+            form.Show(owner)          # owned：跟着主窗口最小化，不进任务栏
+        else:
+            form.Show()
+        rec = {'form': form, 'web': web, 'prev': None, 'proc': None,
+               'hwnd': form.Handle.ToInt64(), 'name': name}
+        with _child_lock:
+            _child_forms[name] = rec
+            _child_by_hwnd[rec['hwnd']] = rec
+        # 无边框 + 可缩放：WS_THICKFRAME 提供缩放循环，主窗口同一套配方（NCCALCSIZE 抹边）
+        style = _user32.GetWindowLongW(wt.HWND(rec['hwnd']), GWL_STYLE)
+        _user32.SetWindowLongW(wt.HWND(rec['hwnd']), GWL_STYLE, style | WS_THICKFRAME)
+        rec['proc'] = _WNDPROC_T(_child_wndproc)
+        prev = _user32.SetWindowLongPtrW(wt.HWND(rec['hwnd']), GWLP_WNDPROC,
+                                         ctypes.cast(rec['proc'], ctypes.c_void_p))
+        rec['prev'] = ctypes.c_void_p(prev)
+        _user32.SetWindowPos(wt.HWND(rec['hwnd']), 0, 0, 0, 0, 0,
+                             SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED)
+
+        def on_closed(_sender, _e):
+            with _child_lock:
+                _child_by_hwnd.pop(rec['hwnd'], None)
+                if _child_forms.get(name) is rec:
+                    _child_forms.pop(name, None)
+            print(f'[KolidUI] dock child closed: {name}', file=sys.stderr)
+            try:
+                web.Dispose()
+            except Exception:
+                pass
+        form.FormClosed += on_closed
+
+        scheduler = _CsTaskScheduler.FromCurrentSynchronizationContext()
+
+        def ready(task):
+            try:
+                if task.IsFaulted:
+                    print(f'[KolidUI] dock child webview failed: {task.Exception}', file=sys.stderr)
+                    deferral.Complete()
+                    return
+                core = web.CoreWebView2
+                s = core.Settings
+                s.IsNonClientRegionSupportEnabled = True   # 标题条的 app-region 拖动
+                s.AreDevToolsEnabled = False
+                s.AreDefaultContextMenusEnabled = False
+                s.IsStatusBarEnabled = False
+                s.IsZoomControlEnabled = False
+                s.IsSwipeNavigationEnabled = False
+
+                def close_requested(_s2, _e2):
+                    try:
+                        form.Close()
+                    except Exception:
+                        pass
+
+                def title_changed(_s2, _e2):
+                    try:
+                        t = str(core.DocumentTitle or '')
+                        if t:
+                            form.Text = t
+                    except Exception:
+                        pass
+
+                def nav_starting(_s2, e2):
+                    # 正文是 opener 画进来的，不允许它导航走；外链交给系统浏览器。
+                    uri = str(e2.Uri or '')
+                    if uri in ('', 'about:blank'):
+                        return
+                    e2.Cancel = True
+                    if uri.startswith(('http://', 'https://')):
+                        try:
+                            webbrowser.open(uri)
+                        except Exception:
+                            pass
+
+                def new_window(_s2, e2):
+                    # 子窗口里也能再开 dock 子窗口（子窗口里的 Block 系统允许嵌套窗口化）：
+                    # 第二层归**这一扇**所有；外链照旧交给系统浏览器。
+                    nm = str(e2.Name or '')
+                    if nm.startswith(DOCK_CHILD_PREFIX):
+                        _adopt_dock_child(_s2, e2, nm, form)
+                        return
+                    e2.Handled = True
+                    uri = str(e2.Uri or '')
+                    if uri.startswith(('http://', 'https://')):
+                        try:
+                            webbrowser.open(uri)
+                        except Exception:
+                            pass
+
+                core.WindowCloseRequested += close_requested
+                core.DocumentTitleChanged += title_changed
+                core.NavigationStarting += nav_starting
+                core.NewWindowRequested += new_window
+                args.NewWindow = core
+                args.Handled = True
+                try:
+                    rec['strips'] = _create_child_strips(rec['hwnd'])
+                except Exception as e:
+                    print(f'[KolidUI] child strips failed: {e}', file=sys.stderr)
+                print(f'[KolidUI] dock child ready: {name} {w}x{h}', file=sys.stderr)
+                deferral.Complete()
+            except Exception as e:
+                print(f'[KolidUI] dock child adopt failed: {e}\n{traceback.format_exc()}',
+                      file=sys.stderr)
+                try:
+                    deferral.Complete()
+                except Exception:
+                    pass
+
+        opts = env.CreateCoreWebView2ControllerOptions()
+        opts.ProfileName = prof.ProfileName
+        opts.IsInPrivateModeEnabled = prof.IsInPrivateModeEnabled
+        web.EnsureCoreWebView2Async(env, opts).ContinueWith(_CsAction[_CsTask](ready), scheduler)
+    except Exception as e:
+        print(f'[KolidUI] dock child create failed: {e}\n{traceback.format_exc()}', file=sys.stderr)
+        try:
+            deferral.Complete()
+        except Exception:
+            pass
+
+
+def _on_new_window_request(self, sender, args):
+    """替换 pywebview 的 NewWindowRequested 处理器（类级替换，在 start 之前装）。"""
+    try:
+        name = str(args.Name or '')
+        if name.startswith(DOCK_CHILD_PREFIX):
+            _adopt_dock_child(sender, args, name)
+            return
+        if _PYWEBVIEW_NEW_WINDOW is not None:
+            return _PYWEBVIEW_NEW_WINDOW(self, sender, args)
+        args.Handled = True
+    except Exception as e:
+        print(f'[KolidUI] new window handler failed: {e}\n{traceback.format_exc()}', file=sys.stderr)
+        try:
+            args.Handled = True
+        except Exception:
+            pass
+
+
+def _install_dock_child_hook():
+    """在 webview.start 之前把类方法换掉 —— pywebview 在 on_webview_ready 里订阅
+    `self.on_new_window_request`，类属性换了，它绑到的就是这一份。"""
+    _edgechromium.EdgeChrome.on_new_window_request = _on_new_window_request
 
 
 def _install_chain(hwnd):
@@ -1497,6 +1949,8 @@ SHELL_HTML = r"""<!DOCTYPE html>
         const frame = document.createElement('iframe');
         frame.src = url;
         frame.allow = 'clipboard-read; clipboard-write';
+        // dock 子窗口的能力握手：同源/跨源都由页面自己 ping，这里在加载后再补两发。
+        frame.addEventListener('load', () => { announceHost(frame); setTimeout(() => announceHost(frame), 700); });
         root.appendChild(frame);
         stage.appendChild(root);
         const t = { id, url, title: title || url, root, frame };
@@ -1505,6 +1959,13 @@ SHELL_HTML = r"""<!DOCTYPE html>
         render();
         syncTabs();
         return t;
+    }
+
+    // Kolid Desktop 专属能力的公告。页面（sampler_node.html）加载时会 hostPing，
+    // 这里回答；iframe 每次 load 也主动补发。普通浏览器里没有壳页，页面收不到。
+    const HOST_HELLO = { __kolid: 'hostHello', host: 'kolid-desktop', caps: ['dockChild'] };
+    function announceHost(frame) {
+        try { if (frame && frame.contentWindow) frame.contentWindow.postMessage(HOST_HELLO, '*'); } catch (err) {}
     }
 
     function activate(id) { activeId = id; render(); }
@@ -1536,7 +1997,27 @@ SHELL_HTML = r"""<!DOCTYPE html>
     // 都发生在页面已经发出真实信号(confirm/finish/select…)之后,补发会把
     // 「已确认」翻成「已取消」;浏览器里这次竞态也几乎总是节点先走。
     window.addEventListener('message', (e) => {
-        if (!e.data || e.data.__kolid !== 'closeTab') return;
+        if (!e.data) return;
+        // 节点页面问"这里是不是 Kolid Desktop / 有没有 dock 子窗口能力"
+        if (e.data.__kolid === 'hostPing') {
+            try { e.source && e.source.postMessage(HOST_HELLO, '*'); } catch (err) {}
+            return;
+        }
+        // 节点页面问 owned 子窗口**现在**的真实几何（见 childWindow.tsx 的几何回写）。
+        // 节点页面与壳页跨源，只有壳页能拉本机接口；取到就回给发问的那个 frame。
+        if (e.data.__kolid === 'dockGeomGet' && typeof e.data.name === 'string') {
+            const src = e.source, name = e.data.name;
+            fetch('/api/dock_child_geom?name=' + encodeURIComponent(name), { cache: 'no-store' })
+                .then((r) => r.json())
+                .then((g) => {
+                    if (!g || !g.ok) return;
+                    try { src && src.postMessage({ __kolid: 'dockGeom', name: name,
+                        x: g.x, y: g.y, w: g.w, h: g.h }, '*'); } catch (err) {}
+                })
+                .catch(() => {});
+            return;
+        }
+        if (e.data.__kolid !== 'closeTab') return;
         const t = tabs.find(x => x.frame && x.frame.contentWindow === e.source);
         if (t) removeTab(t.id);
     });
@@ -2362,6 +2843,11 @@ class HandshakeHandler(BaseHTTPRequestHandler):
             return self._send(f.read_bytes(),
                               TINKLE_CTYPE.get(f.suffix.lower(), 'application/octet-stream'),
                               extra_headers=[('Cache-Control', 'no-store')])
+        if path == '/api/dock_child_geom':
+            # 壳页替节点页面取 owned 子窗口的真实几何（见 _child_geom）。节点页面与壳页
+            # 跨源，只能经 postMessage 中转，所以这一条由壳页来拉。
+            return self._json(_child_geom(
+                (urllib.parse.parse_qs(query).get('name') or [''])[0]))
         if path == '/pull':
             q = urllib.parse.parse_qs(query)
             if q.get('token', [''])[0] != _PULL_TOKEN:
@@ -2750,6 +3236,9 @@ def main():
         background_color='#101012',
     )
     _state['window'] = win
+    # dock 子窗口：换掉 pywebview 的 NewWindowRequested 处理（必须在 start 之前，
+    # pywebview 在窗口初始化完成后才订阅它）。
+    _install_dock_child_hook()
     win.events.loaded += _on_loaded
     # 注意:不要订阅 moved/resized/maximized/restored/minimized —— pywebview 每个
     # 事件 set() 都新起一个线程(webview/event.py:57),原生拖动一次产生上百条

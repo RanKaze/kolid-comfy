@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useDockDocument, useDockWindow } from '../../dock/docScope';
 import type { InspectSel } from './Inspector';
 import {
   type AssetIdentity, type VidController, clipUseIndex, fmtTime, isAudioName, isVideoName, addAsset, newVidId,
@@ -7,6 +8,7 @@ import {
 } from './model';
 import { probeMedia } from './audio';
 import { assetsTick, subscribeAssets } from './assetsTick';
+import { CardScaleControl, aspectOf, cardHeightOf, justifiedRows, useAssetScale } from '../assetScale';
 import { ingestFile } from './ingest';
 import { useCudState } from '../cudScope';
 import { hit, isRecording } from '../../keybindings';
@@ -21,6 +23,8 @@ import { editorState, subscribeEditor } from '../../midi/soundWindow';
 import { addTrack as addMidiTrack } from '../../midi/model';
 import { loadInstrumentOnTrack } from '../../midi/instrumentOps';
 import type { MidiCtl } from '../../midi/types';
+// Prompt 窗与本页不同 origin：落点由本页接（拖拽期间让开 iframe，见 assetDragBus）。
+import { beginAssetDrag, endAssetDrag } from './assetDragBus';
 
 // ── Assets 窗 ───────────────────────────────────────────────────────────────────────────────
 // 三档作用域（顶部那条 segmented），三档说的是**三处不同的字节**：
@@ -78,6 +82,9 @@ export type StoreAsset = {
   tags?: string[];
   /** A0：缩略图 URL（图片才有，后端按需生成并落盘缓存）。 */
   thumb?: string | null;
+  /** 原生像素（图片 PIL / 视频 ffprobe）。流式卡片按它算宽度。 */
+  w?: number;
+  h?: number;
 };
 
 /** A5：仓库条目怎么播 —— 转码过的原件浏览器咬不动，`playHash` 才是能播的那份字节。 */
@@ -212,8 +219,9 @@ const badge: React.CSSProperties = {
   background: 'rgba(0,0,0,0.6)', borderRadius: 3, padding: '1px 3px',
 };
 
-/** 缩略图那一块：海报帧（或悬停扫到的那一格）+ 角标 + 扫片进度线。 */
-const Thumb: React.FC<{ m: CardMedia; poster: string | null }> = ({ m, poster }) => {
+/** 缩略图那一块：海报帧（或悬停扫到的那一格）+ 角标 + 扫片进度线。
+ *  `height` 有值 = 统一高度的流式卡片（宽度由调用方按宽高比算好）；不给就沿用 16:9 的格子。 */
+const Thumb: React.FC<{ m: CardMedia; poster: string | null; height?: number }> = ({ m, poster, height }) => {
   const scrub = useHoverScrub(m);
   const color = m.kind === 'audio' ? '#30d158' : m.kind === 'image' ? '#ffd60a' : '#64d2ff';
   const glyph = m.kind === 'audio' ? '♪' : m.kind === 'image' ? '▧' : '▣';
@@ -225,7 +233,8 @@ const Thumb: React.FC<{ m: CardMedia; poster: string | null }> = ({ m, poster })
       onPointerMove={scrub.onMove}
       onPointerLeave={scrub.onLeave}
       style={{
-        position: 'relative', width: '100%', flexShrink: 0, aspectRatio: '16 / 9', background: '#08080a',
+        position: 'relative', width: '100%', flexShrink: 0,
+        height: height ?? undefined, aspectRatio: height ? undefined : '16 / 9', background: '#08080a',
         display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
         borderRadius: '5.5px 5.5px 0 0',
         cursor: m.kind === 'video' ? 'ew-resize' : undefined,
@@ -235,7 +244,7 @@ const Thumb: React.FC<{ m: CardMedia; poster: string | null }> = ({ m, poster })
       {poster && (
         // key：换一次 src 就换一个元素 —— 否则某一张图 404 触发的 `display:none` 会**永久**
         // 留在同一个 <img> 上，后面换任何 src 都是空白。
-        <img key={poster} src={poster} draggable={false} decoding="async"
+        <img key={poster} src={poster} draggable={false} decoding="async" loading="lazy"
           onError={e => { e.currentTarget.style.display = 'none'; }}
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block', pointerEvents: 'none' }} />
       )}
@@ -283,10 +292,13 @@ export type CardItem = {
   hasAudio: boolean | null;
   /** 缩略图直给（仓库图有后端生成的那张）；不给就按 kind 现算。 */
   poster?: string | null;
+  /** 原生像素。流式卡片用它算宽度（高度一致、宽度 = 高度 × 宽高比）；缺了就退回 16:9。 */
+  w?: number;
+  h?: number;
   /** 字节在哪：`store` 只在仓库；`doc` 某份文档里也内嵌了一份（A4 之后才可能出现）；
    *  `ref` 文档只是**引用**它（.cud 里记哈希与 URL，字节留在仓库 —— 视频/音频走这一档）；
    *  `missing` 引用还在、字节没了。 */
-  byteFrom?: 'store' | 'doc' | 'ref' | 'missing';
+  byteFrom?: 'store' | 'doc' | 'ref' | 'missing' | 'eagle';
   /** 来源徽章：upload / legacy / run / staging … */
   origin?: string;
   /** 谁在用它（"3 clips"）。 */
@@ -307,6 +319,7 @@ const BYTE_BADGE = {
   doc: { text: 'IN DOC', color: '#30d158', title: 'Bytes are also embedded in an open document' },
   ref: { text: 'REF', color: '#5ac8fa', title: 'Referenced, not embedded — the .cud stores the hash and URL; bytes stay in the asset store' },
   missing: { text: 'MISSING', color: '#ff453a', title: 'Referenced, but the bytes are gone' },
+  eagle: { text: 'EAGLE', color: '#ff9f0a', title: 'Bytes stay in your Eagle library and are served in place — nothing is copied into data/assets' },
 } as const;
 
 const Chip: React.FC<{ color: string; title: string; children?: React.ReactNode }> = ({ color, title, children }) => (
@@ -384,10 +397,30 @@ export const Card: React.FC<{
   onDoubleClick?: () => void;
   /** 右键：引用件用它开"链接资产"菜单（别的卡不给 —— 它们没有可换的引用）。 */
   onContextMenu?: (e: React.MouseEvent) => void;
-}> = ({ it, selected, onClick, onDoubleClick, onContextMenu }) => {
+  /** 流式卡片：缩略图高度一致，整卡宽 = 高度 × 宽高比。不给 = 填满格子（绑帧弹窗那套）。 */
+  cardH?: number;
+  /** 行内精确宽度（justified 布局按行算好的）。不给则按 cardH × 宽高比推。 */
+  cardW?: number;
+}> = ({ it, selected, onClick, onDoubleClick, onContextMenu, cardH, cardW }) => {
   const poster = useCardThumb(it.kind, it.src, it.poster);
   const [over, setOver] = useState(false);
   const badge = it.byteFrom ? BYTE_BADGE[it.byteFrom] : null;
+  const flow = typeof cardH === 'number' && cardH > 0;
+  const ratio = it.w && it.h && it.w > 0 && it.h > 0
+    ? it.w / it.h
+    : it.kind === 'audio' ? 1.6 : 16 / 9;
+  const thumbH = flow ? Math.max(24, Math.round(cardH as number)) : undefined;
+  const width = flow
+    ? (cardW && cardW > 0
+      ? Math.round(cardW)
+      : Math.max(40, Math.min(520, Math.round((thumbH as number) * ratio))))
+    : undefined;
+  const dims = it.w && it.h ? `${it.w} × ${it.h}` : '';
+  const meta: { text: string; color?: string }[] = [];
+  if (dims) meta.push({ text: dims });
+  if (it.kind !== 'image' && it.duration > 0) meta.push({ text: fmtTime(it.duration) });
+  if (it.usedBy) meta.push({ text: it.usedBy, color: 'rgba(120,200,255,0.72)' });
+  const tip = [it.name, dims, it.origin, it.usedBy].filter(Boolean).join(' · ');
   return (
     <div
       draggable={!!it.drag}
@@ -400,16 +433,26 @@ export const Card: React.FC<{
           try { e.dataTransfer.setData(k, it.drag[k]); } catch { /* 类型受限：别的类型还发得出去 */ }
         }
         e.dataTransfer.effectAllowed = 'copy';
+        const assetRaw = it.drag[ASSET_ITEM_TYPE];
+        if (assetRaw) {
+          try {
+            const a = JSON.parse(assetRaw) as { url?: string; name?: string; kind?: string };
+            if (a && typeof a.url === 'string') beginAssetDrag({ url: a.url, name: a.name, kind: a.kind });
+          } catch { /* 不是资产载荷 */ }
+        }
       }}
+      onDragEnd={endAssetDrag}
       onPointerEnter={() => setOver(true)}
       onPointerLeave={() => setOver(false)}
-      title={it.usedBy ? `${it.name} — ${it.usedBy}` : it.name}
+      title={tip}
       style={{
-        display: 'flex', flexDirection: 'column', minWidth: 0, borderRadius: 6,
+        display: 'flex', flexDirection: 'column', minWidth: 0, borderRadius: 6, overflow: 'hidden',
+        width, maxWidth: '100%', flexShrink: flow ? 0 : undefined,
+        // 默认不画边框：图片要贴满卡片（Eagle 的网格就是靠行间距分隔，不靠线框）。
         border: selected ? '1px solid #0a84ff'
           : '0.5px solid ' + (it.byteFrom === 'missing'
             ? 'rgba(255,69,58,0.45)'
-            : over ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.1)'),
+            : over ? 'rgba(255,255,255,0.22)' : 'transparent'),
         background: '#0f0f11', cursor: onClick ? 'pointer' : it.drag ? 'grab' : 'default', userSelect: 'none',
       }}
     >
@@ -417,6 +460,7 @@ export const Card: React.FC<{
         <Thumb
           m={{ src: it.src, kind: it.kind, duration: it.duration, hasAudio: it.hasAudio }}
           poster={poster}
+          height={thumbH}
         />
         {badge && (
           <span style={{ position: 'absolute', top: 3, right: 3, display: 'flex', pointerEvents: 'none' }}>
@@ -424,25 +468,68 @@ export const Card: React.FC<{
           </span>
         )}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 6px 0', minWidth: 0 }}>
-        {it.renaming && it.onRenameCommit ? (
-          <RenameInput initial={it.name} commit={it.onRenameCommit} cancel={() => it.onRenameCancel?.()} />
-        ) : (
-          <span
-            onDoubleClick={e => { e.stopPropagation(); it.onNameDoubleClick?.(); }}
-            style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.82)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: it.onNameDoubleClick ? 'text' : undefined }}
-          >{it.name}</span>
-        )}
-        {it.kind !== 'image' && it.duration > 0 && (
-          <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.42)', flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>{fmtTime(it.duration)}</span>
-        )}
-        {it.actions}
-      </div>
-      <div style={{ padding: '0 6px 5px', display: 'flex', gap: 4, minWidth: 0, fontSize: 8.5, color: 'rgba(255,255,255,0.3)', whiteSpace: 'nowrap', overflow: 'hidden' }}>
-        {it.origin && <span style={{ flexShrink: 0 }}>{it.origin}</span>}
-        {it.origin && it.usedBy && <span style={{ opacity: 0.5 }}>·</span>}
-        {it.usedBy && <span style={{ color: 'rgba(120,200,255,0.72)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.usedBy}</span>}
-      </div>
+      {flow ? (
+        <>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 3, padding: '4px 6px 0', height: 26, minWidth: 0 }}>
+            {it.renaming && it.onRenameCommit ? (
+              <RenameInput initial={it.name} commit={it.onRenameCommit} cancel={() => it.onRenameCancel?.()} />
+            ) : (
+              <span
+                onDoubleClick={e => {
+                  // 只有"双击改名"的卡才截住这一下；别的卡让双击冒到整张卡上（Inspector）。
+                  if (it.onNameDoubleClick) { e.stopPropagation(); it.onNameDoubleClick(); }
+                }}
+                style={{
+                  fontSize: 10, fontWeight: 600, lineHeight: '13px', color: 'rgba(255,255,255,0.82)',
+                  flex: 1, minWidth: 0, overflow: 'hidden', wordBreak: 'break-word',
+                  display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                  cursor: it.onNameDoubleClick ? 'text' : undefined,
+                }}
+              >{it.name}</span>
+            )}
+            {it.actions && <span style={{ flexShrink: 0, display: 'flex' }}>{it.actions}</span>}
+          </div>
+          <div style={{
+            height: 15, padding: '1px 6px 5px', display: 'flex', alignItems: 'center', gap: 4,
+            minWidth: 0, fontSize: 8.5, color: 'rgba(255,255,255,0.3)',
+            whiteSpace: 'nowrap', overflow: 'hidden',
+          }}>
+            {meta.map((m, i) => (
+              <React.Fragment key={i}>
+                {i > 0 && <span style={{ opacity: 0.5, flexShrink: 0 }}>·</span>}
+                <span style={{
+                  overflow: 'hidden', textOverflow: 'ellipsis',
+                  flexShrink: i === meta.length - 1 ? 1 : 0, color: m.color,
+                }}>{m.text}</span>
+              </React.Fragment>
+            ))}
+          </div>
+        </>
+      ) : (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 6px 0', minWidth: 0 }}>
+            {it.renaming && it.onRenameCommit ? (
+              <RenameInput initial={it.name} commit={it.onRenameCommit} cancel={() => it.onRenameCancel?.()} />
+            ) : (
+              <span
+                onDoubleClick={e => {
+                  if (it.onNameDoubleClick) { e.stopPropagation(); it.onNameDoubleClick(); }
+                }}
+                style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.82)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: it.onNameDoubleClick ? 'text' : undefined }}
+              >{it.name}</span>
+            )}
+            {it.kind !== 'image' && it.duration > 0 && (
+              <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.42)', flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>{fmtTime(it.duration)}</span>
+            )}
+            {it.actions}
+          </div>
+          <div style={{ padding: '0 6px 5px', display: 'flex', gap: 4, minWidth: 0, fontSize: 8.5, color: 'rgba(255,255,255,0.3)', whiteSpace: 'nowrap', overflow: 'hidden' }}>
+            {it.origin && <span style={{ flexShrink: 0 }}>{it.origin}</span>}
+            {it.origin && it.usedBy && <span style={{ opacity: 0.5 }}>·</span>}
+            {it.usedBy && <span style={{ color: 'rgba(120,200,255,0.72)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.usedBy}</span>}
+          </div>
+        </>
+      )}
     </div>
   );
 };
@@ -743,6 +830,12 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   // 这份文档内嵌的图（Video / Image 两档的唯一数据源）。页面按整份清单播报，这里按活跃文档取桶 ——
   // 切 tab 那一瞬读到的就是目标文档自己那份，不必等页面重播。
   const doc = useDocAssets();
+  const hostDoc = useDockDocument();
+  const hostWin = useDockWindow();
+  // 卡片尺度：高度一致，宽度跟着每件素材的宽高比走（Eagle 窗有自己那一颗值，两窗互不影响）。
+  const assetScale = useAssetScale('assets');
+  const cardH = cardHeightOf(assetScale);
+  const [gridW, setGridW] = useState(0);
   const [over, setOver] = useState(false);
   // 起手看文档自己的模式：image 落地自己那套工作面，video 落 Layer 段，midi 落乐器库。
   // 之后跟着用户的手 —— 切文档不把人从自己选的档上拽走。
@@ -780,6 +873,17 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   const [renaming, setRenaming] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null); // Del/Ctrl+A 只在网格握焦点时接手,不抢全局
 
+  // 行布局要知道内容宽度：窗宽 / 换档 / 侧栏显隐都会改它。
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    const read = () => setGridW(Math.max(0, Math.round(el.clientWidth - 16)));
+    read();
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   // 引用件的键（时间线在播的视频/音频）。不随 scope 收窄 —— 与"doc 两份清单都算在册"同一口径。
   const clipAliveKeys = useMemo(
     () => p.assets.map(a => 'c:' + (a.id || a.asset || a.play || a.src || a.name)),
@@ -791,6 +895,9 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   // 过滤无关:过滤只是"这档里看不见",不是"不在了"。
   useEffect(() => {
     if (!sel) return;
+    // Inspector 是共用的：Eagle（`e:`）等别的窗喂进来的选中不归 Assets 管，
+    // 不能因为"这一窗里找不到这张卡"就把它撤掉。
+    if (!/^(?:s:|c:|d:)/.test(sel)) return;
     const keys = new Set<string>([
       ...(store ?? []).map(s => 's:' + (s.hash || s.name)),
       ...clipAliveKeys,
@@ -862,13 +969,13 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
     if (!menu) return;
     const close = () => setMenu(null);
     const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(null); };
-    window.addEventListener('pointerdown', close);
-    window.addEventListener('wheel', close, { passive: true });
-    window.addEventListener('keydown', key);
+    hostWin.addEventListener('pointerdown', close);
+    hostWin.addEventListener('wheel', close, { passive: true });
+    hostWin.addEventListener('keydown', key);
     return () => {
-      window.removeEventListener('pointerdown', close);
-      window.removeEventListener('wheel', close);
-      window.removeEventListener('keydown', key);
+      hostWin.removeEventListener('pointerdown', close);
+      hostWin.removeEventListener('wheel', close);
+      hostWin.removeEventListener('keydown', key);
     };
   }, [menu]);
 
@@ -1135,6 +1242,182 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
             : 'no library folder yet';
   const instrBroken = isInstruments && (!!instrLib.error || (!!instrLib.lib && !instrLib.lib.ok));
 
+  // 一张卡 = 一个 spec：key + 宽高比 + "给行高/行宽就画出来"。justifiedRows 先按目标高分行，
+  // 再把这一行算好的 (h, w) 交给 Card —— 整行铺满，行内每张图的缩略图高度仍然一致。
+  type CardSpec = { key: string; ratio: number; render: (h: number, w: number) => React.ReactNode };
+  const cardSpecs: CardSpec[] = [];
+  if (!isInstruments) {
+    for (const c of clipItems) {
+      const payload: InspectSel = {
+        key: c.key, name: c.name, kind: c.kind, src: c.missing ? '' : c.url,
+        duration: c.duration, hasAudio: c.hasAudio,
+        origin: 'timeline', hash: c.asset || c.play,
+      };
+      cardSpecs.push({
+        key: c.key,
+        ratio: c.kind === 'audio' ? 1.6 : 16 / 9,
+        render: (ch, cw) => (
+          <Card
+            key={c.key}
+            cardH={ch}
+            cardW={cw}
+            selected={multiSel.has(c.key) || (multiSel.size === 0 && sel === c.key)}
+            onDoubleClick={onActivate}
+            onClick={e => cardClick(e, c.key, payload)}
+            onContextMenu={e => openCardMenu(e, c.key, { asset: c.asset, play: c.play, src: c.src }, c.name)}
+            it={{
+              name: c.name, kind: c.kind, src: c.missing ? '' : c.url,
+              duration: c.duration, hasAudio: c.hasAudio,
+              byteFrom: c.missing ? 'missing' : 'ref',
+              origin: 'timeline',
+              usedBy: c.uses ? `${c.uses} clip${c.uses > 1 ? 's' : ''}` : 'unused',
+              drag: c.missing ? undefined : {
+                [ASSET_ITEM_TYPE]: JSON.stringify({
+                  id: c.id || c.asset || c.play, url: c.url, name: c.name, kind: c.kind,
+                  asset: c.asset, play: c.play,
+                }),
+                [GLOBAL_ITEM_TYPE]: JSON.stringify({
+                  url: c.url, name: c.name, kind: c.kind, asset: c.asset, play: c.play,
+                }),
+                ...(c.id ? { [VID_ASSET_TYPE]: c.id } : null),
+              },
+              actions: (
+                <button
+                  title={c.missing
+                    ? 'Link「' + c.name + '」— pick the original file'
+                    : 'Link「' + c.name + '」to a different file — every clip that uses it follows'}
+                  onClick={() => startLink({ asset: c.asset, play: c.play, src: c.src }, c.name)}
+                  style={{ ...rowBtn, color: c.missing ? '#ff6b60' : 'rgba(255,255,255,0.5)' }}
+                >
+                  <ClipIcon />
+                </button>
+              ),
+            }}
+          />
+        ),
+      });
+    }
+
+    for (const g of docItems) {
+      const key = 'd:' + g.hash;
+      const url = docUrlOf(g.hash);
+      const payload: InspectSel = {
+        key, name: g.name, kind: 'image', src: url, duration: 0, hasAudio: null,
+        origin: scope === 'video' ? 'layer segment' : 'document', hash: g.hash,
+      };
+      cardSpecs.push({
+        key,
+        ratio: aspectOf(g.w, g.h),
+        render: (ch, cw) => (
+          <Card
+            key={key}
+            cardH={ch}
+            cardW={cw}
+            selected={multiSel.has(key) || (multiSel.size === 0 && sel === key)}
+            onDoubleClick={onActivate}
+            onClick={e => cardClick(e, key, payload)}
+            it={{
+              name: g.name, kind: 'image', src: url, duration: 0, hasAudio: null,
+              w: g.w, h: g.h,
+              poster: url,
+              byteFrom: 'doc',
+              origin: whereText(g, k => setNames.get(k) || (k === '' ? 'document' : 'Layer')),
+              drag: {
+                [ASSET_ITEM_TYPE]: JSON.stringify({ id: g.hash, url, name: g.name, kind: 'image', asset: g.hash }),
+              },
+            }}
+          />
+        ),
+      });
+    }
+
+    for (const h of orphanMissing) {
+      const key = 'm:' + h;
+      cardSpecs.push({
+        key,
+        ratio: 16 / 9,
+        render: (ch, cw) => (
+          <Card
+            key={key}
+            cardH={ch}
+            cardW={cw}
+            onContextMenu={e => openCardMenu(e, key, { asset: h }, 'missing · ' + h.slice(0, 8))}
+            it={{
+              name: 'missing · ' + h.slice(0, 8), kind: 'video', src: '', duration: 0, hasAudio: null,
+              byteFrom: 'missing', origin: 'referenced by the timeline',
+              actions: (
+                <button
+                  title={'Link the bytes for ' + h.slice(0, 8) + '… — pick the original file, or another one to rebind'}
+                  onClick={() => startLink({ asset: h }, 'missing · ' + h.slice(0, 8))}
+                  style={{ ...rowBtn, color: '#ff6b60' }}
+                >
+                  <ClipIcon />
+                </button>
+              ),
+            }}
+          />
+        ),
+      });
+    }
+
+    for (const s of storeItems) {
+      const id = s.hash || s.name;
+      const key = 's:' + id;
+      const label = s.displayName || s.name;
+      const play = playUrlOf(s);
+      const payload: InspectSel = {
+        key, name: label, kind: s.kind,
+        src: s.kind === 'image' ? s.url : play,
+        duration: s.duration, hasAudio: s.hasAudio,
+        origin: s.origin || 'library',
+        hash: s.hash, size: s.size,
+      };
+      cardSpecs.push({
+        key,
+        ratio: aspectOf(s.w, s.h, s.kind === 'audio' ? 1.6 : 16 / 9),
+        render: (ch, cw) => (
+          <Card
+            key={key}
+            cardH={ch}
+            cardW={cw}
+            selected={multiSel.has(key) || (multiSel.size === 0 && sel === key)}
+            onDoubleClick={onActivate}
+            onClick={e => cardClick(e, key, payload)}
+            it={{
+              name: label, kind: s.kind, src: s.kind === 'image' ? s.url : play, duration: s.duration, hasAudio: s.hasAudio,
+              w: s.w, h: s.h,
+              poster: s.kind === 'image' ? (s.thumb || s.url) : null,
+              byteFrom: 'store',
+              origin: s.origin || 'library',
+              usedBy: usedBy(s.hash, s.playHash, play, s.url),
+              drag: (() => {
+                const out: Record<string, string> = {
+                  [ASSET_ITEM_TYPE]: JSON.stringify({ id, url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash }),
+                };
+                if (s.kind !== 'image') {
+                  out[GLOBAL_ITEM_TYPE] = JSON.stringify({ url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash });
+                }
+                return out;
+              })(),
+              renaming: renaming === key,
+              onNameDoubleClick: s.hash ? () => setRenaming(key) : undefined,
+              onRenameCommit: next => { if (s.hash) void commitStoreRename(s.hash, next); },
+              onRenameCancel: () => setRenaming(null),
+              actions: s.kind !== 'image' ? (
+                <span style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
+                  <button title={'Claim「' + label + '」into this project'} onClick={() => claimStore(s)} style={rowBtn}>
+                    <PlusIcon />
+                  </button>
+                </span>
+              ) : undefined,
+            }}
+          />
+        ),
+      });
+    }
+  }
+  const gridRows = justifiedRows(cardSpecs, gridW || 320, cardH, 6);
+
   return (
     <div
       onDragOver={e => {
@@ -1212,6 +1495,8 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
             />
           </>
         )}
+        {/* 卡片尺度：只改"多大一张"，不改每张卡自己的宽高比。乐器档是列表，不用它。 */}
+        {!isInstruments && <CardScaleControl kind="assets" />}
         {/* 链接资产的文件入口：引用件右键菜单那一项、以及卡上那颗回形针，都点它
             （同一时刻只为一条引用挑文件）。 */}
         <input
@@ -1258,16 +1543,20 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
         onPointerDownCapture={() => gridRef.current?.focus()}
         style={{
           flex: 1, minHeight: 0, overflow: 'auto', scrollbarWidth: 'thin', outline: 'none',
-          padding: 8, display: 'grid', gap: 6, alignContent: 'start',
-          // 乐器档是一张列表（一行一件），其它三档是卡片网格 —— 同一个滚动容器，两种列宽。
-          gridTemplateColumns: isInstruments ? '1fr' : 'repeat(auto-fill, minmax(104px, 1fr))',
+          padding: 8, gap: 6,
+          // 乐器档是一张列表（一行一件）；其它档是**按行 justified** 的卡片：整行铺满、
+          // 行内缩略图等高，所以外层是纵向排列的一组行，而不是等宽网格。
+          display: isInstruments ? 'grid' : 'flex',
+          flexDirection: isInstruments ? undefined : 'column',
+          alignContent: isInstruments ? 'flex-start' : undefined,
+          gridTemplateColumns: isInstruments ? '1fr' : undefined,
           background: over && !isInstruments ? 'rgba(10,132,255,0.06)' : 'transparent',
         }}
       >
         {isInstruments && <InstrumentList q={q} midi={midi} />}
 
         {!isInstruments && total === 0 && (
-          <div style={{ gridColumn: '1 / -1', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8, whiteSpace: 'pre-line' }}>
+          <div style={{ width: '100%', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8, whiteSpace: 'pre-line' }}>
             {docPending ? 'Reading this document…'
               : docScope && scope === 'video' ? 'Nothing in this document yet.\nMedia you drop on the timeline shows up here as a reference;\nimages on Layer segments are embedded.'
                 : docScope ? 'This document has no images yet.\nLayers, guidances and the staging pool show up here.'
@@ -1276,158 +1565,12 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
           </div>
         )}
 
-        {/* 引用件：时间线在播的视频 / 音频。字节不在 .cud 里（只存哈希与 URL），所以卡上写 REF
-            而不是 IN DOC —— 仓库里那份字节没了，这份文档就跟着废。 */}
-        {clipItems.map(c => {
-          const payload: InspectSel = {
-            key: c.key, name: c.name, kind: c.kind, src: c.missing ? '' : c.url,
-            duration: c.duration, hasAudio: c.hasAudio,
-            origin: 'timeline', hash: c.asset || c.play,
-          };
-          return (
-            <Card
-              key={c.key}
-              selected={multiSel.has(c.key) || (multiSel.size === 0 && sel === c.key)}
-              onDoubleClick={onActivate}
-              onClick={e => cardClick(e, c.key, payload)}
-              onContextMenu={e => openCardMenu(e, c.key, { asset: c.asset, play: c.play, src: c.src }, c.name)}
-              it={{
-                name: c.name, kind: c.kind, src: c.missing ? '' : c.url,
-                duration: c.duration, hasAudio: c.hasAudio,
-                byteFrom: c.missing ? 'missing' : 'ref',
-                origin: 'timeline',
-                usedBy: c.uses ? `${c.uses} clip${c.uses > 1 ? 's' : ''}` : 'unused',
-                // 拖回时间线：它**已经是**这份工程的资产了，所以带上资产 id —— 落点直接
-                // placeAsset（复用这一件，不会再去 importSource 一趟）。图片落点另认 x-asset。
-                drag: c.missing ? undefined : {
-                  [ASSET_ITEM_TYPE]: JSON.stringify({
-                    id: c.id || c.asset || c.play, url: c.url, name: c.name, kind: c.kind,
-                    asset: c.asset, play: c.play,
-                  }),
-                  [GLOBAL_ITEM_TYPE]: JSON.stringify({
-                    url: c.url, name: c.name, kind: c.kind, asset: c.asset, play: c.play,
-                  }),
-                  ...(c.id ? { [VID_ASSET_TYPE]: c.id } : null),
-                },
-                // 缺字节的回形针 = 同一件事的快路（不用右键也能接）。丢了的接回来，
-                // 链错了也能换 —— 挑到不一样的字节时会先问一句（见 onLinkPick）。
-                actions: (
-                  <button
-                    title={c.missing
-                      ? 'Link「' + c.name + '」— pick the original file'
-                      : 'Link「' + c.name + '」to a different file — every clip that uses it follows'}
-                    onClick={() => startLink({ asset: c.asset, play: c.play, src: c.src }, c.name)}
-                    style={{ ...rowBtn, color: c.missing ? '#ff6b60' : 'rgba(255,255,255,0.5)' }}
-                  >
-                    <ClipIcon />
-                  </button>
-                ),
-              }}
-            />
-          );
-        })}
-
-        {docItems.map(g => {
-          const key = 'd:' + g.hash;
-          const url = docUrlOf(g.hash);
-          // 库副本没了（用户手删过 data/assets）→ 标 MISSING。字节其实还在 .cud 里，下一次保存
-          // 会把它写回仓库 —— 所以这里不给 relink（那会把一张同样的图再接一遍），只说实话。
-          const payload: InspectSel = {
-            key, name: g.name, kind: 'image', src: url, duration: 0, hasAudio: null,
-            origin: scope === 'video' ? 'layer segment' : 'document', hash: g.hash,
-          };
-          return (
-            <Card
-              key={key}
-              selected={multiSel.has(key) || (multiSel.size === 0 && sel === key)}
-              onDoubleClick={onActivate}
-              onClick={e => cardClick(e, key, payload)}
-              it={{
-                name: g.name, kind: 'image', src: url, duration: 0, hasAudio: null,
-                poster: url,
-                byteFrom: 'doc',
-                // 它在这份文档里干什么：图层像 / 指导卡 / 图池，以及（Video 档）属于哪一段。
-                // 空 setKey 是"文档主栈"那一套（image 模式的图层，也常是 Layer 段接手前的壳）。
-                origin: whereText(g, k => setNames.get(k) || (k === '' ? 'document' : 'Layer')),
-                drag: {
-                  [ASSET_ITEM_TYPE]: JSON.stringify({ id: g.hash, url, name: g.name, kind: 'image', asset: g.hash }),
-                },
-              }}
-            />
-          );
-        })}
-
-        {/* 时间线引用了、却没有资产行的哈希（老工程 / 库件被删后片段还留着）。它也是一条引用 ——
-            同样能链接资产（接回原件或换绑），所以右键菜单照给。 */}
-        {orphanMissing.map(h => (
-          <Card
-            key={'m:' + h}
-            onContextMenu={e => openCardMenu(e, 'm:' + h, { asset: h }, 'missing · ' + h.slice(0, 8))}
-            it={{
-              name: 'missing · ' + h.slice(0, 8), kind: 'video', src: '', duration: 0, hasAudio: null,
-              byteFrom: 'missing', origin: 'referenced by the timeline',
-              actions: (
-                <button
-                  title={'Link the bytes for ' + h.slice(0, 8) + '… — pick the original file, or another one to rebind'}
-                  onClick={() => startLink({ asset: h }, 'missing · ' + h.slice(0, 8))}
-                  style={{ ...rowBtn, color: '#ff6b60' }}
-                >
-                  <ClipIcon />
-                </button>
-              ),
-            }}
-          />
+        {/* 卡片：按行 justified 排列（整行铺满、行内缩略图等高）。 */}
+        {!isInstruments && gridRows.map((row, ri) => (
+          <div key={'row' + ri} style={{ display: 'flex', gap: 6, width: '100%', flexShrink: 0, alignItems: 'flex-start' }}>
+            {row.items.map((spec, i) => spec.render(row.height, row.widths[i]))}
+          </div>
         ))}
-
-        {storeItems.map(s => {
-          const id = s.hash || s.name;
-          const key = 's:' + id;
-          const label = s.displayName || s.name;
-          const play = playUrlOf(s);
-          const payload: InspectSel = {
-            key, name: label, kind: s.kind,
-            src: s.kind === 'image' ? s.url : play,
-            duration: s.duration, hasAudio: s.hasAudio,
-            origin: s.origin || 'library',
-            hash: s.hash, size: s.size,
-          };
-          return (
-            <Card
-              key={key}
-              selected={multiSel.has(key) || (multiSel.size === 0 && sel === key)}
-              onDoubleClick={onActivate}
-              onClick={e => cardClick(e, key, payload)}
-              it={{
-                name: label, kind: s.kind, src: s.kind === 'image' ? s.url : play, duration: s.duration, hasAudio: s.hasAudio,
-                poster: s.kind === 'image' ? (s.thumb || s.url) : null,
-                byteFrom: 'store',
-                origin: s.origin || 'library',
-                usedBy: usedBy(s.hash, s.playHash, play, s.url),
-                drag: (() => {
-                  const out: Record<string, string> = {
-                    [ASSET_ITEM_TYPE]: JSON.stringify({ id, url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash }),
-                  };
-                  // 老载荷只给音视频：图片落到时间线上没有片段可落，发出去只会让落点白忙一趟。
-                  if (s.kind !== 'image') {
-                    out[GLOBAL_ITEM_TYPE] = JSON.stringify({ url: play, name: label, kind: s.kind, asset: s.hash, play: s.playHash });
-                  }
-                  return out;
-                })(),
-                renaming: renaming === key,
-                onNameDoubleClick: s.hash ? () => setRenaming(key) : undefined,
-                onRenameCommit: next => { if (s.hash) void commitStoreRename(s.hash, next); },
-                onRenameCancel: () => setRenaming(null),
-                actions: s.kind !== 'image' ? (
-                  <span style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
-                    <button title={'Claim「' + label + '」into this project'} onClick={() => claimStore(s)} style={rowBtn}>
-                      <PlusIcon />
-                    </button>
-                  </span>
-                ) : undefined,
-              }}
-            />
-          );
-        })}
       </div>
 
       {/* 底栏：一句实话 —— 现在这一档有多少件、是什么在喂它。 */}
@@ -1494,8 +1637,8 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
           onContextMenu={e => e.preventDefault()}
           style={{
             position: 'fixed', zIndex: 9999,
-            left: Math.max(8, Math.min(menu.x, window.innerWidth - 240)),
-            top: Math.max(8, Math.min(menu.y, window.innerHeight - 96)),
+            left: Math.max(8, Math.min(menu.x, hostWin.innerWidth - 240)),
+            top: Math.max(8, Math.min(menu.y, hostWin.innerHeight - 96)),
             width: 232, padding: 4, borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 1,
             background: 'rgba(34,34,38,0.985)', border: '0.5px solid rgba(255,255,255,0.16)',
             boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
@@ -1527,7 +1670,7 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
             链接资产…
           </button>
         </div>,
-        document.body,
+        hostDoc.body,
       )}
     </div>
   );

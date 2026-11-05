@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { type AgentCtx, type AgentConfig, runAgentTool } from './tools';
+import { useDockWindow } from '../dock/docScope';
 
 // ── Agent dock 窗 = dsh(DeepSeek Harness)sidecar 的 Web UI ──────────────────────────────────
 // 这里只框 dsh:它跑在本地 sidecar 里(agent_dsh.py),这个窗负责起停它、把当前 cud 目录
@@ -57,6 +58,7 @@ const S = {
 };
 
 export const AgentPanel: React.FC<{ ctx: AgentCtx }> = ({ ctx }) => {
+  const hostWin = useDockWindow();
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
 
@@ -159,8 +161,8 @@ export const AgentPanel: React.FC<{ ctx: AgentCtx }> = ({ ctx }) => {
       if (!dshOrigin || e.origin !== dshOrigin) return;
       if ((e.data as { type?: string } | null)?.type === 'kolid-dsh-bind-ready') pushBind(ctxRef.current.cudDir);
     };
-    window.addEventListener('message', onMsg);
-    return () => window.removeEventListener('message', onMsg);
+    hostWin.addEventListener('message', onMsg);
+    return () => hostWin.removeEventListener('message', onMsg);
   }, [dshOrigin]);
 
   return (

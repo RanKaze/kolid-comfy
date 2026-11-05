@@ -52,6 +52,9 @@ export type DockRules = {
   // A unit the page has no body for is a hole in the panel: the drop payload and a saved tree are both
   // checked against this before they are believed.
   known: (id: UnitId) => boolean;
+  // May this unit be hidden? The Layout window is the page's only `false`: hiding it would leave no
+  // window from which to bring anything back. Defaults to true.
+  canHide?: (id: UnitId) => boolean;
   // 这一格**此刻要不要挂出名字**（标题条 / tab 条）。缺省同 `known`：认识就画。
   // 文档格是唯一的例外 —— 它可能只是个**保留位**：最后一份工程关掉后留下的空位，窗连同用户
   // 摆的位置都还留着，可一份工程都没有。这时候什么都不写 —— 挂 "Untitled" 会让人以为那儿
@@ -73,6 +76,9 @@ export type DockRules = {
   // The unit's body IS live state rather than a view of state: a tab switch hides it with display:none
   // instead of unmounting it, because unmounting throws the state away.
   keepMounted: (id: UnitId) => boolean;
+  // May this unit be shrunk to a toolbar strip? A strip has no body, so a unit whose body is live state
+  // (a keepMounted iframe) must say no — shrinking it would unmount the very thing it is keeping.
+  canToolbar?: (id: UnitId) => boolean;
   // The unit's content owns its box — no card inset and no scroller of the dock's. A workbench and a
   // toolbar are both like this; what sets them apart is `grows`.
   fullBleed: (id: UnitId) => boolean;
@@ -93,6 +99,10 @@ export type DockRules = {
   // the same way, at its own width. null = one column.
   right: readonly UnitId[] | null;
   rightW: number;
+  // A column of its own standing BETWEEN the work area and the far column (the prompt editor opens like
+  // this: a real workspace beside the canvas, not a card in a 280px strip). Same shape as `right`, its
+  // own width. null = no such column.
+  afterWork?: { ids: readonly UnitId[]; w: number } | null;
   // How much room a NEW block should take when this unit is dropped into the layout as one — a block
   // that does not exist yet has no size of its own, and "take the rest" is not an answer: the rest of a
   // column is the whole column, which is how appending a small window used to swallow the page.
@@ -143,12 +153,25 @@ export type DockBlock = {
 export type DockNode = DockBlock | { t: 's'; d: 'v' | 'h'; ks: DockNode[]; sz?: number; work?: true };
 // A popped-out unit lives in viewport coordinates: it has to be able to sit on top of the workbench,
 // which is not inside any column.
-export type DockFloat = { id: UnitId; x: number; y: number; w: number; h: number; tb?: boolean; tbDir?: 'h' | 'v' };
+//
+// `frame` 是这条浮窗**自己的那套 dock**：有它，这扇子窗口里就不是一扇窗，而是一整页（块、分割、
+// 容器、tab 组、浮窗、toolbar 全都照主页面那一套）。没有它，就是老形状 —— 一条记录只装 `id`
+// 那一格。老存档可能还是老形状；页面内已经不再画浮窗了。
+// `win` 是这扇子窗口在宿主那里的**稳定名字**。`id` 仍记着"第一个单元"（老代码到处拿它当单元看），
+// 但窗的身份不能跟着那个单元走：格子里第一个 tab 被拖走时，窗口不该因此换一个。
+// `child` 标记"这扇窗在 Kolid Desktop 的 owned 子窗口里"：坐标/尺寸对它是宿主窗口的事，页面
+// 不画卡片、也不拖它；它只负责在布局里留一条记录，让单元有家可回。`child` 必须跟着存档回来 ——
+// 刷新 / 从 Layout 唤回时，ChildWindowHost 会按这条记录把 OS 窗口重新开在原地。宿主没有窗口化
+// 能力（普通浏览器）时，那一趟只把单元泊回布局，不改写这份存档。
+export type Dock = { tree: DockNode; floats: DockFloat[]; hidden?: UnitId[] };
+export type DockFloat = {
+  id: UnitId; x: number; y: number; w: number; h: number; tb?: boolean; tbDir?: 'h' | 'v';
+  child?: true; frame?: Dock; win?: string;
+};
 // 拖拽载荷的**形状**：这组单元原来是不是一条 toolbar、朝哪边。搬家的每条路（并进容器、切新块、
-// 插到缝上、泊回布局）都要把它带过去 —— 否则"把一条 toolbar 拖进另一个块"就等于当场把它拆回
+// 插到缝上、泊回布局）都要把它带过去 —— 否则"把一条 toolbar 拖进另一个窗口"就等于当场把它拆回
 // 一扇普通窗，用户看到的是 toolbar 解体了。
 export type DragShape = { tb: boolean; dir: 'h' | 'v' };
-export type Dock = { tree: DockNode; floats: DockFloat[] };
 export type Zone = 'top' | 'bottom' | 'left' | 'right' | 'center';
 
 export const DOCK_MIN_SZ = 96, DOCK_MAX_SZ = 1200;
@@ -200,6 +223,13 @@ const blockOf = (ids: readonly UnitId[], mode: DockMode = 'default', sz?: number
   ({ t: 'b', ids: [...ids], sel: 0, mode, sz });
 const block = (id: UnitId, mode: DockMode = 'default', sz?: number): DockBlock =>
   blockOf([id], mode, sz);
+// Give the block that holds `id` an initial size. Used when a layout grows a NEW column (the prompt
+// editor) out of an archive that predates it: without a size the new column would split the leftover
+// room with the work area instead of standing at its own width.
+const sizeHolding = (n: DockNode, id: UnitId, sz: number): DockNode =>
+  n.t === 'b'
+    ? (n.ids.includes(id) ? { ...n, sz } : n)
+    : { ...n, ks: n.ks.map(k => sizeHolding(k, id, sz)) };
 
 // 一格的划分。`groups` 不合规（长度对不上、有 0、加起来不等于 ids）就退回"一格一个"，绝不拿一个
 // 半信半疑的数组去切 ids —— 那个后果是某几个单元凭空消失。
@@ -247,13 +277,95 @@ export const defaultDock = (r: DockRules): Dock => {
     // how the page says "a document with no window goes HERE", so pruneDocs and detach leave this nest
     // empty instead of folding it away and letting the next document land at the far end of the row.
     ks.push({ t: 's', d: 'h', ks: [], work: true });
+    if (r.afterWork?.ids.length) {
+      ks.push({ t: 'b', ids: [...r.afterWork.ids], sel: 0, mode: 'v', sz: r.afterWork.w });
+    }
     ks.push({ t: 'b', ids: [...r.right], sel: 0, mode: 'v', sz: r.rightW });
   }
   const row: DockNode = { t: 's', d: 'h', ks };
-  return { tree: r.top ? { t: 's', d: 'v', ks: [block(r.top, 'default', r.topH), row] } : row, floats: [] };
+  return { tree: r.top ? { t: 's', d: 'v', ks: [block(r.top, 'default', r.topH), row] } : row, floats: [], hidden: [] };
 };
 
 export const dockUnits = (n: DockNode): UnitId[] => (n.t === 'b' ? n.ids : n.ks.flatMap(dockUnits));
+
+// ── 子窗口里的那套 dock ────────────────────────────────────────────────────────────────
+// 一条浮窗可能装着一整页（`frame`）。下面这几个读法把"这条记录里到底有哪些单元"变成一句话，
+// 树上的函数（dockUnits）仍然只管树 —— 只在需要"全部"的地方用 dockAllUnits。
+let floatSeq = 0;
+/** 一扇新子窗口的稳定名字。窗口不跟任何一个单元走：锚点被拖走时它还是这一扇。 */
+export const newFloatKey = (): string =>
+  `f${Date.now().toString(36)}${(++floatSeq).toString(36)}`;
+export const floatKey = (f: DockFloat): string => f.win ?? f.id;
+/** 没有 frame 的浮窗就是"只有这一格"的一页。 */
+export const singleFrame = (id: UnitId): Dock => ({ tree: block(id), floats: [] });
+export const floatFrame = (f: DockFloat): Dock => f.frame ?? singleFrame(f.id);
+export const floatUnits = (f: DockFloat): UnitId[] =>
+  f.frame ? dockAllUnits(f.frame) : [f.id];
+export const dockAllUnits = (dock: Dock): UnitId[] =>
+  [...dockUnits(dock.tree), ...dock.floats.flatMap(floatUnits)];
+/** 这条浮窗里有没有看得见的单元（隐藏表归整页那一份，见 Dock.hidden）。 */
+export const floatVisible = (f: DockFloat, hidden: ReadonlySet<UnitId>): boolean =>
+  floatUnits(f).some(u => !hidden.has(u));
+/** 一扇浮窗**自己**负责的单元（不钻进它 frame 里的子浮窗 —— 那是下一层的作用域）。 */
+export const scopeUnits = (dock: Dock): UnitId[] =>
+  [...dockUnits(dock.tree), ...dock.floats.flatMap(f => (f.frame ? [] : [f.id]))];
+export const allFloats = (dock: Dock): DockFloat[] =>
+  [...dock.floats, ...dock.floats.flatMap(f => (f.frame ? allFloats(f.frame) : []))];
+export const findFloat = (dock: Dock, key: string): DockFloat | null =>
+  allFloats(dock).find(f => floatKey(f) === key) ?? null;
+export const floatContaining = (dock: Dock, id: UnitId): DockFloat | null =>
+  allFloats(dock).find(f => floatUnits(f).includes(id)) ?? null;
+export const childFloats = (dock: Dock): DockFloat[] => allFloats(dock).filter(f => !!f.child);
+export const childFloatKeys = (dock: Dock, hidden: ReadonlySet<UnitId>): string[] =>
+  childFloats(dock).filter(f => floatVisible(f, hidden)).map(floatKey);
+export const unitInChild = (dock: Dock, id: UnitId): boolean =>
+  childFloats(dock).some(f => floatUnits(f).includes(id));
+/** 对每一层浮窗（含 frame 里的）跑一遍：返回 null 就是"这条记录没了"。 */
+export const mapFloatsDeep = (dock: Dock, fn: (f: DockFloat) => DockFloat | null): Dock => ({
+  ...dock,
+  floats: dock.floats
+    .map(f => {
+      const inner = f.frame ? mapFloatsDeep(f.frame, fn) : null;
+      return fn(inner ? { ...f, frame: inner } : f);
+    })
+    .filter((f): f is DockFloat => !!f),
+});
+// 一页被搬空了：那条浮窗记录没有存在理由（OS 窗口也要跟着收）。每次写盘前都过一遍，
+// 免得嵌套窗口关掉之后在存档里留下一条空壳。
+export const pruneEmptyFrames = (dock: Dock): Dock =>
+  mapFloatsDeep(dock, f => (f.frame && !dockAllUnits(f.frame).length ? null : f));
+export const setFrameFloat = (dock: Dock, key: string, frame: Dock): Dock =>
+  mapFloatsDeep(dock, f => (floatKey(f) === key ? { ...f, frame } : f));
+export const removeFloat = (dock: Dock, key: string): Dock =>
+  mapFloatsDeep(dock, f => (floatKey(f) === key ? null : f));
+
+// 一条空树：把最后一格从一页里拿走之后，页本身不能是 null（DockPanel 还要画它）。
+// `work` 让它照旧接住第一份新文档（和 defaultDock 里那条空工作区同一口径）。
+export const EMPTY_TREE: DockNode = { t: 's', d: 'v', ks: [], work: true };
+
+/** 把这一页里所有单元收回成一个 tab 组（子窗口自己的 Reset layout）。浮窗一并收回来。 */
+export const collectDock = (dock: Dock): Dock => {
+  const ids = dockAllUnits(dock);
+  if (!ids.length) return EMPTY_TREE === dock.tree ? dock : { tree: EMPTY_TREE, floats: [], hidden: dock.hidden };
+  return { tree: blockOf(ids), floats: [], hidden: dock.hidden };
+};
+
+/** 把一组单元从这一页里**任何地方**拿走（树、浮窗、frame 里更深的那几层）。 */
+export const takeUnits = (dock: Dock, ids: readonly UnitId[]): Dock => {
+  if (!ids.length) return dock;
+  const set = new Set(ids);
+  const tree = detachAll(dock.tree, ids) ?? EMPTY_TREE;
+  const floats = dock.floats
+    .map(f => {
+      if (!f.frame) return set.has(f.id) ? null : f;
+      const frame = takeUnits(f.frame, ids);
+      const units = dockAllUnits(frame);
+      if (!units.length) return null;
+      return { ...f, id: units.includes(f.id) ? f.id : units[0], frame };
+    })
+    .filter((f): f is DockFloat => !!f);
+  return { ...dock, tree, floats };
+};
 
 // 只留通过 `ok` 的单元：树上少一个单元的所有后果（格空的消失、分支塌掉、分叉退成一条）都由
 // `detach` 一个人说，这里只负责反复叫它。关掉一份文档、和把一份旧布局里早已不存在的面板剪掉，
@@ -350,7 +462,7 @@ export type LayoutFit = {
 
 export function fitLayout(rules: DockRules, value: unknown): LayoutFit | null {
   const fallbackTree = () => (rules.fallback ? rules.fallback().tree : defaultDock(rules).tree);
-  const saved = value as { tree?: unknown; floats?: unknown } | null;
+  const saved = value as { tree?: unknown; floats?: unknown; hidden?: unknown } | null;
   if (!saved || typeof saved !== 'object' || !isNode(saved.tree)) return null;
   const ok = (id: UnitId) => !RETIRED_UNITS.includes(id) && (rules.known(id) || !!docUidOf(id));
   const dropped: UnitId[] = [];
@@ -367,53 +479,136 @@ export function fitLayout(rules: DockRules, value: unknown): LayoutFit | null {
 
   // 浮窗：同一个筛子，另加"一扇窗不能有两条记录"—— 两条记录就是两个视口压在同一份可变状态上。
   // 坐标也顺手夹一道：存档里一个 NaN 能把这扇窗丢到画布外，用户看到的是"布局丢了"。
-  const floats: DockFloat[] = [];
+  // `frame` 递归读：子窗口里那一页也是同一套形状，进来过的每个单元都要过同一个筛子。
   const num = (v: unknown, d: number, lo: number, hi: number) =>
     (typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : d);
-  for (const f of (Array.isArray(saved.floats) ? saved.floats : []) as DockFloat[]) {
-    if (!f || typeof f.id !== 'string') continue;
-    if (!ok(f.id)) { cut(f.id); continue; }
-    // 同一扇窗在树里已经有一份（或前面已经收过一条浮窗）时，这条浮窗记录就是多余的 —— 静默丢掉，
-    // 它不算"这一页认不出的面板"。
-    if (floats.some(g => g.id === f.id) || dockUnits(tree).includes(f.id)) continue;
-    floats.push({
-      id: f.id,
-      x: num(f.x, 80, 0, 4000), y: num(f.y, 80, 0, 4000),
-      w: num(f.w, FLOAT_W, FLOAT_MIN_W, DOCK_MAX_SZ), h: num(f.h, 320, FLOAT_MIN_H, DOCK_MAX_SZ),
+  const readFloat = (f: DockFloat | null | undefined, depth: number): DockFloat | null => {
+    if (!f || typeof f.id !== 'string' || depth > 8) return null;
+    const raw = f as DockFloat & { frame?: unknown };
+    const frame = raw.frame && typeof raw.frame === 'object'
+      ? readFrame(raw.frame as { tree?: unknown; floats?: unknown }, depth + 1) : null;
+    let inner = frame;
+    if (inner) {
+      const bad = dockAllUnits(inner).filter(id => !ok(id));
+      bad.forEach(cut);
+      if (bad.length) inner = takeUnits(inner, bad);
+      const units = dockAllUnits(inner);
+      if (!units.length) return null;
+      inner = { ...inner, tree: inner.tree };
+    }
+    const units = inner ? dockAllUnits(inner) : [f.id];
+    if (!inner) {
+      if (!ok(f.id)) { cut(f.id); return null; }
+    } else if (!units.some(id => ok(id))) {
+      units.forEach(cut);
+      return null;
+    }
+    const anchor = inner && !units.includes(f.id) ? units[0] : f.id;
+    // 子窗口的几何是 OS 窗口的（见 childWindow.tsx 的几何回写）：屏幕可以比页面尺度大得多，
+    // 副屏还在主屏左边（负坐标）。按页面浮窗的 0..4000 / 1200 去夹，用户拉大一点、或者把窗
+    // 放到左边那块屏，存档里就被改写了 —— 下次唤回尺寸/位置自然"变了"。
+    const cap = f.child ? 8192 : DOCK_MAX_SZ;
+    const lo = f.child ? -cap : 0;
+    const hi = f.child ? cap : 4000;
+    return {
+      id: anchor,
+      x: num(f.x, 80, lo, hi), y: num(f.y, 80, lo, hi),
+      w: num(f.w, FLOAT_W, FLOAT_MIN_W, cap), h: num(f.h, 320, FLOAT_MIN_H, cap),
       tb: f.tb ? true : undefined, tbDir: f.tbDir === 'v' ? 'v' : f.tbDir === 'h' ? 'h' : undefined,
-    });
+      // `child` 必须跟着存档回来：它是"这扇是真窗口"的唯一凭据，丢了就只能退回页面内浮窗。
+      ...(f.child ? { child: true as const } : null),
+      ...(inner ? { frame: inner, win: typeof raw.win === 'string' && raw.win ? raw.win : newFloatKey() } : null),
+    };
+  };
+  const readFrame = (raw: { tree?: unknown; floats?: unknown }, depth: number): Dock | null => {
+    if (!isNode(raw.tree)) return null;
+    const tree0 = keepOnly(raw.tree, ok) ?? EMPTY_TREE;
+    const floats0: DockFloat[] = [];
+    for (const f of (Array.isArray(raw.floats) ? raw.floats : []) as DockFloat[]) {
+      const one = readFloat(f, depth);
+      if (one) floats0.push(one);
+    }
+    const frame = { tree: tree0, floats: floats0 };
+    return dockAllUnits(frame).length ? frame : null;
+  };
+  const floats: DockFloat[] = [];
+  for (const f of (Array.isArray(saved.floats) ? saved.floats : []) as DockFloat[]) {
+    const one = readFloat(f, 0);
+    if (one) floats.push(one);
+  }
+  // 同一个单元出现两次：只留第一处 — 树先、浮窗按次序。剩下缺的面板由下面那一圈补回来。
+  const seen = new Set<UnitId>();
+  const dedupe = (d: Dock): Dock => {
+    const t = keepOnly(d.tree, id => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    }) ?? EMPTY_TREE;
+    const fs = d.floats
+      .map(f => {
+        if (f.frame) {
+          const frame = dedupe(f.frame);
+          const units = dockAllUnits(frame);
+          if (!units.length) return null;
+          return { ...f, id: units.includes(f.id) ? f.id : units[0], frame };
+        }
+        if (seen.has(f.id)) return null;
+        seen.add(f.id);
+        return f;
+      })
+      .filter((f): f is DockFloat => !!f);
+    return { ...d, tree: t, floats: fs };
+  };
+  {
+    const clean = dedupe({ tree, floats, hidden: [] });
+    tree = clean.tree;
+    floats.splice(0, floats.length, ...clean.floats);
   }
 
-  // 同一个单元出现两次：两处都拆掉，交给下面"缺的补进来"放回一处。留一处听着更省事，可"留哪
-  // 一处、同格里的 tab 与 toolbar 开关跟谁走"没有正确答案 —— 而"这一处不算数、请回它该在的那
-  // 一块"有。
-  const all = dockUnits(tree).concat(floats.map(f => f.id));
-  const dupes = all.filter((id, i) => all.indexOf(id) !== i);
-  if (dupes.length) tree = detachAll(tree, dupes) ?? fallbackTree();
+  // 隐藏表：只认这一页认识的单元，且尊重 canHide；同一项只留一次。
+  // Layout 由 canHide 钉死，老存档/手改文件把它写进来也不生效。
+  const hidden: UnitId[] = [];
+  for (const id of (Array.isArray(saved.hidden) ? saved.hidden : [])) {
+    if (typeof id !== 'string' || hidden.includes(id)) continue;
+    if (!ok(id)) { cut(id); continue; }
+    if (rules.canHide && !rules.canHide(id)) continue;
+    hidden.push(id);
+  }
 
   // 缺的面板进"最长的那个块"：一块里单元最多的地方就是用户心里的那一列，而"它当初放哪儿"这份
   // 布局并没有说（那正是它缺着的原因）。
-  const present = () => dockUnits(tree).concat(floats.map(f => f.id));
+  const present = () => dockAllUnits({ tree, floats }).concat(hidden);
   // **拆分**（不是新增）：Pipeline 与 Pipeline Presets 原本是同一扇窗（"Pipeline & Presets"），
   // 现在各占一扇。老存档里只有 `pipeline`，走下面那条通用规则会把它变成同一块里的另一张 tab ——
   // 那只是把第二扇窗藏起来，不是拆分。所以在它**下面**劈开一块。
   if (present().includes('pipeline') && !present().includes('presets')) {
-    tree = dropInDock({ tree, floats }, 'presets', 'pipeline', 'bottom').tree;
+    tree = dropInDock({ tree, floats, hidden }, 'presets', 'pipeline', 'bottom').tree;
     added.push('presets');
+  }
+  // Prompt 以前是侧栏的 tab：老存档里没有它。新布局把它摆在画布右侧独立一列，老存档也补在同一处
+  // ——在右栏左边劈开一列，而不是让它变成某个已有列里的第 25 张卡。
+  {
+    const far = rules.right?.[0];
+    for (const id of rules.afterWork?.ids ?? []) {
+      if (present().includes(id) || !far || !present().includes(far)) continue;
+      tree = sizeHolding(dropInDock({ tree, floats, hidden }, id, far, 'left').tree, id,
+        rules.afterWork?.w ?? 380);
+      added.push(id);
+    }
   }
   for (const id of rules.panels) {
     if (present().includes(id)) continue;
     const b = biggestBlock(tree);
     if (!b) break;
-    tree = dropInDock({ tree, floats }, id, b.ids[0], 'center').tree;
+    tree = dropInDock({ tree, floats, hidden }, id, b.ids[0], 'center').tree;
     added.push(id);
   }
-  return { dock: { tree, floats }, dropped, added };
+  return { dock: { tree, floats, hidden }, dropped, added };
 }
 
-// The document units a tree and its windows hold.
+// The document units a tree and its windows hold — including the ones inside child frames.
 const heldDocs = (dock: Dock): UnitId[] =>
-  dockUnits(dock.tree).concat(dock.floats.map(f => f.id)).filter(id => !!docUidOf(id));
+  dockAllUnits(dock).concat(dock.hidden ?? []).filter(id => !!docUidOf(id));
 
 // A document with no window yet gets one where documents already live: tabbed into the box that shows
 // one, so a second one does not halve the work area — they share a window behind a strip until the user
@@ -475,15 +670,21 @@ function biggestBlock(n: DockNode): DockBlock | null {
 // 就把那一格的选中项拨到它 —— 写法和手动点 tab（DockView 的 `pick`）完全同一种：容器格记在
 // `shown` 上（只动这一格显示谁），`default` 块记在 `sel` 上。浮窗不用挑，它永远显示自己。
 export const revealDoc = (dock: Dock, id: UnitId): Dock => {
-  if (dock.floats.some(f => f.id === id)) return dock;
-  const tree = rewriteHolder(dock.tree, id, n => {
+  // 单元可能住在这条浮窗的子 dock 里 — 换 tab 的选择项也要往下走。
+  const walk = (d: Dock): Dock => ({
+    ...d,
+    tree: revealInTree(d.tree, id),
+    floats: d.floats.map(f => (f.frame ? { ...f, frame: walk(f.frame) } : f)),
+  });
+  return walk(dock);
+};
+const revealInTree = (tree: DockNode, id: UnitId): DockNode =>
+  rewriteHolder(tree, id, n => {
     if (n.t !== 'b' || !n.ids.includes(id)) return n;
     const cell = n.groups ? cellsOf(n).find(c => c.includes(id)) : null;
     if (cell) return { ...n, shown: [...(n.shown ?? []).filter(u => !cell.includes(u)), id] };
     return { ...n, sel: Math.max(0, n.ids.indexOf(id)) };
   });
-  return { ...dock, tree };
-};
 
 // 文档 tab 在前、常驻单元（Pipeline Graph 等）在后：一条 tab 条里文档们永远排前面 ——
 // 用户点名要 "xxx0.cud, xxx1.cud, Pipeline Graph"，别让常驻单元把文档串隔成两截。
@@ -528,6 +729,33 @@ const renameUnit = (n: DockNode, from: UnitId, to: UnitId): DockNode => {
   }
   return { ...n, ks: n.ks.map(k => renameUnit(k, from, to)) };
 };
+// 改名要钻进每一层子窗口：位置是属于布局的，不管它此刻在哪一扇窗里。
+const renameInDock = (dock: Dock, from: UnitId, to: UnitId): Dock => ({
+  ...dock,
+  tree: renameUnit(dock.tree, from, to),
+  floats: dock.floats.map(f => {
+    if (!f.frame) return f.id === from ? { ...f, id: to } : f;
+    const frame = renameInDock(f.frame, from, to);
+    const units = dockAllUnits(frame);
+    return { ...f, id: f.id === from ? to : (units.includes(f.id) ? f.id : units[0]), frame };
+  }),
+});
+// 关掉的文档：树和每一层子窗口里都剪掉。整个子窗口剪空了就把那条浮窗也收掉。
+const pruneDockDocs = (dock: Dock, isAlive: (id: UnitId) => boolean): Dock | null => {
+  const tree = pruneDocs(dock.tree, isAlive);
+  const floats = dock.floats
+    .map(f => {
+      if (!f.frame) return isAlive(f.id) ? f : null;
+      const frame = pruneDockDocs(f.frame, isAlive);
+      const units = frame ? dockAllUnits(frame) : [];
+      if (!frame || !units.length) return null;
+      return { ...f, id: units.includes(f.id) ? f.id : units[0], frame };
+    })
+    .filter((f): f is DockFloat => !!f);
+  const units = dockAllUnits({ tree: tree ?? EMPTY_TREE, floats });
+  if (!units.length) return null;
+  return { tree: tree ?? EMPTY_TREE, floats };
+};
 
 // Keep the layout in step with the documents the page actually has: a closed one loses its node and
 // nothing else, a newly opened one joins the work area, and one the user already placed keeps that
@@ -544,18 +772,21 @@ export function syncDocUnits(dock: Dock, open: readonly UnitId[], keepSlots = fa
   const stale = held.filter(id => !open.includes(id));
   if (!missing.length && !stale.length) return dock;
   // 先配对：一格新文档接一格没人认领的旧格，换名字，位置留着。多出来的旧格才真按"关掉了"处理。
-  const pairs = missing.slice(0, stale.length).map((id, i) => [stale[i], id] as const);
+  // **隐藏的旧文档不参与配对**：新开的文档应该直接露脸，不该继承上一份"隐藏"的选择。
+  const hiddenSet = new Set(dock.hidden ?? []);
+  const staleVisible = stale.filter(id => !hiddenSet.has(id));
+  const pairs = missing.slice(0, staleVisible.length).map((id, i) => [staleVisible[i], id] as const);
   let moved: Dock = dock;
-  for (const [from, to] of pairs) {
-    moved = {
-      tree: renameUnit(moved.tree, from, to),
-      floats: moved.floats.map(f => (f.id === from ? { ...f, id: to } : f)),
-    };
-  }
+  for (const [from, to] of pairs) moved = renameInDock(moved, from, to);
   const leftStale = stale.slice(pairs.length);
   const alive = new Set<UnitId>([...open, ...(keepSlots ? leftStale : [])]);
   const isAlive = (id: UnitId) => !docUidOf(id) || alive.has(id);
-  const pruned: Dock = { tree: pruneDocs(moved.tree, isAlive) || moved.tree, floats: moved.floats.filter(f => isAlive(f.id)) };
+  const kept = pruneDockDocs(moved, isAlive);
+  const pruned: Dock = {
+    tree: kept?.tree ?? moved.tree,
+    floats: kept?.floats ?? moved.floats,
+    hidden: (moved.hidden ?? []).filter(isAlive),
+  };
   const leftMissing = missing.slice(pairs.length);
   // Nothing arrived and nothing left: hand back the SAME dock, which is how the caller tells a
   // re-announcement apart from a real change without diffing a tree.
@@ -627,9 +858,14 @@ export function rewriteHolder(n: DockNode, id: UnitId, fn: (holder: DockNode) =>
 // a size the frame ever handed out — sizing blocks by it is exactly how a drag ends up fighting the
 // content (lopsided content starves one block, the split overflows, and the boundary stops following
 // the pointer). The user reshapes from the even split; the content never votes.
-export const setBlockMode = (dock: Dock, id: UnitId, mode: DockMode): Dock => ({
-  ...dock, tree: rewriteHolder(dock.tree, id, h => (h.t === 'b' ? switchMode(h, mode) : h)),
-});
+export const setBlockMode = (dock: Dock, id: UnitId, mode: DockMode): Dock => {
+  if (dockUnits(dock.tree).includes(id)) {
+    return { ...dock, tree: rewriteHolder(dock.tree, id, h => (h.t === 'b' ? switchMode(h, mode) : h)) };
+  }
+  // 单元住在子窗口那一页里：模式写进那一层（它自己的树才是它的框架）。
+  return mapFloatsDeep(dock, f => (f.frame && dockAllUnits(f.frame).includes(id)
+    ? { ...f, frame: setBlockMode(f.frame, id, mode) } : f));
+};
 const switchMode = (h: DockBlock, mode: DockMode): DockNode => {
   // 变成容器：一格一个。分组与选中留在身后 —— 容器的每一格本来就是一个窗口。toolbar 也一样：
   // 一条 toolbar 摊成容器，就是若干条各自独立的窗口，没有哪一格继承那个形状。
@@ -664,7 +900,7 @@ const switchMode = (h: DockBlock, mode: DockMode): DockNode => {
 // 条上那颗小按钮选的，所以得跟着窗一起存。容器里不问方向 —— 竖排块的格就是竖条（限宽），横排块
 // 的格就是横条（限高），这是块类型说的话。
 export const setToolbarDock = (dock: Dock, id: UnitId, on: boolean, dir?: 'h' | 'v'): Dock => {
-  const fi = dock.floats.findIndex(f => f.id === id);
+  const fi = dock.floats.findIndex(f => !f.frame && f.id === id);
   if (fi >= 0) {
     return {
       ...dock,
@@ -672,6 +908,11 @@ export const setToolbarDock = (dock: Dock, id: UnitId, on: boolean, dir?: 'h' | 
         ? { ...f, tb: on ? true : undefined, tbDir: dir ?? f.tbDir ?? 'h' }
         : f)),
     };
+  }
+  // 住在子窗口那一页里：同一个开关，写进那一层。
+  const sub = dock.floats.find(f => f.frame && dockAllUnits(f.frame).includes(id));
+  if (sub?.frame) {
+    return { ...dock, floats: dock.floats.map(f => (f === sub ? { ...f, frame: setToolbarDock(f.frame!, id, on, dir) } : f)) };
   }
   return {
     ...dock,
@@ -692,8 +933,12 @@ export const setToolbarDock = (dock: Dock, id: UnitId, on: boolean, dir?: 'h' | 
 // `default` 块 / 浮窗上那颗很小的横竖按钮。容器里没有这一手（方向由容器的轴说了算），所以这里
 // 对容器什么也不做 —— 一颗按下去没反应的方向键比没有这颗键更让人糊涂。
 export const setToolbarDirDock = (dock: Dock, id: UnitId, dir: 'h' | 'v'): Dock => {
-  const fi = dock.floats.findIndex(f => f.id === id);
+  const fi = dock.floats.findIndex(f => !f.frame && f.id === id);
   if (fi >= 0) return { ...dock, floats: dock.floats.map((f, i) => (i === fi ? { ...f, tbDir: dir } : f)) };
+  const sub = dock.floats.find(f => f.frame && dockAllUnits(f.frame).includes(id));
+  if (sub?.frame) {
+    return { ...dock, floats: dock.floats.map(f => (f === sub ? { ...f, frame: setToolbarDirDock(f.frame!, id, dir) } : f)) };
+  }
   return {
     ...dock,
     tree: rewriteHolder(dock.tree, id, h => (h.t === 'b' && h.mode === 'default' ? { ...h, tbDir: dir } : h)),
@@ -814,15 +1059,13 @@ export const shapeOf = (dock: Dock, ids: readonly UnitId[]): DragShape => {
 // 原则 —— 只动 `ids`/`groups` 的插入点，块的 mode、sz、其余格的计数全不动，容器仍是同一个容器。
 // `k` 是**原序列**的格下标（gapIndexAt 的口径：落在第 i、i+1 格之间就是 i+1），不存在"原位放回"
 // 的问题 —— 手里的是别处的窗口，插哪儿都是新位置。
-export const insertCellAt = (dock: Dock, ids: readonly UnitId[], memberId: UnitId, k: number): Dock => {
+export const insertCellAt = (dock: Dock, ids: readonly UnitId[], memberId: UnitId, k: number,
+  carriedShape?: DragShape): Dock => {
   if (!ids.length || ids.includes(memberId)) return dock;
   // 搬来的这一格如果本来就是一条 toolbar，搬过去还是 —— 形状跟着**格**走，不跟着容器走。
-  const shape = shapeOf(dock, ids);
+  const shape = carriedShape ?? shapeOf(dock, ids);
   const srcTb = shape.tb ? 1 : 0;
-  const rest: Dock = {
-    tree: detachAll(dock.tree, ids) || dock.tree,
-    floats: dock.floats.filter(f => !ids.includes(f.id)),
-  };
+  const rest: Dock = takeUnits(dock, ids);
   return {
     ...rest,
     tree: rewriteHolder(rest.tree, memberId, h => {
@@ -924,14 +1167,13 @@ export function placeInTree(n: DockNode, id: UnitId, axis: 'v' | 'h', before: bo
 // Edges split (reusing the nearest ancestor split that already runs that way, so repeated drops make a
 // flat row rather than a spiral of nesting); the centre adds them to the block — more tabs, or more
 // windows in a container.
-export const dropUnits = (dock: Dock, ids: readonly UnitId[], targetId: UnitId, zone: Zone, fit?: DockFit): Dock => {
+export const dropUnits = (dock: Dock, ids: readonly UnitId[], targetId: UnitId, zone: Zone,
+  fit?: DockFit, carriedShape?: DragShape): Dock => {
   if (!ids.length || ids.includes(targetId)) return dock;
   // 搬过去的是什么**形状**（一条 toolbar / 一扇普通窗），落点说了不算，拖来的那扇窗说了算。
-  const shape = shapeOf(dock, ids);
-  const rest: Dock = {
-    tree: detachAll(dock.tree, ids) || dock.tree,
-    floats: dock.floats.filter(f => !ids.includes(f.id)),
-  };
+  // 跨子窗口拖进来时，`ids` 已经不在这页上了 —— 形状从拖拽本身带过来。
+  const shape = carriedShape ?? shapeOf(dock, ids);
+  const rest: Dock = takeUnits(dock, ids);
   if (zone === 'center') return { ...rest, tree: addAllToBlock(rest.tree, targetId, ids, shape) };
   const axis = zoneAxis(zone);
   const leaf: DockBlock = { ...blockOf(ids), ...(shape.tb ? { tb: true, tbDir: shape.dir } : null) };
@@ -955,10 +1197,7 @@ export const mergeIntoMember = (
 ): Dock => {
   // 合到自己身上没有意义（它已经在那个 tab 组里了），宁可不做事也不给一个错的结果。
   if (!ids.length || ids.includes(memberId)) return dock;
-  const rest: Dock = {
-    tree: detachAll(dock.tree, ids) || dock.tree,
-    floats: dock.floats.filter(f => !ids.includes(f.id)),
-  };
+  const rest: Dock = takeUnits(dock, ids);
   return {
     ...rest,
     tree: rewriteHolder(rest.tree, memberId, h => {
@@ -989,33 +1228,50 @@ export const mergeIntoMember = (
 // leaving has no anchor and no edge to be dragged out of — it IS what is moving — and the caller drops
 // the gesture rather than tearing a hole in the layout.
 export const dragOutUnits = (dock: Dock, ids: readonly UnitId[], anchor: UnitId, zone: Zone, fit?: DockFit): Dock => {
-  const rest: Dock = {
-    tree: detachAll(dock.tree, ids) || dock.tree,
-    floats: dock.floats.filter(f => !ids.includes(f.id)),
-  };
+  const rest: Dock = takeUnits(dock, ids);
   return { ...rest, tree: placeInTree(rest.tree, anchor, zoneAxis(zone), zone === 'top' || zone === 'left', blockOf(ids), fit) };
 };
 export const dragOutOfDock = (dock: Dock, dragged: UnitId, anchor: UnitId, zone: Zone, fit?: DockFit): Dock =>
   dragOutUnits(dock, [dragged], anchor, zone, fit);
-export const floatOf = (dock: Dock, id: UnitId) => dock.floats.find(f => f.id === id);
+export const floatOf = (dock: Dock, id: UnitId) =>
+  dock.floats.find(f => !f.frame && f.id === id);
 // The first pop-out lands to the right of the column; each further one cascades so several windows
 // stay readable instead of stacking on top of each other. A workbench asks for a bigger box than a
 // settings unit does — the page decides, because only the page knows what its content is.
-export const floatSpot = (n: number, x: number, y: number): { x: number; y: number } => ({
-  x: Math.round(Math.min(Math.max(8, x), Math.max(8, window.innerWidth - FLOAT_W - 8))),
-  y: Math.round(Math.min(Math.max(8, y + n * 22), Math.max(8, window.innerHeight - 120))),
+// `win` 是这一页所在的窗口：子窗口掉的浮窗要在**它自己**的视口里摆，不能拿主页面的尺寸算。
+export const floatSpot = (n: number, x: number, y: number, win: Window = window): { x: number; y: number } => ({
+  x: Math.round(Math.min(Math.max(8, x), Math.max(8, win.innerWidth - FLOAT_W - 8))),
+  y: Math.round(Math.min(Math.max(8, y + n * 22), Math.max(8, win.innerHeight - 120))),
 });
-export const popOutDock = (dock: Dock, id: UnitId, x?: number, y?: number, w?: number, h?: number): Dock => {
-  if (floatOf(dock, id)) return dock;
-  const n = dock.floats.length;
-  const spot = floatSpot(n, x ?? (window.innerWidth - (w ?? FLOAT_W) - 40), y ?? 90);
-  const f: DockFloat = { id, ...spot, w: w ?? FLOAT_W, h: h ?? 320 };
-  return { tree: detach(dock.tree, id) || dock.tree, floats: [...dock.floats, f] };
+// 弹出一扇窗。`ids` 是这一扇窗里的**全部**单元 —— 一条 tab 组被窗口化时整组一起走，落进子窗口
+// 仍是同一行的 tab；一格一扇窗时它就是一个单元，和老行为完全一致。
+// 子窗口的正文是一整页（`frame`）：现在只有这一扇窗，但用户可以往里再拖、再分割。
+export const popOutUnitsDock = (dock: Dock, ids: readonly UnitId[], x?: number, y?: number,
+  w?: number, h?: number, child?: boolean, winKey?: string, win: Window = window): Dock => {
+  if (!ids.length) return dock;
+  const rest = takeUnits(dock, ids);
+  const n = rest.floats.length;
+  const spot = floatSpot(n, x ?? (win.innerWidth - (w ?? FLOAT_W) - 40), y ?? 90, win);
+  const f: DockFloat = {
+    id: ids[0], ...spot, w: w ?? FLOAT_W, h: h ?? 320,
+    frame: { tree: blockOf(ids), floats: [] },
+    win: winKey ?? newFloatKey(),
+    ...(child ? { child: true as const } : null),
+  };
+  return { ...rest, floats: [...rest.floats, f] };
+};
+export const popOutDock = (dock: Dock, id: UnitId, x?: number, y?: number, w?: number, h?: number,
+  child?: boolean, winKey?: string, win: Window = window): Dock => {
+  if (floatContaining(dock, id)) return dock;
+  return popOutUnitsDock(dock, [id], x, y, w, h, child, winKey, win);
 };
 export const setFloatDock = (dock: Dock, id: UnitId, patch: Partial<DockFloat>): Dock => ({
   ...dock,
-  floats: dock.floats.map(f => f.id === id ? { ...f, ...patch } : f),
+  floats: dock.floats.map(f => (!f.frame && f.id === id ? { ...f, ...patch } : f)),
 });
+// 子窗口那一页自己也要挪一扇页面内浮窗 — 逐层找到 key 所在的那一页再写。
+export const setFloatDockAt = (dock: Dock, key: string, patch: Partial<DockFloat>): Dock =>
+  mapFloatsDeep(dock, f => (floatKey(f) === key ? { ...f, ...patch } : f));
 // The mirror of appendToRow, and the reason a document does not land in the settings column when it
 // is put back from a window: the work area is the row, not the stack.
 export function appendToRow(n: DockNode, leaf: DockNode): DockNode | null {
@@ -1029,22 +1285,42 @@ export function appendToRow(n: DockNode, leaf: DockNode): DockNode | null {
 // Putting a unit back means the place the user can see it from: a container is where stacked units live,
 // so a panel joins the first one it can find — another stacked window there, or another tab. A document
 // goes back to the work area, and never into the settings column.
+// 一个单元此刻是什么形状：它可能在页面内浮窗上、可能在树里、也可能住在某扇子窗口的那一页里。
+const shapeInDock = (dock: Dock, id: UnitId): DragShape | null => {
+  const f = dock.floats.find(x => !x.frame && x.id === id);
+  if (f) return { tb: !!f.tb, dir: f.tbDir ?? 'h' };
+  if (dockUnits(dock.tree).includes(id)) return shapeOf({ tree: dock.tree, floats: [] }, [id]);
+  for (const g of dock.floats) {
+    if (!g.frame) continue;
+    const r = shapeInDock(g.frame, id);
+    if (r) return r;
+  }
+  return null;
+};
 export const dockBackDock = (dock: Dock, id: UnitId): Dock => {
   // 泊回来的是不是一条 toolbar：浮窗自己身上写着（用户在浮窗上也切过），泊回布局还是这个形状。
-  const f = dock.floats.find(x => x.id === id);
-  const shape: DragShape = { tb: !!f?.tb, dir: f?.tbDir ?? 'h' };
-  const floats = dock.floats.filter(x => x.id !== id);
+  const shape: DragShape = shapeInDock(dock, id) ?? { tb: false, dir: 'h' };
   const leaf: DockBlock = { ...block(id), ...(shape.tb ? { tb: true, tbDir: shape.dir } : null) };
-  // Detach BEFORE appending, not after: the point of the detach is that a unit already in the tree
-  // cannot end up in it twice, but appending first means the detach removes the node just added —
-  // which is how "dock this window back" used to make the unit vanish instead of dock it.
-  const rest = detach(dock.tree, id) || dock.tree;
-  const busiest = biggestBlock(rest);
-  const home = busiest ? () => addToBlock(rest, busiest.ids[0], id, shape) : () => (leaf as DockNode);
+  // 从**任何地方**拿走（树、页面内浮窗、子窗口里那一页），再从主页面这边放回去。先拿后放：
+  // 先放会让随后的拿走把刚放进去的那一格删掉 —— "泊回布局"曾经就是这样让单元蒸发的。
+  const rest = takeUnits(dock, [id]);
+  const tree0 = rest.tree;
+  const busiest = biggestBlock(tree0);
+  const home = busiest ? () => addToBlock(tree0, busiest.ids[0], id, shape) : () => (leaf as DockNode);
   const tree = docUidOf(id)
-    ? appendToWork(rest, leaf) || appendToRow(rest, leaf) || home()
-    : appendToContainer(rest, id, shape) || home();
-  return { tree, floats };
+    ? appendToWork(tree0, leaf) || appendToRow(tree0, leaf) || home()
+    : appendToContainer(tree0, id, shape) || home();
+  return { tree, floats: rest.floats, hidden: dock.hidden };
+};
+// 一份布局里所有的浮窗（含子窗口那一页里的）全部泊回主布局。窗口化只属于 Kolid Desktop：
+// 浏览器 / 普通 iframe 读到带浮窗的存档时走这一条，不再用页面内浮窗去假装独立窗口。
+export const dockAllFloatsBack = (dock: Dock): Dock => {
+  let out = dock;
+  // 一次把所有浮窗（含子窗口里的嵌套浮窗）里的单元**去重**收成一份名单：按浮窗逐条泊回会把
+  // 已经随外层收回去的单元再挪一次位置（嵌套浮窗的单元在外层那一趟就已经进树了）。
+  const ids = new Set<UnitId>(allFloats(dock).flatMap(floatUnits));
+  for (const id of ids) out = dockBackDock(out, id);
+  return out;
 };
 // The node at `path`, counted in child indices from the root — the read to sizeAt's write, and how a
 // handle finds the split it belongs to without walking the tree.
@@ -1167,9 +1443,30 @@ export const zoneOf = (r: DOMRect, x: number, y: number, edge: number = ZONE_EDG
 // `known` 是页面当下"拿得出这份单元"的判断（DockRules.known）。带上它时，一整块全都尚未验证的
 // 文档单元的块也算空：刷新后工作台播报前的半秒里，存档里画布窗口的位置在模型里留着，屏幕上却不画
 // 一扇标题为 "doc:1" 的空窗占地方 —— 播报一到，块自然回来。探针不带这个参数，口径不变。
-export const dead = (n: DockNode, known?: (id: UnitId) => boolean): boolean => {
-  if (n.t === 's') return !n.ks.some(k => !dead(k, known));
-  return !!known && !n.ids.some(known);
+export const dead = (n: DockNode, known?: (id: UnitId) => boolean,
+  hidden?: ReadonlySet<UnitId>): boolean => {
+  if (n.t === 's') return !n.ks.some(k => !dead(k, known, hidden));
+  const vis = hidden ? n.ids.filter(id => !hidden.has(id)) : n.ids;
+  if (!vis.length) return true;
+  return !!known && !vis.some(known);
+};
+
+// ── 显示 / 隐藏（可见性，不是成员）────────────────────────────────────────────────────────
+// 被隐藏的单元仍留在树/浮窗里：显示时回到原来的格子、原来的 tab 位，浮窗回到原坐标。
+// 子窗口化之后被关掉的窗由页面先把引擎/浮窗收回来，再调用 `setUnitHidden`。
+export const hiddenOf = (dock: Dock): UnitId[] => dock.hidden ?? [];
+export const isUnitHidden = (dock: Dock, id: UnitId): boolean => (dock.hidden ?? []).includes(id);
+export const setUnitHidden = (dock: Dock, id: UnitId, hidden: boolean): Dock => {
+  const cur = dock.hidden ?? [];
+  if (cur.includes(id) === hidden) return dock;
+  return { ...dock, hidden: hidden ? [...cur, id] : cur.filter(x => x !== id) };
+};
+// 显示一个单元。它若已经不在树/浮窗里（老存档、或曾经被拿走），按文档回工作区、
+// 面板回容器/最长块的老规矩放回去。
+export const showUnit = (dock: Dock, id: UnitId): Dock => {
+  const next = setUnitHidden(dock, id, false);
+  if (dockAllUnits(next).includes(id)) return next;
+  return dockBackDock(next, id);
 };
 
 // A block's size along its parent's axis: the one the user dragged, or a share of what is left. NOTHING
@@ -1201,12 +1498,12 @@ export const DOCK_GROW_MIN_H = 160;
 // 补的是**位置**，不是内容：只往树里塞还没出现的 id，已经摆好的窗一格都不动。
 export function ensureUnits(dock: Dock, ids: readonly UnitId[]): Dock {
   let tree = dock.tree;
-  const present = () => dockUnits(tree).concat(dock.floats.map(f => f.id));
+  const present = () => dockAllUnits({ tree, floats: dock.floats }).concat(dock.hidden ?? []);
   for (const id of ids) {
     if (present().includes(id)) continue;
     const b = biggestBlock(tree);
     if (!b) break;
-    tree = dropInDock({ tree, floats: dock.floats }, id, b.ids[0], 'center').tree;
+    tree = dropInDock({ tree, floats: dock.floats, hidden: dock.hidden }, id, b.ids[0], 'center').tree;
   }
   return tree === dock.tree ? dock : { ...dock, tree };
 }

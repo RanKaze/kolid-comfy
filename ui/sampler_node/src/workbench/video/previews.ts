@@ -171,10 +171,11 @@ export const ensureStrip = (src: string, srcDuration: number): Promise<string[] 
 async function buildStrip(src: string, d: number, n: number,
   onPartial: (urls: string[]) => void): Promise<string[] | null> {
   const dur = Math.max(0, d || 0);
-  // 两条伺服路都认：工程媒体库 `/api/vid_media/` 与**全局资产库** `/api/global_media/`
-  // （Assets 窗接在后面那一段共享库）。后者要带 `d=global`，后端才知道去哪个落点取文件。
+  // 三条伺服路都认：工程媒体库 `/api/vid_media/`、全局资产库 `/api/global_media/`
+  // 与 Eagle 库 `/api/eagle_media/`（字节就地读，不复制）。后者的后端解析在 `_vid_media_path`。
   const isGlobal = src.startsWith('/api/global_media/');
-  const media = (src.startsWith('/api/vid_media/') || isGlobal) ? (src.split('/').pop() || '') : '';
+  const local = src.startsWith('/api/vid_media/') || isGlobal || src.startsWith('/api/eagle_media/');
+  const media = local ? (src.split('/').pop() || '') : '';
   // 后端在（有 ffmpeg）→ 请求整条落盘的缩略图。**但绝不空等**：后端一遍 ffmpeg 抽 96 帧
   // 1080p 要十几秒，这十几秒里用户已经在拖游标了 —— 所以客户端的 fastSeek 抽条**同时
   // 照跑**（谁先到先用，后端整条到了再整体替换）。渐进发布的意义就在这：任何时刻

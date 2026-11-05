@@ -5,6 +5,7 @@ import { blocksToGraph, graphToBlocks, sanitizeGraph, type PipelineGraph } from 
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, preprocessFlag } from './types';
 import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendAttrOpen, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUiOf, setBlendUi, setBlendActiveUid, dropBlendUi, getActiveBlendUid } from './workbench/store';
+import { childIds, engineWindow, forgetChild, onChildDocs, onChildReady, onEngineMessage, sendForUid, sendLocal, setActiveUid as setEngineActiveUid, setLocalIframe } from './dock/docEngine';
 import { parseDocAssets, setDocAssets, dropDocAssets } from './workbench/docAssets';
 import { getVidStagingOverlay, dropVidProcState } from './workbench/video/procRun';
 import { dropVidProcPicks } from './workbench/video/procPicks';
@@ -12,7 +13,6 @@ import { bumpAssets } from './workbench/video/assetsTick';
 import { setHover as setCutHover } from './workbench/cutStore';
 
 const POLL_INTERVAL = 500;
-const PROMPT_POLL_INTERVAL = 1500;
 
 /** 行描述符过界的形状闸：读不出数组就当这一摞是空的。其余字段交给单元自己判（每一个都写了默认值），
  *  这里不替页面重述一遍它的契约 —— 那才是第二份真相。唯一例外是菜单那一格：它的六个字段决定条目
@@ -320,22 +320,14 @@ const stagingUiOf = (v: unknown): BlendStaging => {
 
 const App: React.FC = () => {
   const [tab, setTab] = useState<Tab>('draw');
-  const tabRef = useRef<Tab>('draw');
-  useEffect(() => { tabRef.current = tab; }, [tab]);
 
   const [config, setConfig] = useState<ServerConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [promptReady, setPromptReady] = useState(false);
   const [detailStatus, setDetailStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [staging, setStaging] = useState<StagingItem[]>([]);
   const [showFinishDialog, setShowFinishDialog] = useState(false);
   const [finished, setFinished] = useState(false);
-  const [syncingTab, setSyncingTab] = useState(false);
-  const syncingTabRef = useRef(false);
-  useEffect(() => { syncingTabRef.current = syncingTab; }, [syncingTab]);
-  // Track whether the latest prompt-confirmed was consumed by handleTabChange sync
-  const consumedPromptConfirmedRef = useRef(false);
   const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
   const [pipelinePackages, setPipelinePackages] = useState<PipelinePackageInfo[]>([]);
   /** Draw 页 Pipeline Settings：只剩选中项。`overrides` 是旧版按 pipeline 名字存的那批覆盖，
@@ -369,13 +361,13 @@ const App: React.FC = () => {
     setActionLog(prev => [...prev, { at: Date.now(), text, kind }].slice(-32));
   }, []);
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
-  // Prompt tab 那份 LoRA 卡是 iframe 自己在 mount 时拉的副本：后端换 pipeline 时把 lora_regex
+  // Prompt 窗那份 LoRA 卡是 iframe 自己在 mount 时拉的副本：后端换 pipeline 时把 lora_regex
   // 换了代（并重扫了磁盘），这页看不见。`loraEpochRef` = 本页已知的当前代数，
   // `promptLoraEpochRef` = 那份副本是哪一代拉的，两者不等就是脏 —— 只在这一刻才让它重拉。
   const loraEpochRef = useRef(0);
   const promptLoraEpochRef = useRef(0);
-  // 唯一的一处「让 Prompt tab 跟上现在的 pipeline」。`fromServer` = 先现拉一次 /api/config 才比
-  // 代数：进 tab 那一趟要用它，因为 /api/status 只在运行中轮询，闲置时本页手上的代数可能是旧的。
+  // 唯一的一处「让 Prompt 窗跟上现在的 pipeline」。`fromServer` = 先现拉一次 /api/config 才比
+  // 代数：页面刚起来那一趟要用它，因为 /api/status 只在运行中轮询，闲置时本页手上的代数可能是旧的。
   // 走 iframe 现成的 'reload-lora-data'（只重拉 lora，保住这一页没保存的选择），不是全量
   // 'kolid-reload-data'（那会把选择整片清空）。
   const flushPromptPipeline = useCallback(async (fromServer = false) => {
@@ -383,7 +375,7 @@ const App: React.FC = () => {
       try {
         const cfg: ServerConfig = await fetch('/api/config').then(r => r.json());
         if (typeof cfg?.pipeline_lora_epoch === 'number') loraEpochRef.current = cfg.pipeline_lora_epoch;
-      } catch { /* 问不到就不动，下一次进 tab 再问 */ }
+      } catch { /* 问不到就不动，下一次进页面再问 */ }
     }
     if (loraEpochRef.current === promptLoraEpochRef.current) return;
     const win = promptIframeRef.current?.contentWindow;
@@ -399,6 +391,17 @@ const App: React.FC = () => {
   // the live one. The iframe owns them — this is only the mirror it re-sends whenever the list, the
   // active one or the IO lock changes.
   const [blendDocs, setBlendDocs] = useState<BlendDocs>(EMPTY_BLEND_DOCS);
+  // 被弹进 owned 子窗口、活在**另一台 workbench** 里的文档。它们已经不在本地引擎的 blend-docs
+  // 里了，但宿主仍要为它们画 dock 窗、按 uid 分桶状态 —— 所以单独记着，和本地播报合并。
+  const [detachedDocs, setDetachedDocs] = useState<BlendDoc[]>([]);
+  const detachedRef = useRef<BlendDoc[]>([]);
+  detachedRef.current = detachedDocs;
+  const detachedActiveRef = useRef<number | null>(null);
+  // 本机 workbench iframe 的登记：命令路由要知道另一头是谁。
+  useEffect(() => {
+    setLocalIframe(blendIframeRef.current);
+    return () => setLocalIframe(null);
+  }, []);
   // 会话恢复的闸门：开机对盘上活动集的那次问询结束前，播报不落盘（否则工作台的空播报
   // 会把记录抢先覆写成空，恢复永远读到空）。写口在 blend-docs 播报处。
   const restoreGate = useRef(false);
@@ -409,8 +412,20 @@ const App: React.FC = () => {
   // page, so this is all a background window can show until the engine is scoped per document.
   const [docStills, setDocStills] = useState<Record<number, string>>({});
   const sendDocCommand = useCallback((action: BlendDocCommand, uid?: number) => {
-    blendIframeRef.current?.contentWindow?.postMessage(
-      { type: 'blend-doc-command', action, uid: uid === undefined ? null : uid }, '*');
+    // 活跃文档可能住在本机引擎，也可能住在弹窗里那台引擎：按 uid 选窗口。
+    // activate 还要改宿主的"谁在台前" —— 子引擎的 blend-docs 不会进主列表（见 onChildDocs）。
+    if (action === 'activate' && typeof uid === 'number') {
+      detachedActiveRef.current = detachedRef.current.some(d => d.uid === uid) ? uid : null;
+    }
+    const msg = { type: 'blend-doc-command', action, uid: uid === undefined ? null : uid };
+    // New / Load / Import 产出的文档要进**宿主那份文档表**；子引擎里的新文档宿主看不见
+    // （子引擎只报它那一份 detached 文档）。所以这三条永远打本地引擎，并把台前让给新文档。
+    if (action === 'new' || action === 'load' || action === 'import') {
+      detachedActiveRef.current = null;
+      sendLocal(msg);
+      return;
+    }
+    sendForUid(msg, uid ?? null);
   }, []);
   // 图层 / 工具 / 属性面板搬进宿主之后，控件按下的那一下发这一条；页面里那张 UI_COMMANDS 表是它唯一
   // 的落点 —— 一个动作仍然只有一个执行处，只是按下的人换了地方。载荷由 `BlendUiSend` 那个泛型绑死：
@@ -419,9 +434,48 @@ const App: React.FC = () => {
   const sendBlendUiCommand: BlendUiSend = useCallback(<A extends BlendUiAction,>(action: A, value?: BlendUiPayloads[A]) => {
     // 命令带着**此刻的活跃文档** uid 出门（拍板③）：页面按它校验 —— 攒在事件队列里的过期命令
     // （用户按下之后、执行之前切了 tab）会被页面当垃圾丢掉，不再打进刚切走的文档。
-    blendIframeRef.current?.contentWindow?.postMessage(
-      { type: 'blend-ui-command', uid: getActiveBlendUid(), action, value }, '*');
+    const uid = getActiveBlendUid();
+    sendForUid({ type: 'blend-ui-command', uid, action, value }, uid);
   }, []);
+  // ── 文档窗弹进子窗口之后的宿主侧记录 ──
+  // 子窗口里那台 workbench 的 blend-docs 不进主 handler（那会把它那一份当成全体），
+  // 由 docEngine 单独报到这里：更新 dirty/名字，空表 = 文档被关了。
+  const onDocDetached = useCallback((doc: BlendDoc) => {
+    // ref 当场更新：紧接着来的本地 blend-docs（卸下文档那一趟）若读到旧列表，会把整格剪掉。
+    detachedRef.current = [...detachedRef.current.filter(d => d.uid !== doc.uid), doc];
+    setDetachedDocs(detachedRef.current);
+    detachedActiveRef.current = doc.uid;
+    setBlendDocs(prev => ({
+      ...prev, activeUid: doc.uid,
+      docs: prev.docs.some(d => d.uid === doc.uid) ? prev.docs : [...prev.docs, doc],
+    }));
+    setBlendActiveUid(doc.uid);
+    setEngineActiveUid(doc.uid);
+  }, []);
+  const onDocDocked = useCallback((uid: number) => {
+    detachedRef.current = detachedRef.current.filter(d => d.uid !== uid);
+    setDetachedDocs(detachedRef.current);
+    if (detachedActiveRef.current === uid) detachedActiveRef.current = null;
+    forgetChild(uid);
+  }, []);
+  const onDocLost = useCallback((uid: number) => {
+    onDocDocked(uid);
+    setBlendDocs(prev => ({
+      ...prev, docs: prev.docs.filter(d => d.uid !== uid),
+      activeUid: prev.activeUid === uid ? null : prev.activeUid,
+    }));
+    if (getActiveBlendUid() === uid) setBlendActiveUid(null);
+  }, [onDocDocked]);
+  useEffect(() => onChildDocs((uid, docs, _active, busy) => {
+    const doc = docs.find(d => d.uid === uid);
+    if (!doc) { onDocLost(uid); return; }
+    detachedRef.current = detachedRef.current.map(d => d.uid === uid ? { ...d, ...doc } : d);
+    setDetachedDocs(detachedRef.current);
+    setBlendDocs(prev => ({
+      ...prev, busy: prev.busy || busy,
+      docs: prev.docs.map(d => d.uid === uid ? { ...d, ...doc } : d),
+    }));
+  }), [onDocLost]);
   const stagingRef = useRef<StagingItem[]>([]);
   useEffect(() => { stagingRef.current = staging; }, [staging]);
   // Which detailer result has already been handed to the workbench. The done branch below is
@@ -614,10 +668,8 @@ const App: React.FC = () => {
 
   // Push staging list changes into the Blend workbench (its strip renders from this mirror).
   useEffect(() => {
-    blendIframeRef.current?.contentWindow?.postMessage({
-      type: 'blend-staging',
-      items: staging,
-    }, '*');
+    // 图池属于活跃文档：它若住在子窗口里，镜像要送进那台引擎。
+    sendForUid({ type: 'blend-staging', items: staging }, getActiveBlendUid());
   }, [staging]);
 
   // Processor 工具的可选接口（Interface tab 里开着 Processor 模式的那些）→ 工作台。
@@ -628,9 +680,7 @@ const App: React.FC = () => {
   //       Processor 的 Interface 枚举就一直空着，只有回 Interface tab 重拨一下开关才刷出来。
   // modes 以 interfaceMeta 为准：开关一拨，前端这份 meta 立刻是真值，而 interfaces 是后端
   // 快照（toggle 只 POST 配置、不重拉 /api/package），照它过滤会把刚打开的接口又滤掉。
-  const pushProcessors = useCallback(() => {
-    const win = blendIframeRef.current?.contentWindow;
-    if (!win) return;
+  const pushProcessors = useCallback((target?: Window | null) => {
     const processors = interfaces
       .filter(itf => {
         const modes = interfaceMeta[itf.name]?.modes;
@@ -648,54 +698,45 @@ const App: React.FC = () => {
         // Allow List：开着时 image 输入行多一枚 Video 候选（视频模式逐帧拆 list），输出也是 list。
         allow_list: !!(itf.allow_list ?? interfaceMeta[itf.name]?.allow_list),
       }));
-    win.postMessage({ type: 'blend-processors', processors }, '*');
+    const msg = { type: 'blend-processors', processors };
+    if (target) { try { target.postMessage(msg, '*'); } catch { /* gone */ } return; }
+    // 没有指定目标 = 列表变了：本机与每台子引擎都要跟上。
+    sendLocal(msg);
+    for (const uid of childIds()) sendForUid(msg, uid);
   }, [interfaces, interfaceMeta]);
+  // 工作台 boot 时要的那一包：config + presets + processors。本地引擎在 blend-request-init
+  // 里要，子引擎在握手成功后也要一份（它的 parent 是弹窗，不能指望本地那份消息）。
+  const pushEngineInit = useCallback((target: Window | null) => {
+    if (!target) return;
+    try {
+      target.postMessage({
+        type: 'blend-config',
+        hasTagger: !!config?.has_tagger,
+        hasDetector: !!config?.has_detector,
+        mask_required: preprocessFlag(blockSets, activeBlockSetId, 'enable_mask', true),
+        staging: stagingRef.current,
+      }, '*');
+      target.postMessage({
+        type: 'blend-pipeline-presets',
+        presets: blockSets.map((s: BlockSet) => ({
+          id: s.id, name: s.name,
+          enable_mask: preprocessFlag(blockSets, s.id, 'enable_mask', true),
+          enable_fit: preprocessFlag(blockSets, s.id, 'enable_fit', false),
+          dynamic_layer: preprocessFlag(blockSets, s.id, 'enable_dynamic_layer', false),
+          layer_limit: preprocessFlag(blockSets, s.id, 'dynamic_layer_limit', true),
+          layer_ctx: preprocessFlag(blockSets, s.id, 'dynamic_layer_ctx', true),
+        })),
+        active_id: activeBlockSetId,
+      }, '*');
+      pushProcessors(target);
+    } catch { /* gone */ }
+  }, [config, blockSets, activeBlockSetId, pushProcessors]);
+  // 子引擎握手完成（docEngine 的 pong）后补一发 init。
+  useEffect(() => onChildReady((uid) => pushEngineInit(engineWindow(uid))), [pushEngineInit]);
 
-  // Leaving the prompt tab flushes the prompt editor into prompt_server first.
+  // Prompt 编辑器的落盘由 run 前的 syncPrompt 与它自己的保存负责；页面只剩"切 tab"这一件事。
   const handleTabChange = useCallback((newTab: Tab) => {
-    const needPromptSync = tab === 'prompt' && newTab !== 'prompt';
-    if (!needPromptSync) {
-      setTab(newTab);
-      // 打开 Prompt tab = 主动对一次账：这一页显示不显示是用户说了算，程序不该替他留着脏数据。
-      if (newTab === 'prompt') void flushPromptPipeline(true);
-      return;
-    }
-    setSyncingTab(true);
-    const targetTab = newTab;
-    let syncDone = false;
-    const checkSyncDone = (event: MessageEvent) => {
-      if (event.data?.type !== 'prompt-synced') return;
-      syncDone = true;
-      window.removeEventListener('message', checkSyncDone);
-      setSyncingTab(false);
-      consumedPromptConfirmedRef.current = true;
-      setTab(targetTab);
-    };
-    window.addEventListener('message', checkSyncDone);
-    const iframe = promptIframeRef.current;
-    if (iframe?.contentWindow) iframe.contentWindow.postMessage({ type: 'sync-prompt' }, '*');
-    // Timeout fallback
-    setTimeout(() => {
-      if (syncDone) return;
-      window.removeEventListener('message', checkSyncDone);
-      setSyncingTab(false);
-      setTab(targetTab);
-    }, 3000);
-  }, [tab]);
-
-  // Poll prompt status (fallback)
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const res = await fetch('/api/has_prompt');
-        const data = await res.json();
-        if (!cancelled) setPromptReady(!!data.has_prompt);
-      } catch { /* ignore */ }
-    };
-    poll();
-    const interval = setInterval(poll, PROMPT_POLL_INTERVAL);
-    return () => { cancelled = true; clearInterval(interval); };
+    setTab(newTab);
   }, []);
 
   // Poll while the detailer runs, and drive the Blend workbench from the result.
@@ -704,7 +745,7 @@ const App: React.FC = () => {
     let cancelled = false;
     let idleTicks = 0;               // the action may not have reached the main loop yet
     const post = (payload: Record<string, any>) => {
-      blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-run-status', ...payload }, '*');
+      sendForUid({ type: 'blend-run-status', ...payload }, null);
     };
     const poll = async () => {
       try {
@@ -741,12 +782,12 @@ const App: React.FC = () => {
         // 轮询顺手同步，前端就不用再拉一次 config。
         if (typeof data.loaded_pipeline_name === 'string') setLoadedPipelineName(data.loaded_pipeline_name);
         if (data.architecture !== undefined) setArchitecture(data.architecture ?? null);
-        // 同一趟 run 里 lora_regex 也可能换了代（后端已经跟着重扫过 lora 了）：Prompt tab 开着
-        // 的话这一代当场送过去，别等用户下次进那个 tab。
+        // 同一趟 run 里 lora_regex 也可能换了代（后端已经跟着重扫过 lora 了）：Prompt 窗常驻，
+        // 这一代当场送过去，别等用户下次碰它。
         if (typeof data.pipeline_lora_epoch === 'number') loraEpochRef.current = data.pipeline_lora_epoch;
         void flushPromptPipeline();
-        // 同一趟里 lora_regex 也可能换了代（prompt server 已经跟着重扫过了）：Prompt tab 开着
-        // 的话这一代要当场送过去，别等用户下次进那个 tab。
+        // 同一趟里 lora_regex 也可能换了代（prompt server 已经跟着重扫过了）：Prompt 窗常驻，
+        // 这一代要当场送过去，别等用户下次碰它。
         if (typeof data.pipeline_lora_epoch === 'number') loraEpochRef.current = data.pipeline_lora_epoch;
         void flushPromptPipeline();
         if (st === 'running') {
@@ -777,10 +818,9 @@ const App: React.FC = () => {
               // The result goes back to the layer it came from as one more Image step on its
               // strip: the layer keeps its base pixels, mask and chains, and the new image is
               // placed where the backend drew it. No new layer, nothing overwritten.
-              blendIframeRef.current?.contentWindow?.postMessage(
-                { type: 'blend-append-image', layer_id: generateTarget.layerId, items: [item] }, '*');
+              sendForUid({ type: 'blend-append-image', layer_id: generateTarget.layerId, items: [item] }, null);
             } else {
-              blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-add-layer', items: [item] }, '*');
+              sendForUid({ type: 'blend-add-layer', items: [item] }, null);
             }
           } catch { /* the layer is a convenience, not a hard requirement */ }
         }
@@ -875,14 +915,17 @@ const App: React.FC = () => {
    * (blend_action) and then either archives it, tags it, or hands it to the detailer —
    * the composite is the Context Image, so nothing here switches context.
    */
-  const handleBlendAction = useCallback(async (body: Record<string, any>) => {
+  const handleBlendAction = useCallback(async (body: Record<string, any>, source?: Window | null) => {
     setError(null);
     // Several document windows can be open now, so a run has to say which canvas its pixels came out
     // of. The workbench stamps the document it was looking at into the payload; this only reads it out.
     if (body?.doc?.name) pushLog(`Run on 「${body.doc.name}」`);
+    const post = (msg: any) => {
+      if (source) { try { source.postMessage(msg, '*'); return; } catch { /* gone */ } }
+      sendForUid(msg, body?.doc?.uid ?? null);
+    };
     const reply = (success: boolean, extra: Record<string, any> = {}) => {
-      blendIframeRef.current?.contentWindow?.postMessage(
-        { type: 'blend-action-result', action: body?.action, success, ...extra }, '*');
+      post({ type: 'blend-action-result', action: body?.action, success, ...extra });
     };
     // A run reads the prompt from prompt_server, so flush the editor first.
     if (body.action === 'detailer') await syncPrompt();
@@ -915,8 +958,7 @@ const App: React.FC = () => {
       if (data && data.ref_request) {
         // Enable Edit 下 prompt 引用的 <Image N> 缺 ref image：后端没启动本次 run，
         // 由本页弹窗从工作区补图后再重跑（见 handleRefConfirm）。
-        blendIframeRef.current?.contentWindow?.postMessage(
-          { type: 'blend-ref-request', need: data.ref_request.need, have: data.ref_request.have }, '*');
+        post({ type: 'blend-ref-request', need: data.ref_request.need, have: data.ref_request.have });
         setRefSel([]);
         setRefRequest({ need: data.ref_request.need, have: data.ref_request.have, action: 'blend', body });
         return;
@@ -934,16 +976,14 @@ const App: React.FC = () => {
         // 合成结果只作为新的智能对象图层放回画布顶层（图层自带像素 dataURL，
         // 非破坏、可继续改 transform / 画 mask）；不再自动归档进工作区 ——
         // 工作区只收用户主动拖入的图。画布原有图层与 Mask 层一律不动。
-        blendIframeRef.current?.contentWindow?.postMessage(
-          { type: 'blend-add-layer', smart: true,
+        post({ type: 'blend-add-layer', smart: true,
             items: [{ name: data.name || 'Blend', src: data.image }],
-            note: 'Blend result added as a new smart layer' }, '*');
+            note: 'Blend result added as a new smart layer' });
       } else if (body.action === 'tag' || body.action === 'clear_tag') {
         // clear_tag returns an empty tag/tags/custom/temporary — pushing it through the same
         // auto-tag channel is exactly how a real tag lands, so the editor clears its parsing
         // tags and its Temporary Prompts alike.
         reply(true, { tag: data.tag });
-        setPromptReady(true);
         // Tag output belongs to the prompt stage: push it into the prompt editor's tags.
         setTimeout(() => {
           promptIframeRef.current?.contentWindow?.postMessage({
@@ -978,13 +1018,16 @@ const App: React.FC = () => {
    * `preset_id` names the pipeline preset (block set) that runs this Generate — the enum in the
    * workbench's Generate dialog. The backend resolves it per run; the preset's own start steps apply.
    */
-  const handleLayerGenerate = useCallback(async (body: Record<string, any>) => {
+  const handleLayerGenerate = useCallback(async (body: Record<string, any>, source?: Window | null) => {
     setError(null);
     if (body?.doc?.name) pushLog(`Generate on 「${body.doc.name}」`);
     const layerId = Number(body.layer_id);
+    const post = (msg: any) => {
+      if (source) { try { source.postMessage(msg, '*'); return; } catch { /* gone */ } }
+      sendForUid(msg, body?.doc?.uid ?? null);
+    };
     const reply = (success: boolean, extra: Record<string, any> = {}) => {
-      blendIframeRef.current?.contentWindow?.postMessage(
-        { type: 'blend-action-result', action: 'layer-generate', success, ...extra }, '*');
+      post({ type: 'blend-action-result', action: 'layer-generate', success, ...extra });
     };
     if (!body.image) { reply(false, { error: 'That layer has no image' }); return; }
     if (!body.mask) { reply(false, { error: 'That layer has no mask painted' }); return; }
@@ -1006,8 +1049,7 @@ const App: React.FC = () => {
       const data = await res.json();
       if (data && data.ref_request) {
         // 与 toolbar Run 同一条闸门：缺 ref image 时不启动，弹窗补图后重跑。
-        blendIframeRef.current?.contentWindow?.postMessage(
-          { type: 'blend-ref-request', need: data.ref_request.need, have: data.ref_request.have }, '*');
+        post({ type: 'blend-ref-request', need: data.ref_request.need, have: data.ref_request.have });
         setRefSel([]);
         setRefRequest({ need: data.ref_request.need, have: data.ref_request.have, action: 'layer', body });
         return;
@@ -1036,7 +1078,7 @@ const App: React.FC = () => {
     const req = refRequest;
     setRefRequest(null);
     if (!req || ids.length === 0) return;
-    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-insert-image-ids', ids }, '*');
+    sendForUid({ type: 'blend-insert-image-ids', ids }, null);
     const tokens = ids.map(id => `<image_id:${id}>`).join(' ');
     const prev = String(req.body.extra_prompt || '').trim();
     const body = { ...req.body, extra_prompt: prev ? `${prev} ${tokens}` : tokens };
@@ -1050,8 +1092,8 @@ const App: React.FC = () => {
   // come back through the poller.
   // Must stay ABOVE the postMessage listener below — the listener's dep array reads this
   // const, and a declaration below it is a TDZ ReferenceError on the first render.
-  const handleProcessorRun = useCallback(async (data: any) => {
-    const win = blendIframeRef.current?.contentWindow;
+  const handleProcessorRun = useCallback(async (data: any, source?: Window | null) => {
+    const win = source ?? engineWindow();
     if (!win) return;
     const idx = typeof data.interface_index === 'number' ? data.interface_index : -1;
     const inputs = Array.isArray(data.inputs) ? data.inputs : [];
@@ -1115,34 +1157,23 @@ const App: React.FC = () => {
       } else if (event.data?.type === 'kolid-prompt-library-changed') {
         // A prompt document wrote the shared library (词条 / 分类 / prefab / program). Every prompt
         // UI in this workbench is a separate document with its own React copy of /prompts_data, and
-        // the Prompt tab never re-fetches on its own — so relay to it. Skip the writer itself: it
-        // already patched its own state. Only the always-mounted Prompt tab can be stale while
+        // the Prompt 窗 never re-fetches on its own — so relay to it. Skip the writer itself: it
+        // already patched its own state. Only the always-mounted Prompt 窗 can be stale while
         // something else writes, since an open Query / preset dialog is modal over this page.
         if (event.source === promptIframeRef.current?.contentWindow) return;
         promptIframeRef.current?.contentWindow?.postMessage({ type: 'kolid-prompt-refresh-library' }, '*');
-      } else if (event.data?.type === 'prompt-confirmed') {
-        setPromptReady(true);
-        // Skip auto-advance if this was consumed by handleTabChange sync
-        if (consumedPromptConfirmedRef.current) {
-          consumedPromptConfirmedRef.current = false;
-          return;
-        }
-        // Auto-advance: prompt → draw
-        if (tabRef.current === 'prompt' && !syncingTabRef.current) {
-          setTab('draw');
-        }
       } else if (event.data?.type === 'blend-staging-changed') {
         // 工作区条目变了（工作台上传/删除）：重拉列表，effect 会自动镜像回工作台。
         queueStaging(() => refreshStaging());
       } else if (event.data?.type === 'blend-action') {
         // Blend workbench action: blend (archive) / tag / detailer
-        handleBlendAction(event.data);
+        handleBlendAction(event.data, event.source as Window | null);
       } else if (event.data?.type === 'blend-layer-generate') {
         // Generate from the layer row's context menu: that layer in, that layer out.
-        handleLayerGenerate(event.data);
+        handleLayerGenerate(event.data, event.source as Window | null);
       } else if (event.data?.type === 'blend-processor-run') {
         // Processor 工具的 Run：输入图上传为隐藏条目 → 离线 interface 执行，轮询回程。
-        void handleProcessorRun(event.data);
+        void handleProcessorRun(event.data, event.source as Window | null);
       } else if (event.data?.type === 'blend-cancel-run') {
         // 工作台的 Cancel（运行中才浮出）—— 打断当前 run
         // （后端用 ComfyUI 原生 interrupt：采样步 / block 边界 / Generate Text 后抛
@@ -1151,36 +1182,13 @@ const App: React.FC = () => {
       } else if (event.data?.type === 'blend-request-init') {
         // Seed the canvas with the current pipeline image, report the tagger availability,
         // and hand over the staging pool (its strip renders from this mirror).
-        const iframe = blendIframeRef.current;
-        if (!iframe?.contentWindow) return;
-        iframe.contentWindow.postMessage({
-          type: 'blend-config',
-          hasTagger: !!config?.has_tagger,
-          // Detector 工具总闸：节点没连 detector 时，工作台整块 Detector 工具隐藏。
-          hasDetector: !!config?.has_detector,
-          // 激活 tab 的 Enable Mask 总闸：关 = 整幅是工作区，Run 不要求先画 Mask 层。
-          mask_required: preprocessFlag(blockSets, activeBlockSetId, 'enable_mask', true),
-          staging: stagingRef.current,
-        }, '*');
-        // The Generate dialog's Pipeline Preset enum picks which block set runs the generate, so
-        // the workbench needs every set's id/name plus the tab that is active right now.
-        iframe.contentWindow.postMessage({
-          type: 'blend-pipeline-presets',
-          presets: blockSets.map((s: BlockSet) => ({
-            id: s.id, name: s.name,
-            enable_mask: preprocessFlag(blockSets, s.id, 'enable_mask', true),
-            enable_fit: preprocessFlag(blockSets, s.id, 'enable_fit', false),
-            // Dynamic Layer 三开关：▶ Run 分流到框选→建层→自动 Generate 的工作台侧流程。
-            dynamic_layer: preprocessFlag(blockSets, s.id, 'enable_dynamic_layer', false),
-            layer_limit: preprocessFlag(blockSets, s.id, 'dynamic_layer_limit', true),
-            layer_ctx: preprocessFlag(blockSets, s.id, 'dynamic_layer_ctx', true),
-          })),
-          active_id: activeBlockSetId,
-        }, '*');
-        // Processor 的 Interface 枚举同理：iframe 只在 load 时要一次，列表推送若早于它
-        // 就绪就已经丢在 about:blank 里了 —— 这里补一次，等于和 presets 一样对齐 init。
-        pushProcessors();
-        seedBlendCanvas();
+        // 谁来要 init 就回给谁：本地引擎和弹窗里的子引擎都要自己那份配置。
+        const src = event.source as Window | null;
+        if (!src) return;
+        const localSrc = src === blendIframeRef.current?.contentWindow;
+        pushEngineInit(src);
+        // 种子画面只喂本地引擎：子引擎会从 .cud 字节打开自己的文档，铺一张管线图会污染它。
+        if (localSrc) seedBlendCanvas();
       } else if (event.data?.type === 'blend-staging-upload') {
         // 工作台拖文件/Processor 产出：批量追加进图池。replace=true 是工作台换工程的
         // 整池换水（.cud 导入或 tab 激活）：后端先清可见条目、再按 ids 原样落回，
@@ -1205,7 +1213,7 @@ const App: React.FC = () => {
           // iframe 端只在「自己算出来的图变了」时才重发 —— 换一张长得一样的文档就会永久缺卡。
           // 这里点名让它重发一次（显示本来就吃本地那份，这条是给 run 的取图兜底）。
           if (replace) {
-            blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-guidance-republish' }, '*');
+            sendForUid({ type: 'blend-guidance-republish' }, null);
           }
         }));
       } else if (event.data?.type === 'blend-assets-changed') {
@@ -1247,8 +1255,15 @@ const App: React.FC = () => {
       } else if (event.data?.type === 'blend-docs') {
         // The workbench's document list, its live one and its IO lock, in one announcement — the host
         // draws a dock window per document and greys File while a .cud is being read or written.
-        const docs: BlendDoc[] = Array.isArray(event.data.docs) ? event.data.docs : [];
-        const au = typeof event.data.activeUid === 'number' ? event.data.activeUid : null;
+        const localDocs: BlendDoc[] = Array.isArray(event.data.docs) ? event.data.docs : [];
+        const localAu = typeof event.data.activeUid === 'number' ? event.data.activeUid : null;
+        // 本地引擎只报它手里的文档；弹进子窗口的那几份活在另一台引擎里（detachedRef），
+        // 合并后才是用户眼前的完整文档集。同名 uid 以本地为准（泊回时本地会重新接住它）。
+        const det = detachedRef.current;
+        const docs = [...localDocs];
+        for (const d of det) if (!docs.some(x => x.uid === d.uid)) docs.push(d);
+        const detachedActive = detachedActiveRef.current;
+        const au = detachedActive != null && det.some(d => d.uid === detachedActive) ? detachedActive : localAu;
         setBlendDocs({
           activeUid: au,
           busy: event.data.busy === true,
@@ -1258,6 +1273,7 @@ const App: React.FC = () => {
         });
         // 投影跟着播报走：面板这一瞬就换成目标文档离开时的那份快照（桶里留影），不等页面重推。
         setBlendActiveUid(au);
+        setEngineActiveUid(au);
         // 关掉的文档连快照桶一起收走 —— 留着就是一条永远没人读的旧面板状态。
         setDocStills(prev => {
           const open = new Set(docs.map(d => d.uid));
@@ -1412,16 +1428,17 @@ const App: React.FC = () => {
       }
     };
     window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
+    // 子窗口里那台 workbench 的消息：它的 parent 是弹窗，不是本页。docEngine 把它们
+    // 转成同一条 handler（source = 子 iframe），按 uid 分桶的逻辑因此不用写第二份。
+    const offEngine = onEngineMessage((data, source) => handler({ data, source } as MessageEvent));
+    return () => { offEngine(); window.removeEventListener('message', handler); };
   }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, handleProcessorRun, seedBlendCanvas, refreshStaging, queueStaging, pushLog, pushProcessors]);
 
   // Push preset (tab) changes to the Blend workbench as they happen. The iframe only asks for
   // init once, on load — without this effect a tab created / renamed / deleted / switched after
   // that would never reach the Generate dialog's Pipeline Preset enum.
   useEffect(() => {
-    const iframe = blendIframeRef.current;
-    if (!iframe?.contentWindow) return;
-    iframe.contentWindow.postMessage({
+    const msg = {
       type: 'blend-pipeline-presets',
       presets: blockSets.map((s: BlockSet) => ({
         id: s.id, name: s.name,
@@ -1433,7 +1450,10 @@ const App: React.FC = () => {
         layer_ctx: preprocessFlag(blockSets, s.id, 'dynamic_layer_ctx', true),
       })),
       active_id: activeBlockSetId,
-    }, '*');
+    };
+    // 预设清单是全局的：本机与每台子引擎都要刷新。
+    sendLocal(msg);
+    for (const uid of childIds()) sendForUid(msg, uid);
   }, [blockSets, activeBlockSetId]);
 
   // Push processor-mode interfaces to the workbench whenever they change: the Processor tool's
@@ -1454,7 +1474,7 @@ const App: React.FC = () => {
         const data: StatusResponse = await fetch('/api/status').then(r => r.json());
         if (cancelled) return;
         const st = data.interface_status || 'idle';
-        const win = blendIframeRef.current?.contentWindow;
+        const win = engineWindow();
         if (win) {
           win.postMessage({
             type: 'blend-run-status',
@@ -1515,7 +1535,7 @@ const App: React.FC = () => {
           setLoadedPipelineName(cfg.loaded_pipeline_name ?? '');
           loraEpochRef.current = cfg.pipeline_lora_epoch ?? loraEpochRef.current;
           // 这里以前是 setTimeout(100) 的一次性 post：iframe 还没挂上监听就永久丢在空气里。
-          // 现在漏发有 'kolid-prompt-ready' 和进 tab 那两趟兜，只留这一处发送点。
+          // 现在漏发有 'kolid-prompt-ready' 这一趟兜，只留这一处发送点。
           void flushPromptPipeline();
         }).catch(() => {});
       } else {
@@ -1578,7 +1598,7 @@ const App: React.FC = () => {
    */
   const handleRunPreset = useCallback((presetId: string) => {
     setError(null);
-    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-run-preset', preset_id: presetId }, '*');
+    sendForUid({ type: 'blend-run-preset', preset_id: presetId }, null);
   }, []);
 
   /** Answer a parked Query block. The selection is the prompt UI's RAW choice — the run
@@ -1819,19 +1839,10 @@ const App: React.FC = () => {
 
   return (
     <div>
-      {syncingTab && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
-            <div style={{ width: 32, height: 32, borderRadius: '50%', border: '3px solid rgba(255,255,255,0.1)', borderTopColor: '#0a84ff', animation: 'spin 0.8s linear infinite' }} />
-            <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}>Syncing...</span>
-          </div>
-        </div>
-      )}
       <EditPhase
         tab={tab}
         onTabChange={handleTabChange}
         promptUrl={config.prompt_url}
-        promptReady={promptReady}
         detailStatus={detailStatus}
         staging={staging}
         promptIframeRef={promptIframeRef}
@@ -1871,6 +1882,9 @@ const App: React.FC = () => {
         onBlendUiCommand={sendBlendUiCommand}
         stageUpload={stageUpload}
         stageRemove={stageRemove}
+        onDocDetached={onDocDetached}
+        onDocDocked={onDocDocked}
+        onDocLost={onDocLost}
         interfaces={interfaces}
         interfaceMeta={interfaceMeta}
         onChangeInterfaceMeta={handleChangeInterfaceMeta}

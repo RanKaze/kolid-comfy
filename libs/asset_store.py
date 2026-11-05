@@ -220,6 +220,31 @@ def records(refresh=False):
     return items
 
 
+def dimensions(rec):
+    """图片原生像素（进程内缓存）。卡片按宽高比排流式网格，清单里要它。
+
+    `rec` 来自 `records()`：只认 `id` 与 `file`，不重新扫目录。打不开就是 (0, 0) —— 调用方
+    退回 16:9，不该让一张坏图把整份清单拖垮。
+    """
+    aid = str(rec.get('id') or '')
+    if not aid:
+        return (0, 0)
+    with _LOCK:
+        hit = _WH.get(aid)
+    if hit is not None:
+        return hit
+    path = os.path.join(asset_dir(), str(rec.get('file') or ''))
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            wh = (int(im.size[0]), int(im.size[1]))
+    except Exception:
+        wh = (0, 0)
+    with _LOCK:
+        _WH[aid] = wh
+    return wh
+
+
 def get(asset_id):
     """单件记录（含 `w/h`，图片才现算）；找不到返回 None。"""
     aid = resolve(asset_id)
@@ -230,16 +255,7 @@ def get(asset_id):
             rec = dict(it)
             rec['path'] = os.path.join(asset_dir(), rec['file'])
             if rec['kind'] == 'image':
-                wh = _WH.get(aid)
-                if not wh:
-                    try:
-                        from PIL import Image
-                        with Image.open(rec['path']) as im:
-                            wh = (int(im.size[0]), int(im.size[1]))
-                        _WH[aid] = wh
-                    except Exception:
-                        wh = (0, 0)
-                rec['w'], rec['h'] = wh
+                rec['w'], rec['h'] = dimensions(rec)
             return rec
     return None
 

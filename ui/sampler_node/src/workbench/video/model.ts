@@ -1004,6 +1004,11 @@ export type VidController = {
   /** 每套图层集吃哪几条视频轨的帧（页面报上来的摘要，key = layerKey）。判"Frame source 引用了
    *  静音轨 ⇒ 这一段跳过"要它 —— 图层住在页面里，宿主没有别的来源。引用恒稳，内容变化就地替换。 */
   frameNeed: { current: VidFrameNeed };
+  /** 视频 Detect 取帧口：把 `t` 时刻监视器的 **Layer 合成画面**（含关键帧 / 叠加）抓成一帧 JPEG。
+   *  视频段不走这里（后端原生抽帧更快、也不用搬像素）；这个口只覆盖压在 Layer 上的那些帧。
+   *  `w/h` = Canvas 的 Frame 尺寸（0 = 用位图自身尺寸，按 contain 补黑）。
+   *  由 Player 挂载时注册；没有 Player / 页面不在 / 超时 = null。 */
+  captureFrame?: (t: number, w?: number, h?: number) => Promise<Blob | null>;
   /** 仓库里已经找不到的哈希（工程引用了，但字节不在了）。打开工程与每次改动后刷新：
    *  时间线画红线、Assets 卡挂 MISSING、relink 按它挑目标。 */
   missing: ReadonlySet<string>;
@@ -2459,6 +2464,34 @@ export const placeProcOutput = (
   return { ...withAsset, clips };
 };
 
+/** Detect 视频产物的落点：每次 Detect 都开一条**新的** video 轨（layer 轨之后、已有视频轨之前），
+ *  名字按已有的 `Detect` / `Detect N` 自增。mask 段逐块落在这条轨上，时间位置由调用方对齐。 */
+export const placeDetectTrack = (p: VidProject): { p: VidProject; track: VidTrack } => {
+  const used = p.tracks.filter(t => t.kind === 'video' && /^Detect( \d+)?$/.test(t.name)).length;
+  const name = used === 0 ? 'Detect' : `Detect ${used + 1}`;
+  let at = 0;
+  while (at < p.tracks.length && p.tracks[at].kind === 'layer') at++;
+  const track: VidTrack = { id: newVidId('trk'), kind: 'video', name };
+  const tracks = [...p.tracks];
+  tracks.splice(at, 0, track);
+  return { p: { ...p, tracks }, track };
+};
+
+/** 一块 mask 视频落到 Detect 轨的 [start, start+duration) 上；资产照记（Assets 是项目数据的来源）。 */
+export const placeDetectClip = (
+  p: VidProject, trackId: string, src: string, name: string, start: number, duration: number,
+): VidProject => {
+  const dur = Math.max(0.1, duration);
+  const withAsset = addAsset(p, {
+    id: newVidId('as'), name, src, origin: 'file', kind: 'video', duration: dur, hasAudio: false,
+  });
+  const clips = [...withAsset.clips, {
+    id: newVidId('clip'), trackId, kind: 'video' as const, name, src, origin: 'file' as const,
+    start: Math.max(0, start), duration: dur, offset: 0, srcDuration: dur, hasAudio: false,
+  }];
+  return { ...withAsset, clips };
+};
+
 /** Processor 的 Allow List 视频产物**只入库**（输出口选了 Asset）：时间线不动、不开轨，
  *  每段编码产物在资产库里记一件（多段时名字带序号）。与 placeProcVideoSegs 同一批
  *  产物、两种去处 —— 挑选值在 Processor 窗的输出口行上。 */
@@ -2608,7 +2641,7 @@ export const probeVidMerge = (p: VidProject, ids: readonly string[]): VidMergePr
       }
     }
     // 后端只能读媒体库里的文件：本地拖进来的 blob:/其它 URL 拼不了。
-    if (!local && clips.some(c => !c.src.startsWith('/api/vid_media/'))) {
+    if (!local && clips.some(c => !/^\/api\/(?:vid|eagle)_media\//.test(c.src))) {
       return { ok: false, reason: 'Only library video files can be stitched together.' };
     }
     return { ok: true, plan: { kind, clips, videoMode: local ? 'local' : 'concat' } };

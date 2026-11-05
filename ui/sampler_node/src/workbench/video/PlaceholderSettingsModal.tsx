@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { InterfaceInfo } from '../../types';
 import type { ProcFrameWindow, ProcSettingsPatch, VidClip, VidProcPending } from './model';
+import { useDockWindow } from '../../dock/docScope';
 
 /**
  * PlaceholderSettingsModal —— 占位段的**批量设置**。
@@ -66,6 +67,7 @@ const PlaceholderSettingsModal: React.FC<{
   onApply: (patch: ProcSettingsPatch) => void;
   onClose: () => void;
 }> = ({ clips, interfaces, presets, videoTracks, onApply, onClose }) => {
+  const hostWin = useDockWindow();
   /** 用户动过的字段（id → 文本）。不在里面 = 保持原样（混合值也不写回）。 */
   const [edits, setEdits] = useState<Record<string, string>>({});
   const edit = useCallback((id: string, v: string) => {
@@ -210,8 +212,8 @@ const PlaceholderSettingsModal: React.FC<{
       if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
       else if (e.key === 'Enter' && !e.shiftKey) { e.stopPropagation(); e.preventDefault(); apply(); }
     };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
+    hostWin.addEventListener('keydown', onKey, true);
+    return () => hostWin.removeEventListener('keydown', onKey, true);
   }, [apply, onClose]);
 
   // ── 字段小件 ─────────────────────────────────────────────────────────────────────────────

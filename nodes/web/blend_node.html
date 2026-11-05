@@ -5997,6 +5997,39 @@ requestAnimationFrame(vidBaseTick);
 vidBaseWatchFrames();
 // load() 会把 pending 的 rVFC 回调清掉（换源就是这么做的）：链断了就重挂。
 vidBaseVideo.addEventListener('emptied', () => { vidBaseRvfcPending = false; vidBaseWatchFrames(); });
+// ── 底片换源失败的重来 ─────────────────────────────────────────────────────────────────────
+// 新建工程后第一次把视频拖进来，媒体可能还没完全就绪（入库/首次读盘那一瞬），<video> 会先拿到
+// 一个解不开的响应（MediaError 4 = Format error）。**它自己不会重试** —— 之后一直停在
+// readyState 0，画布上就只剩棋盘格（透明），只有重新换源才解得开。
+// 同一枚 URL 紧接着重开一次就能正常解码（已实测），所以这里按错误退避重来几次；带 `?r=n`
+// 绕开上一次可能被记成半截的 immutable 缓存。`vidBaseSrc` 保持原样：对时/去重/盖章全照旧。
+let vidBaseRetryN = 0;
+let vidBaseRetryTimer = 0;
+function vidBaseRetrySoon() {
+    if (vidBaseRetryTimer || vidBaseRetryN >= 4 || !vidBaseSrc || !vidBaseOn) return;
+    vidBaseRetryN++;
+    const wanted = vidBaseSrc;
+    const delay = [250, 600, 1500, 3000][vidBaseRetryN - 1] || 3000;
+    vidBaseRetryTimer = setTimeout(() => {
+        vidBaseRetryTimer = 0;
+        if (!vidBaseOn || vidBaseSrc !== wanted) return;
+        const v = vidBaseVideo;
+        // blob:/data: 不能拼查询串（拼上就是另一个不存在的地址）：那两类原样重开即可。
+        const bust = /^(blob|data):/i.test(wanted) ? ''
+            : (wanted.indexOf('?') >= 0 ? '&' : '?') + 'r=' + vidBaseRetryN;
+        v.setAttribute('src', wanted + bust);
+        try { v.load(); } catch (e) { /* noop */ }
+    }, delay);
+}
+vidBaseVideo.addEventListener('error', () => {
+    // 换源在途时的旧错误不算数：vidBaseSrc 每换一次就已经是新的一条。
+    if (!vidBaseSrc || !vidBaseOn) return;
+    vidBaseRetrySoon();
+});
+vidBaseVideo.addEventListener('loadeddata', () => {
+    vidBaseRetryN = 0;
+    if (vidBaseRetryTimer) { clearTimeout(vidBaseRetryTimer); vidBaseRetryTimer = 0; }
+});
 
 function vidBasePause() {
     try { if (!vidBaseVideo.paused) vidBaseVideo.pause(); } catch (e) { /* 还没源 */ }
@@ -6038,6 +6071,8 @@ function handleVidBaseSrcMessage(d) {
     vidBasePlaying = !!d.playing;
     vidBaseHidden = d.hidden === true;
     vidBaseOn = true;
+    // 上一次这条源要是停在 error 上（见上面的重来），宿主重新按到它时也得把它叫醒。
+    if (vidBaseVideo.error) { vidBaseRetryN = 0; vidBaseRetrySoon(); }
     if (src !== vidBaseSrc) {
         vidBaseSrc = src;
         const v = vidBaseVideo;
@@ -14178,7 +14213,12 @@ function activateDocument(entry) {
 
 function createDocument(name, doc, ctx, activate, opts) {
     const o = opts || {};
-    const entry = { uid: ++docSeq, name: name || 'Untitled', doc: doc || null, ctx: ctx || blankContext(),
+    // 交接（detach / dock-back）要把同一份文档在另一套 workbench 里以**同一个 uid** 重开：
+    // 两边的消息都按 uid 走，同号就不需要一张映射表。只有请求的号没被占用时才认。
+    const wantUid = Number.isInteger(o.uid) && o.uid > 0 && !documents.some(d => d.uid === o.uid) ? o.uid : null;
+    const uid = wantUid || ++docSeq;
+    if (uid > docSeq) docSeq = uid;
+    const entry = { uid, name: name || 'Untitled', doc: doc || null, ctx: ctx || blankContext(),
         undo: [], redo: [], lastActionKey: null, dirty: false,
         // `kind: 'scene'` 的这一枚是 3D 图层的场景 tab:它的全部内容是 ctx.scene,`hostUid` 记着
         // 它是从哪个工程跳过来的(烘焙的像素要交回那边)。
@@ -14812,8 +14852,18 @@ function hasAnyLayers() {
         || [...layerSets.values()].some(s => s && Array.isArray(s.layers) && s.layers.length);
 }
 
-async function buildCudBlob() {
-    if (!hasAnyLayers() || !canvasW || !canvasH) throw new Error('nothing to save — add a layer first');
+// 视频工程（时间线 / 资产池）的"有内容"：新建工程后只拖进一条视频、还一层没建时，
+// 这份东西全在宿主那桶里（随 .cud 的 header.video 一起落盘），一层没有不代表没有可存的。
+function vidProjectHasContent(vid) {
+    if (!vid || typeof vid !== 'object') return false;
+    return (Array.isArray(vid.clips) && vid.clips.length > 0)
+        || (Array.isArray(vid.assets) && vid.assets.length > 0);
+}
+
+async function buildCudBlob(prefetchedVid) {
+    if (!canvasW || !canvasH) throw new Error('nothing to save — add a layer or a video first');
+    // 判据要留到最后那份宿主快照到手时才算数（见下方 hostVid）。
+    const hadLayers = hasAnyLayers();
     // A file writes a raster layer at the identity (its buffer IS its picture), so a released
     // gesture has to become pixels before the bytes are assembled.
     applyTransformPending();
@@ -15149,7 +15199,9 @@ async function buildCudBlob() {
     }
     for (const e of assetList) delete e.storeHash;
     const payloadParts = assetList.map(e => payload[e.id]).filter(Boolean);
-    const hostVid = await requestHostVid(activeDoc ? activeDoc.uid : 0);
+    const hostVid = prefetchedVid !== undefined ? prefetchedVid : await requestHostVid(activeDoc ? activeDoc.uid : 0);
+    // 一层都没建的时候，值不值得存全看宿主那份快照：只有时间线的工程照样能存，空的才真没东西。
+    if (!hadLayers && !vidProjectHasContent(hostVid)) throw new Error('nothing to save — add a layer or a video first');
     // 这份工程里若有片段/资产的 src 是 blob:（后端 ffmpeg 不可用，前端回退到 objectURL），它写进
     // 文件也活不过下一次读档 —— 读档那趟 normalizeVidProject 会把 blob: 的整条剪掉。存盘时不静悄悄:
     // 数出来交给调用方，让那句 "Saved …" 后面挂上"这些片段重开就没了"。
@@ -15211,7 +15263,10 @@ async function writeDocTo(doc, blob) {
 // whatever was chosen, so the next Ctrl+S lands on it without asking again.
 async function saveCudAs() {
     if (cudBusy) return false;
-    if (!hasAnyLayers() || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
+    if (!canvasW || !canvasH) { setStatus('Nothing to save — add a layer or a video first', 'error'); return false; }
+    // 视频优先的工程可以一层都没有（新建后只拖进一条视频，内容全在宿主那桶里）。宿主改过 Video
+    // 工程就会递 `blend-vid-dirty`，这里认那笔账；真正的判据由 buildCudBlob 末尾那份快照复核。
+    if (!hasAnyLayers() && !(activeDoc && activeDoc.dirty)) { setStatus('Nothing to save — add a layer or a video first', 'error'); return false; }
     const pick = await pickDocuments('save', 'cud', currentCudName || cudFileName(), false);
     if (pick.busy) return false;
     if (pick.error) { setStatus('Save failed: ' + pick.error, 'error'); return false; }
@@ -15259,11 +15314,16 @@ async function saveCud() {
     // tell, so a Ctrl+S landing mid-export would otherwise vanish without a trace.
     if (cudBusy) { setStatus('Still working on the last one…'); return false; }
     if (!currentCudHandle) return saveCudAs();
-    if (!hasAnyLayers() || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
+    if (!canvasW || !canvasH) { setStatus('Nothing to save — add a layer or a video first', 'error'); return false; }
     cudBusy = true; syncDocList();
     setStatus(`Saving ${currentCudName}…`);
     try {
-        const { blob, count, transient } = await buildCudBlob();
+        // 一层都没有的工程（新建后只拖进一条视频）内容全在宿主那桶里。覆盖保存这条路不碰选择器，
+        // 直接问一句最准；这份快照顺手交给 buildCudBlob，省得它末尾再要一次。
+        const hadLayers = hasAnyLayers();
+        const hostVid = hadLayers ? undefined : await requestHostVid(activeDoc ? activeDoc.uid : 0);
+        if (!hadLayers && !vidProjectHasContent(hostVid)) { setStatus('Nothing to save — add a layer or a video first', 'error'); return false; }
+        const { blob, count, transient } = await buildCudBlob(hostVid);
         await writeDocTo(currentCudHandle, blob);
         markDocumentClean();
         announceSaved();
@@ -15739,7 +15799,7 @@ function cudContext(header, records, maskSurface, setData) {
 
 // Opens the file in a NEW tab and switches to it. Everything that can fail (parsing, decoding)
 // happens before a tab exists, so a bad file leaves every open project exactly as it was.
-async function openCudDocument(file, doc) {
+async function openCudDocument(file, doc, opts) {
     if (cudBusy) return false;
     // Load 也是一次"离开当前那份"：它欠的那笔落盘得在**换人之前**补（这个流程一拿 cudBusy，
     // saveCud 就进不去了）。补不上（没落过盘 / 3D tab / 本来就写失败）就照常往下走 —— 这
@@ -15922,7 +15982,7 @@ async function openCudDocument(file, doc) {
         // 工作区恢复：文件里的池原样挂到新建条目上，由 activateDocument 换给全局并按
         // 保留 id 整池同步宿主（见 postStagingSync）。这里不再直接上传 —— 追加会把
         // 上一个工程的图留进新工程。
-        const entry = createDocument((doc && doc.name) || file.name, doc || null, ctx, false);
+        const entry = createDocument((doc && doc.name) || file.name, doc || null, ctx, false, opts);
         if (!ctx.canvasW || !ctx.canvasH) applyCanvasSize();   // no usable size in the file — derive it
         // v6 的 staging 只带 { asset }：把字节从内嵌（或仓库）取回来，补成宿主认识的 src。
         // `asset` 原样留着 —— 下次保存仍写 hash，不再把 base64 写进文件。
@@ -17482,10 +17542,87 @@ async function parkProcessorResults(items, total, layerTrouble) {
 // Interface 枚举与三段端口行的正文都在宿主（workbench/processor.tsx）—— 这里只把第一份描述符播出去。
 syncProcessorUI();
 
+// ── dock 子窗口的文档交接（Kolid Desktop） ─────────────────────────────────────────────
+// 宿主把一扇文档窗弹进 owned 子窗口时，这台 workbench 里那份文档要**连字节一起**交给
+// 子窗口里刚起的另一套 workbench。iframe 不能跨 document 搬（会重载），所以交接的是字节；
+// 目标引擎用同一个 uid 重开，两边消息按 uid 走，无需映射表。
+function activeCudDocDescriptor() {
+    const h = activeDoc && activeDoc.doc;
+    if (!h || !h.token) return null;   // FileSystemHandle 跨不了 document；那边退化成"无绑定"
+    return { token: h.token, name: h.name || activeDoc.name, path: h.path || null, size: h.size || 0 };
+}
+
+async function detachCudForHost(d) {
+    const reqId = d.reqId;
+    const fail = err => {
+        try { window.parent.postMessage({ type: 'blend-cud-detached', reqId, error: String((err && err.message) || err) }, '*'); } catch (e) { /* gone */ }
+    };
+    try {
+        if (cudBusy) throw new Error('The workbench is still busy');
+        const want = Number(d.uid);
+        let entry = documents.find(x => x.uid === want) || activeDoc;
+        if (!entry) throw new Error('No document is open');
+        if (entry !== activeDoc) {
+            const ok = await switchDocument(entry.uid);
+            if (!ok) throw new Error('Could not switch to the document');
+        }
+        if (isSceneDoc(activeDoc)) throw new Error('3D scene tabs cannot be detached');
+        await flushVidSave(activeDoc);
+        cudBusy = true; syncDocList();
+        const { blob } = await buildCudBlob();
+        const bytes = await blob.arrayBuffer();
+        const uid = activeDoc.uid;
+        const name = activeDoc.name;
+        const desc = activeCudDocDescriptor();
+        dropDocument(entry);          // 字节已经在手上：不再走"脏了就问"的那一岔
+        cudBusy = false; syncDocList();
+        try { window.parent.postMessage({ type: 'blend-cud-detached', reqId, uid, name, bytes, doc: desc }, '*', [bytes]); }
+        catch (e) { fail(e); }
+    } catch (err) {
+        cudBusy = false; syncDocList();
+        fail(err);
+    }
+}
+
+async function openCudForHost(d) {
+    const reqId = d.reqId;
+    const fail = err => {
+        try { window.parent.postMessage({ type: 'blend-cud-opened', reqId, error: String((err && err.message) || err) }, '*'); } catch (e) { /* gone */ }
+    };
+    try {
+        if (cudBusy) throw new Error('The workbench is still busy');
+        if (d.dropBoot) {
+            // 子窗口这套 workbench 开机那份空 Untitled 不是用户的工程：交接前让它让位。
+            for (const doc of [...documents]) {
+                if (doc.doc === null && !doc.dirty && doc.name === 'Untitled' && doc.uid !== Number(d.uid)) dropDocument(doc);
+            }
+        }
+        const raw = d.bytes;
+        const bytes = raw instanceof ArrayBuffer ? raw : (raw && raw.buffer) || new ArrayBuffer(0);
+        const file = new File([bytes], d.name || 'detached.cud', { type: 'application/octet-stream' });
+        const uid = Number.isInteger(d.uid) && d.uid > 0 ? d.uid : undefined;
+        const ok = await openCudDocument(file, d.doc || null, uid ? { uid } : undefined);
+        if (!ok) throw new Error('The document could not be opened');
+        const entry = activeDoc;
+        window.parent.postMessage({
+            type: 'blend-cud-opened', reqId,
+            uid: entry ? entry.uid : null, name: entry ? entry.name : '',
+        }, '*');
+    } catch (err) {
+        fail(err);
+    }
+}
+
 // 会话恢复的在途标记：blend-restore-cuds 的串行重开进行中为真，再来的恢复消息直接丢。
 let cudRestoreBusy = false;
 window.addEventListener('message', event => {
     const d = event.data || {};
+    if (d.type === 'blend-ping') {
+        window.parent.postMessage({ type: 'blend-pong', reqId: d.reqId }, '*');
+        return;
+    }
+    if (d.type === 'blend-cud-detach') { void detachCudForHost(d); return; }
+    if (d.type === 'blend-cud-open') { void openCudForHost(d); return; }
     if (d.type === 'blend-config') {
         hasTagger = d.hasTagger !== false;
         // Detector 工具总闸（宿主从 /api/config 的 has_detector 带来）。

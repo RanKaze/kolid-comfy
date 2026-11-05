@@ -4,6 +4,7 @@ import type { BlendAttrOpen, BlendFxOpenStep, BlendUiSend } from '../types';
 import type { WorkbenchHostCtx } from './registry';
 import { useBlendUi } from './store';
 import { FxParamsPanel } from './fxParams';
+import { useDockDocument, useDockWindow } from '../dock/docScope';
 
 // 特效参数不再占一格 dock window：点开链里某一步，参数面就在那枚 chip **旁边**张开成一张小卡片，
 // 再点一次（或点卡片外面 / Esc）收起。面（decal / mask）chip 用的是同一张卡片，里面只有 Frame source
@@ -50,6 +51,8 @@ type CardProps = {
 };
 
 const FxPopCard = ({ list, step, attr, send, video }: CardProps) => {
+  const doc = useDockDocument();
+  const win = useDockWindow();
   const boxRef = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const sel = step ? `[data-fx="${step.stepId}"]` : attrSelector(attr?.attrId ?? '');
@@ -71,10 +74,10 @@ const FxPopCard = ({ list, step, attr, send, video }: CardProps) => {
     const w = box.offsetWidth || 320;
     const h = box.offsetHeight || 240;
     let x = r.right + GAP;
-    if (x + w > window.innerWidth - EDGE) x = r.left - w - GAP;
-    x = Math.max(EDGE, Math.min(x, window.innerWidth - w - EDGE));
+    if (x + w > win.innerWidth - EDGE) x = r.left - w - GAP;
+    x = Math.max(EDGE, Math.min(x, win.innerWidth - w - EDGE));
     let y = r.top;
-    if (y + h > window.innerHeight - EDGE) y = window.innerHeight - h - EDGE;
+    if (y + h > win.innerHeight - EDGE) y = win.innerHeight - h - EDGE;
     y = Math.max(EDGE, y);
     setPos(p => (p && Math.abs(p.x - x) < 0.5 && Math.abs(p.y - y) < 0.5 ? p : { x, y }));
   };
@@ -85,11 +88,11 @@ const FxPopCard = ({ list, step, attr, send, video }: CardProps) => {
   // 滚动（含 dock 那块 scroller，事件不冒泡，所以用 capture）与窗口尺寸都让卡片跟着 chip 走。
   useEffect(() => {
     const fn = () => place();
-    window.addEventListener('resize', fn);
-    document.addEventListener('scroll', fn, true);
+    win.addEventListener('resize', fn);
+    doc.addEventListener('scroll', fn, true);
     return () => {
-      window.removeEventListener('resize', fn);
-      document.removeEventListener('scroll', fn, true);
+      win.removeEventListener('resize', fn);
+      doc.removeEventListener('scroll', fn, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
@@ -110,8 +113,8 @@ const FxPopCard = ({ list, step, attr, send, video }: CardProps) => {
       if (chip && list.current?.contains(chip)) return;
       close();
     };
-    const docs: Document[] = [document];
-    document.querySelectorAll('iframe').forEach(f => {
+    const docs: Document[] = [doc];
+    doc.querySelectorAll('iframe').forEach(f => {
       try { if (f.contentDocument) docs.push(f.contentDocument); } catch { /* cross-origin */ }
     });
     docs.forEach(d => d.addEventListener('pointerdown', down, true));
@@ -126,8 +129,8 @@ const FxPopCard = ({ list, step, attr, send, video }: CardProps) => {
       ev.stopPropagation();
       close();
     };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
+    win.addEventListener('keydown', onKey, true);
+    return () => win.removeEventListener('keydown', onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
@@ -147,7 +150,7 @@ const FxPopCard = ({ list, step, attr, send, video }: CardProps) => {
         <FxParamsPanel send={send} video={video} />
       </div>
     </div>,
-    document.body,
+    doc.body,
   );
 };
 
