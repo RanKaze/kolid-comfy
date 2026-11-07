@@ -11,7 +11,8 @@ import { useVidProcRun } from './video/procRun';
 // Detect 那一颗看模式分两条路：
 //   Image : 只是开页面那口对话框（选源与落位的活还在页面自己那口 modal 里）；
 //   Video : 选源由这一格自己摆（Video / Sel. Video Track / Sel. Video Segment），跑的事交给宿主
-//           （`host.video.detect.run` —— 取帧、分段、落新轨、绑 Mask track 都只有宿主知道）。
+//           （`host.video.detect.open` —— 输入范围/每段帧数、取帧、分段执行、落新轨、绑 Mask track
+//           都只有宿主知道）。
 
 const PROMPT_TITLE = 'Mask expression, e.g. \'(face:0.4)&(hair:0.3)-mouth\'. Operators (left-to-right): & intersect, '
   + '+ union, - subtract, | union. Terms: name, name:0.3, name(0.3). Functions: max(a,b,…), min(a,b,…), '
@@ -30,8 +31,8 @@ const DetectorBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
   if (!d.available) {
     return (
       <div style={wbStyles.note}>
-        No detector is connected to the node — the Detector tool has nothing to do until one is wired into its
-        detector input.
+        No detector is configured — turn Detector on for the interface that implements it in the Interface tab,
+        then bind its image and mask ports.
       </div>
     );
   }
@@ -94,6 +95,9 @@ const DetectorBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
                 : 'Select exactly one video or Layer segment on the timeline.'}
             </div>
           )}
+          <div style={wbStyles.note}>
+            The input range and frames per segment are picked in the Run dialog — same as the Processor.
+          </div>
         </>
       )}
       <div style={{ display: 'flex', gap: 4 }}>
@@ -104,7 +108,7 @@ const DetectorBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
             : 'Open the Detect dialog — pick where the detector looks and where the mask lands'}
           onClick={() => {
             if (videoMode) {
-              det.run({
+              det.open({
                 source, trackId: source === 'sel_track' ? effTrack : undefined,
                 prompt: d.prompt, threshold: d.threshold, invert: d.invert,
               });
@@ -123,6 +127,6 @@ const DetectorBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
 export const detectorUnit: WorkbenchUnit = {
   id: 'detector',
   title: 'Detector',
-  hint: 'Detector — runs the detector connected to the node’s detector input and turns what it finds into a mask.',
+  hint: 'Detector — runs the model bound as Detector in the Interface tab and turns what it finds into a mask.',
   Body: DetectorBody,
 };

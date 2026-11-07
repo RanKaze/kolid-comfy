@@ -67,7 +67,8 @@ const CanvasBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
         <input value={fps} inputMode="numeric"
           onChange={e => setFps(e.target.value.replace(/[^0-9]/g, ''))}
           onBlur={commitFps} onKeyDown={onKey(commitFps)}
-          title="Output frame rate — the time grid Layer Tracks sample on (frame n sits at n / fps)"
+          title={'Output frame rate (1-120) — the time grid Layer Tracks sample on (frame n sits at n / fps), '
+            + 'and the playback frame-rate cap: Layer segments get up to this many composite frames per second'}
           style={{ ...numInput, width: 46 }} />
       </div>
     );

@@ -71,11 +71,12 @@ export type WorkbenchHostCtx = {
      *  ('' = 没绑)、视频轨清单、写口。Guidances 的 MaskRow 用它画 Bind。 */
     maskTrack: { id: string; tracks: { id: string; name: string }[]; set: (id: string | null) => void };
     /** Video Detect（Detector 那一格用）：三个来源（整条时间线合成 / 某一整轨 / 当前选中段）、
-     *  prompt / threshold / invert，跑完在新开的 Detect 轨上落段并自动绑成 Mask track。
+     *  prompt / threshold / invert。`open` 先弹「输入范围 + 每段帧数」modal（与 Processor
+     *  同一套），确认后在新开的 Detect 轨上摆占位段、一段一段跑并自动绑成 Mask track。
      *  `sel` = 时间线上恰好选中一枚 video / Layer 段时的原料；`tracks` 只列有画面的轨
      *  （video 与 layer 两类，音频 / process / MIDI 没有帧）。 */
     detect: {
-      run: (args: {
+      open: (args: {
         source: 'video' | 'sel_track' | 'sel_segment'; trackId?: string;
         prompt: string; threshold: number; invert: boolean;
       }) => void;

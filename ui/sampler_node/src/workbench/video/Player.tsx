@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  type VidController, type VidClip, clipAt, clipAtSolo, fmtTime, kfSample, kfU, toggleLoopRange, vidDuration,
+  type VidController, type VidClip, clipAt, clipAtSolo, clampFps, fmtTime, kfSample, kfU, toggleLoopRange, vidDuration,
 } from './model';
 import { TransportKeys } from '../../midi/TransportKeys';
 import { compositePlanAt, sourceTime, warmSweepAt, type VidCompositePlan } from './composite';
@@ -28,7 +28,11 @@ export const VidPlayer: React.FC<{
   /** 工作台画布的 iframe 此刻**压在这一格上面**（Video 模式里它盖住画面区）。压着的时候合成位图
    *  没人看得见，页面就不必逐帧编码回传 —— 那是播放一层 Layer 段最大的固定开销之一。 */
   stageCovers?: boolean;
-}> = ({ vid, visible, onCompLayer, stageCovers }) => {
+  /** 页面报来的"每套图层集吃哪几条轨的帧"改了一版时的计数。工程没变、播放头也没动（暂停态），
+   *  但源帧清单可能刚多了/少了某条轨（比如 Frame source 刚绑上 Mask 轨）→ 要立刻重折一张，
+   *  否则要等下一次 tick 才看得到。 */
+  needRev?: number;
+}> = ({ vid, visible, onCompLayer, stageCovers, needRev = 0 }) => {
   markRender('VidPlayer');
   const { project: p, transport, playing } = vid;
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -87,6 +91,21 @@ export const VidPlayer: React.FC<{
     sentAt: 0, rtt: 0,
   });
   const pumpRef = useRef<() => void>(() => {});
+  /** 同一帧里别连发两包的硬下限（16ms ≈ 60Hz 屏的一帧）。Canvas FPS 比 60 高时这道闸要跟着
+   *  收窄，否则 120fps 的工程会被它压回 62.5 包/秒 —— 上限就不由 Canvas FPS 说了算了。 */
+  const PUMP_MIN_GAP_MS = 16;
+  const pumpGapMs = (fps: number) => Math.min(PUMP_MIN_GAP_MS, 900 / fps);
+  const pumpTimerRef = useRef(0);
+  /** 帧格定时器：transport 由 rAF 广播（60Hz），与 Canvas FPS 的格会错相 —— 30fps 靠它每两帧
+   *  勉强命中一格，60/120fps 则必然周期性漏格。按帧格边界自己补一次 requestComposite，包率
+   *  才真正贴着 Canvas FPS 走（同一格由 key 去重，不会多发包）。 */
+  const frameTimerRef = useRef(0);
+  /** onTick 最近算出的合成计划；帧格 timer 只读它，不必每格再 O(轨×段) 重算一次。 */
+  const planRef = useRef<VidCompositePlan | null>(null);
+  /** 完整的换段 tick。帧格 timer 比 transport 的 rAF 广播更细：它先一步越过段界时，
+   *  不能再拿上一格算出的 plan 补一包（页面会把刚撤掉的底片重新按住、多折一趟整画布），
+   *  而是直接走一次完整 tick，把「撤帧包 + 底片解按住」在帧格边界上做掉。 */
+  const tickRef = useRef<((interactive?: boolean, tNow?: number) => void) | null>(null);
   const requestRef = useRef<(plan: VidCompositePlan | null, t: number, force?: boolean, sync?: boolean) => void>(() => {});
 
   // 活片段：transport 的订阅者比对 id，只有换段才 setState（React 重渲染是稀罕事）。
@@ -134,6 +153,10 @@ export const VidPlayer: React.FC<{
   const compUsedTracks = useRef(new Map<string, Set<string>>());
   /** 已经报过的预热（layerKey@at）：同一段只报一次，别每个 tick 都发。 */
   const warmSent = useRef('');
+  /** 预热清单按 0.5s 时间桶缓存。warmSweepAt 的 consumed() 对每条视频段都要遍历全部 clips
+   *  （O(段²)），而清单只在段边界 / mute / 引用表变时才变；预热提前量本来就是 4 秒，半秒
+   *  一算绰绰有余。播放中这一笔原来每个 rAF 都白付，段一多就是宿主侧最贵的固定常数。 */
+  const warmCache = useRef<{ sig: string; value: ReturnType<typeof warmSweepAt> | null }>({ sig: '', value: null });
   // 性能探针(只读,诊断用):合成发包端的次数/回包分类,与页面 __vidPerf 配对。
   // kf = 页面最近一包关键帧注入的读数(keys/applied/落空原因),关键帧"有值却不动"时先看它。
   const compPerf = useRef({
@@ -229,6 +252,15 @@ export const VidPlayer: React.FC<{
       compFrameless.current.clear();
       compUsedTracks.current.clear();
       warmSent.current = '';
+      warmCache.current.sig = '';
+      warmCache.current.value = null;
+      // 补偿 timer 里压着的是上一份文档的 want：换 tab 时一并收掉，别让它在新文档的
+      // 第一帧上补发出去（帧包带旧 plan，页面按 uid 会丢，但白白占一次在途）。
+      compReq.current.want = null;
+      // 帧格 timer **不杀**：它下一格自会重排；plan 置空后那一格不发旧文档的包，
+      // 等 onTick 把新文档的 plan 填上就接上了（杀掉 timer 反而让播放停在半路）。
+      planRef.current = null;
+      if (pumpTimerRef.current) { window.clearTimeout(pumpTimerRef.current); pumpTimerRef.current = 0; }
       planSigRef.current = '';
     },
   });
@@ -308,12 +340,15 @@ export const VidPlayer: React.FC<{
     // 内容不随帧变的段（页面报过 frameless）：这一段的画面只由图层集决定 ⇒ 只在**换段**时发一包，
     // 播放中一包都不发。原先一律 12fps 地发，"反正走缓存"——可每包都要现算一次图层集签名
     // （逐层 16×16 采样读回），30 包/秒就是白烧。
-    // 随帧变的那条链：量化到 COMP_FPS（= 30，与工程帧率同格）—— 页面按 rAF 合成，落地的节拍
-    // 由它决定，发多发少都不会积压。
-    // 随帧变的那条链：量化到**工程帧栅格**（与 kf 采样、镜像对时同一把尺）—— 24fps 的工程不再为
-    // 30 包/秒白付 6 趟重复折（页面按 t 去重,省的是包与镜像纠偏）；60fps 的工程也就地提到 60。
-    const pf = projectRef.current.fps;
-    const COMP_FPS = pf > 0 ? Math.min(60, Math.max(1, Math.round(pf))) : 30;
+    // 随帧变的那条链：量化到**工程帧栅格**（与 kf 采样、镜像对时同一把尺）—— 24fps 的工程不为
+    // 30 包/秒白付 6 趟重复折（页面按 t 去重，省的是包与镜像纠偏）。
+    // **上限只由 Canvas 面板里那颗 FPS 决定**：clampFps 与输入框同一口径（1..120，整数，非法值
+    // 落回 30），这里不再另加 60 的硬帽。面板改成 60 就跑 60 格，改成 120 就跑 120 格。
+    const COMP_FPS = clampFps(projectRef.current.fps);
+    // 「发包相位提前半帧」试过并**已否决**（2026-11-06 实测）：理论上能把"到达时刻"摆进两帧 rAF
+    // 的正中间，实测反而更差 —— 顿挫率 11.5% → 13~16.5%、发包晚点 14 → 19~20 次/9.6s，
+    // 而且 120Hz 屏上按 60Hz 算的半帧正好错开一整格。原因是工作台与页面在同一个渲染进程里，
+    // 两条 rAF 本来就同相：踩着帧格边界发，包正好落在页面那口 rAF 之前。**别再加提前量了。**
     const q = Math.max(0, Math.floor(t * COMP_FPS + 1e-6) / COMP_FPS);
     // 计划的身份 = 这一段 + 这一刻的底片片段。换了就 +1：页面把版本号记进录像带，
     // "这一帧是上一份计划画的"立刻看得出来。
@@ -341,7 +376,24 @@ export const VidPlayer: React.FC<{
     // 页面那边按 rAF 合成（一帧最多画一次、同一帧来几包只算最后一包），所以"发得比画得快"
     // 不反噬 —— 这里只压一道最小间隔：别在同一帧里连发两包。换段那一包（sync）不压：
     // 它就是要**立刻**画上台，压掉的正是那一帧。
-    if (!w.sync && r.inflight && now - r.sentAt < 16) return;
+    const gap = pumpGapMs(clampFps(projectRef.current.fps));
+    if (!w.sync && r.inflight && now - r.sentAt < gap) {
+      // 早先这里直接 return：只剩「下一个 transport tick」或「回包」能再唤醒 pump。回包常常在
+      // 14ms 就到（rtt 实测 14ms），仍在闸内被挡回去，于是还要白等一整个 rAF —— 包间隔
+      // 被量化成 33/66ms，p95 65ms 的长顿就是这么来的。补足剩余时间自己再试一次即可。
+      // 高 Canvas FPS 时 gap 收窄到帧格的 0.9 倍，补枪不会把下一格拖出界外。
+      if (!pumpTimerRef.current) {
+        pumpTimerRef.current = window.setTimeout(() => {
+          pumpTimerRef.current = 0;
+          pumpRef.current();
+        }, Math.max(0, gap - (now - r.sentAt)));
+      }
+      return;
+    }
+    if (pumpTimerRef.current) {
+      window.clearTimeout(pumpTimerRef.current);
+      pumpTimerRef.current = 0;
+    }
     r.want = null;
     r.key = w.key;
     sendComposite(w.plan, w.q, { planT: w.planT, planRev: w.planRev, sync: w.sync });
@@ -425,8 +477,10 @@ export const VidPlayer: React.FC<{
 
   // ── transport 订阅 ── 读数/scrub 条直改；活片段只在换段时走 React；暂停态的画面跟手。
   useEffect(() => {
-    const onTick = (interactive?: boolean) => {
-      const t = transport.get();
+    const onTick = (interactive?: boolean, tNow?: number) => {
+      // 帧格 timer 醒来时 transport.get() 还是上一次 rAF 写下的冻结快照；允许它把
+      // clock.seconds() 传进来，段界才不会因为「快照没跨过去」而晚一拍才切。
+      const t = tNow ?? transport.get();
       if (readRef.current) readRef.current.textContent = fmtTime(t);
       const proj = projectRef.current;
       // 视频 solo 亮着 = **直接播**：不走画布系统 —— 合成计划作废、底片不送，
@@ -438,6 +492,7 @@ export const VidPlayer: React.FC<{
       // **静音的 Layer 轨被 compositePlanAt 跳过**（它的段不合成，露出底下）；
       // Frame source 引用了静音视频轨的 Layer 段同样跳过（拿不到画面）。
       const plan = soloActive ? null : compositePlanAt(proj, t, muted, frameNeed.current);
+      planRef.current = plan;          // 帧格 timer 复用它，不必每格再分桶算一次
       const modeId = plan ? plan.layer.id : null;
       if ((compModeRef.current?.id ?? null) !== modeId
         || (plan && compModeRef.current?.name !== plan.layer.name)) {
@@ -503,7 +558,14 @@ export const VidPlayer: React.FC<{
       // —— 播放中一段只发一次；页面对已存在的镜像一律幂等（不重复 seek、不重复折）。
       // 不预热的话，"建镜像 + 等 loadeddata + seek + 切图层集 + 整画布重渲染 + 首帧合成"
       // 全挤在边界那一帧里 —— 播放中就是一次可感的顿（画面上像闪一下）。
-      const warm = soloActive ? null : warmSweepAt(proj, t, muted, 4, frameNeed.current);   // 4 秒的提前量：够它把文件加载完
+      // 半秒一算（键里带上工程规模 / mute / solo / 引用表规模，变化立刻重算；内容级变化最多
+      // 滞后半秒，而预热窗口有 4 秒，不会来不及）。缓存里的 `want` 不进 warmKey，复用无副作用。
+      const warmSig = `${Math.floor(t * 2)}|${soloActive ? 1 : 0}|${[...muted].join(',')}|${proj.clips.length}|${proj.tracks.length}|${proj.fps}|${frameNeed.current ? Object.keys(frameNeed.current).length : 0}`;
+      if (warmSig !== warmCache.current.sig) {
+        warmCache.current.sig = warmSig;
+        warmCache.current.value = soloActive ? null : warmSweepAt(proj, t, muted, 4, frameNeed.current);
+      }
+      const warm = warmCache.current.value;   // 4 秒的提前量：够它把文件加载完
       const warmKey = warm
         ? warm.segs.map(s => `${s.layerKey}@${s.at.toFixed(2)}`).join(',') + '|' + warm.srcs.map(s => `${s.trackId}@${s.src}`).join(',')
         : '';
@@ -559,9 +621,56 @@ export const VidPlayer: React.FC<{
     compLayerRef.current = plan0 ? plan0.layerKey : null;
     onCompLayerRef.current?.(compLayerRef.current);
     onTick();
+    tickRef.current = onTick;
     const un = transport.subscribe(onTick);
-    return () => { un(); v0?.removeEventListener('seeked', onSeeked); };
+    return () => { un(); if (tickRef.current === onTick) tickRef.current = null; v0?.removeEventListener('seeked', onSeeked); };
   }, [transport, showStrip, hideStrip, requestComposite, requestBase, requestBaseOff]);
+
+  // ── 帧格驱动 ── 画面换帧率的**上限 = Canvas 面板里的 FPS** ───────────────────────────────
+  // transport 由 clock 的 rAF 广播（前台 60Hz）。只靠它唤醒合成，包间隔会被 rAF 相位量化：
+  // 30fps 靠每两帧命中一格尚且凑合，60fps 起就周期性漏格，120fps 更是一半格收不到包。
+  // 这里按 Canvas FPS 的帧格边界另排一只 timer，每格主动补一次 requestComposite；同一格
+  // 由 requestComposite 的 key 去重，rAF 那条路照旧负责换段 / 读数 / 底片对时，两边不重复发包。
+  // 页面上屏仍是一次 rAF 最多画一张 —— 显示器刷新率是物理天花板，这里给的是可追的上限。
+  useEffect(() => {
+    const stop = () => {
+      if (frameTimerRef.current) { window.clearTimeout(frameTimerRef.current); frameTimerRef.current = 0; }
+    };
+    if (!visible || !playing) { stop(); return; }
+    const step = () => {
+      frameTimerRef.current = 0;
+      if (!liveRef.current || !playingRef.current) return;
+      // **必须读 clock 而不是 transport.get()**：后者只在 clock 的 rAF 广播里被写一次，
+      // 两次广播之间它是冻结的快照 —— 帧格 timer 在格边界醒来会拿到旧时刻，q 不前进，
+      // 包率就被 rAF 频率锁死。clock.seconds() 是同一把钟的连续插值读数。
+      const t = clock.seconds();
+      const fps = clampFps(projectRef.current.fps);
+      const plan = planRef.current;
+      if (plan) {
+        const s = plan.layer.start, e = s + (plan.layer.duration || 0);
+        if (t < s || t >= e) {
+          // 已经越过这一段的边界，而 rAF 的 onTick 还没广播到这一刻。别补这一包：它是
+          // 「出段后还在发合成包」的真身 —— 页面收到会重新把底片按住、又折一趟整画布，
+          // 紧接着 frame-off 再撤一次，段界就出现一次可见的顿。直接走完整 tick 切段。
+          tickRef.current?.(false, t);
+        } else {
+          requestRef.current(plan, t);
+        }
+      }
+      const q = Math.floor(Math.max(0, t) * fps + 1e-6) / fps;
+      const frameMs = 1000 / fps;
+      // 下一次唤醒 = 下一格的边界。**不要在这里减"提前量"**：q 的时刻与唤醒时刻必须同一把尺，
+      // 提前量整体已被否决（见 requestComposite 里那段），留下这条注释就是为了别再试一次。
+      let wait = (q + 1 / fps - t) * 1000 - 0.3;
+      // **跨度上限**：t 是 clock 的插值读数，每 2 秒会按后端时基重校一次，偶尔会往回退几毫秒；
+      // 拿退回去的 t 去算"还要等多久"，wait 会被撑到 50~60ms —— 正好是最长的那几档空档。
+      // 夹在一格多一点：真到点了就早醒一次，同格由 key 去重（不会多发包），下一格自己对齐。
+      if (wait > frameMs * 1.15) wait = frameMs * 1.15;
+      frameTimerRef.current = window.setTimeout(step, Math.max(1, wait));
+    };
+    step();
+    return stop;
+  }, [visible, playing, transport]);
 
   // 换段"挂起"用的状态：主 <video> 在合成图盖上来之前先不换源（见下面那个 effect）。
   // `compHasPixels` = 这一格画布手上真的有一张合成图（缓存的 cached 回包不算）。
@@ -659,6 +768,9 @@ export const VidPlayer: React.FC<{
     if (visible) return;
     compReq.current.key = '';
     compReq.current.want = null;
+    planRef.current = null;
+    if (pumpTimerRef.current) { window.clearTimeout(pumpTimerRef.current); pumpTimerRef.current = 0; }
+    if (frameTimerRef.current) { window.clearTimeout(frameTimerRef.current); frameTimerRef.current = 0; }
     vid.blendPost({ type: 'blend-vid-frame-off' });
     baseReq.current.on = false;
     baseReq.current.key = '\u0000';
@@ -668,6 +780,9 @@ export const VidPlayer: React.FC<{
     liveRef.current = false;
     compReq.current.key = '';
     compReq.current.want = null;
+    planRef.current = null;
+    if (pumpTimerRef.current) { window.clearTimeout(pumpTimerRef.current); pumpTimerRef.current = 0; }
+    if (frameTimerRef.current) { window.clearTimeout(frameTimerRef.current); frameTimerRef.current = 0; }
     vidRef.current.blendPost({ type: 'blend-vid-frame-off' });
     vidRef.current.blendPost({ type: 'blend-vid-base-off' });
   }, []);
@@ -849,6 +964,8 @@ export const VidPlayer: React.FC<{
   // 工程一变就把当前这一格**强制**重折一张：暂停态没有 tick 会来补，而 Keyframes 窗里改帧值
   // 恰恰发生在暂停态（录/改完想立刻看到）。requestComposite 的按帧去重会把这些拦掉，所以这里
   // 走 force；页面的缓存身份带 kfSig/内容签名，真没变的帧会命中缓存，一个像素都不白画。
+  // `needRev` 同理：页面刚把某条轨写进/移出 Frame source（如绑上 Mask 轨），源帧清单变了，
+  // 暂停态也得立刻重折一张，不然要等下一次 tick 才看得见。
   useEffect(() => {
     if (!visible) return;
     const t = transport.get();
@@ -857,7 +974,7 @@ export const VidPlayer: React.FC<{
       : compositePlanAt(projectRef.current, t, muteRef.current, frameNeed.current);
     requestRef.current(plan, t, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [p]);
+  }, [p, needRev]);
   // 卸载(Image 模式换走正文)时槽不该悬着。
   // 卸载（切模式换走正文）时把解码器与 <video> 收干净。**不动时钟、不停声音**：传输是
   // 整页共用的，音频/视频的调度住在 timelineAudio.ts —— 切到 MIDI 模式，音频轨照样响。

@@ -501,10 +501,10 @@ export const kfLocalTimes = (clip: VidClip | null | undefined, fps = 30): number
 export type VidProcPending = {
   /** 同一趟 Run 的所有占位共用一颗（播报/统计用）。 */
   runId: string;
-  /** 这一趟是谁发的：processor（接口子图）/ preset（Pipeline Preset 的 block 链）。
-   *  缺省 = processor（旧存档）。续跑按它分流：一个 POST /api/execute_interface，
-   *  一个 POST /api/preset_video。 */
-  kind?: 'processor' | 'preset';
+  /** 这一趟是谁发的：processor（接口子图）/ preset（Pipeline Preset 的 block 链）/
+   *  detect（视频 Detector 的分段检测）。缺省 = processor（旧存档）。续跑按它分流：
+   *  一个 POST /api/execute_interface，一个 POST /api/preset_video，一个 /api/blend_action。 */
+  kind?: 'processor' | 'preset' | 'detect';
   /** preset 路：preset（block set）的 id + 名字（播报/续跑名字兜底）。 */
   presetId?: string;
   presetName?: string;
@@ -527,6 +527,26 @@ export type VidProcPending = {
   inputs: Record<string, ProcFrameWindow>;
   /** preset 路：这一段的 Mask 轨**帧段**（同形，port 恒 '0'）。没绑 Mask 轨就是空。 */
   maskInputs?: Record<string, ProcFrameWindow>;
+  /** detect 路：这一段怎么检 —— 提示词 / 阈值 / 反相，以及产物落在哪条 Detect 轨。
+   *  原始视频段记 `file` + `f0`（源文件内帧号），后端照资产库直读、自己抽帧；Layer /
+   *  整条时间线的合成段没有文件，记 `t0`（时间线绝对秒），跑的时候由 Player 逐帧抓合成
+   *  画面送后端。`n` = 这一段的帧数（段长 = n / fps）。 */
+  detect?: {
+    prompt: string;
+    threshold: number;
+    invert: boolean;
+    /** 这一趟开的那条 Detect 轨（产物落点）。 */
+    outTrackId: string;
+    fps: number;
+    n: number;
+    /** 原始视频段：源文件名 + 源内起始帧号。 */
+    file?: string;
+    f0?: number;
+    /** 合成段：这一段在时间线上的绝对起点（秒），逐帧抓图从这里起算。 */
+    t0?: number;
+    /** 合成段归属的图层集 key（播报 / 认亲用）。 */
+    layerKey?: string;
+  };
   /** 第几段（0 起）/ 共几段。 */
   segIndex: number;
   segCount: number;
@@ -1150,10 +1170,15 @@ export const clipsByTrack = (p: VidProject): Map<string, VidClip[]> => {
 };
 
 export const clipAtSolo = (p: VidProject, t: number, soloVideo: ReadonlySet<string>,
-  muted: ReadonlySet<string>): VidClip | null => {
+  muted: ReadonlySet<string>, opts?: { skipMaskTrack?: boolean }): VidClip | null => {
   const buckets = clipsByTrack(p);
+  const skipMask = !!opts?.skipMaskTrack;
   for (const tr of p.tracks) {
     if (tr.kind !== 'video') continue;
+    // Mask 轨（Detect 产物）的段也是视频，**监视器上照常播放**（轨道序 = 上下序，最上层命中
+    //  先赢；solo 它时也走这一路）。只有取检测源那一路要跳过它（skipMaskTrack，见 EditPhase
+    //  的 classify）—— 拿黑 mask 再检一遍只会黑上加黑。
+    if (skipMask && tr.id === p.maskTrackId) continue;
     if (muted.has(tr.id)) continue;                        // mute 优先
     if (soloVideo.size > 0 && !soloVideo.has(tr.id)) continue;
     const hit = (buckets.get(tr.id) || []).find(c => !c.pending && t >= c.start && t < c.start + c.duration);
@@ -2477,19 +2502,138 @@ export const placeDetectTrack = (p: VidProject): { p: VidProject; track: VidTrac
   return { p: { ...p, tracks }, track };
 };
 
-/** 一块 mask 视频落到 Detect 轨的 [start, start+duration) 上；资产照记（Assets 是项目数据的来源）。 */
-export const placeDetectClip = (
-  p: VidProject, trackId: string, src: string, name: string, start: number, duration: number,
+/** Detect 的分段**占位**：Run 确认的当下就在 Detect 轨正下方摆一条 process 轨，每段一个坑
+ *  （带着 detect 快照）。与 Processor 同一套规矩 —— 坑原地保留、可以反复 ▶ 重跑，产物落到
+ *  上方 Detect 轨的对应时间位置。 */
+export const placeDetectPlaceholders = (
+  p: VidProject,
+  item: {
+    runId: string; name: string; outTrackId: string;
+    prompt: string; threshold: number; invert: boolean; fps: number;
+    segs: { start: number; duration: number; n: number;
+      file?: string; f0?: number; t0?: number; layerKey?: string }[];
+  },
 ): VidProject => {
+  if (!item.segs.length) return p;
+  const outTrack = p.tracks.find(t => t.id === item.outTrackId);
+  if (!outTrack) return p;
+  const track: VidTrack = {
+    id: newVidId('trk'), kind: 'process',
+    name: `Process ${p.tracks.filter(t => t.kind === 'process').length + 1}`,
+  };
+  const tracks = [...p.tracks];
+  tracks.splice(tracks.findIndex(t => t.id === outTrack.id) + 1, 0, track);
+  const clips: VidClip[] = item.segs.map((s, i) => ({
+    id: newVidId('clip'), trackId: track.id, kind: 'process', name: item.name,
+    src: '', origin: 'file', start: Math.max(0, s.start), duration: Math.max(0.1, s.duration),
+    offset: 0, srcDuration: Math.max(0.1, s.duration), hasAudio: false,
+    pending: {
+      runId: item.runId, port: 0, iface: 'Detector', ifaceNum: -1,
+      params: {}, inputs: {}, segIndex: i, segCount: item.segs.length, kind: 'detect',
+      detect: {
+        prompt: item.prompt, threshold: item.threshold, invert: item.invert,
+        outTrackId: item.outTrackId, fps: item.fps, n: s.n,
+        ...(s.file != null ? { file: s.file } : {}),
+        ...(s.f0 != null ? { f0: s.f0 } : {}),
+        ...(s.t0 != null ? { t0: s.t0 } : {}),
+        ...(s.layerKey != null ? { layerKey: s.layerKey } : {}),
+      },
+    },
+  }));
+  return { ...p, tracks, clips: [...p.clips, ...clips] };
+};
+
+/** 一段 Detect 跑完：产物落到 Detect 轨的对应时间位置。占位段**原地不动**（可以反复 ▶ 重跑）；
+ *  同一个占位段上一次的产物按 procOwner 认亲原地换掉，别的东西占着不覆盖（调用方先过
+ *  detectSlotBusy）。 */
+export const placeDetectOutput = (
+  p: VidProject, ownerId: string, src: string, name: string, duration: number,
+): VidProject => {
+  const clip = p.clips.find(c => c.id === ownerId);
+  const trId = clip?.pending?.detect?.outTrackId;
+  if (!clip || !trId || !p.tracks.some(t => t.id === trId)) return p;
   const dur = Math.max(0.1, duration);
   const withAsset = addAsset(p, {
     id: newVidId('as'), name, src, origin: 'file', kind: 'video', duration: dur, hasAudio: false,
   });
-  const clips = [...withAsset.clips, {
-    id: newVidId('clip'), trackId, kind: 'video' as const, name, src, origin: 'file' as const,
-    start: Math.max(0, start), duration: dur, offset: 0, srcDuration: dur, hasAudio: false,
-  }];
+  const clips = withAsset.clips.filter(c => !(c.trackId === trId && c.procOwner === ownerId));
+  clips.push({
+    id: newVidId('clip'), trackId: trId, kind: 'video', name, src, origin: 'file',
+    start: Math.max(0, clip.start), duration: dur, offset: 0, srcDuration: dur, hasAudio: false,
+    procOwner: ownerId,
+  });
   return { ...withAsset, clips };
+};
+
+/** Detect 轨的槽位 [start, start+duration) 是否被**别的东西**占着。`ownerId` = 占位段 id：
+ *  它自己上一次的产物不算占（重跑会原地换掉）；别的片段占着 = ▶ 置灰。 */
+export const detectSlotBusy = (
+  p: VidProject, trackId: string, start: number, duration: number, ownerId?: string,
+): boolean => {
+  if (!trackId || !p.tracks.some(t => t.id === trackId)) return false;
+  const a = Math.max(0, start);
+  const b = a + Math.max(0.05, duration);
+  return p.clips.some(c => c.trackId === trackId && c.duration > 0
+    && !(ownerId && c.procOwner === ownerId)
+    && c.start < b - 1e-6 && c.start + c.duration > a + 1e-6);
+};
+
+/** 段落首尾相接的容差（秒）：时间线上都是按帧切出来的，浮点尾巴不该判成空隙。 */
+const MERGE_EPS = 0.002;
+
+/** Detect 轨整轨合并的可行性（纯函数）：产物段必须**全部落位、首尾严格相接**，否则整条 mask
+ *  会缺帧，后面的段就会全部错位 —— 宁可先不合并，也不要拿一条有洞的文件去对画面。
+ *  `parts` 直接喂 /api/vid_merge（每段 from 自己的 0 秒开始，长度 = 段时长）。 */
+export const detectTrackMergePlan = (
+  p: VidProject, trackId: string,
+): { ok: true; parts: { f: string; in: number; out: number }[]; base: number }
+  | { ok: false; reason: string } => {
+  const laws = p.clips.filter(c => c.trackId === trackId && !c.pending && c.src && c.duration > 0)
+    .sort((a, b) => a.start - b.start);
+  if (laws.length < 2) return { ok: false, reason: 'fewer than two segments' };
+  // 还没跑完：占位段（process 轨上的坑）比产物多，合并必缺帧。
+  const holes = p.clips.filter(c => c.pending?.detect?.outTrackId === trackId);
+  if (laws.length < holes.length) return { ok: false, reason: 'segments still pending' };
+  for (let i = 1; i < laws.length; i++) {
+    if (Math.abs(laws[i].start - (laws[i - 1].start + laws[i - 1].duration)) > MERGE_EPS) {
+      return { ok: false, reason: 'segments are not contiguous' };
+    }
+  }
+  if (laws.some(c => !/^\/api\/(?:vid|eagle)_media\//.test(c.src))) {
+    return { ok: false, reason: 'segments are not library files' };
+  }
+  return {
+    ok: true,
+    base: laws[0].start,
+    // 段的 src 有两种来路：自己那段的小文件（srcDuration = 段长），或上一次合并出的整轨文件
+    // （srcDuration = 整轨长，offset = 段在整轨里的起点）。后者要按 offset 去整轨里切，不能再
+    // 从 0 秒开始 —— 否则重跑一段后重拼，其余段的内容会整体错位。
+    parts: laws.map(c => (c.srcDuration > c.duration + MERGE_EPS
+      ? { f: c.src, in: c.offset, out: c.offset + c.duration }
+      : { f: c.src, in: 0, out: c.duration })),
+  };
+};
+
+/** 整轨合并成功后把一条 mask 文件分给该轨的**每一段**：段自身的位置、时长、procOwner 全不动
+ *  （分段 ▶ 重跑与槽位照旧），只把 src 换成整条文件、offset 指到同一条帧网格上。
+ *  于是整条轨只有一个源 —— 页面一只镜像连续 seek，取帧时刻也回到与画面同一时间轴
+ *  （offset = 段起点 − 轨起点），逐帧对齐。 */
+export const shareDetectTrackSource = (
+  p: VidProject, trackId: string, src: string, duration: number,
+): VidProject => {
+  const own = p.clips.filter(c => c.trackId === trackId && !c.pending && c.src && c.duration > 0)
+    .sort((a, b) => a.start - b.start);
+  if (own.length < 2) return p;
+  const base = own[0].start;
+  const ids = new Set(own.map(c => c.id));
+  const dur = Math.max(0.1, duration);
+  return {
+    ...p,
+    clips: p.clips.map(c => (ids.has(c.id)
+      ? { ...c, src, asset: undefined, play: undefined,
+          offset: Math.max(0, c.start - base), srcDuration: dur, hasAudio: false }
+      : c)),
+  };
 };
 
 /** Processor 的 Allow List 视频产物**只入库**（输出口选了 Asset）：时间线不动、不开轨，
@@ -2519,7 +2663,6 @@ export const placeProcAssets = (
 //  * video 段：同源且源内连续 → 本地并成一段；否则交后端 ffmpeg 拼成一条新文件再替换；
 //  * layer 段：内容是否相同由页面回签（见 layerSigs），调用方确认后才允许合并。
 // 联合音画（groupId）一律不合并：视频段被并、音频段没被并，组就断了 —— 先 ⧉ 解绑再来。
-const MERGE_EPS = 0.002;
 
 export type VidMergeKind = 'video' | 'process' | 'layer';
 export type VidMergePlan = {

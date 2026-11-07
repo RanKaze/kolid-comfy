@@ -155,8 +155,20 @@ def detect_mask(detector, image, threshold=0.5, dilation=4,
             if masks is None or masks.numel() == 0:
                 raise RuntimeError(f"SAM3 未检测到任何对象。\nprompt: '{prompt}'\nthreshold: {threshold}\n建议尝试降低 threshold 到 0.15-0.3")
 
-            print(f"✅ SAM3 Grounding 执行成功，检测到 {masks.shape[0]} 个对象")
-            mask_list = mask_batch_to_list(masks)
+            # 无检测时 SAM3 回的是"零 mask 哨兵"（zeros(1,H,W)，numel > 0）而不是空张量 ——
+            # 只按 numel 判空会把它当成"检测到 1 个对象"。全零 mask 一律不算检测。
+            mask_list = [m.detach().float().cpu() for m in mask_batch_to_list(masks)]
+            mask_list = [m for m in mask_list if float(m.sum()) > 0]
+            if not mask_list:
+                # 逐帧跑视频时"这一帧没东西"是正常结果：回一张全零 mask，
+                # 调用方（combine_masks）不接受空列表。
+                print(f"⚠️ SAM3 未检测到对象（prompt: '{prompt}' | threshold: {threshold}）"
+                      " —— SAM3 的 presence 分数普遍偏低：可降低 threshold，或换个词"
+                      "（woman / person 通常比 girl 得分高）")
+                return [torch.zeros(int(masks.shape[-2]), int(masks.shape[-1]),
+                                    dtype=torch.float32)]
+
+            print(f"✅ SAM3 Grounding 执行成功，检测到 {len(mask_list)} 个对象")
             return mask_list
 
         except Exception as e:

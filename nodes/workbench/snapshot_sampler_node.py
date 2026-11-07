@@ -62,7 +62,6 @@ from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_c
 from ...libs.mask_utils import expand_mask
 from ...libs.video_utils import get_video_metadata
 from ...libs import av_media
-from ...libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from ..pipeline.sampler_node import get_loras_from_string, ConditioningCacheStore
 from ...libs.generate_text_utils import apply_generate_text_to_prompt
@@ -630,6 +629,33 @@ IO_FILE_KINDS = {
 # 它是一个 IMAGE 口，段上选一条时间线视频轨，跑的时候把那条轨在段的时间窗内采样成一列图喂进来。
 VIDEO_GEN_SLOTS = ('prompt', 'width', 'height', 'duration', 'fps',
                    'first_frame', 'last_frame', 'reference', 'video')
+
+# Detector / Tagger 的槽位（与前端 types.ts 的 DETECTOR_SLOTS / TAGGER_SLOTS 同名）：
+# 一个开了 Detector 的 interface 就是一台检测器 —— image / prompt / threshold 三个入口，
+# mask 一个出口；Tagger 则是 image / threshold 两个入口，prompt 一个出口。
+# 槽位只是"角色名"，绑的是端口号（1..20）；执行全程按号走，与端口改名无关。
+DETECTOR_SLOTS = ('image', 'prompt', 'threshold', 'mask')
+TAGGER_SLOTS = ('image', 'threshold', 'prompt')
+# 必绑槽：detector 少了 image 就没图可检、少了 mask 就不知道产物从哪出；
+# tagger 少了 image 没图可打、少了 prompt 不知道标签从哪回。
+MODE_REQUIRED_SLOTS = {'detector': ('image', 'mask'), 'tagger': ('image', 'prompt')}
+
+
+class _InterfaceTaggerAdapter:
+    """交给 Prompt 窗的 `get_tag()` 用的打标适配器。
+
+    Prompt 窗那几个 Tag 按钮走的是 `get_tag(tagger, image)`，它认「带 .tag(image) 的对象」——
+    这里把这一跳转给采样器上的 Tagger 接口包，于是打标模型不再需要作为节点输入口存在。
+    """
+
+    def __init__(self, server):
+        self.server = server
+
+    def tag(self, image):
+        node = getattr(self.server, 'node_instance', None)
+        if node is None:
+            raise RuntimeError('Sampler node is not ready — cannot run the tagger interface.')
+        return node._run_tagger_interface(self.server, image)
 
 # 工作台自己那三份用户内容（blocks 链与 DEFAULT SETTING、Prompt 预设、最近一份 .cud 的路径）
 # 住 data/sampler/，与 data/prompt、data/switch 同级，整目录进 .gitignore。以前它们躺在 nodes/
@@ -2152,26 +2178,6 @@ def _vid_resize_mask(mask, w, h):
                          align_corners=False)[0, 0]
 
 
-def _vid_detect_result(detector, image, prompt, threshold, invert):
-    """与 /api/blend_action detect 同一套掩码表达式语义，但只取 mask（视频逐帧用）。"""
-    from ...libs.detect_utils import detect_mask
-    from ...libs.mask_utils import combine_masks
-    from ...libs.mask_expression import parse_mask_expression, collect_terms, eval_expression
-    if prompt:
-        root = parse_mask_expression(prompt, threshold)
-        term_masks = {}
-        for name, t in collect_terms(root):
-            term_masks[(name, float(t))] = combine_masks(
-                detect_mask(detector=detector, image=image, threshold=float(t), prompt=name),
-                mode='max')
-        result = eval_expression(root, term_masks)
-    else:
-        result = combine_masks(detect_mask(detector=detector, image=image,
-                                           threshold=threshold, prompt=''), mode='max')
-    if invert:
-        result = 1.0 - result
-    return result
-
 
 def _vid_publish(val, name='vgen', want_fps=None):
     """把一枚 **VIDEO 产物**搬进视频媒体库，返回 (url, frames, fps) 或 (None, 0, 0)。
@@ -2346,13 +2352,18 @@ def _vid_merge(parts, name='merged'):
     （编码/尺寸/帧率不一致，或入出点落在关键帧缝里）再退到 concat 滤镜重编码，统一到第一段的
     尺寸/帧率。输出落在资产媒体库，文件名按文件身份 + 入出点哈希缓存 —— 同样的拼接第二次
     直接命中，不会重复写盘。
+
+    **口径是帧**：Detect 轨的段都是同一个编码器按同一个帧率切出来的，每段从 0 秒起、以 IDR
+    开头、帧数与段长严格对应 —— 所以流拷贝拼出来的整轨就是"各段帧首尾相接"，不多不少。
+    重拼时入出点都落在段边界（也就是关键帧）上，同样逐帧对齐；只有编码参数真的不一致、
+    流拷贝拼不动时才退回重编码。
     """
     ff = _ff_bin('ffmpeg')
     fp = _ff_bin('ffprobe')
     if not ff or not fp:
         return {'ok': False, 'error': 'ffmpeg not available on the server'}
-    if not isinstance(parts, list) or len(parts) < 2:
-        return {'ok': False, 'error': 'need at least two parts'}
+    if not isinstance(parts, list) or len(parts) < 1:
+        return {'ok': False, 'error': 'need at least one part'}
     # 片段/资产名不带扩展名：时间线上显示的是逻辑名，扩展名由 src 决定。
     nm = os.path.splitext(os.path.basename(str(name or 'merged')))[0] or 'merged'
     d = _vid_media_dir()
@@ -2397,16 +2408,18 @@ def _vid_merge(parts, name='merged'):
         return "'" + p.replace("'", "'\\''") + "'"
 
     try:
-        with open(listing, 'w', encoding='utf-8') as f:
-            for path, (a, b) in zip(paths, spans):
-                f.write(f'file {_q(path)}\n')
-                f.write(f'inpoint {a:.6f}\n')
-                f.write(f'outpoint {b:.6f}\n')
-        r = subprocess.run(
-            [ff, '-y', '-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0',
-             '-i', listing, '-c', 'copy', '-an', '-movflags', '+faststart', tmp],
-            capture_output=True, timeout=1800)
-        ok = r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0
+        ok = False
+        if not exact:
+            with open(listing, 'w', encoding='utf-8') as f:
+                for path, (a, b) in zip(paths, spans):
+                    f.write(f'file {_q(path)}\n')
+                    f.write(f'inpoint {a:.6f}\n')
+                    f.write(f'outpoint {b:.6f}\n')
+            r = subprocess.run(
+                [ff, '-y', '-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0',
+                 '-i', listing, '-c', 'copy', '-an', '-movflags', '+faststart', tmp],
+                capture_output=True, timeout=1800)
+            ok = r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0
         if not ok:
             # 回退：逐段 -ss/-t 切开，统一缩放/补边/帧率后 concat 重编码。
             probe0 = _vid_ffprobe(paths[0]) or {}
@@ -2420,6 +2433,12 @@ def _vid_merge(parts, name='merged'):
                 return {'ok': False, 'error': 'cannot read the source resolution'}
             w -= w % 2
             hgt -= hgt % 2
+            # 精确模式按调用方声明的工程帧率统一：逐帧 mask 必须落在与画面同一帧网格上。
+            if exact and fps_hint:
+                try:
+                    fps = float(fps_hint)
+                except (TypeError, ValueError):
+                    pass
             fps = max(1.0, min(120.0, fps))
             cmd = [ff, '-y', '-hide_banner', '-loglevel', 'error']
             for path, (a, b) in zip(paths, spans):
@@ -2770,10 +2789,10 @@ class SnapshotDetailerSamplerServer:
                              'ref_pixels': 1048576, 'ref_align': 8,
                              'tgen_pixels': 1048576, 'tgen_align': 8}
 
-    def __init__(self, detector, tagger, lora_regex, asset=None, package=None,
+    def __init__(self, lora_regex, asset=None, package=None,
                  node_instance=None, unique_id=None, config=None, extra_pnginfo=None, prompt=None):
-        self.detector = detector
-        self.tagger = tagger
+        # Detector / Tagger 不再有「模型对象」这一层：Interface tab 把某个接口包声明成
+        # detector / tagger 并绑好槽位，执行时就现跑那个包（见 mode_interface / _run_*_interface）。
         self.extra_pnginfo = extra_pnginfo
         self.asset = asset
         self.lora_regex = lora_regex
@@ -2999,7 +3018,10 @@ class SnapshotDetailerSamplerServer:
             last_selected_prefabs=[],
         )
         self.prompt_server.lora_path_mode = True
-        self.prompt_server.tagger = self.tagger
+        # Prompt 窗的 Tag 按钮：打标直接执行 Interface tab 绑定的 Tagger 接口包。
+        # 没配好（开关没开 / 槽没绑全）就交 None —— 那几个按钮不出现，而不是点了才报错。
+        self.prompt_server.tagger = (_InterfaceTaggerAdapter(self)
+                                     if self.mode_ready('tagger') else None)
         self.prompt_server.asset = self.asset
         t_prompt = threading.Thread(target=self.prompt_server.start)
         t_prompt.daemon = True
@@ -3703,7 +3725,28 @@ class SnapshotDetailerSamplerServer:
                 one['modes'] = {'block': bool(modes.get('block')),
                                 'processor': bool(modes.get('processor')),
                                 # Video Generator：把这个包声明成一台视频生成器（八个固定槽各绑一个端口）。
-                                'video_generator': bool(modes.get('video_generator'))}
+                                'video_generator': bool(modes.get('video_generator')),
+                                # Detector / Tagger：把这个包声明成检测器 / 打标器（下面按槽位绑端口）。
+                                'detector': bool(modes.get('detector')),
+                                'tagger': bool(modes.get('tagger'))}
+            # Detector / Tagger 的槽位绑定：槽名 → 端口号（1..20）。模块外的槽名一律丢 ——
+            # 执行时只认这几枚角色，未知槽留着只会让"这个口扮演什么"说不清。
+            for mode, slots in (('detector', DETECTOR_SLOTS), ('tagger', TAGGER_SLOTS)):
+                raw_ports = entry.get(mode)
+                if not isinstance(raw_ports, dict):
+                    continue
+                clean_ports = {}
+                for slot, num in raw_ports.items():
+                    if slot not in slots:
+                        continue
+                    try:
+                        num = int(num)
+                    except (TypeError, ValueError):
+                        continue
+                    if 1 <= num <= 20:
+                        clean_ports[slot] = num
+                if clean_ports:
+                    one[mode] = clean_ports
             # Video Generator 的槽位绑定：槽名 → 端口号（1..20）。槽名出表就丢 —— 未知的槽
             # 段那一侧不认，留着只会让"这段到底绑了什么"说不清。
             # Fixed FPS 开着时前端根本不给 fps 槽，这里也就把那一口摘掉（万一老配置里还留着）。
@@ -3776,6 +3819,47 @@ class SnapshotDetailerSamplerServer:
         except Exception as e:
             print(f"[SnapshotDetailerSampler] Failed to save interface_meta: {e}")
 
+    def mode_interface(self, mode):
+        """按 Interface tab 的模式开关，找出扮演 detector / tagger 的那个接口包。
+
+        返回 `(pkg, bindings)`；没有返回 `(None, {})`。只认真正有子图的接口包 ——
+        老式「值接口」（dict 里只有 values、没有 end_node_id）没有可执行的东西，不参与匹配。
+        绑定表 = {槽名: 端口号}，缺的槽就是没绑。
+        多个接口都开了同一个模式时，**优先选绑定齐全的那个**；都不齐全就返回第一个，
+        让报错能说清缺哪一枚槽。
+        """
+        if mode not in MODE_REQUIRED_SLOTS:
+            return None, {}
+        required = MODE_REQUIRED_SLOTS[mode]
+        first = None
+        for pkg in (self.interface_packages or []):
+            if not isinstance(pkg, dict) or not pkg.get('end_node_id'):
+                continue
+            name = str(pkg.get('name') or '')
+            meta = (self.interface_meta or {}).get(name) or {}
+            if not (meta.get('modes') or {}).get(mode):
+                continue
+            ports = meta.get(mode) or {}
+            if not isinstance(ports, dict) or not ports:
+                continue
+            if first is None:
+                first = (pkg, ports)
+            if all(ports.get(slot) for slot in required):
+                return pkg, ports
+        return first if first else (None, {})
+
+    def mode_ready(self, mode):
+        """这个模式能不能用：绑定齐全才算 —— 只开开关、槽没绑全是"没配好"。"""
+        pkg, bindings = self.mode_interface(mode)
+        if pkg is None:
+            return False
+        required = MODE_REQUIRED_SLOTS.get(mode, ())
+        return all(bindings.get(slot) for slot in required)
+
+    def mode_status(self):
+        return {'has_detector': self.mode_ready('detector'),
+                'has_tagger': self.mode_ready('tagger')}
+
     def find_pipeline_by_name(self, name):
         """Resolve a pipeline by its package name → {'package_idx','pipeline_idx','node_id'}.
 
@@ -3843,6 +3927,10 @@ class SnapshotDetailerSamplerServer:
         if 'interface_meta' in data:
             self.interface_meta = self._normalize_interface_meta(data['interface_meta'])
             self._save_interface_meta_file()
+            # 绑定一改，Prompt 窗的 Tag 按钮跟着换适配器（执行时现查 meta，不需要重取模型）。
+            if getattr(self, 'prompt_server', None) is not None:
+                self.prompt_server.tagger = (_InterfaceTaggerAdapter(self)
+                                             if self.mode_ready('tagger') else None)
         # Open With Application（Settings tab 的 user preference）：写共享偏好文件，
         # 各节点执行时的 open_ui 从那里读 —— 不挂在某个节点实例上。
         if 'open_with_app' in data:
@@ -4159,9 +4247,9 @@ class SnapshotDetailerSamplerServer:
                     # GLOBAL_PARAM_DEFAULTS 回显，加参数不必再来这里补一行。
                     **{k: (getattr(inst, k, d) if inst else d)
                        for k, d in SnapshotDetailerSamplerServer.GLOBAL_PARAM_DEFAULTS.items()},
-                    'has_tagger': inst.tagger is not None if inst else False,
-                    # Detector 工具的总闸：节点没连 detector 时整块工具隐藏。
-                    'has_detector': inst.detector is not None if inst else False,
+                    'has_tagger': inst.mode_ready('tagger') if inst else False,
+                    # Detector 工具的总闸：Interface tab 没把某个接口声明成 detector（或槽没绑全）时整块工具隐藏。
+                    'has_detector': inst.mode_ready('detector') if inst else False,
                     'architecture': self._get_current_architecture(inst),
                     'has_package': bool(inst and inst.interface_packages),
                     'package_count': len(inst.interface_packages) if inst else 0,
@@ -4185,6 +4273,13 @@ class SnapshotDetailerSamplerServer:
                     # Prompt tab 的 LoRA 灰名单跟着哪一代 regex 拉的 —— 宿主页拿它判断要不要重拉。
                     'pipeline_lora_epoch': getattr(inst, 'pipeline_lora_epoch', 0) if inst else 0,
                 })
+                return
+
+            # Interface tab 改完 Detector / Tagger 后，宿主页不用重拉整份 config，
+            # 只要这两个开关态 —— 接口包本身不序列化，这里只说"配没配好"。
+            if self.path == '/api/modes_status':
+                self._send_json(inst.mode_status() if inst else
+                                {'has_tagger': False, 'has_detector': False})
                 return
 
             if self.path == '/api/status':
@@ -4335,6 +4430,16 @@ class SnapshotDetailerSamplerServer:
 
                     start_types = fresh_pkg.get('start_types', {})
                     end_types = fresh_pkg.get('types', {})
+                    # 值接口 = InterfaceStartNode 的 interface 输出直连 package 输入的那份 dict。
+                    # 它没有 end_node_id / sub_prompt，端口类型只能来自它自带的 types；连
+                    # port_types 都没有时按 values 的键兜一份 ANY。
+                    _has_value_iface = bool(not end_id and isinstance(pkg.get('values'), dict))
+                    _iface_values = (pkg.get('values') or {}) if _has_value_iface else {}
+                    if _has_value_iface:
+                        start_types = start_types or fresh_pkg.get('types') or {}
+                        if not start_types:
+                            start_types = {str(k): 'ANY' for k in _iface_values}
+                        end_types = {}
                     print("[InterfacePorts] /api/package end=%s via=%s start_types=%s end_types=%s"
                           % (end_id, _from, start_types or '{}', end_types or '{}'))
 
@@ -4399,6 +4504,9 @@ class SnapshotDetailerSamplerServer:
                     # Interface meta（改名 / 模式 / block 端口绑定）按包名字贴回来。
                     # 端口名本身只是展示 —— 执行全程按端口号走,改名不影响链路。
                     iface_name = fresh_pkg.get('name', pkg.get('name', ''))
+                    if _has_value_iface and not str(iface_name).strip():
+                        iface_name = ('Interface ' + str(pkg.get('start_node_id') or '')
+                                      if pkg.get('start_node_id') else 'Interface value')
                     meta = (getattr(inst, 'interface_meta', None) or {}).get(iface_name) or {}
                     names_meta = meta.get('names') or {}
 
@@ -4428,9 +4536,13 @@ class SnapshotDetailerSamplerServer:
                         'name': iface_name,
                         'start_ports': start_ports,
                         'end_ports': end_ports,
-                        'modes': meta.get('modes') or {'block': False, 'processor': False,
-                                                       'video_generator': False},
+                        'modes': {**{'block': False, 'processor': False, 'video_generator': False,
+                                     'detector': False, 'tagger': False},
+                                  **(meta.get('modes') or {})},
                         'block_ports': meta.get('block_ports') or {},
+                        # Detector / Tagger：槽位 → 端口号的绑定（空表 = 没绑 / 没开这个模式）。
+                        'detector': meta.get('detector') or {},
+                        'tagger': meta.get('tagger') or {},
                         # Video Generator：八个固定槽各绑了哪个端口（空表 = 还没绑 / 没开这个模式）。
                         'video_gen': meta.get('video_gen') or {},
                         # image/mask 出口的默认落位与入口的默认来源（Processor 小窗的初值），没有就是空表。
@@ -4995,7 +5107,9 @@ class SnapshotDetailerSamplerServer:
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
-                    res = _vid_merge(body.get('parts'), str(body.get('name') or 'merged'))
+                    res = _vid_merge(body.get('parts'), str(body.get('name') or 'merged'),
+                                     exact=bool(body.get('exact')),
+                                     fps_hint=body.get('fps'))
                     self._send_json(res, 200 if res.get('ok') else 500)
                 except Exception as e:
                     self._send_json({'ok': False, 'error': str(e)}, 500)
@@ -5517,8 +5631,8 @@ class SnapshotDetailerSamplerServer:
                     # 产物按画布尺寸（Canvas 的 Frame/fps）编码成一列 mask mp4，交给前端落到新轨。
                     dv = body.get('detect_video') or {} if action == 'detect' else None
                     if dv:
-                        if inst.detector is None:
-                            self._send_json({'success': False, 'error': 'No detector is connected to the node'})
+                        if not inst.mode_ready('detector'):
+                            self._send_json({'success': False, 'error': 'No detector is configured (Interface tab → Detector)'})
                             return
                         params = body.get('detect') or {}
                         prompt = str(params.get('prompt') or '').strip()
@@ -5568,17 +5682,25 @@ class SnapshotDetailerSamplerServer:
                                 work_w, work_h = int(frames[0].shape[2]), int(frames[0].shape[1])
                         prepared = [_vid_fit_canvas(fr, work_w, work_h) for fr in frames]
                         masks = []
+                        empty = 0
                         for fr in prepared:
-                            m = _vid_detect_result(inst.detector, fr, prompt, threshold, invert)
+                            m = inst.node_instance._detect_with_interface(
+                                inst, fr, prompt, threshold, invert)
                             # 一律回成 2D [H,W] 再编码：_vid_encode 的 _rgb 只认裸 mask / [H,W,C]，
                             # combine_masks 吐的 [1,H,W] 会被它读成"1 行 W 列"而编不出来。
-                            masks.append(_vid_resize_mask(m, out_w, out_h))
+                            m = _vid_resize_mask(m, out_w, out_h)
+                            # 一帧都没检到 = 这张 mask 全零。invert 时全零反而表示"整帧都是前景"，
+                            # 所以只在非 invert 口径下计数（前端据此判定"整趟什么都没检到"）。
+                            if not invert and float(m.sum()) <= 0.0:
+                                empty += 1
+                            masks.append(m)
                         url = _vid_encode(masks, vfps, str(dv.get('name') or 'detect'))
                         if not url:
                             self._send_json({'success': False, 'error': 'Detect video: encoding the mask failed'})
                             return
                         self._send_json({'success': True, 'video': url, 'frames': len(masks),
-                                         'fps': vfps, 'w': out_w or work_w, 'h': out_h or work_h})
+                                         'empty': empty, 'fps': vfps,
+                                         'w': out_w or work_w, 'h': out_h or work_h})
                         return
 
                     comp = decode_image_dataurl(body.get('composite')) if action in ('detailer', 'tag', 'detect') else None
@@ -5608,14 +5730,14 @@ class SnapshotDetailerSamplerServer:
 
                     if action == 'tag':
                         # 纯读取：拿画布合成图 + Mask 层打标，结果只写进 prompt 阶段
-                        if inst.tagger is None:
-                            self._send_json({'success': False, 'error': 'Tagger not configured'})
+                        if not inst.mode_ready('tagger'):
+                            self._send_json({'success': False, 'error': 'Tagger not configured (Interface tab → Tagger)'})
                             return
                         if inst.node_instance is None:
                             self._send_json({'success': False, 'error': 'Node not ready'})
                             return
                         mode = body.get('tag_mode', 'mask')
-                        tag = inst.node_instance._run_tag_on_image(image, mask, inst.tagger, mode)
+                        tag = inst.node_instance._run_tag_on_image(inst, image, mask, mode)
                         parsed_selected, parsed_temporary = inst._apply_tag_result(tag)
                         self._send_json({'success': True, 'tag': tag, 'tags': parsed_selected, 'custom': '', 'temporary': parsed_temporary})
                         return
@@ -5628,10 +5750,9 @@ class SnapshotDetailerSamplerServer:
                         # 结果按 invert 翻转、再乘 Main Mask（Masked 变体由前端随 payload 带
                         # mask，且已换算到 source 图自己的网格），以「白=覆盖」的 RGBA PNG 返回
                         # —— 亮度进不了 mask 面，alpha 就是覆盖度，四个 destination 都由前端落地。
-                        if inst.detector is None:
-                            self._send_json({'success': False, 'error': 'No detector is connected to the node'})
+                        if not inst.mode_ready('detector'):
+                            self._send_json({'success': False, 'error': 'No detector is configured (Interface tab → Detector)'})
                             return
-                        from ...libs.detect_utils import detect_mask
                         from ...libs.mask_utils import combine_masks
                         from ...libs.mask_expression import parse_mask_expression, collect_terms, eval_expression
                         params = body.get('detect') or {}
@@ -5666,18 +5787,15 @@ class SnapshotDetailerSamplerServer:
                             # 找不到, 同一个词换阈值就该是两条独立的掩码。
                             term_masks = {}
                             for name, t in collect_terms(root):
-                                term_hits = detect_mask(detector=inst.detector, image=img,
-                                                        threshold=float(t), prompt=name)
-                                combined = combine_masks(term_hits, mode='max')
+                                combined = inst.node_instance._run_detector_interface(
+                                    inst, img, name, float(t))
                                 term_masks[(name, float(t))] = combined
                                 dbg.record_mask(f"术语 '{name}' @ {t}", combined,
-                                                detail=f'{len(term_hits)} 个实例')
+                                                detail='接口包输出')
                             result = eval_expression(root, term_masks)
                         else:
-                            result = combine_masks(
-                                detect_mask(detector=inst.detector, image=img,
-                                            threshold=threshold, prompt=''),
-                                mode='max')
+                            result = inst.node_instance._run_detector_interface(
+                                inst, img, '', threshold)
                         if invert:
                             result = 1.0 - result
                         if mask is not None and float(mask.sum()) > 0:
@@ -5834,8 +5952,8 @@ class SnapshotDetailerSamplerNode:
                 "lora_regex": ("STRING", {"default": "", "multiline": False}),
             },
             "optional": {
-                "detector": ("*",),
-                "tagger": ("*",),
+                # Detector / Tagger 不再挂节点端口：Interface tab 把某个接口包声明成
+                # detector / tagger 并绑好槽位，采样器执行时现跑那个包。
                 "asset": ("STRING", {"default": "", "multiline": True, "tooltip": "Assets snapshot: JSON string (normal mode) or name (global mode) for Tag From Assets button"}),
                 "package": ("*",),
             },
@@ -5858,11 +5976,134 @@ class SnapshotDetailerSamplerNode:
         return getattr(self, '_current_pipeline', None)
 
     # -------------------------------------------------------------------------
+    # Detector / Tagger：执行 Interface tab 里绑定的那两个接口包
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _as_image_batch(image):
+        """把一枚图收成 IMAGE 口要的 [1,H,W,C]。已经是 4D 的 batch 原样返回。"""
+        if image is None:
+            return None
+        if not torch.is_tensor(image):
+            image = torch.as_tensor(image)
+        if image.dim() == 3:
+            return image.unsqueeze(0)
+        return image
+
+    def _run_mode_interface(self, server, mode, image, manual_values=None):
+        """执行扮演 `mode`（detector / tagger）的那个接口包，返回 (results, result_ports, bindings)。
+
+        image 走**端口覆盖**（画出来的图不是注入语义的备胎），prompt / threshold 走 manual_values ——
+        InterfaceExecutor 会按端口类型把它们收敛好。这里只做「哪个口是哪枚角色」的翻译。
+        """
+        pkg, bindings = server.mode_interface(mode)
+        if pkg is None:
+            raise RuntimeError(
+                f'No interface is configured as {mode} — in the Interface tab, turn {mode.capitalize()} '
+                f'on for the interface that implements it.')
+        image_port = bindings.get('image')
+        if not image_port:
+            raise RuntimeError(f'{mode.capitalize()} interface has no image port bound (Interface tab).')
+        from .interface_node import InterfaceExecutor
+        executor = InterfaceExecutor(
+            extra_pnginfo=getattr(server, 'extra_pnginfo', None),
+            get_pipeline=lambda: None,
+            get_image=lambda: None,
+            get_mask=lambda: None,
+        )
+        port_overrides = {int(image_port): self._as_image_batch(image)}
+        results = executor.execute(pkg, manual_values or {}, port_overrides=port_overrides)
+        return results, list(getattr(executor, 'result_ports', [])), bindings
+
+    def _run_detector_interface(self, server, image, prompt='', threshold=0.5):
+        """跑 Detector 接口包，返回一张 [1,H,W] 的 mask。
+
+        出口槽没绑时按类型兜底：有 MASK 用 MASK，没有再退 IMAGE（按亮度转 mask）。
+        """
+        from ...libs.mask_utils import combine_masks
+        pkg, bindings = server.mode_interface('detector')
+        if pkg is None:
+            raise RuntimeError(
+                'No interface is configured as detector — in the Interface tab, turn '
+                'Detector on for the interface that implements it.')
+        manual = {}
+        if bindings.get('prompt'):
+            manual[str(bindings['prompt'])] = str(prompt or '')
+        if bindings.get('threshold'):
+            manual[str(bindings['threshold'])] = float(threshold)
+        results, result_ports, bindings = self._run_mode_interface(server, 'detector', image, manual)
+        target = bindings.get('mask') or 0
+        masks = []
+        for i, (ptype, val, _name) in enumerate(results):
+            port = result_ports[i] if i < len(result_ports) else None
+            if target and port != target:
+                continue
+            if ptype == 'MASK' and torch.is_tensor(val):
+                masks.append(val)
+            elif ptype == 'IMAGE':
+                m = staging_image_to_mask(val)
+                if m is not None:
+                    masks.append(m)
+        if not masks:
+            _nm = pkg.get('name', '') if isinstance(pkg, dict) else ''
+            raise RuntimeError(
+                f"Detector interface {_nm!r} returned no mask on the bound output port "
+                f"(missing MASK output or image port).")
+        return combine_masks(masks, mode='max')
+
+    def _run_tagger_interface(self, server, image, threshold=0.5):
+        """跑 Tagger 接口包，返回标签字符串。"""
+        pkg, bindings = server.mode_interface('tagger')
+        if pkg is None:
+            raise RuntimeError(
+                'No interface is configured as tagger — in the Interface tab, turn '
+                'Tagger on for the interface that implements it.')
+        manual = {}
+        if bindings.get('threshold'):
+            manual[str(bindings['threshold'])] = float(threshold)
+        results, result_ports, bindings = self._run_mode_interface(server, 'tagger', image, manual)
+        target = bindings.get('prompt') or 0
+        texts = []
+        for i, (ptype, val, _name) in enumerate(results):
+            port = result_ports[i] if i < len(result_ports) else None
+            if target and port != target:
+                continue
+            if ptype in ('IMAGE', 'MASK', 'VIDEO', 'PIPELINE_DATA'):
+                continue
+            if val is None:
+                continue
+            if isinstance(val, list):
+                texts.extend(str(v) for v in val if v is not None)
+            else:
+                texts.append(str(val))
+        if not texts:
+            _nm = pkg.get('name', '') if isinstance(pkg, dict) else ''
+            raise RuntimeError(
+                f"Tagger interface {_nm!r} returned no prompt string on the bound output port.")
+        return ', '.join(t.strip() for t in texts if t.strip())
+
+    def _detect_with_interface(self, server, image, prompt, threshold=0.5, invert=False):
+        """掩码表达式语义：逐 term 跑 Detector 接口，再按表达式合并。"""
+        from ...libs.mask_utils import combine_masks
+        from ...libs.mask_expression import parse_mask_expression, collect_terms, eval_expression
+        if prompt:
+            root = parse_mask_expression(prompt, threshold)
+            term_masks = {}
+            for name, t in collect_terms(root):
+                term_masks[(name, float(t))] = combine_masks(
+                    self._run_detector_interface(server, image, name, float(t)), mode='max')
+            result = eval_expression(root, term_masks)
+        else:
+            result = combine_masks(
+                self._run_detector_interface(server, image, '', threshold), mode='max')
+        if invert:
+            result = 1.0 - result
+        return result
+
+    # -------------------------------------------------------------------------
     # Tag
     # -------------------------------------------------------------------------
-    def _run_tag_on_image(self, tag_image, mask, tagger, mode='mask'):
+    def _run_tag_on_image(self, server, tag_image, mask, mode='mask', threshold=0.5):
         """对给定图像 + 遮罩打标，与 pipeline 状态无关（供 Blend 工作台直接调用）。"""
-        from ...libs.caption_utils import get_tag
         from ...libs.image_utils import crop_mask
         if mask is not None:
             try:
@@ -5880,7 +6121,7 @@ class SnapshotDetailerSamplerNode:
                     tag_image = cropped_img * mask_expanded + white_bg * (1 - mask_expanded)
             except Exception as mask_err:
                 print(f"[RunTag] crop_mask failed, falling back to full: {mask_err}")
-        return get_tag(tagger, tag_image)
+        return self._run_tagger_interface(server, tag_image, threshold)
 
     # -------------------------------------------------------------------------
     # Load From Assets
@@ -7638,9 +7879,9 @@ class SnapshotDetailerSamplerNode:
                     # mask/covered 在链中该位置没有 mask = 报错中止整条链（用户指定语义）。
                     bp = block.get('params', block)
                     tag_mode = (bp.get('mode', 'full') or 'full') if isinstance(bp, dict) else 'full'
-                    if server is None or getattr(server, 'tagger', None) is None:
-                        print(f"[PipelineBlock {i+1}] WARNING: Tagger block but the node has no tagger input — skipped (prompt unchanged)")
-                        dbg.record_error(f'Block {i+1} · Tagger 块跳过', '节点没有 tagger 输入',
+                    if server is None or not server.mode_ready('tagger'):
+                        print(f"[PipelineBlock {i+1}] WARNING: Tagger block but no tagger is configured — skipped (prompt unchanged)")
+                        dbg.record_error(f'Block {i+1} · Tagger 块跳过', 'Interface tab 没绑定 tagger 端口',
                                          block=i + 1, where='tagger_block')
                         continue
                     if tag_mode in ('mask', 'covered') and current_mask is None:
@@ -7653,7 +7894,7 @@ class SnapshotDetailerSamplerNode:
                     dbg.record_image(f'Block {i+1} · Tagger 输入图', tag_img, block=i + 1)
                     if tag_mask is not None:
                         dbg.record_mask(f'Block {i+1} · Tagger 输入 mask', tag_mask, block=i + 1)
-                    tag = self._run_tag_on_image(tag_img, tag_mask, server.tagger, tag_mode)
+                    tag = self._run_tag_on_image(server, tag_img, tag_mask, tag_mode)
                     tag = (tag or '').strip()
                     if tag:
                         # 与 Blend 的 Tag 工具同一条 parsing 通道:解析后写入 prompt 阶段的
@@ -8116,12 +8357,10 @@ class SnapshotDetailerSamplerNode:
                 # （detector 内部会缩到自己的分辨率，这一步不能省）。
                 if block.get('type') == 'detect':
                     bp = block.get('params', block)
-                    if server is None or getattr(server, 'detector', None) is None:
+                    if server is None or not server.mode_ready('detector'):
                         raise RuntimeError(
-                            f"Detect block (block {i+1}) needs a detector — connect one to the node's "
-                            f"detector input, or remove this block.")
-                    from ...libs.detect_utils import detect_mask as _detect_mask
-                    from ...libs.mask_utils import combine_masks as _combine_masks
+                            f"Detect block (block {i+1}) needs a detector — in the Interface tab, turn on "
+                            f"Detector for the interface that implements it, or remove this block.")
                     from ...libs.mask_expression import (
                         parse_mask_expression as _parse_expr,
                         collect_terms as _collect_terms,
@@ -8148,18 +8387,15 @@ class SnapshotDetailerSamplerNode:
                             _root = _parse_expr(det_prompt, det_threshold)
                             _term_masks = {}
                             for _name, _t in _collect_terms(_root):
-                                _hits = _detect_mask(detector=server.detector, image=det_img,
-                                                     threshold=float(_t), prompt=_name)
-                                _combined = _combine_masks(_hits, mode='max')
+                                _combined = self._run_detector_interface(
+                                    server, det_img, _name, float(_t))
                                 _term_masks[(_name, float(_t))] = _combined
                                 dbg.record_mask(f"Block {i+1} · 术语 '{_name}' @ {_t}", _combined,
-                                                block=i + 1, detail=f'{len(_hits)} 个实例')
+                                                block=i + 1, detail='接口包输出')
                             _m = _eval_expr(_root, _term_masks)
                         else:
-                            _m = _combine_masks(
-                                _detect_mask(detector=server.detector, image=det_img,
-                                             threshold=det_threshold, prompt=''),
-                                mode='max')
+                            _m = self._run_detector_interface(
+                                server, det_img, '', det_threshold)
                         if det_invert:
                             _m = 1.0 - _m
                         # 对齐到当前工作图的网格：detector 自己那一档分辨率与链上的不同。
@@ -9918,7 +10154,7 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # 主入口
     # -------------------------------------------------------------------------
-    def sample(self, pipeline, seed, lora_regex="", detector=None, tagger=None, asset="",
+    def sample(self, pipeline, seed, lora_regex="", asset="",
                package=None, extra_pnginfo=None, unique_id=None):
         mm.throw_exception_if_processing_interrupted()
 
@@ -9947,8 +10183,6 @@ class SnapshotDetailerSamplerNode:
                 lora_regex = str(arch)
 
         server = SnapshotDetailerSamplerServer(
-            detector=detector,
-            tagger=tagger,
             lora_regex=lora_regex,
             asset=asset,
             package=package,

@@ -5997,6 +5997,9 @@ requestAnimationFrame(vidBaseTick);
 vidBaseWatchFrames();
 // load() 会把 pending 的 rVFC 回调清掉（换源就是这么做的）：链断了就重挂。
 vidBaseVideo.addEventListener('emptied', () => { vidBaseRvfcPending = false; vidBaseWatchFrames(); });
+// 必要的 seek（换源 / 粗纠偏）一落地就补一张：seek 在途时 stageShowBase 会 return，
+// 等下一口 rAF 才"发现能画了"就是白冻一拍。stageShowBase 自带 stamp 去重，不会重复上传。
+vidBaseVideo.addEventListener('seeked', () => { if (stageWanted() === 'base') stageShowBase(true); });
 // ── 底片换源失败的重来 ─────────────────────────────────────────────────────────────────────
 // 新建工程后第一次把视频拖进来，媒体可能还没完全就绪（入库/首次读盘那一瞬），<video> 会先拿到
 // 一个解不开的响应（MediaError 4 = Format error）。**它自己不会重试** —— 之后一直停在
@@ -6050,9 +6053,14 @@ function vidBaseSeek() {
     }
     // `!v.seeking`：seek 在途时再发一次只会把这次作废重来（六赫兹的包足够把一只正在纠偏的
     // 视频钉死在 readyState=1 上）。让它落地再说。
-    // 容差：被按住时（hidden，画面上看不见它）**贴紧**着对 —— seek 的代价这会儿是免费的，
-    // 换来的是一出段就有"正在那一帧"，不用再跳一下。没被按住时沿用原来的宽容差（跳一次要卡一下）。
-    const tol = vidBaseHidden ? 0.04 : 0.25;
+    // **统一用 0.25，hidden 时绝不贴紧对时**（2026-11-06）：`vidBaseWant` 来自 6Hz 量化的
+    // `t`，而 <video> 的 currentTime 是连续前进的 —— 两者天然有 0~0.167s 的锯齿，0.04 的
+    // 容差等于每一包都触发一次 seek，把解码器钉死在 readyState=1 / seeking=true。Layer 段里
+    // 看不见它（无感），**一出段** stageShowBase 拿不到帧、stageBackdropItem 也判"对不上这一帧"，
+    // 画面就冻在最后一张合成图上（实测 ~200ms 空档，用户报的"切出 Layer 段卡一下"）。
+    // 让它连续播，只在真漂移时粗纠偏；0.25 与 stageBackdropItem 的判据是同一把尺，
+    // 所以底片一旦能上台，也一定被判为"这一帧可信"。
+    const tol = 0.25;
     if (ready && !v.seeking && Math.abs(v.currentTime - vidBaseWant) > tol) {
         try { v.currentTime = vidBaseWant; } catch (e) { /* 还不能 seek */ }
     }
@@ -6067,6 +6075,7 @@ function handleVidBaseSrcMessage(d) {
     // 底片是页面级的唯一一只 <video>：谁的包都能把它换走。换 tab 那一瞬宿主的旧 Player 可能
     // 还补发一包上一份的片段 —— 那一帧会被当成本文档的底，压在本文档的图层下面（串图的最短路径）。
     if (d.uid != null && activeDoc && (d.uid | 0) !== activeDoc.uid) return;
+    const prevHidden = vidBaseHidden, prevSrc = vidBaseSrc;
     vidBaseWant = Math.max(0, (+d.offset || 0) + (+d.t || 0) - (+d.start || 0));
     vidBasePlaying = !!d.playing;
     vidBaseHidden = d.hidden === true;
@@ -6087,7 +6096,10 @@ function handleVidBaseSrcMessage(d) {
         v.addEventListener('loadedmetadata', onMeta, { once: true });
         v.addEventListener('loadeddata', onMeta, { once: true });
     }
-    stageSync(true);
+    // 只有"按住态 / 换源"真变了才强制对账。播放中 6Hz 的纯对时包若也 force，stageSync 会绕过
+    // "模式相同就短路"，白折一趟整画布 render —— 段界那一秒里 base-src 与 frame-off 连着来，
+    // 就是两次整趟 render 叠在一起（可感的顿）。底片换帧本身由 stamp 去重那条路保证。
+    stageSync(prevHidden !== vidBaseHidden || src !== prevSrc);
     vidBaseSeek();
 }
 
@@ -6799,6 +6811,11 @@ function handleVidFrameMessage(d) {
 function vidFrameOff() {
     const prev = vidFramePacket;
     vidFramePacket = null;
+    // 帧包撤了，"底片被按住"就当场作废。出段时宿主把 hidden:false 的底片包与 frame-off
+    // 几乎同时发出，同源消息虽有序但这条链不靠顺序：万一 frame-off 先到，stageWanted() 会
+    // 判成 'hold'，台上继续挂着上一张合成图，直到下一条 6Hz 底片包才解（一次可见的定格）。
+    // 下一个进段帧包会自己把它置回 true（见 handleVidFrameMessage）。
+    vidBaseHidden = false;
     vidFrameSourcesNow = null;
     if (vidFrameRetryTimer) { clearTimeout(vidFrameRetryTimer); vidFrameRetryTimer = 0; }
     if (vidFrameRaf) { cancelAnimationFrame(vidFrameRaf); vidFrameRaf = 0; }

@@ -564,13 +564,60 @@ export const videoGenMissing = (cfg?: VideoGenConfig | null): VideoGenSlot[] =>
   VIDEO_GEN_SLOTS.filter(s => s.required && !(s.key === 'fps' && cfg?.fixed_fps)
     && (cfg?.ports?.[s.key] ?? 0) <= 0).map(s => s.key);
 
+// ── Detector / Tagger ──────────────────────────────────────────────────────────────────────
+// 和 Video Generator 同一套做法：开一个 toggle，就把这个 interface **声明**成一台检测器 /
+// 打标器，再把固定槽位各绑一个真实端口。采样器执行时只按槽名查端口号 —— 不认识任何具体
+// 接口，也不需要把模型作为节点输入口接进来。
+//   Detector：image / prompt / threshold（入口）→ mask（出口）
+//   Tagger  ：image / threshold（入口）→ prompt（出口）
+export type DetectorSlot = 'image' | 'prompt' | 'threshold' | 'mask';
+export type TaggerSlot = 'image' | 'threshold' | 'prompt';
+
+/** 槽位 → 端口号（1 起，与 InterfacePort.num 同一套）。 */
+export type ModePorts<T extends string> = Partial<Record<T, number>>;
+
+export const DETECTOR_SLOTS: {
+  key: DetectorSlot; label: string; side: 'start' | 'end';
+  types: string[]; required?: boolean; tip: string;
+}[] = [
+  { key: 'image', label: 'Image', side: 'start', types: ['IMAGE'], required: true,
+    tip: 'The image to detect on. Must be bound — every detect call feeds one image here.' },
+  { key: 'prompt', label: 'Prompt', side: 'start', types: ['STRING'],
+    tip: 'The detection term. The sampler evaluates the mask expression and feeds each term here, one call per term.' },
+  { key: 'threshold', label: 'Threshold', side: 'start', types: ['FLOAT', 'INT'],
+    tip: 'Detection threshold, fed as a value (0..1). Optional — unbound means the interface uses its own default.' },
+  { key: 'mask', label: 'Mask', side: 'end', types: ['MASK', 'IMAGE'], required: true,
+    tip: 'The mask output. Must be bound — a MASK port comes back as-is; an IMAGE port is read as luminance.' },
+];
+
+export const TAGGER_SLOTS: {
+  key: TaggerSlot; label: string; side: 'start' | 'end';
+  types: string[]; required?: boolean; tip: string;
+}[] = [
+  { key: 'image', label: 'Image', side: 'start', types: ['IMAGE'], required: true,
+    tip: 'The image to tag. Must be bound — every tag call feeds one image here.' },
+  { key: 'threshold', label: 'Threshold', side: 'start', types: ['FLOAT', 'INT'],
+    tip: 'Tag threshold, fed as a value (0..1). Optional — unbound means the interface uses its own default.' },
+  { key: 'prompt', label: 'Prompt', side: 'end', types: ['STRING'], required: true,
+    tip: 'The tag text output. Must be bound — the sampler merges it into the positive prompt.' },
+];
+
+export function modeMissing<T extends string>(
+  slots: { key: T; required?: boolean }[], ports?: ModePorts<T> | null,
+): T[] {
+  return slots.filter(s => s.required && (ports?.[s.key] ?? 0) <= 0).map(s => s.key);
+}
+
 export interface InterfaceInfo {
   name: string;
   start_ports: InterfacePort[];
   end_ports: InterfacePort[];
   /** Interface tab 贴在包上的标注（/api/package 已按名字合并）。 */
-  modes?: { block: boolean; processor: boolean; video_generator?: boolean };
+  modes?: { block: boolean; processor: boolean; video_generator?: boolean; detector?: boolean; tagger?: boolean };
   block_ports?: { in?: number; out?: number };
+  /** Detector / Tagger 的槽位绑定（/api/package 已按名字合并）。 */
+  detector?: ModePorts<DetectorSlot>;
+  tagger?: ModePorts<TaggerSlot>;
   /** Video Generator 的槽位绑定（/api/interfaces 已按名字合并进这里）。 */
   video_gen?: VideoGenConfig;
   /** image/mask 出口的默认落位（键 = 端口号字符串），Processor 小窗拿它当初值。 */
@@ -596,8 +643,11 @@ export type ProcessorSrc = 'layers' | 'selected' | 'asset' | 'main_mask' | 'sele
  *  端口名只是展示 —— 执行全程按端口号走。names 的键是端口号字符串。 */
 export interface InterfaceMetaEntry {
   names?: { start?: Record<string, string>; end?: Record<string, string> };
-  modes?: { block: boolean; processor: boolean; video_generator?: boolean };
+  modes?: { block: boolean; processor: boolean; video_generator?: boolean; detector?: boolean; tagger?: boolean };
   block_ports?: { in?: number; out?: number };
+  /** Detector / Tagger 的槽位绑定（槽名 → 端口号）。 */
+  detector?: ModePorts<DetectorSlot>;
+  tagger?: ModePorts<TaggerSlot>;
   /** Video Generator：开了那个 toggle 才有 —— 八个固定槽 + 可选的参考槽各绑一个端口。 */
   video_gen?: VideoGenConfig;
   /** image/mask 出口的默认落位（键 = 端口号字符串），后端归一化时按枚举收敛。 */

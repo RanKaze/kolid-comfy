@@ -1760,8 +1760,25 @@ const App: React.FC = () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ interface_meta: next }),
-    }).catch(() => {});
-  }, []);
+    })
+      // Detector / Tagger 的槽位绑定就写在这份 meta 里：绑定一改，后端现查接口包，
+      // 这里把开关态同步给工作台（Detector 工具 / Tag 面板），不用刷新页面。
+      .then(() => fetch('/api/modes_status'))
+      .then(r => r.json())
+      .then((st: { has_tagger?: boolean; has_detector?: boolean }) => {
+        setConfig(c => (c ? { ...c, has_tagger: !!st.has_tagger, has_detector: !!st.has_detector } : c));
+        const msg = {
+          type: 'blend-config',
+          hasTagger: !!st.has_tagger,
+          hasDetector: !!st.has_detector,
+          mask_required: preprocessFlag(blockSets, activeBlockSetId, 'enable_mask', true),
+          staging: stagingRef.current,
+        };
+        sendLocal(msg);
+        for (const uid of childIds()) sendForUid(msg, uid);
+      })
+      .catch(() => {});
+  }, [blockSets, activeBlockSetId]);
 
   // preset 行 ⚙：这套链跑起来时用哪条 pipeline（按名字绑，run 时解析）。
   const handleSetPresetPipeline = useCallback((setId: string, pipelineName: string) => {

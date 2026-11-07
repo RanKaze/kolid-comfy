@@ -6,6 +6,8 @@ import { clipsByTrack, type VidClip, type VidFrameNeed, type VidProject } from '
 //  * 命中 layer 段 → 这一帧交给工作台的图层系统，画面**只有这一段自己的图层**：Layer 段是遮住
 //    脚下一层的，不把底下视频帧当底图，所以空段就是一张空图。所有 video 轨的当前帧当"源帧"
 //    交过去 —— 面 attribute 的 Frame source 从里面挑（`baseTrackId` 那条只用来定输出栅格）。
+//    Mask 轨（Detect 产物）默认不进 sources；但若有面 attribute 明确把 Frame source 绑到它，
+//    它就按 need 一起交过去，让"用 mask 当图片"这件事能真的显示出来。
 // 音频轨不参与：它们不产生画面，声音由本机引擎按时间线位置混（见 pcmClips.ts）。
 export type VidCompositeSource = { trackId: string; clip: VidClip };
 
@@ -27,11 +29,19 @@ const clipOn = (trackId: string, t: number, buckets: Map<string, VidClip[]>): Vi
 /** 这一段的 Frame source 是不是**引用了静音的视频轨**。
  *  静音 = 这条轨不显示（"mute 优先"），而这一段只能靠它出画面 ⇒ 引用失效：这一段合成不出画面，
  *  按"不合成"处理（露出底下），与静音的 Layer 轨同一读法。
+ *  **Mask 轨例外**：它是工具轨（Detect 产物），绑成 Frame source 时按"取它的像素"用 —— 它自己
+ *  静不静音只决定它要不要作为一条视频轨上屏，不该让整段图层消失。否则"把 mask 当图片、同时把
+ *  mask 轨隐掉"这个用法永远配不出来。
  *  **只认静音**：轨上那一刻没有片（空档）是正常编辑状态，decal 就该是空的，段照常合成。 */
-const layerRefMuted = (key: string, muted: ReadonlySet<string>, need?: VidFrameNeed): boolean => {
+const layerRefMuted = (
+  key: string, muted: ReadonlySet<string>, need?: VidFrameNeed, maskTrackId?: string,
+): boolean => {
   const list = key && need ? need[key] : null;
   if (!list || !list.length) return false;
-  for (const tr of list) if (muted.has(tr)) return true;
+  for (const tr of list) {
+    if (maskTrackId && tr === maskTrackId) continue;   // Mask 轨不受自身静音影响（见上）
+    if (muted.has(tr)) return true;
+  }
   return false;
 };
 
@@ -47,25 +57,35 @@ export const compositePlanAt = (
   let top: VidClip | null = null;
   for (const tr of p.tracks) {
     if (tr.kind !== 'video' && tr.kind !== 'layer') continue;
+    // Mask 轨（Detect 产物）**默认**不在 sources 里（它的段也是视频，但通常不该被当成画面）；
+    // 只有当这一套图层的 Frame source 明确指着它时才放行（见下面 maskWanted）。
     if (tr.kind === 'layer' && muted.has(tr.id)) continue;   // 静音的 Layer 段不参与合成
     const hit = clipOn(tr.id, t, buckets);
     if (!hit) continue;
     // 这一段的面只能从一条静音轨取帧 ⇒ 出不了画面，跳过（底下照常出）
-    if (hit.kind === 'layer' && layerRefMuted(hit.layerKey || hit.id, muted, need)) continue;
+    if (hit.kind === 'layer' && layerRefMuted(hit.layerKey || hit.id, muted, need, p.maskTrackId)) continue;
     top = hit;
     break;
   }
   if (!top || top.kind !== 'layer') return null;
+  const layerKey = top.layerKey || top.id;
+  // Mask 轨（Detect 产物）**默认不当帧源**；只有当这一套图层集真的把它的 Frame source 指到
+  // Mask 轨上（页面报来的 need[layerKey] 含它）时，才把它的当前帧一并交过去 —— 否则一段
+  // Layer 上"用 mask 当图片"的 attribute 永远拿不到帧，只会停在上一张面 / 空白。
+  const maskWanted = !!p.maskTrackId && !!(need && need[layerKey] && need[layerKey].includes(p.maskTrackId));
   const sources: VidCompositeSource[] = [];
   for (const tr of p.tracks) {
     if (tr.kind !== 'video') continue;
+    if (tr.id === p.maskTrackId && !maskWanted) continue;
     const hit = clipOn(tr.id, t, buckets);
     if (hit) sources.push({ trackId: tr.id, clip: hit });
   }
+  // 底片只用来定输出栅格：优先挑一条普通视频轨，别让 Mask 轨（可能后换过 Canvas 尺寸）当栅格。
+  const base = sources.find(s => s.trackId !== p.maskTrackId) ?? sources[0];
   return {
     layer: top,
-    layerKey: top.layerKey || top.id,
-    baseTrackId: sources.length ? sources[0].trackId : null,
+    layerKey,
+    baseTrackId: base ? base.trackId : null,
     sources,
   };
 };
@@ -132,7 +152,7 @@ export const warmSweepAt = (
       if (!list || !list.length || !list.includes(trackId)) continue;
       const tr = p.tracks.find(x => x.id === c.trackId);
       if (!tr || muted.has(tr.id)) continue;                          // 静音的 Layer 轨：不合成，引用是死的
-      if (layerRefMuted(c.layerKey || c.id, muted, need)) continue;   // 引用了静音视频轨：同样出不了画面
+      if (layerRefMuted(c.layerKey || c.id, muted, need, p.maskTrackId)) continue;   // 引用了静音视频轨：同样出不了画面
       return true;
     }
     return false;
@@ -140,6 +160,8 @@ export const warmSweepAt = (
   const srcs: VidSweep['srcs'] = [];
   for (const tr of p.tracks) {
     if (tr.kind !== 'video') continue;
+    // Mask 轨默认不预热（consumed() 只认真被 Frame source 引用的轨，与 compositePlanAt 同口径）；
+    // 被某套图层集明确绑上时才随它一起热。
     const hit = (buckets.get(tr.id) || []).find(c => !c.pending && t >= c.start && t < c.start + c.duration);
     if (hit && hit.src && consumed(hit, tr.id)) srcs.push({ trackId: tr.id, src: hit.src, want: sourceTime(hit, t) });
   }
@@ -152,7 +174,7 @@ export const warmSweepAt = (
     if (c.start <= t || c.start > t + look) continue;
     const tr = p.tracks.find(x => x.id === c.trackId);
     if (!tr || muted.has(tr.id)) continue;                 // 静音的 Layer 轨不合成，也不用预热
-    if (layerRefMuted(c.layerKey || c.id, muted, need)) continue;   // 引用失效的段不会合成，别白等
+    if (layerRefMuted(c.layerKey || c.id, muted, need, p.maskTrackId)) continue;   // 引用失效的段不会合成，别白等
     const key = c.layerKey || c.id;
     const prev = best.get(key);
     if (!prev || c.start < prev.start) best.set(key, c);
@@ -165,6 +187,8 @@ export const warmSweepAt = (
     const tracks: VidWarm['tracks'] = [];
     for (const tr of p.tracks) {
       if (tr.kind !== 'video') continue;
+      // Mask 轨只有在 wantTracks 里（这套图层集的 Frame source 明确绑了它）才随段预热。
+      if (tr.id === p.maskTrackId && !wantTracks.has(tr.id)) continue;
       if (wantTracks.size && !wantTracks.has(tr.id)) continue;      // 没人吃这条轨：不必随段预热
       const hit = (buckets.get(tr.id) || []).find(cc => !cc.pending && at >= cc.start && at < cc.start + cc.duration);
       if (hit) tracks.push({ trackId: tr.id, src: hit.src, want: sourceTime(hit, at) });

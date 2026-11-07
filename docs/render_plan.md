@@ -581,15 +581,53 @@ P3.4 之后用户仍报"播放有卡顿"。实测（`_probe_vid_cadence.cjs --gp
 改后 `render` 1.0ms、`stagePresent` 0.2ms、rAF p50 6.5ms；Layer 段包率与监视器回图率都是 **30~32/s**
 （`_probe_vid_rate.cjs --gpu`：包间隔 p50 34ms、回图 p50 31ms，rtt 23ms）。
 
-**没解决的两处**（都量过，先记在这儿，别再当"卡顿"去翻显示路径）：
+**换段那一下**：曾是最长的空档（stage 重铺 107ms、监视器回图 137ms，落在进出 Layer 段的边界上）。
+P3.7 已治（见 §10.3.6）：现在进出段最大间隔 ≈50ms，`_probe_vid_boundary.cjs --gpu` 的 >100ms 空档计数为 0。
 
-- **换段那一下**：`_probe_vid_boundary.cjs --gpu` 跨 base→live→composite→base 播 4 秒，只有 1 处
-  >100ms 的空档（stage 重铺 107ms、监视器回图 137ms），落在进出 Layer 段的边界上。其余间隔都在 35ms 上下。
-  要治它得让"进段首帧"不再等镜像 seek（预热已经提前 4 秒，但换套 + 首帧合成仍在这一帧里）。
-- **片源帧率 ≠ 采样格**：这条工程是 30fps，片源只有 24.5fps（`totalVideoFrames` 2 秒 49 帧）。合成按
-  `q = floor(t*30)/30` 取样，24.5fps 的内容落在 30Hz 的格子上，每帧被显示 1 或 2 格且不均匀 —— 看起来
-  像轻微抖动，但这是采样节拍，不是丢帧。宿主 rAF 与主线程都干净（`_probe_host_jank.cjs --gpu`：
-  0 条 longtask、p95 16.7ms、>33ms 的帧 1/307）。
+**片源帧率 ≠ 采样格**：这条工程是 30fps，片源只有 24.5fps（`totalVideoFrames` 2 秒 49 帧）。合成按
+`q = floor(t*30)/30` 取样，24.5fps 的内容落在 30Hz 的格子上，每帧被显示 1 或 2 格且不均匀 —— 看起来
+像轻微抖动，但这是采样节拍，不是丢帧。宿主 rAF 与主线程都干净（`_probe_host_jank.cjs --gpu`：
+0 条 longtask、p95 16.7ms、>33ms 的帧 1/307）。这是**画面换帧的物理地板**（40.8ms/源帧）。
+
+### 10.3.6 播放帧率与段界卡顿（P3.7，已落地）
+
+**帧率上限 = Canvas 面板那颗 FPS**（与 `video.fps` / `proj.fps` 同一值，1..120）。链路上原有三道硬限制，
+全部拆掉：
+
+| 限制 | 位置 | 后果 |
+|---|---|---|
+| `min(60, round(fps))` | `Player.tsx` 的 `COMP_FPS` | 填 120 也被压回 60 格 |
+| `PUMP_MIN_GAP_MS = 16` 固定闸 | `pumpRef` | >62.5 包/秒一律被挡 |
+| 发包只靠 transport 的 rAF tick 唤醒 | clock 广播 | 60/120fps 时周期性漏格 |
+
+现在：`COMP_FPS = clampFps(proj.fps)`、`pumpGapMs = min(16, 900/fps)`、另排一只**帧格 timer** 每格补一次
+`requestComposite`（同格由 key 去重）。**帧格 timer 必须读 `clock.seconds()`**：`transport.get()` 只在
+rAF 广播里被写一次，两次广播之间是冻结快照，用它时 60/120 档只跑到 35/52 包/秒，换连续插值后是 49/84。
+`pumpRef` 被闸挡住时用 `setTimeout` 补足剩余毫秒自己再试一枪（干等 rAF 会把包间隔量化成 33/66ms）。
+
+**段界卡顿的真身**是底片镜像交不出帧：`vidBaseSeek()` 原在底片被"按住"时用 0.04s 贴紧容差，而
+`vidBaseWant` 来自 **6Hz 量化**的 t，`<video>.currentTime` 是连续前进的 —— 两者天然有 0~0.167s 锯齿，
+等于每包都 seek，把解码器钉在 `readyState=1/seeking=true`；一出段 `stageShowBase` 撞上 seeking 直接
+return，画面冻在最后一张合成图上（实测 `stageShowBase` 被挡 14 次、出段空档 136~197ms）。改法：
+
+- 底片对时容差**统一 0.25**（与 `stageBackdropItem` 判据同一把尺），暂停态精确 seek 不动。
+- `vidFrameOff()` 显式清 `vidBaseHidden`（frame-off 与 `hidden:false` 底片包顺序无关）。
+- `handleVidBaseSrcMessage()` 只在按住态 / 换源真变了才 `stageSync(true)`，省掉播放中每 166ms 的整趟 render。
+- 底片 `<video>` 加 `seeked` 钩子：必要 seek 一落地就补画。
+- 帧格 timer 越过 `plan.layer.start+duration` 时**不补过期包**，直接走完整 tick 切段。
+
+**验收**：`_probe_frame_trace.cjs`（逐包四段时序：发包→页面 flush→回图→上屏）+ `_probe_cadence_ab.cjs`
+（多次采样，数 >1.35 格的"真顿挫"）。稳态 3×3.2s：画面换帧 p50 36.2ms / p90 45.8ms、顿挫 10.4%、
+发包间隔 p50 33.0ms。`_probe_seg_hitch.cjs`：进出段最大间隔 ≈50ms、`placeholder=0`、`backdropFalse=0`。
+
+> **否决过的一条**（2026-11-06）：把发包相位提前半个刷新周期（想让包赶在页面那口 rAF 之前到）。
+> 理论上漂亮，实测全面变差：顿挫 11.5%→13~16.5%、发包晚点 14→19~20 次/9.6s；按 60Hz 写死 8.3ms 在
+> 120Hz 屏上还会正好错开一整格。原因是工作台与页面在**同一个渲染进程**里，两条 rAF 本来就同相。
+> 别再往这个方向改。
+
+> **另一件量过的事实**：这台 headless 环境里宿主自己的 rAF 会有 57~72ms 的偶发停摆（`_probe_frame_trace`
+> 的 `hostRaf`），段尾偶发的 ~110ms 空档就是它 —— 不是发包逻辑的锅，换独立浏览器窗口复测再判。
+
 
 ### 10.3.5 底片态就是 context image（P3.6，已落地）
 

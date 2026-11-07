@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useSyncExternalStore } from 'react';
-import type { PipelineBlock, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi, VideoGenConfig, VideoGenSlot } from '../types';
-import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, preprocessFlag, VIDEO_GEN_SLOTS, videoGenMissing } from '../types';
+import type { PipelineBlock, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend, BlendProcessorUi, VideoGenConfig, VideoGenSlot, DetectorSlot, TaggerSlot, ModePorts } from '../types';
+import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, preprocessFlag, VIDEO_GEN_SLOTS, videoGenMissing, DETECTOR_SLOTS, TAGGER_SLOTS, modeMissing } from '../types';
 import { DebugPanel } from './DebugModal';
 import { LogPanel } from './LogModal';
 import RunStatusSeg from './RunStatusSeg';
@@ -33,7 +33,7 @@ import { MidiWorkspace } from '../midi/Workspace';
 import { patchMidiSettings, useMidiSettings, type LibraryState } from '../midi/settings';
 import { reloadInstruments, useInstrumentLibrary } from '../midi/library';
 import { unitIcon } from '../workbench/icons';
-import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VgenFrameSpec, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, clipAtSolo, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeDetectClip, placeDetectTrack, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenRefImageTrack, setVideoGenRefTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, vgenChainPrevOf, vgenChainTo, vgenRefFramePlan, vgenRefPlan, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VgenFrameSpec, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, clipAtSolo, createSeekCoalescer, createVidTransport, defaultVidProject, detectSlotBusy, detectTrackMergePlan, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeDetectPlaceholders, placeDetectOutput, placeDetectTrack, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenRefImageTrack, setVideoGenRefTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, shareDetectTrackSource, vgenChainPrevOf, vgenChainTo, vgenRefFramePlan, vgenRefPlan, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import { compositePlanAt } from '../workbench/video/composite';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 // Prompt 窗与 sampler 页不同 origin：拖拽载荷走 postMessage，target 在这里登记。
@@ -162,9 +162,9 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     store: DOCK_STORE,
     panels: PANEL_IDS,
     known: (id: UnitId) => PANEL_IDS.includes(id) || isDocUnit(id),
-    // Layout 是唯一不能隐藏的一格：藏了它就没有地方把别的窗再叫回来。Prompt 也不能藏：
-    // 它的正文是一份常驻的 iframe（页面与 Agent 都靠它），藏掉就等于把它拆了。
-    canHide: (id: UnitId) => id !== 'layout' && id !== 'prompt' && id !== 'promptManager',
+    // Layout 是唯一不能隐藏的一格：藏了它就没有地方把别的窗再叫回来。Prompt 那两格可以藏 ——
+    // 它们的 iframe 始终挂载（藏起来只是 display:none），页面与 Agent 的通道不断。
+    canHide: (id: UnitId) => id !== 'layout',
     // 名字条只列**此刻真有工程认领它**的文档格。关掉最后一份后那格成了保留位 —— 窗留着
     // （用户摆的位置不动），但一条 tab 都不挂，上面什么也不写。
     listed: (id: UnitId) => PANEL_IDS.includes(id) || byUnit.has(id),
@@ -249,12 +249,16 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
 // The document actions, in the order the retired `#fileMenu` listed them. Their tooltips are that
 // menu's, carried over word for word — only Load's had to change, because a .cud no longer opens as a
 // tab of the workbench but as a window of its own.
-const FILE_ACTIONS: { action: BlendDocCommand; label: string; title: string }[] = [
+// `export-mp4` 不走 blend-doc-command（视频工程在宿主，不在工作台页），由 File 条直接接住、
+// 调用宿主侧的 exportMp4；其余六项照旧发给工作台的 DOC_COMMANDS。
+type FileAction = BlendDocCommand | 'export-mp4';
+const FILE_ACTIONS: { action: FileAction; label: string; title: string }[] = [
   { action: 'new', label: 'New', title: 'New project — a blank document in its own window' },
   { action: 'load', label: 'Load', title: 'Load a .cud document. It opens as a new project window beside the one you are editing.' },
   { action: 'save', label: 'Save', title: 'Save (Ctrl+S) writes the whole context back to the file it was loaded from. Never loaded? It asks where to put it.' },
   { action: 'save-as', label: 'Save As', title: 'Save As: write the whole context to a file you pick, and the project becomes bound to it' },
   { action: 'export-png', label: 'Export PNG', title: 'Export the composite as a PNG: visible LAYERS flattened at canvas resolution, transparency kept — guidances are references, they stay out of the exported image' },
+  { action: 'export-mp4', label: 'Export MP4', title: 'Export the video timeline as an MP4: output-track clips (or all video clips) between the in/out points are stitched together and downloaded. Video only — audio is not included.' },
   { action: 'import', label: 'Import', title: 'Import images and PSD files as new layers. A .cud document belongs to Load.' },
 ];
 const SECTION_KEYS: SectionKey[] = PANEL_IDS;
@@ -603,6 +607,38 @@ function ringSegmentDone() {
     window.parent.postMessage({ __kolid: 'tinkle', event: 'pipeline-done', segment: true }, '*');
   } catch { /* ignore */ }
 }
+
+// ── Detector 视频路的两颗纯工具 ───────────────────────────────────────────────────────────────
+// 一段（一个占位）一次 POST：kind='video' = 后端照资产库直读源文件、自己抽帧；
+// kind='frames' = 页面把合成画面逐帧抓成 JPEG / data URL 送过来（Layer 段 / 整条时间线）。
+type DetectCfg = { prompt: string; threshold: number; invert: boolean };
+type DetectChunk = { video: string; frames: number; empty: number };
+const postDetect = async (dv: Record<string, unknown>, cfg: DetectCfg): Promise<DetectChunk> => {
+  const res = await fetch('/api/blend_action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'detect',
+      detect: { prompt: cfg.prompt, threshold: cfg.threshold, invert: cfg.invert },
+      detect_video: dv,
+    }),
+  });
+  let j: { success?: boolean; video?: string; frames?: number; empty?: number; error?: string } | null = null;
+  try { j = await res.json(); } catch { j = null; }
+  if (!j || !j.success || !j.video) {
+    throw new Error((j && j.error) || `The backend refused the detect chunk (HTTP ${res.status}).`);
+  }
+  return {
+    video: j.video,
+    frames: Math.max(1, Math.round(j.frames || 0)),
+    empty: Math.max(0, Math.round(j.empty || 0)),
+  };
+};
+const dataUrlOf = (b: Blob) => new Promise<string>((resolve, reject) => {
+  const fr = new FileReader();
+  fr.onload = () => resolve(String(fr.result || ''));
+  fr.onerror = () => reject(new Error('Could not read a captured frame.'));
+  fr.readAsDataURL(b);
+});
 
 const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, promptUrl,
@@ -980,6 +1016,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   })());
   const [vidProject, setVidProject] = useState<VidProject>(() => vidSeedRef.current!.p);
   const vidProjectRef = useRef(vidProject); vidProjectRef.current = vidProject;
+  // 控制器（含 captureFrame）在下面 2900 附近才建出来；Detect 的续跑函数在它之前定义，
+  // 所以经这面 ref 取"当下那一份"，调用时一定已经就位。
+  const vidCtlRef = useRef<VidController | null>(null);
   // 屏幕上这份工程**属于哪份文档**。`vidProjectRef` 是 state 的镜像，切 tab 的那一帧会短暂
   // 停在上一份上（setVidProject 之后 React 才重渲）—— 存盘时向宿主要工程（blend-request-vid）、
   // 以及每一笔改动写进哪个桶，都要按归属判，不能拿"屏幕上正摆着的那份"当答案。
@@ -1221,6 +1260,72 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     pushVidHist(uid, prev, label || 'Video edit');
     markVidDirty(uid);
   }, [pushVidHist, markVidDirty]);
+  // ── Export MP4：视频工程的导出 ───────────────────────────────────────────────────────────
+  // 取输出轨（role='output'）上的视频段，按时间线顺序拼成一条 MP4 下载；没有输出轨就退到全部
+  // 视频轨。入/出点设了就只导那段范围内的内容（段本身按范围裁窗）。产物落在媒体库里、按内容
+  // 哈希缓存（同一份导出第二次直接命中），然后 fetch 成 blob 触发浏览器下载。
+  // 视频工程在宿主，所以这条不走 blend-doc-command —— File 条直接接住（见 toolbar 的 onClick）。
+  const exportMp4 = useCallback(async () => {
+    const p = vidProjectRef.current;
+    const outIds = new Set(p.tracks.filter(t => t.role === 'output').map(t => t.id));
+    const useOutputs = outIds.size > 0;
+    const hasRange = p.outPoint > p.inPoint;
+    const rangeStart = hasRange ? p.inPoint : 0;
+    const rangeEnd = hasRange ? p.outPoint
+      : p.clips.reduce((m, c) => Math.max(m, c.start + c.duration), 0);
+    if (!(rangeEnd > rangeStart)) {
+      pushLog?.('Nothing to export — the timeline is empty.', 'error');
+      return;
+    }
+    const clips = p.clips
+      .filter(c => c.kind === 'video' && !c.pending && !c.vgen && c.src)
+      .filter(c => useOutputs ? outIds.has(c.trackId) : true)
+      .filter(c => c.start < rangeEnd && c.start + c.duration > rangeStart)
+      .sort((a, b) => a.start - b.start);
+    if (clips.length === 0) {
+      pushLog?.(useOutputs
+        ? 'Nothing to export — there are no finished clips on the output track(s). Run a Processor or Video Generator segment first.'
+        : 'Nothing to export — there are no video clips on the timeline.', 'error');
+      return;
+    }
+    const parts = clips.map(c => {
+      const segStart = Math.max(c.start, rangeStart);
+      const segEnd = Math.min(c.start + c.duration, rangeEnd);
+      return { f: c.src, in: c.offset + (segStart - c.start), out: c.offset + (segEnd - c.start) };
+    }).filter(pt => pt.out > pt.in);
+    if (parts.length === 0) {
+      pushLog?.('Nothing to export — the selected range contains no video frames.', 'error');
+      return;
+    }
+    const docName = blendDocs.docs.find(d => d.uid === activeUidRef.current)?.name?.replace(/\.[^.]+$/, '') || 'export';
+    const outName = `${docName}.mp4`;
+    pushLog?.(`Exporting MP4… (${parts.length} segment${parts.length > 1 ? 's' : ''}, ${(rangeEnd - rangeStart).toFixed(1)}s)`);
+    try {
+      const r = await fetch('/api/vid_merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parts, name: docName }),
+      });
+      const res = await r.json().catch(() => null) as {
+        ok?: boolean; src?: string; error?: string;
+      } | null;
+      if (!res || !res.ok || !res.src) {
+        pushLog?.(`Export failed: ${(res && res.error) || 'the server could not stitch the timeline.'}`, 'error');
+        return;
+      }
+      // 下载：fetch 成 blob 再触发 <a download>，比直接给同源 URL 更稳（浏览器不会自作主张拿去播）。
+      const blobRes = await fetch(res.src);
+      const blob = await blobRes.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = outName;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      pushLog?.(`Exported MP4 · ${(blob.size / 1048576).toFixed(2)} MB · ${outName}`, 'success');
+    } catch (err) {
+      pushLog?.(`Export failed: ${String((err as Error)?.message || err)}`, 'error');
+    }
+  }, [pushLog, blendDocs.docs]);
   // MIDI 的宿主：投影 + 选中段的编辑视图，写回全在 vidUpdate / vidUpdateIn 上。
   // 撤销、脏标记、随 .cud 存盘都跟时间线共用一套 —— 一次音符编辑 = 时间线的一步。
   const midiHost = useMidiHost({
@@ -1349,6 +1454,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 每套图层集吃哪几条视频轨的帧（页面报上来的摘要，key = layerKey）。判"Frame source 引用了静音轨
   // ⇒ 这一段跳过"要用它（见 composite.ts 的 compositePlanAt）。走 ref：每帧都读，不进渲染图。
   const frameNeedRef = useRef<VidFrameNeed>({});
+  // 页面每报一版新的 need（内容变了才发）就 +1，喂给 Player：暂停态也要立刻按新的源帧清单
+  // 重折一张 —— 例如某套图层刚把 Frame source 绑到 Mask 轨上。
+  const [vidNeedRev, setVidNeedRev] = useState(0);
   // iframe 的两条 Video 消息：保存时按 uid 来要快照；读档/重开时把文件里那份送回桶里。
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
@@ -1365,6 +1473,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           if (Array.isArray(v) && v.length) need[k] = v.map(String);
         }
         frameNeedRef.current = need;
+        setVidNeedRev(v => v + 1);
         return;
       }
       if (d.type === 'blend-vid-layer-sig') {
@@ -1564,6 +1673,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 就是锚的时间线跨度；其余行跟着同一段时间线窗口走（Asset 行从自己头上起喂同样时长）。
   // `ports` = 这一趟会写到输出轨的口，modal 据此把目标槽位的占用情况算出来（占着就置灰 Run）。
   const [vidSegCfg, setVidSegCfg] = useState<{ name: string; start: number; duration: number; total: number; fps: number; kind: 'clip' | 'asset'; ports: number[] } | null>(null);
+  // Detector 视频路的运行配置：点 Detect 时先算好锚（整条时间线 / 某轨 / 某段），弹与
+  // Processor 同一套「输入范围 + 每段帧数」modal；确认后才开跑（见 openVidDetect）。
+  const [vidDetectCfg, setVidDetectCfg] = useState<{
+    args: { source: 'video' | 'sel_track' | 'sel_segment'; trackId?: string;
+      prompt: string; threshold: number; invert: boolean };
+    name: string; start: number; duration: number; total: number; fps: number;
+  } | null>(null);
   // 占位段设置 modal：打开时记下这一批 id（时间线多选的选择集在打开那一刻定住 —— 之后
   // 时间线里点选变化不该把 modal 的作用对象偷换掉）。
   const [procSettingsIds, setProcSettingsIds] = useState<string[] | null>(null);
@@ -2528,6 +2644,99 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, [resolvePresetSrc, vidUpdate, autoSaveCud]);
 
 
+  // Detect 轨整轨合并：把各段产物按时间顺序拼成**一条** mask 文件，再让每一段都引用它。
+  // 逐段独立的 1/6 秒小文件在播放时每段都要换一只 <video> 镜像，永远追不上画面；整轨一条源
+  // 之后，取帧时刻回到与画面同一时间轴（offset = 段起点 − 轨起点），逐帧对齐。
+  // 未跑完（还有占位段没落位）或段间有空隙时不动 —— 有洞的整轨会让后面所有段错位。
+  // 单段重跑后同样会再拼一次：那一段用自己的新文件，其余段按 offset 从整轨里切。
+  const mergeDetectTrack = useCallback(async (trackId: string) => {
+    const pl = detectTrackMergePlan(vidProjectRef.current, trackId);
+    if (!pl.ok) return;
+    // 已经合并过（各段同一条源、同一个源长）就什么都不做 —— 这里每拍都会被叫到，必须幂等。
+    const own = vidProjectRef.current.clips
+      .filter(c => c.trackId === trackId && !c.pending && c.src && c.duration > 0);
+    if (own.length > 1 && own.every(c => c.src === own[0].src
+      && Math.abs(c.srcDuration - own[0].srcDuration) < 1e-3)) return;
+    try {
+      const r = await fetch('/api/vid_merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parts: pl.parts, name: 'Detect mask', exact: true,
+          fps: clampFps(vidProjectRef.current.fps),
+        }),
+      });
+      const res = await r.json().catch(() => null) as
+        { ok?: boolean; src?: string; duration?: number } | null;
+      if (!res || !res.ok || !res.src || !(res.duration && res.duration > 0)) return;
+      vidUpdate(p => shareDetectTrackSource(p, trackId, res.src as string, res.duration as number),
+        'Detect track merged');
+      autoSaveCud();
+    } catch {
+      // 合并失败（ffmpeg 被清理 / 文件不在）：保持逐段引用，画面照旧能出，只是播放对不齐。
+    }
+  }, [vidUpdate, autoSaveCud]);
+
+  // 打开工程 / 每次编辑落定后都试一次：老工程里的 Detect 轨还是"一段一个小文件"，自动拼成
+  // 整轨一次（已合并时上面幂等直接返回，不发请求）。没跑完 / 有缺口时同样直接返回。
+  useEffect(() => {
+    const mt = vidProject.maskTrackId;
+    if (mt) void mergeDetectTrack(mt);
+  }, [vidProject.maskTrackId, vidProject.clips, mergeDetectTrack]);
+
+  // 跑一个 Detect 占位段：按段里的快照重放**这一段**，产物落到 Detect 轨的对应位置。
+  // 原始视频段由后端照资产库直读（file + 源内帧号）；合成段（Layer / 整条时间线）没有文件，
+  // 由 Player 按 t0 逐帧抓合成画面送过来。批量循环与 continuePendingClip 共用这一颗 ——
+  // 忙碌闸门 / 播报由调用方管（这里只管这一段本身）。
+  const runDetectChunk = useCallback(async (
+    clipId: string, onProgress?: (frac: number) => void,
+  ): Promise<{ frames: number; empty: number }> => {
+    const clip = vidProjectRef.current.clips.find(c => c.id === clipId);
+    const d = clip?.pending?.detect;
+    if (!clip || !d) throw new Error('The detector placeholder is gone.');
+    if (!vidProjectRef.current.tracks.some(t => t.id === d.outTrackId)) {
+      throw new Error('The Detect track this segment belongs to was deleted — run Detect again.');
+    }
+    const ui = getBlendUi();
+    const cw = Math.max(0, Math.round(ui.canvas.w || 0));
+    const ch = Math.max(0, Math.round(ui.canvas.h || 0));
+    setProcFill(clipId, 0);
+    try {
+      let r: DetectChunk;
+      if (d.file != null && d.f0 != null) {
+        r = await postDetect({
+          kind: 'video', file: d.file, f0: d.f0, n: d.n, fps: d.fps, w: cw, h: ch, name: 'detect',
+        }, d);
+        onProgress?.(1);
+      } else {
+        const cap = vidCtlRef.current?.captureFrame;
+        if (!cap) throw new Error('The player is not available — open Video mode with the player visible first.');
+        const t0 = d.t0 ?? clip.start;
+        const frames: string[] = [];
+        for (let k = 0; k < d.n; k++) {
+          const t = t0 + k / d.fps;
+          const blob = await cap(t, cw, ch);
+          if (!blob) {
+            throw new Error(`Could not capture the composite frame at ${t.toFixed(2)}s — is the Layer segment visible (track muted / player not ready)?`);
+          }
+          frames.push(await dataUrlOf(blob));
+          const frac = (k + 1) / d.n;
+          setProcFill(clipId, frac);
+          onProgress?.(frac);
+        }
+        r = await postDetect({ kind: 'frames', frames, fps: d.fps, w: cw, h: ch, name: 'detect' }, d);
+      }
+      vidUpdate(p => placeDetectOutput(p, clipId, r.video, clip.name, r.frames / d.fps), 'Detect segment');
+      autoSaveCud();              // 一段落位 = 工程变了：已落盘的 .cud 立刻跟上一版
+      ringSegmentDone();          // 这一段跑完了：桌面端开着 Tinkle 就响一声
+      // 还差段就什么都不做；最后一段落位后把整条 Detect 轨拼成一条 mask（见 mergeDetectTrack）。
+      await mergeDetectTrack(d.outTrackId);
+      return { frames: r.frames, empty: r.empty };
+    } finally {
+      clearProcFill(clipId);
+    }
+  }, [vidUpdate, autoSaveCud, mergeDetectTrack]);
+
   // 占位段上的 ▶（续跑）：按段里的执行快照把**这一段**单独重放，产物落到输出轨的对应
   // 位置 —— 占位段原地保留，所以同一段可以反复重跑（每次覆盖它自己上一次的产物）。
   // 输出轨的那个位置被别的东西占着时不跑（按钮已置灰，这里是兜底）。
@@ -2545,6 +2754,46 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const pd = clip.pending;
     // 开跑（或确认不跑）就从队列里摘掉：排队标记不能让已轮到的段还挂着 ⏸。
     dequeueProcClip(clipId);
+    // Detect 段：槽位看的是这条 Detect 轨（自己的旧产物不算占），重放走 runDetectChunk。
+    if (pd.kind === 'detect') {
+      const d = pd.detect;
+      if (!d) {
+        setVidProcRun({ state: 'error', msg: 'This detector placeholder lost its snapshot — run Detect again.' });
+        return 'skip';
+      }
+      if (detectSlotBusy(vidProjectRef.current, d.outTrackId, clip.start, clip.duration, clip.id)) {
+        setVidProcRun({ state: 'error', msg: `The Detect track already has a clip over ${clip.start.toFixed(1)}s–${(clip.start + clip.duration).toFixed(1)}s — move or delete it first.` });
+        return 'skip';
+      }
+      vidProcBusy.current = true;
+      beginVidProcRun(getActiveBlendUid());
+      vidCancelRef.current = false;
+      setVidProcRun({ state: 'running', msg: `Detecting segment ${pd.segIndex + 1}/${pd.segCount}…` });
+      try {
+        const r = await runDetectChunk(clipId);
+        const nothing = !d.invert && r.frames > 0 && r.empty >= r.frames;
+        setVidProcRun({ state: 'done', msg: nothing
+          ? `Detector segment ${pd.segIndex + 1}/${pd.segCount} landed — no objects were detected in its ${r.frames} frame${r.frames === 1 ? '' : 's'}; try another prompt or a lower threshold.`
+          : `Detector segment ${pd.segIndex + 1}/${pd.segCount} landed on the Detect track.` });
+        return 'done';
+      } catch (e: unknown) {
+        const cancelled = vidCancelRef.current;
+        const stopped = cancelled && vidStopRef.current === clipId;
+        setVidProcRun(stopped
+          ? { state: 'cancelled', msg: 'Detector segment stopped — the rest of the queue keeps running.' }
+          : cancelled
+            ? { state: 'cancelled', msg: 'Detector segment cancelled — the placeholder stays; click it to try again.' }
+            : { state: 'error', msg: `Detector failed — ${e instanceof Error ? e.message : String(e)}` });
+        return stopped ? 'stopped' : cancelled ? 'cancelled' : 'failed';
+      } finally {
+        setVidStagingOverlay({ busy: false, progress: -1 });
+        pushVidStaging({ busy: false, cancelLive: false, progress: -1 });
+        vidCancelRef.current = false;
+        if (vidStopRef.current === clipId) vidStopRef.current = null;
+        vidProcBusy.current = false;
+        endVidProcRun();
+      }
+    }
     if (procSlotBusy(vidProjectRef.current, pd.port ?? 0, clip.start, clip.duration, clip.id)) {
       setVidProcRun({ state: 'error', msg: `The output track already has a clip over ${clip.start.toFixed(1)}s–${(clip.start + clip.duration).toFixed(1)}s — move or delete it first.` });
       return 'skip';
@@ -2611,7 +2860,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       vidProcBusy.current = false;
       endVidProcRun();
     }
-  }, [interfaces, vidUpdate, blockSets, executePresetSeg, autoSaveCud]);
+  }, [interfaces, vidUpdate, blockSets, executePresetSeg, autoSaveCud, runDetectChunk]);
 
   // 多选 ▶：把选中的占位段按 **从左到右（start 升序）、同起点从下到上（轨道序号降序）**
   // 的顺序串行跑完。单段的忙碌闸门/进度/落位/自动保存仍走 continuePendingClip，这里只排队：
@@ -2630,10 +2879,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       .filter((c): c is VidClip => !!c && !!c.pending)
       .sort((a, b) => (a.start - b.start)
         || ((rowOf.get(b.trackId) ?? 0) - (rowOf.get(a.trackId) ?? 0)));
-    const runnable = picked.filter(c => !procSlotBusy(proj, c.pending!.port ?? 0, c.start, c.duration, c.id));
+    const runnable = picked.filter(c => c.pending!.kind === 'detect'
+      ? !detectSlotBusy(proj, c.pending!.detect?.outTrackId ?? '', c.start, c.duration, c.id)
+      : !procSlotBusy(proj, c.pending!.port ?? 0, c.start, c.duration, c.id));
     const blocked = picked.length - runnable.length;
     if (!runnable.length) {
-      setVidProcRun({ state: 'error', msg: 'Every selected placeholder is blocked — its slot on the output track is taken.' });
+      setVidProcRun({ state: 'error', msg: 'Every selected placeholder is blocked — its target track already has a clip over that span.' });
       return;
     }
     let done = 0, failed = 0, stopped = 0, paused = 0, cancelled = false;
@@ -2873,6 +3124,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // Keyframes 窗手动加帧的"当下的值"：与录制同一条 blend-vid-kf-get（见 layerKfParams）。
     kfSnapshot: layerKfParams,
   }), [vidProject, vidTransport, vidPlaying, vidPps, blendDocs.activeUid, staging, vidUpdate, vidSeek, blendPost, blendWindow, soloAudio, soloVideo, toggleSolo, mute, toggleMute, continuePendingClip, continueManyPendingClips, pausePendingClip, stopPendingClip, layerSigs, layerCopy, layerKfParams, vidMissing, vidRelink, recheckMissing]);
+  vidCtlRef.current = vidCtl;
   // 页面存档只在**有文档**时写：它是"刷新之后还没有 .cud 时"的起手工程，不是一份独立的工程。
   // 一份文档都没有的时候写它，等于把刚关掉那份的时间线存成"下次开机的默认工程" —— 下次
   // 新建文档就会凭空长出上一份的轨道与片段。
@@ -2935,10 +3187,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   //   sel_track    : 选中的那一整轨，轨上每个非占位段各成一段；
   //   sel_segment  : 时间线上当前选中的那一枚段。
   // 非 Layer 的段由后端原生抽帧（像素不出画布）；Layer 段（或整条时间线里压在 Layer 上的帧）
-  // 由 Player 把监视器的合成画面逐帧抓成 JPEG 送后端。产物按 Canvas 的 Frame / fps 编码成
-  // 一列 mask mp4，整趟跑完**一次性**落到一条新的 Detect 轨上（一步撤销），并自动绑成 Mask track。
-  const DETECT_SEG_FRAMES = 30;    // 后端单次抽帧检测的帧数（内存预算）
-  const DETECT_BATCH = 6;          // 合成帧一批送几帧（跨窗搬像素，别一次搬太多）
+  // 由 Player 把监视器的合成画面逐帧抓成 JPEG 送后端。
+  // 与 Processor 同一套执行方式：先摆**占位段**（一条新 Detect 轨 + 下方 process 轨上一排坑），
+  // 然后一段一段跑、每段完成即落轨 + 自动保存；占位段原地保留，可以单独 ▶ 重跑。
   const DETECT_TOTAL_CAP = 36000;  // 与 Processor 同一条总量上限（≈20 分钟 @30fps）
   // Sel Video Segment 的原料：恰好选中一枚 video / Layer 段时 = 它的名字与种类。
   const detectSel = useMemo(() => {
@@ -2953,7 +3204,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       .map(t => ({ id: t.id, name: t.name, kind: t.kind as 'video' | 'layer' })),
     [vidProject.tracks],
   );
-  const runVidDetect = useCallback(async (args: {
+  // Detect 那一颗按钮的**前半**：算好本轮锚（整条时间线 / 某轨 / 某段），弹与 Processor
+  // 同一套「输入范围 + 每段帧数」modal；确认后 onRun 才换算成绝对帧范围交给 runVidDetect。
+  const openVidDetect = useCallback((args: {
     source: 'video' | 'sel_track' | 'sel_segment'; trackId?: string;
     prompt: string; threshold: number; invert: boolean;
   }) => {
@@ -2962,9 +3215,71 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       return;
     }
     const proj = vidProjectRef.current;
+    if (!getBlendUi().detector.available) {
+      setVidProcRun({ state: 'error', msg: 'No detector is configured — turn Detector on in the Interface tab and bind its image and mask ports.' });
+      return;
+    }
+    const fps = clampFps(proj.fps);
+    let name = '';
+    let start = 0;
+    let end = 0;
+    if (args.source === 'video') {
+      end = proj.clips.reduce((m, c) =>
+        (c.pending || c.kind !== 'video' && c.kind !== 'layer') ? m : Math.max(m, c.start + c.duration), 0);
+      if (end <= 0) {
+        setVidProcRun({ state: 'error', msg: 'Nothing to detect — there is no video or Layer content on the timeline.' });
+        return;
+      }
+      name = 'Whole timeline';
+    } else if (args.source === 'sel_track') {
+      const tr = proj.tracks.find(t => t.id === args.trackId && (t.kind === 'video' || t.kind === 'layer'));
+      if (!tr) {
+        setVidProcRun({ state: 'error', msg: 'Pick a video or Layer track first.' });
+        return;
+      }
+      const list = proj.clips.filter(c => c.trackId === tr.id && !c.pending && c.kind === tr.kind
+        && (tr.kind === 'layer' || !!c.src) && c.duration > 0);
+      if (!list.length) {
+        setVidProcRun({ state: 'error', msg: `「${tr.name}」 has no segments to detect.` });
+        return;
+      }
+      start = Math.min(...list.map(c => c.start));
+      end = Math.max(...list.map(c => c.start + c.duration));
+      name = tr.name;
+    } else {
+      const sel = getVidSelection();
+      const c = sel.size === 1 ? proj.clips.find(x => sel.has(x.id)) : undefined;
+      if (!c || (c.kind !== 'video' && c.kind !== 'layer')) {
+        setVidProcRun({ state: 'error', msg: 'Select exactly one video or Layer segment on the timeline first.' });
+        return;
+      }
+      if (c.kind === 'video' && !c.src) {
+        setVidProcRun({ state: 'error', msg: `「${c.name}」 has no video source the backend can read.` });
+        return;
+      }
+      start = c.start;
+      end = c.start + c.duration;
+      name = c.name;
+    }
+    const total = Math.floor((end - start) * fps + 1e-6);
+    if (total < 1) {
+      setVidProcRun({ state: 'error', msg: `「${name}」 is shorter than one frame — nothing to detect.` });
+      return;
+    }
+    setVidDetectCfg({ args, name, start, duration: end - start, total, fps });
+  }, []);
+  const runVidDetect = useCallback(async (args: {
+    source: 'video' | 'sel_track' | 'sel_segment'; trackId?: string;
+    prompt: string; threshold: number; invert: boolean;
+  }, rangeA: number, rangeB: number, segFrames: number) => {
+    if (vidProcBusy.current) {
+      setVidProcRun({ state: 'error', msg: 'Another video run is in flight — wait for it or cancel it first.' });
+      return;
+    }
+    const proj = vidProjectRef.current;
     const ui = getBlendUi();
     if (!ui.detector.available) {
-      setVidProcRun({ state: 'error', msg: 'No detector is connected to the node — wire one into its detector input first.' });
+      setVidProcRun({ state: 'error', msg: 'No detector is configured — turn Detector on in the Interface tab and bind its image and mask ports.' });
       return;
     }
     const fps = clampFps(proj.fps);
@@ -2984,7 +3299,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         const plan = compositePlanAt(proj, t, muted, frameNeedRef.current);
         if (plan) return { kind: 'layer', key: plan.layerKey, clipId: plan.layer.id };
       }
-      const c = clipAtSolo(proj, t, soloV, muted);
+      // Mask 轨在监视器上照常播（与 Player 同一口径），但**不能当检测源**：拿黑 mask
+      //  再检一遍只会黑上加黑 —— 这一路跳过它，落到下面那条真正的视频轨。
+      const c = clipAtSolo(proj, t, soloV, muted, { skipMaskTrack: true });
       return c && c.src ? { kind: 'raw', clip: c } : null;
     };
     const sameTgt = (a: Tgt | null, b: Tgt | null): boolean => {
@@ -3058,9 +3375,26 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       segs.push({ f0, f1, tgt });
     }
 
+    // 输入范围（modal 给的是**锚内相对帧号**，openVidDetect 已换算成绝对帧）。只裁 segs，
+    // 落位仍按绝对帧号，别的照旧。
+    if (rangeB <= rangeA) {
+      setVidProcRun({ state: 'error', msg: 'The Detect time range is empty — End must be later than Start.' });
+      return;
+    }
+    {
+      const clipped: Seg[] = [];
+      for (const s of segs) {
+        const a = Math.max(s.f0, rangeA);
+        const b = Math.min(s.f1, rangeB);
+        if (b > a) clipped.push({ f0: a, f1: b, tgt: s.tgt });
+      }
+      segs.length = 0;
+      segs.push(...clipped);
+    }
+
     const total = segs.reduce((n, s) => n + (s.f1 - s.f0), 0);
     if (!total) {
-      setVidProcRun({ state: 'error', msg: 'Nothing to detect — no video or Layer content under the chosen source.' });
+      setVidProcRun({ state: 'error', msg: 'Nothing to detect — no video or Layer content inside that time range.' });
       return;
     }
     if (total > DETECT_TOTAL_CAP) {
@@ -3068,114 +3402,105 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       return;
     }
 
-    // 后端那一条 detect_video 入口：kind='video' = 后端自己抽帧；kind='frames' = 页面抓来的合成帧。
-    const postDetect = async (dv: Record<string, unknown>): Promise<{ video: string; frames: number }> => {
-      const res = await fetch('/api/blend_action', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'detect',
-          detect: { prompt: args.prompt, threshold: args.threshold, invert: args.invert },
-          detect_video: dv,
-        }),
-      });
-      let j: { success?: boolean; video?: string; frames?: number; error?: string } | null = null;
-      try { j = await res.json(); } catch { j = null; }
-      if (!j || !j.success || !j.video) {
-        throw new Error((j && j.error) || `The backend refused the detect chunk (HTTP ${res.status}).`);
-      }
-      return { video: j.video, frames: Math.max(1, Math.round(j.frames || 0)) };
-    };
-    const dataUrlOf = (b: Blob) => new Promise<string>((resolve, reject) => {
-      const fr = new FileReader();
-      fr.onload = () => resolve(String(fr.result || ''));
-      fr.onerror = () => reject(new Error('Could not read a captured frame.'));
-      fr.readAsDataURL(b);
-    });
-
-    // 每块帧数还要按**输出像素量**折算：mask 是 float32，4K 一帧 33MB —— 只按固定条数切块
-    // 会把内存冲爆（与 Processor 的分段约束同一条）。按 160MB / 块封顶，不少于 5 帧。
+    // 每段帧数：modal 给的值，再按**输出像素量**折算（mask 是 float32，4K 一帧 33MB —— 只按
+    // 固定条数切块会把内存冲爆，与 Processor 的分段约束同一条）。按 160MB / 段封顶，不少于 5 帧。
     const perFrameBytes = Math.max(1, (cw > 0 ? cw : 1280) * (ch > 0 ? ch : 720)) * 4;
-    const chunkCap = Math.max(5, Math.min(DETECT_SEG_FRAMES, Math.floor((160 * 1024 * 1024) / perFrameBytes)));
-    const batchCap = Math.max(2, Math.min(DETECT_BATCH, chunkCap));
+    const chunkCap = Math.max(5, Math.min(150, Math.floor((160 * 1024 * 1024) / perFrameBytes)));
+    const seg = Math.max(1, Math.min(Math.round(segFrames) || 30, chunkCap));
 
-    vidProcBusy.current = true;
-    beginVidProcRun(getActiveBlendUid());
-    vidCancelRef.current = false;
-    const results: { src: string; f0: number; frames: number }[] = [];
+    // 一段 = 一个占位 = 一次 POST。原始视频段记源文件 + 源内帧号（后端自己抽帧）；合成段记
+    // 时间线绝对秒（Player 逐帧抓合成画面）。
+    type Chunk = { start: number; duration: number; n: number;
+      file?: string; f0?: number; t0?: number; layerKey?: string };
+    const chunks: Chunk[] = [];
+    let missingFile = '';
+    for (const s of segs) {
+      for (let f = s.f0; f < s.f1; f += seg) {
+        const n = Math.min(seg, s.f1 - f);
+        if (s.tgt.kind === 'raw') {
+          const c = s.tgt.clip;
+          const file = c.src.split('/').pop() || '';
+          if (!file) { missingFile = c.name; continue; }
+          // 源内帧号：段内时刻 = f/fps，再按这段自己的 offset 折回源。
+          const sf = Math.max(0, Math.floor((c.offset + (f / fps - c.start)) * fps + 1e-6));
+          chunks.push({ start: f / fps, duration: n / fps, n, file, f0: sf });
+        } else {
+          chunks.push({ start: f / fps, duration: n / fps, n, t0: f / fps, layerKey: s.tgt.key });
+        }
+      }
+    }
+    if (missingFile) {
+      setVidProcRun({ state: 'error', msg: `「${missingFile}」 has no source file the backend can read.` });
+      return;
+    }
+    if (!chunks.length) {
+      setVidProcRun({ state: 'error', msg: 'Nothing to detect — the chosen range has no frames to read.' });
+      return;
+    }
+
+    const runId = `det-${Date.now()}`;
+    let outTrackId = '';
+    let outName = '';
     let done = 0;
-    let placedTrack = '';
-    let placed = false;
-    const setProgress = (msg: string) => {
-      const p = total > 0 ? Math.min(1, done / total) : 0;
+    let detected = 0;      // 后端实际产出的帧数
+    let emptyFrames = 0;   // 其中"一个对象都没检到"（mask 全零）的帧数
+    const setProgress = (msg: string, frac = 0) => {
+      const p = total > 0 ? Math.min(1, (done + frac) / total) : 0;
       setVidStagingOverlay({ progress: p });
       pushVidStaging({ progress: p });
       setVidProcRun({ state: 'running', msg });
     };
-    // 整趟（或已跑完的那几块）**一次性**落位：新开一条 Detect 轨、逐段铺上、自动绑成 Mask track。
-    // 一部分也算——失败/取消时已完成的那几块不丢。
-    const place = () => {
-      if (placed || !results.length) return;
-      placed = true;
-      vidUpdate(p => {
-        const { p: withTrack, track } = placeDetectTrack(p);
-        placedTrack = track.name;
-        let out = withTrack;
-        results.forEach((r, i) => {
-          out = placeDetectClip(out, track.id, r.src, `${track.name} ${i + 1}`, r.f0 / fps, r.frames / fps);
-        });
-        return setMaskTrack(out, track.id);
-      }, 'Detect video');
-      autoSaveCud();
-    };
 
+    vidProcBusy.current = true;
+    beginVidProcRun(getActiveBlendUid());
+    vidCancelRef.current = false;
     setVidStagingOverlay({ busy: true, progress: 0 });
     pushVidStaging({ busy: true, cancelLive: true, progress: 0 });
-    setVidProcRun({ state: 'running', msg: `Detecting ${total} frames…` });
+    setVidProcRun({ state: 'running', msg: `Placing ${chunks.length} detector segment${chunks.length === 1 ? '' : 's'}…` });
+
+    let ids: string[] = [];
     try {
-      for (const s of segs) {
+      // 先摆占位段：一条新 Detect 轨 + 下方 process 轨上一排坑，一次性落盘（一步撤销）。
+      vidUpdate(p => {
+        const { p: withTrack, track } = placeDetectTrack(p);
+        outTrackId = track.id;
+        outName = track.name;
+        const withPh = placeDetectPlaceholders(withTrack, {
+          runId, name: track.name, outTrackId: track.id, fps,
+          prompt: args.prompt, threshold: args.threshold, invert: args.invert, segs: chunks,
+        });
+        return setMaskTrack(withPh, track.id);
+      }, 'Detect video');
+      autoSaveCud();
+      ids = chunks.map((_, i) => vidProjectRef.current.clips.find(c =>
+        c.pending?.runId === runId && c.pending.detect && c.pending.segIndex === i)?.id || '');
+      // 一段一段跑：每段完成即落轨 + 自动保存，已完成的不因后面的失败而丢。
+      for (let i = 0; i < ids.length; i++) {
         if (vidCancelRef.current) throw new Error('cancelled');
-        if (s.tgt.kind === 'raw') {
-          const c = s.tgt.clip;
-          const file = c.src.split('/').pop() || '';
-          if (!file) throw new Error(`「${c.name}」 has no source file the backend can read.`);
-          for (let f = s.f0; f < s.f1; f += chunkCap) {
-            if (vidCancelRef.current) throw new Error('cancelled');
-            const n = Math.min(chunkCap, s.f1 - f);
-            // 源内帧号：段内时刻 = f/fps，再按这段自己的 offset 折回源。
-            const sf = Math.max(0, Math.floor((c.offset + (f / fps - c.start)) * fps + 1e-6));
-            setProgress(`Detecting 「${c.name}」 — ${done}/${total} frames…`);
-            const r = await postDetect({ kind: 'video', file, f0: sf, n, fps, w: cw, h: ch, name: 'detect' });
-            results.push({ src: r.video, f0: f, frames: r.frames });
-            done += n;
-          }
-        } else {
-          const cap = vidCtl.captureFrame;
-          if (!cap) throw new Error('The player is not available — open Video mode with the player visible first.');
-          for (let f = s.f0; f < s.f1; f += batchCap) {
-            if (vidCancelRef.current) throw new Error('cancelled');
-            const n = Math.min(batchCap, s.f1 - f);
-            const frames: string[] = [];
-            for (let k = 0; k < n; k++) {
-              const t = (f + k) / fps;
-              const blob = await cap(t, cw, ch);
-              if (!blob) {
-                throw new Error(`Could not capture the composite frame at ${t.toFixed(2)}s — is the Layer segment visible (track muted / player not ready)?`);
-              }
-              frames.push(await dataUrlOf(blob));
-            }
-            setProgress(`Detecting composite frames — ${done}/${total} frames…`);
-            const r = await postDetect({ kind: 'frames', frames, fps, w: cw, h: ch, name: 'detect' });
-            results.push({ src: r.video, f0: f, frames: r.frames });
-            done += n;
-          }
+        const id = ids[i];
+        const ck = chunks[i];
+        if (!id) continue;
+        if (detectSlotBusy(vidProjectRef.current, outTrackId, ck.start, ck.duration, id)) {
+          throw new Error(`The Detect track already has a clip over ${ck.start.toFixed(1)}s–${(ck.start + ck.duration).toFixed(1)}s — move or delete it first.`);
         }
+        setProgress(`Detecting segment ${i + 1}/${ids.length} — ${done}/${total} frames…`);
+        const r = await runDetectChunk(id, frac => {
+          setProgress(`Detecting segment ${i + 1}/${ids.length} — ${done + Math.round(frac * ck.n)}/${total} frames…`, frac * ck.n);
+        });
+        detected += r.frames;
+        emptyFrames += r.empty;
+        done += ck.n;
       }
-      place();
-      setVidProcRun({ state: 'done', msg: `Done — ${results.length} mask segment${results.length === 1 ? '' : 's'} on 「${placedTrack}」, bound as the Mask track.` });
+      const nothing = !args.invert && detected > 0 && emptyFrames >= detected;
+      setVidProcRun(nothing
+        ? { state: 'done', msg: `Done — ${chunks.length} segment${chunks.length === 1 ? '' : 's'} on 「${outName}」, but no objects were detected in any of its ${detected} frame${detected === 1 ? '' : 's'}. Try a different prompt or a lower threshold (SAM3 scores for words like "girl" often sit below 0.2; "woman" / "person" usually score higher).` }
+        : { state: 'done', msg: `Done — ${chunks.length} mask segment${chunks.length === 1 ? '' : 's'} on 「${outName}」, bound as the Mask track.` });
     } catch (e: unknown) {
-      place();
-      const tail = results.length
-        ? ` — ${results.length} segment${results.length === 1 ? '' : 's'} already placed on 「${placedTrack}」` : '';
+      const remaining = vidProjectRef.current.clips.filter(c => c.pending?.runId === runId && c.pending.detect).length;
+      const landed = chunks.length - remaining;
+      const tail = landed > 0
+        ? ` — ${landed}/${chunks.length} segment${chunks.length === 1 ? '' : 's'} landed on 「${outName}」; ${remaining} placeholder${remaining === 1 ? '' : 's'} left — click ▶ on a segment to retry it.`
+        : '';
       setVidProcRun(vidCancelRef.current
         ? { state: 'cancelled', msg: `Detect cancelled${tail}` }
         : { state: 'error', msg: `Detect failed — ${e instanceof Error ? e.message : String(e)}${tail}` });
@@ -3186,7 +3511,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       vidProcBusy.current = false;
       endVidProcRun();
     }
-  }, [vidCtl, vidUpdate, autoSaveCud]);
+  }, [vidUpdate, autoSaveCud, runDetectChunk]);
   const wbHost = useMemo(() => ({
     staging, blendPreview, guidanceCard, stageUpload, stageRemove,
     layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock, setVisible: setUnitVisible },
@@ -3205,13 +3530,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         tracks: vidTrackList,
         set: (id: string | null) => vidUpdate(proj => setMaskTrack(proj, id || null), 'Mask track'),
       },
-      // Video Detect：三个来源（整条时间线合成 / 某一整轨 / 当前选中段），产物落到新开的
-      // Detect 轨上并自动绑成 Mask track（见 runVidDetect）。
-      detect: { run: runVidDetect, sel: detectSel, tracks: vidDetectTracks },
+      // Video Detect：三个来源（整条时间线合成 / 某一整轨 / 当前选中段）。点 Detect 先弹
+      // 「输入范围 + 每段帧数」modal；确认后产物落到新开的 Detect 轨上并自动绑成 Mask track，
+      // 一段一段执行（见 openVidDetect / runVidDetect）。
+      detect: { open: openVidDetect, sel: detectSel, tracks: vidDetectTracks },
     },
   }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock, setUnitVisible,
     vidMode, vidProject.fps, vidProject.maskTrackId, setVidFps, vidTrackList, vidAssetList, videoGenList, addVideoGenSegment, continueSel, addContinueVgenSegment, vidUpdate,
-    runVidDetect, detectSel, vidDetectTracks]);
+    openVidDetect, detectSel, vidDetectTracks]);
   // Agent 窗的 ctx:工具执行体(runAgentTool)要碰的宿主事实与写口捆成一份。AgentPanel 经 ref
   // 永远取最新一份用,所以这份对象只影响它自身重渲的频率,不影响工具执行的正确性。
   // dsh 的工作区 = 当前 cud 的所在目录(Agent 窗把它报给 sidecar,再由插件钉进 dsh 页面)。
@@ -3516,7 +3842,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const active = d.uid === blendDocs.activeUid;
     const still = active && liveReady ? null : docStills[d.uid];
     docBodies[unit] = active && vidMode === 'video'
-      ? <VidPlayer vid={vidCtl} visible={tab === 'draw'}
+      ? <VidPlayer vid={vidCtl} visible={tab === 'draw'} needRev={vidNeedRev}
           stageCovers={!!frameRect && vidMode === 'video'} />
       : active && vidMode === 'midi'
         // MIDI 模式的主窗就是**整套 MIDI 界面**（Transport 在顶、左乐器右卷帘，见 midi/Workspace）：
@@ -4278,11 +4604,20 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               // 工作台读写档的时候整排变灰（`cudBusy`），跟原来那六个按钮的禁用是同一颗开关。
               toolbar: (
                 <div style={styles.fileBar}>
-                  {FILE_ACTIONS.map(a => (
-                    <button key={a.action} title={a.title} disabled={blendDocs.busy}
-                      style={{ ...styles.fileBtn, opacity: blendDocs.busy ? 0.38 : 1, cursor: blendDocs.busy ? 'default' : 'pointer' }}
-                      onClick={() => onDocCommand(a.action)}>{a.label}</button>
-                  ))}
+                  {FILE_ACTIONS.map(a => {
+                    // Export MP4 只在 Video 模式有意义：导出的是视频工程（宿主那份），
+                    // 不是工作台的图层合成。其余模式按钮置灰但保留位置，避免布局跳动。
+                    const mp4Disabled = a.action === 'export-mp4' && vidMode !== 'video';
+                    const disabled = blendDocs.busy || mp4Disabled;
+                    return (
+                      <button key={a.action} title={a.title} disabled={disabled}
+                        style={{ ...styles.fileBtn, opacity: disabled ? 0.38 : 1, cursor: disabled ? 'default' : 'pointer' }}
+                        onClick={() => {
+                          if (a.action === 'export-mp4') { void exportMp4(); }
+                          else onDocCommand(a.action);
+                        }}>{a.label}</button>
+                    );
+                  })}
                 </div>
               ),
               ...docBodies,
@@ -4876,6 +5211,29 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             void runVideoListProcessor(segFrames, inFrame, outFrame);
           }}
           onClose={() => setVidSegCfg(null)}
+        />
+      )}
+      {/* Detector 视频路：点 Detect 先在这里定输入范围与每段帧数。锚由来源决定
+          （整条时间线 / 某轨 / 某段），确认后才先摆占位段、再一段一段跑。 */}
+      {vidDetectCfg && (
+        <VidSegModal
+          title="Run detector on video"
+          subtitle={`Detector · ${vidDetectCfg.name} — frames are detected in segments`}
+          note="Each segment is detected on its own: frames of a raw video clip are read by the backend, frames of a Layer / composite segment are captured from the player. Placeholders stay on their own track; every finished segment lands on the Detect track above, at the same timeline position, and the placeholder can be run again any time (its previous result is replaced)."
+          anchorName={vidDetectCfg.name}
+          anchorKind="clip"
+          spanStart={vidDetectCfg.start}
+          spanDuration={vidDetectCfg.duration}
+          total={vidDetectCfg.total}
+          fps={vidDetectCfg.fps}
+          onRun={(segFrames, inFrame, outFrame) => {
+            const cfg = vidDetectCfg;
+            setVidDetectCfg(null);
+            // modal 的帧号是锚内相对帧；换成时间线绝对帧（网络上落位一律用绝对帧号）。
+            const base = Math.max(0, Math.round(cfg.start * cfg.fps));
+            void runVidDetect(cfg.args, base + inFrame, base + outFrame, segFrames);
+          }}
+          onClose={() => setVidDetectCfg(null)}
         />
       )}
       {/* Pipeline Preset 的视频路：preset 没有输入口，源在 modal 里选（Tracks / Sel. Track /
@@ -6055,11 +6413,21 @@ const InterfaceTab: React.FC<{
     const nextNames: InterfaceMeta[string]['names'] = Object.keys(names).length ? names : undefined;
     patchMeta(iface, { names: nextNames });
   };
-  const setIfaceMode = (iface: string, key: 'block' | 'processor' | 'video_generator', on: boolean) => {
+  const setIfaceMode = (iface: string, key: 'block' | 'processor' | 'video_generator' | 'detector' | 'tagger', on: boolean) => {
     const cur = metaFor(iface);
     patchMeta(iface, {
-      modes: { block: false, processor: false, video_generator: false, ...(cur.modes || {}), [key]: on },
+      modes: { block: false, processor: false, video_generator: false, detector: false, tagger: false, ...(cur.modes || {}), [key]: on },
     });
+  };
+  // Detector / Tagger：和 Video Generator 一样按**槽位**绑端口 —— 一个接口包声明成检测器 /
+  // 打标器后，下面这几枚固定角色各挑一个类型对得上的端口。执行时按槽名查号，不认具体接口。
+  const setModePort = (iface: string, mode: 'detector' | 'tagger', slot: string, num: number) => {
+    const cur = metaFor(iface);
+    const ports: Record<string, number> = { ...((cur[mode] as Record<string, number>) || {}) };
+    if (num > 0) ports[slot] = num; else delete ports[slot];
+    patchMeta(iface, mode === 'detector'
+      ? { detector: ports as ModePorts<DetectorSlot> }
+      : { tagger: ports as ModePorts<TaggerSlot> });
   };
   // Video Generator：八个固定槽各绑一个端口。绑的是**端口号**（执行全程按号走），
   // 槽位名是这个端口在这一台生成器里扮演的角色。
@@ -6214,7 +6582,7 @@ const InterfaceTab: React.FC<{
                     开关受形状校验：不满足就拒开并在下方说一句话。 */}
                 {(() => {
                   const meta = metaFor(iface.name);
-                  const modes = { block: false, processor: false, ...(meta.modes || {}) };
+                  const modes = { block: false, processor: false, video_generator: false, detector: false, tagger: false, ...(meta.modes || {}) };
                   const pipelineIn = iface.start_ports?.filter(p => p.type === 'PIPELINE_DATA') ?? [];
                   const pipelineOut = iface.end_ports?.filter(p => p.type === 'PIPELINE_DATA') ?? [];
                   const mediaIn = iface.start_ports?.filter(p => ['IMAGE', 'MASK', 'PIPELINE_DATA'].includes(p.type)) ?? [];
@@ -6254,6 +6622,62 @@ const InterfaceTab: React.FC<{
                           setIfaceMode(iface.name, 'video_generator', v);
                         }} />
                       </div>
+                      {/* Detector / Tagger：把这个 interface **声明**成检测器 / 打标器后，
+                          下面几枚固定槽各绑一个类型对得上的端口。执行时只按槽名查端口号 ——
+                          模型不再作为采样器节点的输入口出现。 */}
+                      <div style={{ ...toggleRow, marginBottom: 0 }}>
+                        <span style={toggleLabel} title="Detector：把这个接口包当检测器 —— Detect 块、Detector 工具和视频检测都执行它。">Detector</span>
+                        <IOSToggle checked={!!modes.detector} onChange={v => setIfaceMode(iface.name, 'detector', v)} />
+                        <span style={{ ...toggleLabel, marginLeft: 12 }} title="Tagger：把这个接口包当打标器 —— Tagger 块与 Tag 面板执行它。">Tagger</span>
+                        <IOSToggle checked={!!modes.tagger} onChange={v => setIfaceMode(iface.name, 'tagger', v)} />
+                      </div>
+                      {(modes.detector || modes.tagger) && (
+                        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '0.5px solid rgba(191,90,242,0.18)' }}>
+                          {(['detector', 'tagger'] as const).filter(k => modes[k]).map(k => {
+                            const slots = k === 'detector' ? DETECTOR_SLOTS : TAGGER_SLOTS;
+                            const ports = (meta[k] || {}) as Record<string, number>;
+                            const missing = modeMissing(slots, ports);
+                            return (
+                              <div key={k} style={{ marginBottom: 8 }}>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.65)', margin: '2px 0 4px' }}>
+                                  {k === 'detector' ? 'Detector ports' : 'Tagger ports'}
+                                </div>
+                                {slots.map(slot => {
+                                  const list = ((slot.side === 'start' ? iface.start_ports : iface.end_ports) ?? [])
+                                    .filter(p => slot.types.includes(p.type));
+                                  const cur = ports[slot.key] ?? 0;
+                                  const bad = slot.required && cur <= 0;
+                                  return (
+                                    <div key={slot.key} style={{ ...toggleRow, marginBottom: 0 }}>
+                                      <span style={{
+                                        ...toggleLabel, minWidth: 74,
+                                        color: bad ? '#ff9f0a' : (cur > 0 ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.38)'),
+                                      }} title={slot.tip}>{slot.label}{slot.required ? ' *' : ''}</span>
+                                      <select style={{ ...styles.paramSelect, flex: 1 }} value={cur}
+                                        onChange={e => setModePort(iface.name, k, slot.key, parseInt(e.target.value, 10) || 0)}
+                                        title={slot.tip}>
+                                        <option value={0} style={{ background: '#1c1c1e', color: '#fff' }}>
+                                          {list.length ? '— none —' : `no ${slot.types.join('/')} port`}
+                                        </option>
+                                        {list.map(p => (
+                                          <option key={p.num} value={p.num} style={{ background: '#1c1c1e', color: '#fff' }}>
+                                            {portDisplay(iface.name, slot.side, p)}（value{p.num}）
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  );
+                                })}
+                                {missing.length > 0 && (
+                                  <div style={{ fontSize: 11, color: '#ff9f0a', marginTop: 4, lineHeight: 1.4 }}>
+                                    Bind {missing.join(' / ')} to use this {k}.
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                       {/* Allow List：只在 Processor 开着时给。开着 = 这一口吃一整列图/mask（视频逐帧、
                           多张 staging），吐出来也是 list；执行时按每个内部节点是不是 INPUT_IS_LIST
                           分流（直通 list / 逐帧跑再合并）。视频模式下 Processor 窗的 image 输入行

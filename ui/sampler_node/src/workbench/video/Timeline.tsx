@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useDockDocument, useDockWindow } from '../../dock/docScope';
 import {
   type VidClip, type VidClipClipboard, type VidController, type VgenFrameSpec, type VidPasteResult, type VidTrack, type VidMergeProbe,
-  addLayerClip, addMidiClip, addTrack, clipAtSolo, copyVidClips, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, midiClipWindow, midiNotesInClip, moveClip, moveClips, moveTrack, musicOf, newVidId, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
+  addLayerClip, addMidiClip, addTrack, clipAtSolo, copyVidClips, detectSlotBusy, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, midiClipWindow, midiNotesInClip, moveClip, moveClips, moveTrack, musicOf, newVidId, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
   vgenChainPrevOf, vgenRefFramePlan, vgenSeamsOf, vgenWithDuration,
 } from './model';
 import { nativeEngine } from '../../midi/engine';
@@ -1653,7 +1653,7 @@ export const VidTimeline: React.FC<{
                     )}
                     {/* 输出轨：Processor / Preset 的 process 段跑完，成品固定落在这一条的对应位置。 */}
                     {tr.role === 'output' && (
-                      <span data-vid-out-badge="" title="Output track — every finished Processor / Preset segment lands here at its placeholder's timeline position. Placeholders stay where they are and can be run again."
+                      <span data-vid-out-badge="" title="Output track — every finished Processor / Preset / Detector segment lands here at its placeholder's timeline position. Placeholders stay where they are and can be run again."
                         style={{ flexShrink: 0, fontSize: 8, fontWeight: 800, letterSpacing: 0.3, color: '#30d158', background: 'rgba(48,209,88,0.16)', border: '0.5px solid rgba(48,209,88,0.5)', borderRadius: 3, padding: '1px 3px', lineHeight: 1.1 }}>OUT</span>
                     )}
                     {/* 生成器轨的设置：宽高 / from canvas / scale / fps —— 轨上所有段共享，
@@ -1733,7 +1733,7 @@ export const VidTimeline: React.FC<{
                   vid.update(proj => addLayerClip(proj, tr.id, timeAt(e.clientX)), 'Add layer segment');
                 }}
                 title={tr.kind === 'layer' ? 'Layer track — double-click to add a Layer segment. Each segment owns its own layers; it composites over the video below and only takes effect while this track sits above every video track.'
-                  : tr.kind === 'process' ? 'Process track — holds the Processor / Preset segment placeholders. Placeholders never play; each finished segment lands on the output track above at the same timeline position, and a placeholder can be run again any time (its previous result is replaced).'
+                  : tr.kind === 'process' ? 'Process track — holds the Processor / Preset / Detector segment placeholders. Placeholders never play; each finished segment lands on the output track above at the same timeline position, and a placeholder can be run again any time (its previous result is replaced).'
                     : tr.kind === 'midi' ? 'MIDI track — double-click to add a MIDI segment (4 bars). Its notes are edited in the MIDI window; drag / trim / split the segment like any clip. The instrument, channel and track velocity live on the track header.'
                       : undefined}
                 style={{ position: 'relative', flex: 1, minWidth: 0, background: dropLane === tr.id ? 'rgba(10,132,255,0.08)' : 'transparent' }}
@@ -1753,10 +1753,13 @@ export const VidTimeline: React.FC<{
                     x.trackId === tr.id && x.id !== c.id
                     && Math.abs((x.start + x.duration) - c.start) <= 0.002);
                   // 这个段（占位段或生成器段）的产物槽位是不是已经被别的东西占了
-                  // （占了 ▶ 置灰 —— 自己的旧产物不算占）。
+                  // （占了 ▶ 置灰 —— 自己的旧产物不算占）。Detect 段的槽位在它自己的 Detect 轨上。
+                  const det = c.pending?.detect;
                   const outPort = c.pending?.port ?? c.vgen?.port;
-                  const continueBlocked = (c.pending || c.vgen)
-                    ? procSlotBusy(p, outPort ?? 0, c.start, c.duration, c.id) : false;
+                  const continueBlocked = det
+                    ? detectSlotBusy(p, det.outTrackId, c.start, c.duration, c.id)
+                    : (c.pending || c.vgen)
+                      ? procSlotBusy(p, outPort ?? 0, c.start, c.duration, c.id) : false;
                   return (
                     <Clip key={c.id} clip={c} pps={pps} selected={selIds.has(c.id)} blade={cutArmed} muted={isMuted}
                       touchesLeft={touchesLeft}
@@ -1779,12 +1782,13 @@ export const VidTimeline: React.FC<{
                         }
                         vid.continueProc?.(id);
                       }}
-                      onSettings={onSettingsPlaceholders ? (id: string) => {
+                      onSettings={onSettingsPlaceholders && !c.pending?.detect ? (id: string) => {
                         // 点中的段在多选里 → 整批一起设置；否则只它自己（并把它切成唯一选中）。
+                        // Detect 段没有可改的 processor 参数，不参与这一批。
                         const inSel = selIds.has(id);
                         if (!inSel) selectOnly(id);
                         const ids = inSel
-                          ? p.clips.filter(x => selIds.has(x.id) && x.pending).map(x => x.id)
+                          ? p.clips.filter(x => selIds.has(x.id) && x.pending && !x.pending.detect).map(x => x.id)
                           : [id];
                         onSettingsPlaceholders(ids.length ? ids : [id]);
                       } : undefined}
@@ -2033,7 +2037,7 @@ export const VidTimeline: React.FC<{
           {([
             ['video', 'Add Video Track', 'Add a video track on top'],
             ['layer', 'Add Layer Track', 'Add a Layer track on top — it holds Layer segments, each with its own set of layers, composited over the video below. Only a Layer track that sits above every video track takes effect.'],
-            ['process', 'Add Process Track', 'Add a process track on top — it holds Processor / Preset segment placeholders. Placeholders never play; each finished segment lands on the output track above at the same timeline position, and it can be run again any time. New placeholders come from Run, so an empty track only becomes useful once you move placeholders onto it.'],
+            ['process', 'Add Process Track', 'Add a process track on top — it holds Processor / Preset / Detector segment placeholders. Placeholders never play; each finished segment lands on the output track above at the same timeline position, and it can be run again any time. New placeholders come from Run, so an empty track only becomes useful once you move placeholders onto it.'],
             ['audio', 'Add Audio Track', 'Add an audio track at the bottom'],
             ['midi', 'Add MIDI Track', 'Add a MIDI track at the bottom — pick its instrument on the track header; its segments hold notes edited in the MIDI window.'],
           ] as ['video' | 'layer' | 'process' | 'audio' | 'midi', string, string][]).map(([kind, label, tip]) => (
@@ -2391,7 +2395,7 @@ const Clip: React.FC<{
         : isMidi
         ? `${c.name} — MIDI segment, ${midiShown.length} note${midiShown.length === 1 ? '' : 's'} in view (${fmtTime(c.duration)}). Its notes are edited in the MIDI window — select this segment and switch to MIDI. Trimming only hides the notes outside the segment; they stay on it. The instrument, MIDI channel and track velocity live on the track header. Drag / trim / split / copy like any clip.`
         : isPending && c.pending
-        ? `${c.name} — ${c.pending.kind === 'preset' ? 'Pipeline Preset' : 'Processor'} placeholder, segment ${c.pending.segIndex + 1}/${c.pending.segCount} of 「${c.pending.iface}」 (nothing to show until it runs). Click ▶ Run to execute just this segment from its stored snapshot; the result lands on the output track above and this placeholder stays, so it can be run again. Drag/trim/delete like any clip.`
+        ? `${c.name} — ${c.pending.detect ? 'Detector' : c.pending.kind === 'preset' ? 'Pipeline Preset' : 'Processor'} placeholder, segment ${c.pending.segIndex + 1}/${c.pending.segCount} of 「${c.pending.iface}」 (nothing to show until it runs). Click ▶ Run to execute just this segment from its stored snapshot; the result lands on ${c.pending.detect ? 'the Detect' : 'the output'} track above and this placeholder stays, so it can be run again. Drag/trim/delete like any clip.`
         : `${c.name} — ${fmtTime(c.duration)}${c.hasAudio ? ' · audio' : ''}${c.groupId ? ' · linked A/V (Alt-drag moves this one alone; click ⧉ to unlink for good)' : ''}${gone ? ' · MEDIA MISSING from the asset store — pick the original file in the Assets window (Project scope) to relink' : ''}`}
       style={{
         position: 'absolute', left: c.start * pps, width: Math.max(8, c.duration * pps), top: 3, bottom: 3,
@@ -2491,8 +2495,8 @@ const Clip: React.FC<{
                 : queued
                   ? 'Remove this segment from the queue — it stays on the track and can be run again later.'
                   : continueBlocked
-                    ? `The output track already has a clip over ${fmtTime(c.start)}–${fmtTime(c.start + c.duration)} — move or delete it before running this segment again.`
-                    : `Run this segment from its stored snapshot (${c.pending.kind === 'preset' ? 'preset' : 'interface'} 「${c.pending.iface}」, segment ${c.pending.segIndex + 1}/${c.pending.segCount}; params and frame windows are kept in the clip). The result lands on the output track, leaving this placeholder in place. With several placeholders selected, ▶ runs them all in order (left → right, bottom → top).`}
+                    ? `The ${c.pending.detect ? 'Detect' : 'output'} track already has a clip over ${fmtTime(c.start)}–${fmtTime(c.start + c.duration)} — move or delete it before running this segment again.`
+                    : `Run this segment from its stored snapshot (${c.pending.detect ? 'detector' : c.pending.kind === 'preset' ? 'preset' : 'interface'} 「${c.pending.iface}」, segment ${c.pending.segIndex + 1}/${c.pending.segCount}; params and frame windows are kept in the clip). The result lands on ${c.pending.detect ? 'the Detect' : 'the output'} track, leaving this placeholder in place. With several placeholders selected, ▶ runs them all in order (left → right, bottom → top).`}
               onPointerDown={e => e.stopPropagation()}
               style={{ flexShrink: 0, display: 'flex', position: 'relative', margin: tight ? '0 auto' : undefined }}
             >
