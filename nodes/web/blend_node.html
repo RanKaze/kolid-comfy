@@ -774,7 +774,9 @@ if (stageGL && typeof fxglBindStage === 'function') {
     try { fxglBindStage(stageCanvas, stageCanvas.getContext('webgl2')); } catch (e) { /* 取不到就退回旧路 */ }
 }
 const stageCtx2d = stageGL ? null : stageCanvas.getContext('2d');
-const vidBaseVideo = document.getElementById('vidBaseVideo');
+// 底片播放引擎的**当前台面**。<video> 不再是唯一一只：池子里每段一只（见 vidBasePool），
+// 到段界只把这里指向已经预热好的那一只 —— 不再换源 + load + seek（那是切换卡顿的根）。
+let vidBaseVideo = document.getElementById('vidBaseVideo');
 const vidSrcStage = document.getElementById('vidSrcStage');
 const blendCanvas = document.getElementById('blendCanvas');
 const guidanceCanvas = document.getElementById('guidanceCanvas');
@@ -1119,6 +1121,13 @@ let vidBasePlaying = false;    // 宿主在不在播
 // 还没画上来之前，它一旦上台就是"跳闪一下 Video 2 的视频"—— 关键帧把那一层 alpha 置 0 也拦不住，
 // 因为那压根不是合成的结果。见 stageWanted / stageShowBase。
 let vidBaseHidden = false;
+// 底片播放引擎（双缓冲预取）：宿主提前报"接下来谁会当底片、轮到它时该在源内第几秒"
+// （blend-vid-base-warm），页面按段各挂一只镜像 <video> 并暂停在那一刻。到段界只换台，
+// 不再换源 + load + seek —— 播放中那几百毫秒没有新帧，正是用户报的"切换卡顿"。
+// 键 = 段 id；同一文件的不同段因此各有各的解码位置（同源换段也只需换台）。
+const VID_BASE_POOL_MAX = 4;
+const vidBasePool = new Map();   // key -> { key, v, src, start, offset, warmAt, usedAt }
+let vidBaseActiveKey = '';       // 台上那一只的段 id（'' = 还是 DOM 里那只初始元素）
 // P3.2：唯一显示面此刻装的是哪一样 —— 'live'（活画布这套）/ 'base'（底片帧）/ 'composite'
 // （别段的合成图副本）。空串 = 缓冲刚被清掉，下一次 stageSync 必须重铺。
 let stageMode = '';
@@ -1141,6 +1150,7 @@ let swapPendingUid = null;     // 这一份还没画出第一帧（宿主那边�
 let vidBaseSeq = 0;            // 呈现过的帧数（rVFC 驱动）
 let vidBaseRvfcAt = 0;         // 最近一次 rVFC 的时刻（判断这条链还活着没有）
 let vidBaseRvfcPending = false; // 已挂、还没回调 —— rVFC 是一次性的，靠它防重复挂链
+let vidBaseRvfcEpoch = 0;       // 每次换台/重挂 +1：旧元素（甚至同一只元素上一轮）的回调据此作废
 let guidanceHasInk = false;    // 这一趟 guidance 栈里有没有真的落下像素（没有就不往 stage 上叠）
 let overlayDpr = 1;
 let viewDrag = null;           // {kind:'zoom'|'rotate'|'pan', sign, startX, startY, startView, anchorDoc, centerDoc, moved}
@@ -5128,6 +5138,10 @@ function render(opts) {
             // 那是每帧最大的一笔固定开销，可真正的读者最多 12/s（预览）或人手按的（导出/生成）。
             // 所以帧包驱动的那趟按 CONTEXT_COPY_MS 节流：读者要精确的像素时自己 ensureBlendImage()；
             // 停下播放、任何一次手改的 render 都会立刻补一张（那条路径 minMs = 0，不节流）。
+            // **例外：画布没盖住监视器**（stageCovers=false）。那时回图这一趟真的要把 blendCanvas
+            // 编码传回宿主给用户看 —— 节流等于把监视器降到 4fps。只有"画布压着监视器、那张位图
+            // 本来就没人看"时才省这笔；布局让开后 packet 的 stageCovers 立即变 false，下一趟就恢复
+            // 每帧抄。
             // **只在这一趟真画了的时候抄**：skipDisplay（缺帧 / 换套 / 无底）那一趟台上留的是
             // 上一帧 —— 而在底片态那就是一张视频裸帧。抄它等于往 context image 里灌一张不该有的图，
             // 而 stageShowLive 之后正好会把这张铺上台（用户看到"活画布"里是一帧底片）。
@@ -5136,7 +5150,7 @@ function render(opts) {
             // 入口走 ensureBlendImage() —— 那时台上已经是合成图，读到的就是显示面上的真相。
             if (!skipDisplay) {
                 if (setMismatch) blendDirty = true;
-                else syncBlendImage(kfFold ? CONTEXT_COPY_MS : 0);
+                else syncBlendImage(kfFold && vidFramePacket && vidFramePacket.stageCovers ? CONTEXT_COPY_MS : 0);
             }
             // ── guidance 栈：照旧 2D 画进 guidanceCtx（卡片 / 合并 / 吸管都读它），再整张叠到显示面上。
             // 它是**显示层**，不进 context image —— #blendCanvas 里永远只有工作栈。
@@ -5282,12 +5296,13 @@ function vidSrcVideoFor(trackId, src) {
         // 加载期间收到的那一包只能算"还没帧"：解出来了立刻按记住的时刻对一次，再重画一趟。
         const wt = (e.warmWant != null && e.want < 0) ? e.warmWant : e.want;
         if (wt >= 0) {
-            try { v.currentTime = wt; } catch (err) { /* 还不能 seek */ }
+            try { v.currentTime = vidSrcClamp(v, wt); } catch (err) { /* 还不能 seek */ }
             if (vidBasePlaying && v.paused) void v.play().catch(() => { /* 自动播放政策 */ });
         }
         vidSrcAskRedraw();
     }, { once: true });
-    v.addEventListener('error', () => { e.ok = false; }, { once: true });
+    // 不能是 once：重挂源之后还要继续盯着（见 vidSrcRecover）。
+    v.addEventListener('error', () => { e.ok = false; vidSrcRecover(e); });
     v.setAttribute('src', src);
     vidSrcStage.appendChild(v);
     try { v.load(); } catch (err) { /* noop */ }
@@ -5311,6 +5326,7 @@ function vidSrcVideoFor(trackId, src) {
 function vidSrcDrop(key) {
     const e = vidSrcVideos.get(key);
     if (!e) return;
+    if (e.catchTimer) { clearTimeout(e.catchTimer); e.catchTimer = 0; }
     try { e.v.pause(); e.v.removeAttribute('src'); e.v.load(); e.v.remove(); } catch (err) { /* gone */ }
     vidSrcVideos.delete(key);
 }
@@ -5392,35 +5408,62 @@ function vidSrcSync(d) {
         const e = vidSrcVideoFor(trackId, String(t.src));
         const v = e.v;
         e.want = want;
+        // 解码错误 / seek 卡死都是**终态**（readyState 焊在 1）：不重挂源就永远没有帧，蒙版会停在
+        // 旧帧上跟人对不上（或整幅只剩占位条纹）。统一在这里兜住，错误事件那条路见 vidSrcRecover。
+        if (v.error) vidSrcRecover(e);
+        else if (v.seeking && e.seekSince && now - e.seekSince > 2500) vidSrcRecover(e);
         if (v.readyState >= 2) {
             if (playing) {
-                // 播放中只做**纠偏**，而且带迟滞与节流：轻微落后（<0.35s）就让它自己追 —— 播放是 1×，
-                // 追得回来。一落后就 seek 的话会自锁：seek 一次十几到几十毫秒，落后更多、再 seek，
-                // 永远停在 readyState=1（那一枚贴片干脆没有帧）。多条轨绑在一段上时这个自锁最容易被
-                // 触发（解码器抢不过来），表现就是"绑两轨的段播起来又糊又卡"。
+                // 播放中只做**纠偏**。两条手段，分工明确：
+                //  · 起播这一下必须**对准** —— 暂停着的镜像停在哪就是哪，"差 0.3s 以内就照播"等于
+                //    整段都差 0.3s（30fps 上是 9 帧，mask 明显对不上人）。这里只多付一次 seek。
+                //  · 播起来之后**不 seek**（seek 一次十几到几十毫秒，落后更多、再 seek，会自锁在
+                //    readyState=1 —— 那一枚贴片干脆没有帧），改用**微调播放速率**把相位拉回来：
+                //    偏差 0.05s ≈ ±2.5% 的速率，人眼看不出来，几十毫秒内就回到逐帧对齐。
                 if (v.paused) {
-                    if (Math.abs(v.currentTime - want) > 0.3) {
-                        try { v.currentTime = want; vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
+                    if (Math.abs(v.currentTime - want) > 1 / 120) {
+                        try { v.currentTime = vidSrcClamp(v, want); vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
                     }
+                    try { v.playbackRate = 1; } catch (err) { /* gone */ }
                     void v.play().catch(() => { /* autoplay 政策 */ });
-                } else if (!v.seeking && now - (e.seekAt || 0) > 600 && Math.abs(v.currentTime - want) > 0.35) {
-                    e.seekAt = now;
-                    try { v.currentTime = want; vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
+                } else if (!v.seeking) {
+                    const drift = v.currentTime - want;        // 正 = 镜像超前
+                    if (Math.abs(drift) > 0.35) {
+                        if (now - (e.seekAt || 0) > 600) {
+                            e.seekAt = now;
+                            try { v.currentTime = vidSrcClamp(v, want); vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
+                        }
+                        try { v.playbackRate = 1; } catch (err) { /* gone */ }
+                    } else {
+                        const rate = Math.max(0.94, Math.min(1.06, 1 - drift * 0.5));
+                        try { if (Math.abs(v.playbackRate - rate) > 0.003) v.playbackRate = rate; } catch (err) { /* gone */ }
+                    }
                 }
             } else {
                 if (!v.paused) v.pause();
+                try { if (v.playbackRate !== 1) v.playbackRate = 1; } catch (err) { /* gone */ }
                 if (Math.abs(v.currentTime - want) > 1 / 240) {
-                    try { v.currentTime = want; vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
+                    try { v.currentTime = vidSrcClamp(v, want); vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
                 }
             }
             out.set(trackId, v);
         } else if (playing) {
+            try { if (v.playbackRate !== 1) v.playbackRate = 1; } catch (err) { /* gone */ }
             if (v.paused) void v.play().catch(() => { /* autoplay 政策 */ });
             out.set(trackId, v);                          // 还没解出来：这一帧这轨先空着
         } else {
+            // 暂停态里"还没解出画面"（正在 seek / 刚挂源）也必须把这一包的时刻记到元素上：
+            // 丢掉这一次 seek 就没有下一个包来补（暂停时不再发包），蒙版会停在预热指的那一格上，
+            // 与画面差好几秒 —— 用户看到的就是"mask 完全没对上人"。
+            if (!playing && Math.abs(v.currentTime - want) > 1 / 240) {
+                try { v.currentTime = vidSrcClamp(v, want); vidSrcAwaitSeek(e); } catch (err) { /* 还不能 seek */ }
+            }
             out.set(trackId, v);
         }
         e.usedAt = now;
+        // 暂停态的对位看门狗：上面这一次 seek 可能仍被吞掉（元素正在 seek、或者预热刚把它挪走），
+        // 而暂停态不会有下一包来救 —— 见 vidSrcCatchUp。
+        vidSrcCatchUp(e);
     }
     // 这一包不再需要的镜像：停掉（别让它们在后台继续解码）。同一只同轨不同源的旧镜像也在内 ——
     // 它的源已经不归这一刻了，停着（保留已解出的画面，seek 回去很快），等预热带回来或被池子淘汰。
@@ -5450,9 +5493,12 @@ function handleVidWarm(d) {
     for (const t of list) {
         const e = vidSrcVideoFor(String(t.trackId), String(t.src));
         e.warmWant = Math.max(0, +t.want || 0);
+        // 这一只正被当前帧包吃（= 暂停的播放头就在这一段上）：**不许**挪它。预热把它拉到 4 秒之后，
+        // 而暂停态没有下一包来拉回来 —— 蒙版就停在别的一格上，和画面差好几秒。
+        if (vidSrcNeedNow.has(vidSrcKey(String(t.trackId), String(t.src)))) continue;
         if (e.v.paused && !e.v.seeking && e.v.readyState >= 2
             && Math.abs(e.v.currentTime - e.warmWant) > 0.1) {
-            try { e.v.currentTime = e.warmWant; } catch (err) { /* 还不能 seek */ }
+            try { e.v.currentTime = vidSrcClamp(e.v, e.warmWant); } catch (err) { /* 还不能 seek */ }
         }
     }
     if (!need.size || !list.length || vidWarmDone.has(key)) return;   // 不吃帧 / 特效链已付过
@@ -5523,8 +5569,71 @@ function vidSrcAskRedraw() {
 function vidSrcAwaitSeek(e) {
     if (e.awaitSeek) return;
     e.awaitSeek = true;
-    e.v.addEventListener('seeked', () => { e.awaitSeek = false; vidSrcAskRedraw(); }, { once: true });
+    e.seekSince = performance.now();
+    e.v.addEventListener('seeked', () => { e.awaitSeek = false; e.seekSince = 0; vidSrcAskRedraw(); }, { once: true });
     setTimeout(() => { e.awaitSeek = false; }, 1500);     // 卡住的 seek 不把标记焊死
+}
+
+/** 暂停态的对位看门狗。
+ *  帧包只在**发包那一刻**对位一次，而那一刻元素常常正在别处：预热（handleVidWarm）刚把它挪到
+ *  4 秒之后，或者 seek 还没落（readyState<2）。被吞掉的那一次没有下一包来补 —— 暂停时宿主不再
+ *  发包 —— 于是蒙版就停在预热/上一次拖动的那一格上，和画面差好几秒，看起来就是"完全对不上"。
+ *  这里按 e.want（= 最近一包要的时刻）补一次，元素一能 seek 就补；有界重试，不做轮询。 */
+function vidSrcCatchUp(e) {
+    if (vidBasePlaying) return;                 // 播放中有速率纠偏那条路（见 vidSrcSync）
+    const want = e.want;
+    if (!(want >= 0)) return;
+    const at = () => {
+        const v = e.v;
+        if (vidBasePlaying || e.want !== want) return true;   // 来了新包/开始播：以新的为准
+        if (v.readyState < 2 || v.seeking) return false;       // 还轮不到我们动手
+        if (Math.abs(v.currentTime - want) > 1 / 240) {
+            try { v.currentTime = vidSrcClamp(v, want); vidSrcAwaitSeek(e); } catch (err) { return false; }
+            vidSrcAskRedraw();                   // seeked 那条路可能被 awaitSeek 挡住，这里兜一次
+            return true;
+        }
+        return true;
+    };
+    if (e.catchTimer) { clearTimeout(e.catchTimer); e.catchTimer = 0; }
+    if (at()) return;
+    let n = 0;
+    const tick = () => {
+        e.catchTimer = 0;
+        if (at() || ++n > 20) return;
+        e.catchTimer = setTimeout(tick, 100);
+    };
+    e.catchTimer = setTimeout(tick, 100);
+}
+
+/** 别把 currentTime 停在 duration 上：片尾那个 GOP 常在边界上解不出来（MEDIA_ERR_DECODE），
+ *  一错就是终态。留半帧余量。 */
+function vidSrcClamp(v, t) {
+    const d = v.duration;
+    if (isFinite(d) && d > 0.1) return Math.max(0, Math.min(t, d - 0.05));
+    return Math.max(0, t);
+}
+
+/** 解码/网络错误是**终态**：同一个 <video> 不重新 load，readyState 就永远焊在 1 —— 这条轨从此
+ *  没有帧，表现是蒙版停在旧帧上跟人对不上、或整幅变成占位条纹。这里重挂源、把这一刻该在的时刻
+ *  补回去，让它自己爬起来（1 秒内只救一次，免得把错误风暴变成加载风暴）。 */
+function vidSrcRecover(e) {
+    const v = e.v, now = performance.now();
+    if (e.recoverAt && now - e.recoverAt < 1000) return;
+    e.recoverAt = now;
+    e.ok = false;
+    e.awaitSeek = false;
+    e.seekSince = 0;
+    const wt = Math.max(0, e.want >= 0 ? e.want : (e.warmWant != null ? e.warmWant : 0));
+    try { v.setAttribute('src', e.src); v.load(); } catch (err) { return; }
+    v.addEventListener('loadeddata', () => {
+        e.ok = true;
+        if (v.videoWidth && v.videoHeight) noteVidGrid(v.videoWidth, v.videoHeight);
+        const t = e.want >= 0 ? e.want : wt;
+        try { v.currentTime = vidSrcClamp(v, t); } catch (err) { /* 还不能 seek */ }
+        if (vidBasePlaying && v.paused) void v.play().catch(() => { /* 自动播放政策 */ });
+        vidSrcAskRedraw();
+    }, { once: true });
+    vidSrcAskRedraw();
 }
 
 /** 丢掉缓存里那一版、按此刻的状态重画一趟。缓存记的是"还没帧/旧帧"的结论，不能拿它挡重画。 */
@@ -5719,7 +5828,7 @@ let vidBackdropFrom = 'none';
 const videoFrameSeqMap = new WeakMap();
 function videoFrameGen(v) {
     if (!v) return null;
-    if (v === vidBaseVideo) return vidBaseSrc + '#' + vidBaseSeq;
+    if (v === vidBaseVideo) return vidBaseSrc + '|' + vidBaseActiveKey + '#' + vidBaseSeq;
     let e = videoFrameSeqMap.get(v);
     if (!e) {
         e = { seq: 0 };
@@ -5737,7 +5846,13 @@ function videoFrameGen(v) {
 function stageBackdropItem() {
     if (!vidSurfaceVideo) { vidBackdropFrom = 'image'; return null; }
     const v = vidBaseVideo;
-    const wantBaseT = vidFramePacket ? vidFramePacket.baseT : null;
+    // "这一帧该在哪儿"分两条路：有合成包时按包里的 baseT；**没有包（游标在普通视频段上，底片
+    // 直接出画）时就是底片包自己的 vidBaseWant**。后者原来漏了 —— 换片段那一刻 <video> 刚挂上
+    // 新源、还停在 0 秒（= 新片段的首帧），而 want 已经在段内几十秒处；readyState 一到 2 它就被
+    // 当成"可信"铺上台，屏幕上一闪那张**被上一段盖住**的首帧，seek 落定后又跳回来。
+    // 两条路都用同一把 0.25s 的尺（与 vidBaseSeek / 帧包的判据一致）。
+    const wantBaseT = vidFramePacket ? vidFramePacket.baseT
+        : (vidBaseOn ? vidBaseWant : null);
     // 底片元素只有在"它手上那一帧就是这一帧要的那一帧"时才可信：换片段/seek 在途时它装的还是
     // 上一段的那张，铺上去就是错帧（播放中看着像"先出上一段、再跳回来"）。
     const timely = v && v.readyState >= 2 && v.videoWidth && v.videoHeight
@@ -5878,7 +5993,11 @@ function vidBaseWatchFrames() {
     if (!v || vidBaseRvfcPending) return;
     if (typeof v.requestVideoFrameCallback !== 'function') return;
     vidBaseRvfcPending = true;
+    const epoch = vidBaseRvfcEpoch;
     const onFrame = () => {
+        // 已经换台/重挂了（旧元素，甚至同一只元素上一轮的链）：它讲的不是台上这一只，
+        // 不许改帧号/时刻，也不许重挂。
+        if (v !== vidBaseVideo || epoch !== vidBaseRvfcEpoch) return;
         vidBaseRvfcPending = false;
         vidBaseSeq++;
         vidBaseRvfcAt = performance.now();
@@ -5902,7 +6021,7 @@ function stageShowBase(force) {
     if (!canvasW || !canvasH || v.readyState < 2 || v.seeking) return;
     if (!v.videoWidth || !v.videoHeight) return;
     const fresh = !v.paused && vidBaseRvfcAt > 0 && performance.now() - vidBaseRvfcAt < 500;
-    const stamp = vidBaseSrc + '@' + (fresh ? '#' + vidBaseSeq : v.currentTime.toFixed(3));
+    const stamp = vidBaseSrc + '|' + vidBaseActiveKey + '@' + (fresh ? '#' + vidBaseSeq : v.currentTime.toFixed(3));
     if (!force && stageMode === 'base' && stamp === stageBaseStamp) return;
     // **和合成走同一个画家**：底片态 = "这一帧没有图层"的那一帧，底色取自 stageBackdropItem（同一个
     // "这张底片对不对得上这一帧"的判据，见那儿）。它说不可信就不画 —— 台上保留上一帧，绝不清屏。
@@ -5913,9 +6032,11 @@ function stageShowBase(force) {
     stageMode = 'base';
     // P3.6：底片态里 **context image 就是这一帧**。P3.3 当时刻意不抄（底图只负责显示，blendCanvas
     // 留给工作图层），结果 Video 模式下把游标停在没 Layer 的段落上时，Context 卡 / 生成 / 导出 /
-    // 吸管读到的还是上一套工作图层 —— 预览看着是"死"的。stage 上此刻就是这一帧，从 live 路径那个
-    // 同一个入口抄一次即可（`stageReadbackToBlend` 的注释本来就说"stage 上此刻就是它"）。
-    stageReadbackToBlend();
+    // 吸管读到的还是上一套工作图层 —— 预览看着是"死"的。
+    // **播放中按 CONTEXT_COPY_MS 节流**：这是整幅 GPU→2D 回读（832×1216 约 5ms），而底片一秒
+    // 出 30 帧 —— 每帧都抄等于给播放加一根 30Hz 的刺（以前这里是无条件抄，正是"纯视频段播放
+    // 不跟手"的一笔固定开销）。真正的读者比出帧稀得多；要精确像素的入口自己 ensureBlendImage()。
+    syncBlendImage(CONTEXT_COPY_MS);
     // 预览的调度一直只挂在 render() 上，底片态没人叫它 ⇒ Context 卡停在旧图上。这里补上；
     // 节奏仍由 schedulePreview 自己节流（底片态走 70ms 快档），不会跟着出帧率跑。
     schedulePreview();
@@ -5995,11 +6116,8 @@ function vidBaseTick() {
 }
 requestAnimationFrame(vidBaseTick);
 vidBaseWatchFrames();
-// load() 会把 pending 的 rVFC 回调清掉（换源就是这么做的）：链断了就重挂。
-vidBaseVideo.addEventListener('emptied', () => { vidBaseRvfcPending = false; vidBaseWatchFrames(); });
-// 必要的 seek（换源 / 粗纠偏）一落地就补一张：seek 在途时 stageShowBase 会 return，
-// 等下一口 rAF 才"发现能画了"就是白冻一拍。stageShowBase 自带 stamp 去重，不会重复上传。
-vidBaseVideo.addEventListener('seeked', () => { if (stageWanted() === 'base') stageShowBase(true); });
+// 每只底片镜像的 emptied / loaded / seeked / error 都在 vidBaseAttach 里挂（见下）——
+// 元素不再只有一只，事件必须跟着换台走。
 // ── 底片换源失败的重来 ─────────────────────────────────────────────────────────────────────
 // 新建工程后第一次把视频拖进来，媒体可能还没完全就绪（入库/首次读盘那一瞬），<video> 会先拿到
 // 一个解不开的响应（MediaError 4 = Format error）。**它自己不会重试** —— 之后一直停在
@@ -6012,10 +6130,12 @@ function vidBaseRetrySoon() {
     if (vidBaseRetryTimer || vidBaseRetryN >= 4 || !vidBaseSrc || !vidBaseOn) return;
     vidBaseRetryN++;
     const wanted = vidBaseSrc;
+    const wantedKey = vidBaseActiveKey;
     const delay = [250, 600, 1500, 3000][vidBaseRetryN - 1] || 3000;
     vidBaseRetryTimer = setTimeout(() => {
         vidBaseRetryTimer = 0;
-        if (!vidBaseOn || vidBaseSrc !== wanted) return;
+        // 换台/换源之后这条重试讲的已经不是台上这一只：丢掉。
+        if (!vidBaseOn || vidBaseSrc !== wanted || vidBaseActiveKey !== wantedKey) return;
         const v = vidBaseVideo;
         // blob:/data: 不能拼查询串（拼上就是另一个不存在的地址）：那两类原样重开即可。
         const bust = /^(blob|data):/i.test(wanted) ? ''
@@ -6024,15 +6144,214 @@ function vidBaseRetrySoon() {
         try { v.load(); } catch (e) { /* noop */ }
     }, delay);
 }
-vidBaseVideo.addEventListener('error', () => {
-    // 换源在途时的旧错误不算数：vidBaseSrc 每换一次就已经是新的一条。
-    if (!vidBaseSrc || !vidBaseOn) return;
-    vidBaseRetrySoon();
-});
-vidBaseVideo.addEventListener('loadeddata', () => {
+
+// ── 底片播放引擎：按段预取 + 双缓冲换台 ───────────────────────────────────────────────────
+// 以前底片只有一只 <video>：换片段 = 换源 + load + seek，播放中那几百毫秒没有新帧，台上只能
+// 定在上一段最后一帧 —— 用户报的"切换卡顿"。现在按段留镜像（键 = 段 id），宿主提前报
+// "接下来谁会当底片、轮到它时该在源内第几秒"（blend-vid-base-warm）：窗口内那只先加载好、
+// 暂停在对位处；到段界只把台上这只换成它 —— 一次纹理上传，不再等 I/O 与 seek。
+// 同一文件的不同段也各有各的镜像：换段不再重设同一只元素的 src（那会掉回 readyState 0）。
+function vidBaseClipKey(d) {
+    const k = d && d.key != null ? String(d.key) : '';
+    if (k) return k;
+    return String((d && d.src) || '') + '|'
+        + ((+d.start || 0).toFixed(4)) + '|' + ((+d.offset || 0).toFixed(4));
+}
+function vidBaseSetSrc(e, src) {
+    if (!e || e.src === src) return;
+    e.src = src;
+    e.warmAt = -1;
+    e.pending = false;
+    const v = e.v;
+    try { if (!v.paused) v.pause(); } catch (err) { /* 还没源 */ }
+    v.setAttribute('src', src);
+    try { v.load(); } catch (err) { /* noop */ }
+}
+
+function vidBaseAttach(e) {
+    const v = e.v;
+    const active = () => v === vidBaseVideo;
+    // 换源会清掉 pending 的 rVFC 回调（load() 就是这么做的）：链断了就重挂。
+    v.addEventListener('emptied', () => {
+        if (!active()) return;
+        vidBaseRvfcEpoch++;
+        vidBaseRvfcPending = false;
+        vidBaseWatchFrames();
+    });
+    const onMeta = () => {
+        if (!active()) return;
+        if (v.videoWidth && v.videoHeight) noteVidGrid(v.videoWidth, v.videoHeight);
+        vidBaseSeek();
+    };
+    v.addEventListener('loadedmetadata', onMeta);
+    v.addEventListener('loadeddata', () => {
+        e.ok = true;
+        if (!active()) {
+            // 预热镜像：解出来了就对到"轮到它的那一刻"，暂停着等段界。
+            vidBaseStandbySeek(e);
+            return;
+        }
+        vidBaseRetryN = 0;
+        if (vidBaseRetryTimer) { clearTimeout(vidBaseRetryTimer); vidBaseRetryTimer = 0; }
+        onMeta();
+        // 一上来就有一帧：段界那一拍不必等下一口 rAF。
+        if (stageWanted() === 'base') stageShowBase(true);
+    });
+    v.addEventListener('seeked', () => {
+        // 必要的 seek（换源 / 粗纠偏）一落地就补一张：seek 在途时 stageShowBase 会 return，
+        // 等下一口 rAF 才"发现能画了"就是白冻一拍。stageShowBase 自带 stamp 去重。
+        if (active() && stageWanted() === 'base') stageShowBase(true);
+    });
+    v.addEventListener('error', () => {
+        e.ok = false;
+        // 换源在途时的旧错误不算数：vidBaseSrc 每换一次就已经是新的一条。
+        if (!active() || !vidBaseSrc || !vidBaseOn) return;
+        vidBaseRetrySoon();
+    });
+}
+
+function vidBaseEntryFor(key, src) {
+    let e = vidBasePool.get(key);
+    if (e) {
+        e.usedAt = performance.now();
+        if (e.src !== src) vidBaseSetSrc(e, src);
+        return e;
+    }
+    // 池子里有一只**闲着且同源**的？（已经卸任的上一段 / 上次预热留下的）直接换挂这段的
+    // 牌子，不重新 load：Detect 整轨合并那种几百个小段共享一条源时，每段都新开一个解码器
+    // 就是每 1/6 秒一次冷启动。正在等着段界的备用（pending）不许抢。
+    for (const [k, x] of vidBasePool) {
+        if (k === vidBaseActiveKey || x.pending || x.src !== src) continue;
+        vidBasePool.delete(k);
+        x.key = key;
+        x.warmAt = -1;
+        x.usedAt = performance.now();
+        vidBasePool.set(key, x);
+        return x;
+    }
+    const v = document.createElement('video');
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = 'auto';
+    v.setAttribute('aria-hidden', 'true');
+    v.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;display:none;';
+    e = { key: key, v: v, src: src, start: 0, offset: 0, warmAt: -1, usedAt: performance.now(), ok: false, pending: false };
+    vidBaseAttach(e);
+    v.setAttribute('src', src);
+    vidSrcStage.appendChild(v);
+    try { v.load(); } catch (err) { /* noop */ }
+    vidBasePool.set(key, e);
+    vidBaseTrim(key);
+    return e;
+}
+
+function vidBaseDrop(key) {
+    const e = vidBasePool.get(key);
+    if (!e || key === vidBaseActiveKey) return;
+    try { e.v.pause(); e.v.removeAttribute('src'); e.v.load(); e.v.remove(); } catch (err) { /* gone */ }
+    vidBasePool.delete(key);
+}
+
+function vidBaseTrim(protectKey) {
+    // 池子有界：台上一只 + 最近的备用几只。解码器不白占着，但正用的与刚预热的绝不挤掉。
+    while (vidBasePool.size > VID_BASE_POOL_MAX) {
+        let oldest = null, oldestAt = Infinity;
+        for (const [k, x] of vidBasePool) {
+            if (k === vidBaseActiveKey || k === protectKey || x.pending) continue;
+            if (x.usedAt < oldestAt) { oldest = k; oldestAt = x.usedAt; }
+        }
+        // 全是等着段界的备用：宁可多留一只，也不把"下一段要用的"挤掉（下一包会清 pending）。
+        if (!oldest) break;
+        vidBaseDrop(oldest);
+    }
+}
+
+/** 备用镜像对到"轮到它的那一刻"（暂停着）。只动暂停的镜像：台上那只归帧包/底片包去对时。 */
+function vidBaseStandbySeek(e) {
+    if (!e || e.v === vidBaseVideo || !(e.warmAt >= 0)) return;
+    const v = e.v;
+    if (v.readyState < 2 || v.seeking) return;
+    if (Math.abs(v.currentTime - e.warmAt) > 0.12) {
+        try { v.currentTime = vidSrcClamp(v, e.warmAt); } catch (err) { /* 还不能 seek */ }
+    }
+}
+
+/** 宿主的底片预取包：4 秒内会当底片的段（见 Player 的 baseWarmAt）。幂等：已存在只更新热度。 */
+function handleVidBaseWarm(d) {
+    const items = Array.isArray(d.items) ? d.items : [];
+    const now = performance.now();
+    // 这份清单是新的：上一份里没被点到、还没轮到段界的备用重新算"闲着的"，
+    // 同源的新段可以直接拿来换牌子（不必新开解码器）。
+    for (const [k, x] of vidBasePool) if (k !== vidBaseActiveKey) x.pending = false;
+    // 池子的容量就是"台上 + 最近几只"。清单按轮到它的时刻升序，只取最近的几只 ——
+    // 远的那几段下一包（半秒后）还在窗口里，届时再备也不迟。
+    const list = items.slice(0, VID_BASE_POOL_MAX - 1);
+    if (window.__vidPerf) __vidPerf.baseWarm += list.length;
+    for (const t of list) {
+        if (!t || !t.src) continue;
+        const key = vidBaseClipKey(t);
+        if (key === vidBaseActiveKey) {
+            const cur = vidBasePool.get(key);
+            if (cur) cur.usedAt = now;
+            continue;                       // 台上这一只由底片包对时，预热不许拽它
+        }
+        const e = vidBaseEntryFor(key, String(t.src));
+        e.start = +t.start || 0;
+        e.offset = +t.offset || 0;
+        e.warmAt = Math.max(0, +t.at || 0);
+        e.pending = true;
+        e.usedAt = now;
+        if (!e.v.paused) { try { e.v.pause(); } catch (err) { /* 还没源 */ } }
+        vidBaseStandbySeek(e);
+    }
+    vidBaseTrim('');
+}
+
+/** 换台：台上那只改成 e。帧号/帧戳全部重来 —— 同文件的两段在合成器眼里必须换一张纹理。 */
+function vidBaseActivate(e) {
+    if (!e) return;
+    e.usedAt = performance.now();
+    e.pending = false;
+    e.warmAt = -1;
+    if (e.v === vidBaseVideo) { vidBaseActiveKey = e.key; return; }
+    const old = vidBaseVideo;
+    if (old) { try { if (!old.paused) old.pause(); } catch (err) { /* 还没源 */ } }
+    vidBaseVideo = e.v;
+    vidBaseActiveKey = e.key;
+    vidBaseSeq = 0;
+    vidBaseRvfcAt = 0;
+    vidBaseRvfcPending = false;
+    vidBaseRvfcEpoch++;
     vidBaseRetryN = 0;
     if (vidBaseRetryTimer) { clearTimeout(vidBaseRetryTimer); vidBaseRetryTimer = 0; }
-});
+    stageBaseStamp = '';
+    if (window.__vidPerf) {
+        __vidPerf.baseSwap++;
+        if (vidBaseVideo.readyState < 2 || vidBaseVideo.seeking) __vidPerf.baseSwapCold++;
+    }
+    // 元数据可能是在它还是备用镜像时到的（那时 noteVidGrid 被 active 判据挡掉了）。
+    if (vidBaseVideo.videoWidth && vidBaseVideo.videoHeight) {
+        noteVidGrid(vidBaseVideo.videoWidth, vidBaseVideo.videoHeight);
+    }
+    vidBaseWatchFrames();
+}
+
+/** 换文档：整池作废（别人的源不该留在这一份的台上）；初始 DOM 元素接管为空台。 */
+function vidBaseResetPool() {
+    vidBasePause();
+    for (const [k, e] of [...vidBasePool]) {
+        try { e.v.pause(); e.v.removeAttribute('src'); e.v.load(); e.v.remove(); } catch (err) { /* gone */ }
+        vidBasePool.delete(k);
+    }
+    vidBaseActiveKey = '';
+    vidBaseSrc = '';
+    vidBaseVideo = document.getElementById('vidBaseVideo');
+    vidBaseSeq = 0;
+    vidBaseRvfcAt = 0;
+    vidBaseRvfcPending = false;
+    vidBaseRvfcEpoch++;
+    vidBaseWatchFrames();
+}
 
 function vidBasePause() {
     try { if (!vidBaseVideo.paused) vidBaseVideo.pause(); } catch (e) { /* 还没源 */ }
@@ -6067,39 +6386,32 @@ function vidBaseSeek() {
     if (v.paused) void v.play().catch(() => { /* autoplay 政策 */ });
 }
 
-// 宿主的底片包：{src,start,offset,t,playing,hidden}。只做三件事：换源、对时、播/停 —— 外加
+// 宿主的底片包：{src,key,start,offset,t,playing,hidden}。换台、对时、播/停 —— 外加
 // `hidden`：游标压在 Layer 段上时宿主仍让它跟着播（一出段就能立刻露出正在那一帧），但**不许上台**。
 function handleVidBaseSrcMessage(d) {
     const src = String(d.src || '');
     if (!src) { vidBaseOff(); return; }
-    // 底片是页面级的唯一一只 <video>：谁的包都能把它换走。换 tab 那一瞬宿主的旧 Player 可能
-    // 还补发一包上一份的片段 —— 那一帧会被当成本文档的底，压在本文档的图层下面（串图的最短路径）。
+    // 底片跟着文档走：换 tab 那一瞬宿主的旧 Player 可能还补发一包上一份的片段 —— 那一帧会被
+    // 当成本文档的底，压在本文档的图层下面（串图的最短路径）。
     if (d.uid != null && activeDoc && (d.uid | 0) !== activeDoc.uid) return;
-    const prevHidden = vidBaseHidden, prevSrc = vidBaseSrc;
+    const key = vidBaseClipKey(d);
+    const prevHidden = vidBaseHidden, prevSrc = vidBaseSrc, prevKey = vidBaseActiveKey;
     vidBaseWant = Math.max(0, (+d.offset || 0) + (+d.t || 0) - (+d.start || 0));
     vidBasePlaying = !!d.playing;
     vidBaseHidden = d.hidden === true;
     vidBaseOn = true;
+    // 双缓冲在这里兑现：预热过的段已经在池里加载好、暂停在对位处，这里只是换台。
+    // 没预热过（用户跳转 / 第一次进段）就现建一只，行为与以前一样（等 load + seek），
+    // 但从不重设台上那只的 src —— 同文件换段不会掉回 readyState 0。
+    const e = vidBaseEntryFor(key, src);
+    vidBaseSrc = src;
+    vidBaseActivate(e);
     // 上一次这条源要是停在 error 上（见上面的重来），宿主重新按到它时也得把它叫醒。
     if (vidBaseVideo.error) { vidBaseRetryN = 0; vidBaseRetrySoon(); }
-    if (src !== vidBaseSrc) {
-        vidBaseSrc = src;
-        const v = vidBaseVideo;
-        v.setAttribute('src', src);
-        try { v.load(); } catch (e) { /* noop */ }
-        // 元数据到了才能对时，也才知道栅格（画布还是 0 的时候靠这一下立起来）。
-        const onMeta = () => {
-            if (vidBaseSrc !== src) return;      // 已经换走了
-            if (v.videoWidth && v.videoHeight) noteVidGrid(v.videoWidth, v.videoHeight);
-            vidBaseSeek();
-        };
-        v.addEventListener('loadedmetadata', onMeta, { once: true });
-        v.addEventListener('loadeddata', onMeta, { once: true });
-    }
-    // 只有"按住态 / 换源"真变了才强制对账。播放中 6Hz 的纯对时包若也 force，stageSync 会绕过
-    // "模式相同就短路"，白折一趟整画布 render —— 段界那一秒里 base-src 与 frame-off 连着来，
+    // 只有"按住态 / 换源 / 换段"真变了才强制对账。播放中 6Hz 的纯对时包若也 force，stageSync
+    // 会绕过"模式相同就短路"，白折一趟整画布 render —— 段界那一秒里 base-src 与 frame-off 连着来，
     // 就是两次整趟 render 叠在一起（可感的顿）。底片换帧本身由 stamp 去重那条路保证。
-    stageSync(prevHidden !== vidBaseHidden || src !== prevSrc);
+    stageSync(prevHidden !== vidBaseHidden || src !== prevSrc || key !== prevKey);
     vidBaseSeek();
 }
 
@@ -6638,6 +6950,9 @@ function vidFrameRetryLater(force) {
 window.__vidPerf = { packs: 0, hits: 0, misses: 0, renders: 0, sigMs: 0, repliesActive: 0, repliesTemp: 0, lastSig: '',
     // 缺帧占位（紫）出现过几趟。播放中若紫色闪得频繁，说明镜像视频跟不上（换段 / 池子太小）。
     placeholder: 0,
+    // 底片播放引擎（双缓冲）：warm = 预热的段数，swap = 换台次数，swapCold = 换上去时还没就绪
+    // （没预热到 / 加载慢）的次数。播放中 swapCold 应当接近 0 —— 涨了就说明预取窗口不够。
+    baseWarm: 0, baseSwap: 0, baseSwapCold: 0,
     // 「这一帧不敢落地」的计数（按原因分）：播放中若出现瞬时黑/透明，这四个数会指出是哪条路。
     holds: { noFrames: 0, emptyStack: 0, unknownSet: 0, emptyCtx: 0 } };
 
@@ -14195,6 +14510,7 @@ function activateDocument(entry) {
     vidCompCache = null;
     vidCompPending = null;
     vidBaseOff();                 // 换源与对时由宿主按新文档重报（Player 换挂载时会重来一遍）
+    vidBaseResetPool();           // 上一份的镜像（按段 id 建的）这一份一个字都不继承
     blankStageForSwap();
     faceSent.clear();             // 宿主按文档分桶喂缩略图：这一份的每一张面都得重新发
     maskStillSrc = null; maskStillGen = -1;   // 蒙版卡是活跃文档那一张，去重记忆跟着换人
@@ -17696,6 +18012,7 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-vid-layer-copy') { replyVidLayerCopy(d.reqId, d.from, d.to); return; }
     if (d.type === 'blend-vid-frame-off') { vidFrameOff(); return; }
     if (d.type === 'blend-vid-base-src') { handleVidBaseSrcMessage(d); return; }
+    if (d.type === 'blend-vid-base-warm') { handleVidBaseWarm(d); return; }
     if (d.type === 'blend-vid-base-off') { vidBaseOff(); return; }
     if (d.type === 'blend-vid-grid') { noteVidGrid(d.width, d.height); vidSurfaceVideo = true; return; }
     // 宿主明说"此刻是不是 Video 显示模式"。Video 模式下画布永远铺一层视频帧打底

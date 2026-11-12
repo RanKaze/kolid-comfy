@@ -19,6 +19,7 @@ import {
 } from '../../midi/model';
 import type { MediaInfo } from './audio';
 import type { Ingested } from './ingest';
+import { normalizeAudioDefs, type AudioBusDef, type AudioEventPoint, type AudioInterfaceDef, type AudioObjectDef } from './audioDefs';
 
 // 五种轨：
 //  * video / audio —— 素材轨，帧与声直接来自源文件；
@@ -122,6 +123,10 @@ export type VidClip = {
   /** 输出轨上的产物由哪个占位段生成（= 占位段的 clip id）。重跑同一个占位段时按它认亲，
    *  自己的旧产物不算"占位"，会被原地换掉；别的东西占着才是真占。 */
   procOwner?: string;
+  /** Detect 轨整轨合并之后：这一段**原来的小文件**地址。合并只是把播放源换成一条整轨，
+   *  原始小文件永远留着 —— 重新合并、修复整轨都从这些整文件重拼（整文件才逐帧安全，
+   *  按秒去整轨里切会剪出半截 NAL）。 */
+  mergedFrom?: string;
   /** 关键帧系统（见 VidKeyframes）：持久化在段上，随 .cud 走。眼下只有 Layer 段用 ——
    *  通道里记的是它图层集的 fx 参数与 transform。结构对参数源开放，之后扩啥都只是新键。 */
   keyframes?: VidKeyframes;
@@ -886,6 +891,10 @@ export type VidProject = {
   /** solo 的轨道 id，音频与视频分开记。随工程走，与 `muteIds` 同理。 */
   soloAudioIds?: string[];
   soloVideoIds?: string[];
+  /** 音频轨的**推子增益**（trackId → 线性 0..1，缺省 = 1）：只改播放混音，不切片子、
+   *  不改素材字节。与 mute / solo 一样随工程（.cud / 页面存档）走 —— Fader 窗读写的就是它。
+   *  mute / solo 仍优先：被静音或被 solo 排除的轨，增益再大也不响（见 audioAudible）。 */
+  audioGain?: Record<string, number>;
   /** 音乐时间基（BPM / 拍号 / PPQ / 循环）。MIDI 音符与音频/视频共用一条时间线，
    *  MIDI 段内部按拍记；旧档没有这个字段 → `MUSIC_DEFAULT`。 */
   music?: VidMusic;
@@ -893,6 +902,11 @@ export type VidProject = {
    *  打开哪份工程就落回它自己存的模式，不再是页面级的一颗开关。旧档没有这个字段 → 'image'。
    *  同一份 .cud 里视频与 MIDI 并存（都在 tracks/clips 里），模式只决定**先看哪一副面孔**。 */
   mode?: 'image' | 'video' | 'midi';
+  /** 音频定义三件套 + 项目全局事件点（见 audioDefs.ts）。都随工程走；缺省 = 没建过。 */
+  audioBuses?: AudioBusDef[];
+  audioInterfaces?: AudioInterfaceDef[];
+  audioObjects?: AudioObjectDef[];
+  audioEventPoints?: AudioEventPoint[];
 };
 
 /** solo 状态：**音频与视频分开记** —— 一边亮着不影响另一边。空集 = 没有 solo（全部照常）。
@@ -1193,6 +1207,23 @@ export const audioAudible = (trackId: string, soloAudio: ReadonlySet<string>,
   muted: ReadonlySet<string>): boolean =>
   !muted.has(trackId) && (soloAudio.size === 0 || soloAudio.has(trackId));
 
+/** 一条音频轨的推子增益（线性，0..1）：缺省 = 1（单位增益）。坏值 / 越界一律夹回合法区间 ——
+ *  推子只做衰减不放大，几条轨叠在一起时不会因为某一条被推过 0 dB 而削波。 */
+export const audioTrackGain = (p: VidProject, trackId: string): number => {
+  const raw = Number(p.audioGain?.[trackId]);
+  return Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 1;
+};
+
+/** 写一条音频轨的推子增益（0..1）。写回缺省值 1 时把键删掉，工程里不留"没动过的轨"的垃圾。 */
+export const setAudioTrackGain = (p: VidProject, trackId: string, gain: number): VidProject => {
+  const v = Number.isFinite(gain) ? Math.max(0, Math.min(1, gain)) : 1;
+  const cur = audioTrackGain(p, trackId);
+  if (Math.abs(v - cur) < 1e-6) return p;
+  const next: Record<string, number> = { ...(p.audioGain ?? {}) };
+  if (v >= 1) delete next[trackId]; else next[trackId] = v;
+  return { ...p, audioGain: Object.keys(next).length ? next : undefined };
+};
+
 // ── 写口（全部纯函数：旧 project 原样进，新 project 整份出）───────────────────────────────
 
 /** 拖动片段。默认 `groupId` 认了亲的整组一起平移；`linked=false`（按住 Alt）只动被拖的
@@ -1267,38 +1298,61 @@ export const trimClip = (p: VidProject, id: string, edge: 'l' | 'r', t: number, 
   const clip = p.clips.find(c => c.id === id);
   if (!clip) return p;
   const ids = new Set((linked && clip.groupId ? p.clips.filter(c => c.groupId === clip.groupId) : [clip]).map(c => c.id));
-  return {
-    ...p,
-    clips: p.clips.map(c => {
-      if (!ids.has(c.id)) return c;
-      // Layer / process（生成器、处理器占位）/ MIDI 段没有"源文件时长"这条边界：两条边都不受
-      // 限制（它们的 srcDuration 只是造段那一刻的长度）—— 否则永远拉不过造出来时的长度。
-      const timeless = c.kind === 'layer' || c.kind === 'process' || c.kind === 'midi';
-      if (edge === 'l') {
-        // 左边：start 最多退到 start-offset（源的开头），最多进到 start+duration-MIN。
-        const lo = timeless ? 0 : Math.max(0, c.start - c.offset);
-        const hi = c.start + c.duration - MIN_CLIP;
-        const ns = Math.min(hi, Math.max(lo, t));
-        const d = ns - c.start;
-        // MIDI 段的 offset 是**拍**：左裁把窗口在内容里平移，允许为负（内容前面留白）。
-        if (c.kind === 'midi') {
-          return {
-            ...c, start: ns, duration: c.duration - d,
-            offset: c.offset + secondsToBeat(d, musicOf(p).tempo),
-          };
-        }
-        return { ...c, start: ns, duration: c.duration - d, offset: timeless ? 0 : Math.max(0, c.offset + d) };
+  const next = p.clips.map(c => {
+    if (!ids.has(c.id)) return c;
+    // Layer / process（生成器、处理器占位）/ MIDI 段没有"源文件时长"这条边界：两条边都不受
+    // 限制（它们的 srcDuration 只是造段那一刻的长度）—— 否则永远拉不过造出来时的长度。
+    const timeless = c.kind === 'layer' || c.kind === 'process' || c.kind === 'midi';
+    if (edge === 'l') {
+      // 左边：start 最多退到 start-offset（源的开头），最多进到 start+duration-MIN。
+      const lo = timeless ? 0 : Math.max(0, c.start - c.offset);
+      const hi = c.start + c.duration - MIN_CLIP;
+      const ns = Math.min(hi, Math.max(lo, t));
+      const d = ns - c.start;
+      // MIDI 段的 offset 是**拍**：左裁把窗口在内容里平移，允许为负（内容前面留白）。
+      if (c.kind === 'midi') {
+        return {
+          ...c, start: ns, duration: c.duration - d,
+          offset: c.offset + secondsToBeat(d, musicOf(p).tempo),
+        };
       }
-      // 右边：end 最多到源的结尾（offset + srcDuration），最短 MIN_CLIP。
-      const maxEnd = timeless ? Infinity : c.start + (c.srcDuration - c.offset);
-      const ne = Math.min(Math.max(c.start + MIN_CLIP, t), maxEnd);
-      return { ...c, duration: Math.max(MIN_CLIP, ne - c.start) };
-    }),
-  };
+      return { ...c, start: ns, duration: c.duration - d, offset: timeless ? 0 : Math.max(0, c.offset + d) };
+    }
+    // 右边：end 最多到源的结尾（offset + srcDuration），最短 MIN_CLIP。
+    const maxEnd = timeless ? Infinity : c.start + (c.srcDuration - c.offset);
+    const ne = Math.min(Math.max(c.start + MIN_CLIP, t), maxEnd);
+    return { ...c, duration: Math.max(MIN_CLIP, ne - c.start) };
+  });
+  if (!p.audioEventPoints?.length) return { ...p, clips: next };
+  // 事件点是**段内秒**：左裁按"绝对时刻不动"整体平移（裁到起点之前的点丢掉），
+  // 右裁只丢超出新长度的点。
+  const before = new Map(p.clips.map(c => [c.id, c] as const));
+  const moved = new Map<string, { shift: number; max: number }>();
+  for (const c of next) {
+    if (!ids.has(c.id)) continue;
+    const old = before.get(c.id) as VidClip;
+    moved.set(c.id, { shift: -(c.start - old.start), max: c.duration });
+  }
+  const keep: AudioEventPoint[] = [];
+  for (const pt of p.audioEventPoints) {
+    const m = moved.get(pt.clipId);
+    if (!m) { keep.push(pt); continue; }
+    const nt = pt.t + m.shift;
+    if (nt < -1e-6 || nt > m.max + 1e-6) continue;
+    keep.push({ ...pt, t: Math.max(0, Math.min(m.max, nt)) });
+  }
+  return { ...p, clips: next, audioEventPoints: keep };
 };
 
-export const removeClip = (p: VidProject, id: string): VidProject =>
-  ({ ...p, clips: p.clips.filter(c => c.id !== id && c.groupId !== id) });
+export const removeClip = (p: VidProject, id: string): VidProject => {
+  const gone = new Set(p.clips.filter(c => c.id === id || c.groupId === id).map(c => c.id));
+  return {
+    ...p,
+    clips: p.clips.filter(c => !gone.has(c.id)),
+    // 事件点跟着段走：段没了，绑在它上面的点一起收掉。
+    ...(p.audioEventPoints ? { audioEventPoints: p.audioEventPoints.filter(pt => !gone.has(pt.clipId)) } : {}),
+  };
+};
 
 /** 在时间线 `t` 处**剪开**一段（按住 C 左键片段 —— 剃刀）。默认联动组的另一侧一起剪，
  *  两边切口对齐、各自 offset 推进同样的量，剪完仍是一个组（还能一起拖）；`linked=false`
@@ -1314,6 +1368,8 @@ export const splitClip = (p: VidProject, id: string, t: number, linked = true): 
   const gRight = target.groupId ? newVidId('grp') : undefined;
   let changed = false;
   const clips: VidClip[] = [];
+  // 事件点按切点分家：切点之后的点跟右半走（段内秒减去切点），之前的留在左半。
+  const splitMap = new Map<string, { cut: number; rightId: string }>();
   for (const c of p.clips) {
     if (!ids.has(c.id)) { clips.push(c); continue; }
     const cut = t - c.start;
@@ -1330,10 +1386,21 @@ export const splitClip = (p: VidProject, id: string, t: number, linked = true): 
     // 各自按窗口显示（左半看不到切点之后、右半看不到切点之前）。
     const rightOffset = c.kind === 'midi'
       ? c.offset + secondsToBeat(cut, musicOf(p).tempo) : c.offset + cut;
-    clips.push({ ...right, id: newVidId('clip'), groupId: gRight, start: c.start + cut, duration: c.duration - cut, offset: rightOffset,
+    const rightId = newVidId('clip');
+    clips.push({ ...right, id: rightId, groupId: gRight, start: c.start + cut, duration: c.duration - cut, offset: rightOffset,
       ...(c.keyframes ? { keyframes: kfR } : {}) });
+    splitMap.set(c.id, { cut, rightId });
   }
-  return changed ? { ...p, clips } : p;
+  if (!changed) return p;
+  let audioEventPoints = p.audioEventPoints;
+  if (audioEventPoints?.length && splitMap.size) {
+    audioEventPoints = audioEventPoints.flatMap(pt => {
+      const m = splitMap.get(pt.clipId);
+      if (!m) return [pt];
+      return pt.t < m.cut ? [pt] : [{ ...pt, clipId: m.rightId, t: pt.t - m.cut }];
+    });
+  }
+  return { ...p, clips, ...(audioEventPoints ? { audioEventPoints } : {}) };
 };
 
 /** 解绑：联动组全体摘掉 groupId —— 此后各自拖各自裁（音画错开的正式手续）。 */
@@ -1996,6 +2063,10 @@ export const removeTrack = (p: VidProject, trackId: string): VidProject => ({
   muteIds: p.muteIds?.filter(id => id !== trackId),
   soloAudioIds: p.soloAudioIds?.filter(id => id !== trackId),
   soloVideoIds: p.soloVideoIds?.filter(id => id !== trackId),
+  // 推子增益同样按轨记：删轨后留一条悬空增益，重开工程时会被当成"这条轨有推子"。
+  ...(p.audioGain && p.audioGain[trackId] !== undefined
+    ? { audioGain: Object.fromEntries(Object.entries(p.audioGain).filter(([id]) => id !== trackId)) }
+    : {}),
 });
 
 /** 视频模式的 Mask：绑一条轨（或传空 = 解绑）。只认视频轨 —— 音频轨没有画面，
@@ -2583,7 +2654,12 @@ const MERGE_EPS = 0.002;
 
 /** Detect 轨整轨合并的可行性（纯函数）：产物段必须**全部落位、首尾严格相接**，否则整条 mask
  *  会缺帧，后面的段就会全部错位 —— 宁可先不合并，也不要拿一条有洞的文件去对画面。
- *  `parts` 直接喂 /api/vid_merge（每段 from 自己的 0 秒开始，长度 = 段时长）。 */
+ *  `parts` 直接喂 /api/vid_merge（每段 from 自己的 0 秒开始，长度 = 段时长）。
+ *
+ *  只在"每段都还是自己的小文件"时合并：这时流拷贝拼的是各段的帧首尾相接，一帧不差。
+ *  已经共享一条整轨（某段从整轨里按 offset 切）时不再动 —— 按秒去整轨里再切，落点会
+ *  因关键帧对齐而多/少帧（实测 0.1667→0.3333 切出 8 帧而非 5 帧），反而把对齐全毁了。
+ *  单段重跑后留下的"整轨 + 一个小文件"混合状态本身逐帧精确，不必重拼。 */
 export const detectTrackMergePlan = (
   p: VidProject, trackId: string,
 ): { ok: true; parts: { f: string; in: number; out: number }[]; base: number }
@@ -2599,18 +2675,24 @@ export const detectTrackMergePlan = (
       return { ok: false, reason: 'segments are not contiguous' };
     }
   }
-  if (laws.some(c => !/^\/api\/(?:vid|eagle)_media\//.test(c.src))) {
+  if (laws.some(c => !/^\/api\/(?:vid|eagle)_media\//.test(c.mergedFrom || c.src))) {
     return { ok: false, reason: 'segments are not library files' };
+  }
+  // 已经是这条整轨了（每段同源、同源长）—— 不必重拼，否则每拍一个 clips 更新都会再发一次。
+  if (laws.every(c => c.src === laws[0].src
+    && Math.abs(c.srcDuration - laws[0].srcDuration) < 1e-3)) {
+    return { ok: false, reason: 'track already merged' };
+  }
+  // 老版本合并过的段（没留下原文件地址）：重拼只能从整轨里按秒切，会剪坏，干脆不动。
+  if (laws.some(c => c.srcDuration > c.duration + MERGE_EPS && !c.mergedFrom)) {
+    return { ok: false, reason: 'track merged without original segments' };
   }
   return {
     ok: true,
     base: laws[0].start,
-    // 段的 src 有两种来路：自己那段的小文件（srcDuration = 段长），或上一次合并出的整轨文件
-    // （srcDuration = 整轨长，offset = 段在整轨里的起点）。后者要按 offset 去整轨里切，不能再
-    // 从 0 秒开始 —— 否则重跑一段后重拼，其余段的内容会整体错位。
-    parts: laws.map(c => (c.srcDuration > c.duration + MERGE_EPS
-      ? { f: c.src, in: c.offset, out: c.offset + c.duration }
-      : { f: c.src, in: 0, out: c.duration })),
+    // 每一段都取**整文件**（原小文件，缺省就是自己的 src），从中段来 —— 后端因此可以纯流拷贝
+    // 而不做任何按秒裁切，拼出来的整轨逐帧等于各段的帧首尾相接。
+    parts: laws.map(c => ({ f: c.mergedFrom || c.src, in: 0, out: c.duration })),
   };
 };
 
@@ -2631,9 +2713,83 @@ export const shareDetectTrackSource = (
     ...p,
     clips: p.clips.map(c => (ids.has(c.id)
       ? { ...c, src, asset: undefined, play: undefined,
+          // 原小文件地址留在段上：合并是可逆的，重新合并/修复都从这些整文件重拼。
+          mergedFrom: c.mergedFrom || c.src,
           offset: Math.max(0, c.start - base), srcDuration: dur, hasAudio: false }
       : c)),
   };
+};
+
+/** Detect 轨各段共享的那条整轨地址（每段同源才算共享）；逐段各用各的 / 不够两段时返回 null。 */
+export const detectTrackSharedSrc = (p: VidProject, trackId: string): string | null => {
+  const own = p.clips.filter(c => c.trackId === trackId && !c.pending && c.src && c.duration > 0)
+    .sort((a, b) => a.start - b.start);
+  if (own.length < 2) return null;
+  return own.every(c => c.src === own[0].src) ? own[0].src : null;
+};
+
+/** Detect 轨的产物段丢了（整轨那条合并缓存被清掉后坏段被删、或旧版本没把段存进工程），
+ *  但占位段还在、产物文件也还在资产库里：按 segIndex 顺序把缺的段补回去。
+ *  只在"资产数 = 占位数、时长逐一对得上、轨上没有别人加的段"时动手 —— 有一处对不上就不猜。 */
+export const restoreDetectOutputs = (p: VidProject, trackId: string): VidProject => {
+  const holes = p.clips.filter(c => c.pending?.detect?.outTrackId === trackId)
+    .sort((a, b) => (a.pending?.segIndex ?? 0) - (b.pending?.segIndex ?? 0));
+  if (!holes.length) return p;
+  const holeIds = new Set(holes.map(h => h.id));
+  // 轨上只允许有"本批产物"（procOwner 指回某个坑）。手动加过别的东西 = 这条轨归用户管，不猜。
+  const onTrack = p.clips.filter(c => c.trackId === trackId);
+  if (onTrack.some(c => !(c.procOwner && holeIds.has(c.procOwner)))) return p;
+  const done = new Set(onTrack.map(c => c.procOwner));
+  if (holes.every(h => done.has(h.id))) return p;         // 一段不缺
+  // 产物一段一件进资产库（`addAsset` 只追加），按建件顺序与 segIndex 顺序一一对应：
+  // 数量、时长逐一对得上才补；有一处对不上就不动（宁可缺着，也不把第 i 段的 mask 摆到别处）。
+  const cand = p.assets.filter(a => a.kind === 'video' && /_detect\.mp4(?:$|[?#])/.test(a.src));
+  if (cand.length !== holes.length) return p;
+  for (let i = 0; i < holes.length; i++) {
+    if (Math.abs(cand[i].duration - holes[i].duration) > MERGE_EPS) return p;
+  }
+  const add: VidClip[] = holes.filter(h => !done.has(h.id)).map(h => {
+    const i = holes.indexOf(h);
+    return {
+      id: newVidId('clip'), trackId, kind: 'video', name: h.name, src: cand[i].src,
+      origin: 'file', start: h.start, duration: cand[i].duration,
+      offset: 0, srcDuration: cand[i].duration, hasAudio: false, procOwner: h.id,
+    };
+  });
+  return { ...p, clips: [...p.clips, ...add] };
+};
+
+/** 老工程合并时没在段上留 `mergedFrom`：整轨那条缓存一被清掉（缓存目录被收拾 / 换机器），
+ *  就再没有可拼的料了。找回办法：Detect 产物是**一段一件**进资产库的（`addAsset` 只追加），
+ *  资产按建件顺序与各段起点顺序一一对应 —— 数量、时长都对得上才认；有一处对不上就不动
+ *  （宁可继续坏着，也不拿错段去拼，拼错比没有更难查）。 */
+export const restoreDetectMergeSources = (p: VidProject, trackId: string): VidProject => {
+  const own = p.clips.filter(c => c.trackId === trackId && !c.pending && c.src && c.duration > 0)
+    .sort((a, b) => a.start - b.start);
+  if (own.length < 2 || own.some(c => c.mergedFrom)) return p;
+  // 只在"整轨一条源"的状态里找：逐段时段长 = 源长，本来就该没有 mergedFrom。
+  if (own.some(c => c.srcDuration <= c.duration + MERGE_EPS)) return p;
+  const cand = p.assets.filter(a => a.kind === 'video' && /_detect\.mp4(?:$|[?#])/.test(a.src));
+  if (cand.length !== own.length) return p;
+  for (let i = 0; i < own.length; i++) {
+    if (Math.abs(cand[i].duration - own[i].duration) > MERGE_EPS) return p;
+  }
+  const from = new Map<string, string>();
+  own.forEach((c, i) => from.set(c.id, cand[i].src));
+  return { ...p, clips: p.clips.map(c => (from.has(c.id) ? { ...c, mergedFrom: from.get(c.id) } : c)) };
+};
+
+/** 整轨那条源没了（缓存被清 / 文件被挪）：把每段退回自己的**原文件**，好让
+ *  `detectTrackMergePlan` 再拼一条新的。没有 mergedFrom 的段不动 —— 它已经是最小单位。 */
+export const unshareDetectTrackSource = (p: VidProject, trackId: string): VidProject => {
+  let changed = false;
+  const clips = p.clips.map(c => {
+    if (c.trackId !== trackId || c.pending || !c.mergedFrom) return c;
+    if (c.src === c.mergedFrom && Math.abs(c.offset) < 1e-9) return c;
+    changed = true;
+    return { ...c, src: c.mergedFrom, offset: 0, srcDuration: c.duration };
+  });
+  return changed ? { ...p, clips } : p;
 };
 
 /** Processor 的 Allow List 视频产物**只入库**（输出口选了 Asset）：时间线不动、不开轨，
@@ -3102,6 +3258,23 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       [...(Array.isArray(v) ? v : []), ...extra]
         .filter((x): x is string => typeof x === 'string' && trackIds.has(x)),
     )];
+    // 音频事件点：挂在段上（段内秒）。老档的点没有 clipId、t 是绝对秒 —— 按时间找一段安置。
+    const audio = normalizeAudioDefs(p);
+    const clipById = new Map(clips.map(c => [c.id, c] as const));
+    const sorted = [...clips].sort((a, b) => a.start - b.start);
+    const eventPoints: AudioEventPoint[] = [];
+    for (const pt of audio.audioEventPoints ?? []) {
+      let one: AudioEventPoint | null = pt.clipId && clipById.has(pt.clipId) ? pt : null;
+      if (!one) {
+        const host = sorted.find(c => pt.t >= c.start - 1e-6 && pt.t <= c.start + c.duration + 1e-6);
+        if (host) one = { ...pt, clipId: host.id, t: pt.t - host.start };
+      }
+      if (!one) continue;
+      const host = clipById.get(one.clipId) as VidClip;
+      if (one.t < -1e-6 || one.t > host.duration + 1e-6) continue;
+      eventPoints.push({ ...one, t: Math.max(0, Math.min(host.duration, one.t)) });
+    }
+    eventPoints.sort((a, b) => (a.clipId === b.clipId ? a.t - b.t : a.clipId < b.clipId ? -1 : 1));
     return pruneVgenChains({
       tracks, clips, assets,
       inPoint, outPoint,
@@ -3113,7 +3286,24 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
       muteIds: pickIds(p.muteIds, legacyMute),
       soloAudioIds: pickIds(p.soloAudioIds, legacySolo),
       soloVideoIds: pickIds(p.soloVideoIds),
+      // 推子增益：只留还活着的**音频轨**，值夹回 0..1；等于缺省 1 的键不写回（见 setAudioTrackGain）。
+      audioGain: (() => {
+        const src: unknown = p.audioGain;
+        if (!src || typeof src !== 'object') return undefined;
+        const out: Record<string, number> = {};
+        for (const [id, raw] of Object.entries(src as Record<string, unknown>)) {
+          if (trackKind.get(id) !== 'audio') continue;
+          const v = Number(raw);
+          if (!Number.isFinite(v)) continue;
+          const g = Math.max(0, Math.min(1, v));
+          if (g < 1) out[id] = g;
+        }
+        return Object.keys(out).length ? out : undefined;
+      })(),
       mode: p.mode === 'video' ? 'video' : p.mode === 'midi' ? 'midi' : 'image',
+      // 音频定义三件套 + 事件点：悬空引用/回环/坏值在这里一次收敛（见 audioDefs.ts）。
+      ...audio,
+      audioEventPoints: eventPoints.length ? eventPoints : undefined,
     });
   } catch { return base; }
 };

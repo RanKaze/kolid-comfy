@@ -3,6 +3,7 @@ import re
 import json
 import hashlib
 import mimetypes
+import struct
 import threading
 import queue
 import http.server
@@ -2367,7 +2368,7 @@ def _vid_merge(parts, name='merged'):
     # 片段/资产名不带扩展名：时间线上显示的是逻辑名，扩展名由 src 决定。
     nm = os.path.splitext(os.path.basename(str(name or 'merged')))[0] or 'merged'
     d = _vid_media_dir()
-    paths, spans = [], []
+    paths, spans, whole = [], [], []
     for i, pt in enumerate(parts):
         if not isinstance(pt, dict):
             return {'ok': False, 'error': f'part {i} is not an object'}
@@ -2382,8 +2383,18 @@ def _vid_merge(parts, name='merged'):
             return {'ok': False, 'error': f'part {i}: bad in/out'}
         if not (b > a):
             return {'ok': False, 'error': f'part {i}: out must be greater than in'}
+        # 这一段是不是"整个文件"？整文件才走流拷贝 —— inpoint/outpoint 是**按秒**切的，
+        # 会把关键帧之间的帧剪成半截 NAL，拼出来的文件 ffprobe 数得清帧、解码器却解不动
+        # （浏览器黑屏、PyAV 解码会把整个进程卡死）。整文件不做任何裁剪，帧首尾相接，安全。
+        dur = 0.0
+        try:
+            dur = float((_vid_ffprobe(path) or {}).get('duration') or 0.0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        is_whole = a <= 1e-3 and (dur <= 0.0 or b >= dur - 1e-3)
         paths.append(path)
         spans.append((a, b))
+        whole.append(is_whole)
     # 缓存键：文件身份（大小 + mtime_ns，同名重写也会换 key）+ 入出点 + 版本前缀。
     h = hashlib.sha1(b'merge-v1')
     for path, (a, b) in zip(paths, spans):
@@ -2393,7 +2404,7 @@ def _vid_merge(parts, name='merged'):
             return {'ok': False, 'error': 'media file disappeared'}
         h.update(f'{os.path.basename(path)}|{st.st_size}|{st.st_mtime_ns}|{a:.6f}|{b:.6f}\n'.encode('utf-8'))
     out = os.path.join(d, f'merge_{h.hexdigest()[:16]}.mp4')
-    if os.path.isfile(out):
+    if os.path.isfile(out) and os.path.isfile(out + '.ok'):
         probe = _vid_ffprobe(out)
         if probe is not None:
             return {'ok': True, 'src': '/api/vid_media/' + os.path.basename(out),
@@ -2401,25 +2412,44 @@ def _vid_merge(parts, name='merged'):
                     'duration': probe['duration'] or sum(b - a for a, b in spans),
                     'hasAudio': bool(probe['acodec'])}
     os.makedirs(d, exist_ok=True)
-    tmp = out + f'.{os.getpid()}.part.mp4'
-    listing = out + f'.{os.getpid()}.txt'
+    # 同一个哈希的并发请求不能共用临时文件：两次 /api/vid_merge 撞在一起会把对方的
+    # listing/输出写坏。加随机后缀，谁先完成谁 replace，另一份只是白写一次。
+    tag = f'{os.getpid()}.{uuid.uuid4().hex[:8]}'
+    tmp = out + f'.{tag}.part.mp4'
+    listing = out + f'.{tag}.txt'
 
     def _q(p):
         return "'" + p.replace("'", "'\\''") + "'"
 
     try:
         ok = False
-        if not exact:
+        # 只有**每一段都是整文件**时才走流拷贝：不写 inpoint/outpoint，各段的帧原样首尾相接，
+        # 帧数与各段严格相等（不会多一帧也不会少一帧），并且不会出现半截 NAL。
+        # 任何一段需要按秒裁切时都直接走下面的重编码 —— 帧口径靠解码+编码保证，而不是靠
+        # 关键帧对齐（那个对齐在按秒切时不可靠）。
+        if all(whole):
             with open(listing, 'w', encoding='utf-8') as f:
-                for path, (a, b) in zip(paths, spans):
+                for path in paths:
                     f.write(f'file {_q(path)}\n')
-                    f.write(f'inpoint {a:.6f}\n')
-                    f.write(f'outpoint {b:.6f}\n')
             r = subprocess.run(
                 [ff, '-y', '-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0',
                  '-i', listing, '-c', 'copy', '-an', '-movflags', '+faststart', tmp],
                 capture_output=True, timeout=1800)
             ok = r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 0
+            if ok:
+                # 流拷贝成功也要过一遍解码器：坏的 NAL 会让浏览器黑屏、后端解码卡死，
+                # 宁可多花这一次校验，也不要交出一条"数得出帧却解不动"的文件。
+                chk = subprocess.run(
+                    [ff, '-v', 'error', '-i', tmp, '-f', 'null', '-'],
+                    capture_output=True, timeout=1800)
+                # 逐段首尾相接时，段边界上常有两帧 dts 相等（拼完帧数不变，只是时间戳不单调），
+                # 这是 muxer 的告警不是解码失败 —— 拿它当失败会让整条轨永远走不下面那条重编码，
+                # 而重编码的命令行在段数一多就超 Windows 的 32767 上限。只认真正的解码错误。
+                err = (chk.stderr or b'').decode('utf-8', 'replace').strip()
+                bad = [ln for ln in err.splitlines()
+                       if 'non monotonically increasing dts' not in ln.lower()]
+                if chk.returncode != 0 or bad:
+                    ok = False
         if not ok:
             # 回退：逐段 -ss/-t 切开，统一缩放/补边/帧率后 concat 重编码。
             probe0 = _vid_ffprobe(paths[0]) or {}
@@ -2433,12 +2463,6 @@ def _vid_merge(parts, name='merged'):
                 return {'ok': False, 'error': 'cannot read the source resolution'}
             w -= w % 2
             hgt -= hgt % 2
-            # 精确模式按调用方声明的工程帧率统一：逐帧 mask 必须落在与画面同一帧网格上。
-            if exact and fps_hint:
-                try:
-                    fps = float(fps_hint)
-                except (TypeError, ValueError):
-                    pass
             fps = max(1.0, min(120.0, fps))
             cmd = [ff, '-y', '-hide_banner', '-loglevel', 'error']
             for path, (a, b) in zip(paths, spans):
@@ -2457,7 +2481,11 @@ def _vid_merge(parts, name='merged'):
             if r.returncode != 0 or not os.path.isfile(tmp) or os.path.getsize(tmp) == 0:
                 tail = r.stderr.decode('utf-8', 'replace')[-400:] if r.stderr else 'unknown'
                 return {'ok': False, 'error': 'stitch failed: ' + tail}
+        # `.ok` 是"这条已经过解码校验"的凭证：缓存命中只认带凭证的文件 —— 老版本按秒裁切
+        # 拼出来的坏文件（ffprobe 数得清帧、一解码就报 NAL 错）不会因为同名被当成好货复用。
         os.replace(tmp, out)
+        with open(out + '.ok', 'w', encoding='utf-8') as f:
+            f.write(str(os.path.getsize(out)))
     finally:
         for p in (tmp, listing):
             try:
@@ -2472,6 +2500,291 @@ def _vid_merge(parts, name='merged'):
             'name': nm,
             'duration': probe['duration'] or sum(b - a for a, b in spans),
             'hasAudio': bool(probe['acodec'])}
+
+
+# ── 所有加载过的 .cud 工程（只留链接，不存数据）──────────────────────────────────────────
+# 这一份是 Assets 窗 Project 档的唯一数据源：工作台每次播报活动文档集，这里就把它并进
+# `data/sampler/cud_projects.json` —— 关掉的文档**不会**被摘掉，用户想回头再开一次。
+# 链接失效（文件被移走/删除）不报错：列清单时当场把它从记录里清掉，窗里也就不再出现。
+# 内容信息（有没有视频/音频/图像、合成缩略图）只在那份文件还在时现读头。
+_CUD_PROJECTS_LOCK = threading.Lock()
+_CUD_PROJECTS_MAX = 200
+_CUD_INFO_LOCK = threading.Lock()
+_CUD_INFO_CACHE = {}
+
+
+def _cud_projects_file():
+    return _workbench_file('cud_projects.json')
+
+
+def _cud_norm_path(path):
+    try:
+        return os.path.normcase(os.path.abspath(str(path)))
+    except Exception:
+        return str(path or '').strip().lower()
+
+
+def _cud_projects_load():
+    """读链接表。老格式（裸路径数组）也认 —— 只认 path/at 两个字段。"""
+    try:
+        with open(_cud_projects_file(), encoding='utf-8') as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f'[CudProjects] cannot read the list: {e}')
+        return []
+    rows = data.get('projects') if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return []
+    out = []
+    seen = set()
+    for row in rows:
+        if isinstance(row, str):
+            path, at = row, 0.0
+        elif isinstance(row, dict):
+            path, at = row.get('path'), row.get('at')
+        else:
+            continue
+        if not (isinstance(path, str) and path):
+            continue
+        key = _cud_norm_path(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            at = float(at) if isinstance(at, (int, float)) else 0.0
+        except (TypeError, ValueError):
+            at = 0.0
+        out.append({'path': path, 'at': at})
+    return out
+
+
+def _cud_projects_save(rows):
+    payload = json.dumps({'projects': rows}, ensure_ascii=False, indent=1).encode('utf-8')
+    asset_store._atomic_write(_cud_projects_file(), payload)
+
+
+def _cud_projects_remember(paths):
+    """把这次加载过的 .cud 路径并进链接表（同一条路径只更新 at，不重复）。"""
+    clean = []
+    for p in (paths or []):
+        if not (isinstance(p, str) and p.lower().endswith('.cud')):
+            continue
+        try:
+            clean.append(os.path.abspath(p))
+        except Exception:
+            continue
+    if not clean:
+        return
+    with _CUD_PROJECTS_LOCK:
+        rows = _cud_projects_load()
+        by = {_cud_norm_path(r['path']): r for r in rows}
+        now = time.time()
+        for p in clean:
+            key = _cud_norm_path(p)
+            row = by.get(key)
+            if row is None:
+                row = {'path': p, 'at': now}
+                rows.append(row)
+                by[key] = row
+            else:
+                row['path'] = p
+                row['at'] = now
+        rows.sort(key=lambda r: -float(r.get('at') or 0))
+        try:
+            _cud_projects_save(rows[:_CUD_PROJECTS_MAX])
+        except Exception as e:
+            print(f'[CudProjects] cannot write the list: {e}')
+
+
+def _cud_projects_seed():
+    """第一次跑：把当前会话/最近打开的那几份并进来，别让老用户面对一张空表。"""
+    if os.path.exists(_cud_projects_file()):
+        return
+    paths = []
+    try:
+        with open(_workbench_file('open_cuds.json'), encoding='utf-8') as f:
+            rec = json.load(f)
+        if isinstance(rec, dict) and isinstance(rec.get('paths'), list):
+            paths.extend(rec['paths'])
+    except Exception:
+        pass
+    try:
+        with open(_workbench_file('recent_cud.json'), encoding='utf-8') as f:
+            rec = json.load(f)
+        if isinstance(rec, dict) and isinstance(rec.get('path'), str):
+            paths.append(rec['path'])
+    except Exception:
+        pass
+    _cud_projects_remember(paths)
+
+
+def _cud_read_header(path):
+    """只读 .cud 头（`CUD1` + 4 字节头长 + JSON），不碰后面的资产字节。"""
+    try:
+        with open(path, 'rb') as f:
+            prefix = f.read(8)
+            if len(prefix) < 8 or prefix[:4] != b'CUD1':
+                return None
+            hlen = struct.unpack('<I', prefix[4:8])[0]
+            if hlen <= 0 or hlen > 128 * 1024 * 1024:
+                return None
+            raw = f.read(hlen)
+            if len(raw) != hlen:
+                return None
+            head = json.loads(raw.decode('utf-8'))
+            return head if isinstance(head, dict) else None
+    except Exception as e:
+        print(f'[CudProjects] cannot read header of {path}: {type(e).__name__}: {e}')
+        return None
+
+
+def _cud_hash_url(value):
+    """哈希 → `/api/asset_media/<hash>`；仓库里找不到这份字节就返回空（别给卡片一条死链）。"""
+    h = value if isinstance(value, str) else ''
+    if not h:
+        return ''
+    try:
+        if not asset_store.path_of(h):
+            return ''
+    except Exception:
+        pass
+    return '/api/asset_media/' + quote(h, safe='')
+
+
+def _cud_src_alive(src):
+    """`/api/vid_media/<file>` 是**缓存**（合并/探帧产物可能被清掉）；别的 /api 源没有便宜的
+    存活检查，默认当活。工程卡片宁可选一条备用的哈希，也不要把黑屏当成"这里有视频"。"""
+    if not src.startswith('/api/vid_media/'):
+        return True
+    name = unquote(src[len('/api/vid_media/'):]).strip('/')
+    try:
+        return bool(name) and os.path.isfile(
+            os.path.join(_vid_media_dir(), os.path.basename(name)))
+    except Exception:
+        return True
+
+
+def _cud_media_url(obj):
+    """工程里一件视频/音频资产的**可播地址**，按"最可能播得出来"排：
+    1) A5 的转码代理哈希（`play`，浏览器最认它）；
+    2) 当年真正播的那条 URL（缓存没了就跳过）；
+    3) 原件哈希（`asset`，容器可能浏览器咬不动，但至少字节在）。"""
+    if not isinstance(obj, dict):
+        return ''
+    play = _cud_hash_url(obj.get('play'))
+    src = obj.get('src')
+    src = src if isinstance(src, str) and src.startswith('/api/') and _cud_src_alive(src) else ''
+    asset = _cud_hash_url(obj.get('asset'))
+    return play or src or asset
+
+
+def _cud_project_info(path):
+    """一份 .cud 里有什么：视/音/图三类内容、画布尺寸、时长、第一段可播视频。"""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (_cud_norm_path(path), round(st.st_mtime, 4), int(st.st_size))
+    with _CUD_INFO_LOCK:
+        cached = _CUD_INFO_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    head = _cud_read_header(path)
+    if head is None:
+        info = {'ok': False, 'error': 'not a readable .cud',
+                'size': st.st_size, 'mtime': st.st_mtime}
+    else:
+        video = head.get('video') if isinstance(head.get('video'), dict) else {}
+        vassets = video.get('assets') if isinstance(video.get('assets'), list) else []
+        vclips = video.get('clips') if isinstance(video.get('clips'), list) else []
+        video_assets = [a for a in vassets if isinstance(a, dict) and a.get('kind') == 'video']
+        audio_assets = [a for a in vassets if isinstance(a, dict) and a.get('kind') == 'audio']
+        video_clips = [c for c in vclips if isinstance(c, dict) and c.get('kind') == 'video']
+        audio_clips = [c for c in vclips if isinstance(c, dict) and c.get('kind') == 'audio']
+        has_video = bool(video_assets or video_clips)
+        has_audio = bool(audio_assets or audio_clips
+                         or any(a.get('hasAudio') for a in video_assets))
+        # 图像：资产表里除 `composite` 之外的像素（图层/贴图/图池/3D/姿势），
+        # 或任何一套图层栈。只有合成图不算"工程里有图像"。
+        head_assets = head.get('assets') if isinstance(head.get('assets'), list) else []
+        image_assets = [a for a in head_assets
+                        if isinstance(a, dict) and a.get('role') != 'composite']
+        has_image = bool(image_assets)
+        if not has_image and isinstance(head.get('layers'), list) and head['layers']:
+            has_image = True
+        if not has_image:
+            sets = head.get('layerSets')
+            if isinstance(sets, dict):
+                sets = list(sets.values())
+            if isinstance(sets, list) and any(
+                    isinstance(s, dict) and s.get('layers') for s in sets):
+                has_image = True
+        if not has_image:
+            staging = head.get('staging') if isinstance(head.get('staging'), list) else []
+            if any(isinstance(s, dict) and s.get('asset') for s in staging):
+                has_image = True
+        video_src = ''
+        for a in list(video_assets) + list(video_clips):
+            video_src = _cud_media_url(a)
+            if video_src:
+                break
+        try:
+            duration = max((float(c.get('start') or 0) + float(c.get('duration') or 0)
+                            for c in vclips), default=0.0)
+        except Exception:
+            duration = 0.0
+        canvas = head.get('canvas') if isinstance(head.get('canvas'), dict) else {}
+        try:
+            cw = int(canvas.get('w') or 0)
+        except (TypeError, ValueError):
+            cw = 0
+        try:
+            ch = int(canvas.get('h') or 0)
+        except (TypeError, ValueError):
+            ch = 0
+        info = {
+            'ok': True, 'w': cw, 'h': ch, 'duration': duration,
+            'hasVideo': has_video, 'hasAudio': has_audio, 'hasImage': has_image,
+            'video': video_src or None,
+            'videoCount': len(video_assets), 'audioCount': len(audio_assets),
+            'imageCount': len(image_assets),
+            'size': st.st_size, 'mtime': st.st_mtime,
+        }
+    with _CUD_INFO_LOCK:
+        if len(_CUD_INFO_CACHE) > 512:
+            _CUD_INFO_CACHE.clear()
+        _CUD_INFO_CACHE[key] = dict(info)
+    return dict(info)
+
+
+def _cud_projects_list():
+    """链接表 → 卡片数据。文件不在了的就从记录里清掉，这正是"链接丢了就清除"。"""
+    _cud_projects_seed()
+    rows = _cud_projects_load()
+    out = []
+    keep = []
+    for row in rows:
+        path = row.get('path')
+        if not (isinstance(path, str) and path.lower().endswith('.cud')
+                and os.path.isfile(path)):
+            continue
+        info = _cud_project_info(path) or {'ok': False, 'error': 'not readable'}
+        info['path'] = path
+        info['name'] = os.path.basename(path)
+        info['dir'] = os.path.dirname(path)
+        info['at'] = row.get('at') or 0
+        info['thumb'] = '/api/cud_frame_thumb?path=' + quote(path, safe='') + '&w=320'
+        out.append(info)
+        keep.append(row)
+    if len(keep) != len(rows):
+        with _CUD_PROJECTS_LOCK:
+            try:
+                _cud_projects_save(keep)
+            except Exception as e:
+                print(f'[CudProjects] cannot prune the list: {e}')
+    return out
 
 
 class DocumentIo:
@@ -2655,6 +2968,8 @@ class DocumentIo:
         for p in (paths or []):
             if isinstance(p, str) and p:
                 clean.append(os.path.abspath(p))
+        # 活动集只说明"这次开着谁"；Project 档要的是"加载过谁" —— 并进那份只增不删的链接表。
+        _cud_projects_remember(clean)
         try:
             with open(_workbench_file('open_cuds.json'), 'w', encoding='utf-8') as f:
                 json.dump({'paths': clean}, f, ensure_ascii=False)
@@ -4680,6 +4995,15 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'ok': True, 'docs': doc_io.restore_open_cuds()})
                 return
 
+            # Assets 窗 Project 档：所有加载过的 .cud（只留链接）。文件没了的链接在这里
+            # 当场清掉；内容标记与缩略图只对还在盘上的工程现读。
+            if self.path == '/api/cud_projects':
+                try:
+                    self._send_json({'ok': True, 'projects': _cud_projects_list()})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e), 'projects': []}, 500)
+                return
+
             # 全局资产库：Assets 窗的 Global 开关问的就是这一份清单（落点 = 节点那一份
             # data/assets/，见 _global_assets_list）。只读，不写 —— 往里加货是节点的事。
             if self.path == '/api/global_assets':
@@ -5107,9 +5431,7 @@ class SnapshotDetailerSamplerServer:
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
-                    res = _vid_merge(body.get('parts'), str(body.get('name') or 'merged'),
-                                     exact=bool(body.get('exact')),
-                                     fps_hint=body.get('fps'))
+                    res = _vid_merge(body.get('parts'), str(body.get('name') or 'merged'))
                     self._send_json(res, 200 if res.get('ok') else 500)
                 except Exception as e:
                     self._send_json({'ok': False, 'error': str(e)}, 500)

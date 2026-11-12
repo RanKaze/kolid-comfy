@@ -1,4 +1,4 @@
-import { clipsByTrack, type VidClip, type VidFrameNeed, type VidProject } from './model';
+import { clipAtSolo, clipsByTrack, type VidClip, type VidFrameNeed, type VidProject } from './model';
 
 // ── 逐帧合成：哪一帧归谁 ────────────────────────────────────────────────────────────────────
 // 口径（见 model.ts 的轨道序）：轨道的数组序就是上下序，**最上层命中的那一段**决定这一帧怎么出。
@@ -196,4 +196,55 @@ export const warmSweepAt = (
     segs.push({ layerKey: key, at, tracks });
   }
   return { srcs, segs };
+};
+
+// ── 底片预取（播放引擎的双缓冲）────────────────────────────────────────────────────────────
+// 底片态以前是"换片段 = 同一只 <video> 换源 + load + seek"：播放中那几百毫秒没有新帧，
+// 台上只能定在上一段最后一帧 —— 这就是切换时的卡顿。现在工作台页面按段留一只镜像（见
+// blend_node 的 vidBasePool），宿主提前告诉它"接下来谁会当底片、轮到它时该在源内第几秒"，
+// 到段界只剩一次换台（纹理换一张），不再等加载与 seek。
+//
+// **底片序列只会在视频段边界改变**（某段开始 / 结束，露出或换上另一条轨的段）。所以这里
+// 取窗口内所有视频段的 start/end，在每个边界后一脚问一次"这一脚归谁" —— 命中同一段只留
+// 最早那一次。`at` 是**轮到它的那一刻**的源内时刻（不是播放头此刻的时刻）：预热窗口每半秒
+// 滑一次，同一个 `from` 算出来的 `at` 不变，页面因此不会反复 seek 同一只镜像。
+export type VidBaseWarm = {
+  /** 段的 id（页面按它认镜像；剪辑换源也认这个键）。 */
+  key: string;
+  src: string;
+  start: number;
+  offset: number;
+  /** 轮到它当底片时，源内第几秒（镜像暂停在这里等着）。 */
+  at: number;
+  /** 它开始当底片的时间线时刻（排序 / 去重 / 诊断）。 */
+  from: number;
+};
+
+export const baseWarmAt = (
+  p: VidProject, t: number, muted: ReadonlySet<string>, soloVideo: ReadonlySet<string>, look = 4, limit = 4,
+): VidBaseWarm[] => {
+  const cur = clipAtSolo(p, t, soloVideo, muted);
+  const times: number[] = [];
+  for (const c of p.clips) {
+    if (c.pending || !c.src) continue;
+    const tr = p.tracks.find(x => x.id === c.trackId);
+    if (!tr || tr.kind !== 'video') continue;
+    if (muted.has(tr.id)) continue;
+    if (soloVideo.size > 0 && !soloVideo.has(tr.id)) continue;
+    const a = c.start, b = c.start + c.duration;
+    if (a > t && a <= t + look) times.push(a);
+    if (b > t && b <= t + look) times.push(b);
+  }
+  times.sort((x, y) => x - y);
+  const out = new Map<string, VidBaseWarm>();
+  for (const x of times) {
+    const at = x + 1e-4;                    // 边界后一脚：这一脚命中的就是下一段
+    const clip = clipAtSolo(p, at, soloVideo, muted);
+    if (!clip || !clip.src || clip.id === cur?.id || out.has(clip.id)) continue;
+    out.set(clip.id, {
+      key: clip.id, src: clip.src, start: clip.start, offset: clip.offset,
+      at: sourceTime(clip, Math.max(clip.start, at)), from: x,
+    });
+  }
+  return [...out.values()].sort((a, b) => a.from - b.from).slice(0, Math.max(1, limit));
 };

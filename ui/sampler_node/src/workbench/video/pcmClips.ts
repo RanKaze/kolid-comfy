@@ -16,7 +16,7 @@
 
 import { PAGE_SESSION } from '../../midi/session';
 import { decodeAudio } from './audio';
-import { audioAudible, type VidProject } from './model';
+import { audioAudible, audioTrackGain, type VidProject } from './model';
 
 const RATE = 48000;
 const PCM_CLIENT_ABI = 3;        // 与 audio_bridge.py 的 PCM_CLIENT_ABI 一致
@@ -47,6 +47,58 @@ let active = false;              // 有任何一个段子真的交给了引擎
 let pushGen = 0;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let chain: Promise<void> = Promise.resolve();
+
+// ── 一次性音效（Keyframe 音频事件点触发）────────────────────────────────────────────────────
+// 与时间线共用同一条 PCM 通道与同一把「作者会话」的锁：只有正在出声的那扇窗摆得响。
+// start / offset 都是**绝对帧 / 片段内帧**，和 pcm_set 的口径一致；每次触发用一个新 clip id，
+// 播完（length + 400ms 尾巴）自动 pcm_clear，别把槽位留给下一声。
+// 上限 16 条并发：后端 PCM 槽只有 64 个且时间线优先，事件音效不能把时间线挤掉。
+
+const MAX_ONE_SHOTS = 16;
+const oneShots = new Map<string, ReturnType<typeof setTimeout>>();
+let oneShotSeq = 0;
+
+/** 清掉本窗所有还挂着的事件音效（停止 / seek / 回绕时调）。 */
+export const clearOneShots = (): void => {
+  for (const [clip, timer] of oneShots) {
+    clearTimeout(timer);
+    void post('pcm_clear', { clip, gen: 0 });
+  }
+  oneShots.clear();
+};
+
+/**
+ * 播一条一次性音效。返回 false = 本次不发声（同一份 PCM 解码失败 / 槽满 / 非作者）。
+ * `tag` 只用来拼 clip id，方便在诊断日志里认出是哪颗事件点。
+ */
+export const playOneShot = async (
+  src: string, startSec: number, offsetSec: number, gain: number, tag: string,
+): Promise<boolean> => {
+  if (!(gain > 0.0001) || !src) return false;
+  if (oneShots.size >= MAX_ONE_SHOTS) return false;
+  const data = await pcmOf(src);
+  if (!data) return false;
+  const offset = Math.max(0, Math.round(offsetSec * RATE));
+  if (offset >= data.frames) return false;
+  const length = data.frames - offset;
+  const start = Math.max(0, Math.round(startSec * RATE));
+  const clip = `evt:${tag}:${++oneShotSeq}`;
+  if (!await uploadRaw(clip, data.frames, data.pcm)) {
+    void post('pcm_clear', { clip, gen: 0 });
+    return false;
+  }
+  const res = await post('pcm_set', { clip, gen: 0, start, offset, length, gain });
+  if (!res || res.ok !== true) {
+    void post('pcm_clear', { clip, gen: 0 });
+    return false;
+  }
+  const timer = setTimeout(() => {
+    oneShots.delete(clip);
+    void post('pcm_clear', { clip, gen: 0 });
+  }, (length / RATE) * 1000 + 400);
+  oneShots.set(clip, timer);
+  return true;
+};
 
 /** 引擎此刻有没有在替时间线出声（Audio Monitor 据此去轮询引擎峰值）。 */
 export const engineTimelineActive = (): boolean => active;
@@ -145,24 +197,27 @@ const applyPlacement = (e: Entry): void => {
 };
 
 /** 传一次 PCM：begin → 分块 → finish。任何一步失败都返回 false（下次整段重来）。 */
-const uploadOnce = async (e: Entry, frames: number, pcm: Int16Array): Promise<boolean> => {
-  const begun = await post('pcm_begin', { clip: e.id, frames, channels: 2 });
+const uploadRaw = async (clip: string, frames: number, pcm: Int16Array): Promise<boolean> => {
+  const begun = await post('pcm_begin', { clip, frames, channels: 2 });
   if (!begun || begun.ok !== true) {
-    if (begun && begun.error) console.warn('[pcm] %s: %s', e.id, begun.error);
+    if (begun && begun.error) console.warn('[pcm] %s: %s', clip, begun.error);
     return false;
   }
   const bytes = new Uint8Array(pcm.buffer);
   for (let off = 0; off < frames; off += CHUNK_FRAMES) {
     const n = Math.min(CHUNK_FRAMES, frames - off);
     const res = await post('pcm_chunk', {
-      clip: e.id, offset: off,
+      clip, offset: off,
       data: toBase64(bytes.subarray(off * 4, (off + n) * 4)),
     });
     if (!res || res.ok !== true) return false;
   }
-  const fin = await post('pcm_finish', { clip: e.id });
+  const fin = await post('pcm_finish', { clip });
   return !!fin && fin.ok === true;
 };
+
+const uploadOnce = (e: Entry, frames: number, pcm: Int16Array): Promise<boolean> =>
+  uploadRaw(e.id, frames, pcm);
 
 /** 上传是**唯一**出声的前提：失败就退避重试，别让一段音频悄悄变成静音。 */
 const upload = async (e: Entry): Promise<void> => {
@@ -242,7 +297,8 @@ const flush = (project: VidProject, solo: ReadonlySet<string>, mute: ReadonlySet
       start: Math.max(0, Math.round(c.start * RATE)),
       offset: Math.max(0, Math.round((c.offset || 0) * RATE)),
       length: Math.max(0, Math.round(c.duration * RATE)),
-      gain: audible ? 1 : 0,
+      // 混音增益：Fader 窗写的推子在 audible 之上再做一次衰减（mute / solo 仍然优先）。
+      gain: audible ? audioTrackGain(project, c.trackId) : 0,
     };
     if (e.src !== c.src) {
       e.src = c.src;
@@ -276,7 +332,7 @@ export const syncEngineClips = (
   const sig = project.clips
     .filter(c => c.kind === 'audio')
     .map(c => [c.id, c.src, c.start.toFixed(3), c.duration.toFixed(3), (c.offset || 0).toFixed(3),
-      audioAudible(c.trackId, solo, mute) ? 1 : 0].join(','))
+      audioAudible(c.trackId, solo, mute) ? audioTrackGain(project, c.trackId).toFixed(3) : '0'].join(','))
     .join('|');
   if (sig === lastSig) return;
   lastSig = sig;

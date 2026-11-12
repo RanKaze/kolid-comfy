@@ -157,6 +157,33 @@ const VAudio: UnitIcon = p => <Svg {...p}>
   <rect x="3.4" y="7.2" width="3.4" height="6.4" rx="1" />
   <rect x="9.2" y="3.2" width="3.4" height="10.4" rx="1" />
 </Svg>;
+// Fader：三条推子槽 + 各自停在不同的位置 —— 混音台上把几条轨压到同一平衡的手。
+// 与 VAudio（一只看电平的表）分开：那扇窗**看**，这扇窗**调**。
+const VFader: UnitIcon = p => <Svg {...p}>
+  <path d="M2.2 4h11.6M2.2 8h11.6M2.2 12h11.6" opacity="0.55" />
+  <rect x="4.2" y="2.9" width="2.2" height="2.2" rx="0.7" fill="currentColor" stroke="none" />
+  <rect x="9.2" y="6.9" width="2.2" height="2.2" rx="0.7" fill="currentColor" stroke="none" />
+  <rect x="6.2" y="10.9" width="2.2" height="2.2" rx="0.7" fill="currentColor" stroke="none" />
+</Svg>;
+// Audio Bus：一根总干线，两条支路汇进来（嵌套的串联增益链）。
+const VBus: UnitIcon = p => <Svg {...p}>
+  <path d="M1.9 8h12.2" />
+  <path d="M4.4 3.2v9.6M9 3.2v9.6" opacity="0.55" />
+  <circle cx="4.4" cy="8" r="1.2" fill="currentColor" stroke="none" />
+  <circle cx="9" cy="8" r="1.2" fill="currentColor" stroke="none" />
+</Svg>;
+// Audio Interface：一块面板上两排接口孔（事件/参数）。
+const VIFace: UnitIcon = p => <Svg {...p}>
+  <rect x="1.9" y="2.6" width="12.2" height="10.8" rx="1.6" />
+  <circle cx="5.2" cy="6.3" r="1" /><circle cx="8" cy="6.3" r="1" /><circle cx="10.8" cy="6.3" r="1" />
+  <circle cx="5.2" cy="9.9" r="1" opacity="0.55" /><circle cx="8" cy="9.9" r="1" opacity="0.55" /><circle cx="10.8" cy="9.9" r="1" opacity="0.55" />
+</Svg>;
+// Audio Object：一只喇叭 + 一颗事件点（对象实例在事件点上发声）。
+const VObj: UnitIcon = p => <Svg {...p}>
+  <path d="M2.4 6.1h2.3L8 3.3v9.4L4.7 9.9H2.4z" />
+  <path d="M10.4 5.4a3.4 3.4 0 0 1 0 5.2" opacity="0.65" />
+  <circle cx="12.8" cy="3.1" r="1.2" fill="currentColor" stroke="none" />
+</Svg>;
 // Keyframes：一条值轨上几枚菱形帧 —— Keyframes 窗摊开的就是这一串(时刻 + 值)。
 // 与 VTracks 那三条轨分开：这里是**一条参数**的关键帧序列，不是轨道布局。
 const VKf: UnitIcon = p => <Svg {...p}>
@@ -274,6 +301,8 @@ export const UNIT_ICONS: Record<string, UnitIcon> = {
   layout: Layout, videoGen: VideoGen,
   // Video 模式
   vplayer: VPlayer, vtracks: VTracks, vassets: VAssets, veagle: VEagle, vinspector: VInspector, vkf: VKf, vaudio: VAudio,
+  vfader: VFader,
+  vbus: VBus, viface: VIFace, vobj: VObj,
   // 工具窗(彩色,见 UNIT_COLORS)
   log: PLog, debug: PDebug, probe: PProbe, agent: Agent,
   // 宿主

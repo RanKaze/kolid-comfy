@@ -3,7 +3,7 @@ import {
   type VidController, type VidClip, clipAt, clipAtSolo, clampFps, fmtTime, kfSample, kfU, toggleLoopRange, vidDuration,
 } from './model';
 import { TransportKeys } from '../../midi/TransportKeys';
-import { compositePlanAt, sourceTime, warmSweepAt, type VidCompositePlan } from './composite';
+import { baseWarmAt, compositePlanAt, sourceTime, warmSweepAt, type VidCompositePlan } from './composite';
 import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame } from './previews';
 import { markRender } from './perf';
 import { useCudScope } from '../cudScope';
@@ -157,6 +157,10 @@ export const VidPlayer: React.FC<{
    *  （O(段²)），而清单只在段边界 / mute / 引用表变时才变；预热提前量本来就是 4 秒，半秒
    *  一算绰绰有余。播放中这一笔原来每个 rAF 都白付，段一多就是宿主侧最贵的固定常数。 */
   const warmCache = useRef<{ sig: string; value: ReturnType<typeof warmSweepAt> | null }>({ sig: '', value: null });
+  /** 底片预取清单（见 composite 的 baseWarmAt）：与预热同一份 0.5s 缓存节奏。 */
+  const baseWarmCache = useRef<ReturnType<typeof baseWarmAt>>([]);
+  /** 已经报过的底片预取集（clip@from@src）：同一份清单只发一次。 */
+  const baseWarmSent = useRef('');
   // 性能探针(只读,诊断用):合成发包端的次数/回包分类,与页面 __vidPerf 配对。
   // kf = 页面最近一包关键帧注入的读数(keys/applied/落空原因),关键帧"有值却不动"时先看它。
   const compPerf = useRef({
@@ -254,6 +258,8 @@ export const VidPlayer: React.FC<{
       warmSent.current = '';
       warmCache.current.sig = '';
       warmCache.current.value = null;
+      baseWarmCache.current = [];
+      baseWarmSent.current = '';
       // 补偿 timer 里压着的是上一份文档的 want：换 tab 时一并收掉，别让它在新文档的
       // 第一帧上补发出去（帧包带旧 plan，页面按 uid 会丢，但白白占一次在途）。
       compReq.current.want = null;
@@ -438,7 +444,9 @@ export const VidPlayer: React.FC<{
     // Video 2 段左边缘），铺上台就是把 Video 2 的裸帧闪一下，而关键帧只作用于合成图。
     const sent = vid.blendPost({
       type: 'blend-vid-base-src', src: clip.src,
-      // 底片是工作台页面级唯一的一只 <video>：谁的包都能换走它 —— 所以这一包也盖章。
+      // 段 id = 底片镜像池的键（页面按它认预热好的那一只，见 blend_node 的 vidBasePool）。
+      key: clip.id,
+      // 底片跟着文档走：谁的包都能换走它 —— 所以这一包也盖章。
       uid: vid.docUid ?? null,
       start: clip.start, offset: clip.offset, t: q, playing, hidden,
     });
@@ -564,8 +572,13 @@ export const VidPlayer: React.FC<{
       if (warmSig !== warmCache.current.sig) {
         warmCache.current.sig = warmSig;
         warmCache.current.value = soloActive ? null : warmSweepAt(proj, t, muted, 4, frameNeed.current);
+        // 底片预取与合成预热同一份节奏：谁会在 4 秒内当底片、轮到它时该在源内第几秒。
+        // 页面按段留一只镜像（双缓冲），段界就不必再换源 + load + seek（那是可感的卡顿）。
+        baseWarmCache.current = soloActive ? [] : baseWarmAt(proj, t, muted, soloV);
       }
       const warm = warmCache.current.value;   // 4 秒的提前量：够它把文件加载完
+      const baseWarm = baseWarmCache.current;
+      const baseWarmKey = baseWarm.map(s => `${s.key}@${s.from.toFixed(2)}@${s.at.toFixed(3)}@${s.src}`).join(',');
       const warmKey = warm
         ? warm.segs.map(s => `${s.layerKey}@${s.at.toFixed(2)}`).join(',') + '|' + warm.srcs.map(s => `${s.trackId}@${s.src}`).join(',')
         : '';
@@ -592,6 +605,13 @@ export const VidPlayer: React.FC<{
         requestComposite(plan, t, true, true);
       } else {
         requestComposite(plan, t);   // solo 时 plan 为 null → 停掉合成（发 frame-off）
+      }
+      // **底片预取放在底片包之后**：段界那一拍两条消息同 tick 发，页面必须先换台、再被
+      // 预取包整理池子。反过来（预取先到）它会把"正要上台的那只"当闲着的重组/挤掉，
+      // 段界于是又变成一次冷启动。
+      if (baseWarmKey !== baseWarmSent.current) {
+        baseWarmSent.current = baseWarmKey;
+        if (baseWarm.length) vid.blendPost({ type: 'blend-vid-base-warm', items: baseWarm });
       }
     };
     // seek 落定 = 真帧已上屏：撤掉缩略条替身。两个守卫防止拖动中闪替身——
@@ -819,10 +839,10 @@ export const VidPlayer: React.FC<{
     // 出了 Layer 段：这一段的"等过期"记账作废 —— 下一趟进段照旧先按住。
     if (!compMode) vidGaveUpFor.current = null;
     if (!active || !activeId) {
-      if (v.dataset.clipId) { delete v.dataset.clipId; v.removeAttribute('src'); v.load(); }
+      if (v.dataset.clipId) { delete v.dataset.clipId; delete v.dataset.clipSrc; v.removeAttribute('src'); v.load(); }
       return;
     }
-    if (v.dataset.clipId === activeId) return;
+    if (v.dataset.clipId === activeId && v.dataset.clipSrc === active.src) return;
     // 要换到新片段了，而这一刻这一格归合成图：按住（暂停在上一段最后那一帧），等合成图上来。
     // 400ms 之后不管有没有来都照换 —— 监视器不能冻住。
     if (compMode && !hasComp && vidGaveUpFor.current !== activeId) {
@@ -838,13 +858,18 @@ export const VidPlayer: React.FC<{
     }
     if (vidHoldTimer.current) { window.clearTimeout(vidHoldTimer.current); vidHoldTimer.current = 0; }
     v.dataset.clipId = activeId;
+    // **同一个文件就别重设 src**：Detect 轨整轨合并后，几百个小段共享一条源，每 1/6 秒换一次段。
+    // `v.src = <同一个 URL>` 会让浏览器把整只文件重新加载一遍（缓存命中也要重跑资源选择、掉回
+    // readyState 0），表现就是播放时画面永远慢半拍、对不上 —— 换段在这里只是记账，源没变就接着放。
+    if (v.dataset.clipSrc === active.src) return;
+    v.dataset.clipSrc = active.src;
     v.src = active.src;
     const target = Math.max(0, active.offset + (transport.get() - active.start));
     const onMeta = () => { try { v.currentTime = target; } catch { /* not seekable yet */ } };
     if (v.readyState >= 1) onMeta();
     else v.addEventListener('loadedmetadata', onMeta, { once: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId, compMode, hasComp, vidHoldTick]);
+  }, [activeId, active?.src, compMode, hasComp, vidHoldTick]);
   useEffect(() => () => { if (vidHoldTimer.current) window.clearTimeout(vidHoldTimer.current); }, []);
 
   // 页面据此决定画布要不要铺一层视频帧打底（Video 模式永远铺 ⇒ 底片与合成在像素层面是同一种状态；

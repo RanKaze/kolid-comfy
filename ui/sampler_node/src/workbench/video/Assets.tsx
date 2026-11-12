@@ -49,10 +49,16 @@ export const ASSET_ITEM_TYPE = 'application/x-asset';
 export const GLOBAL_ITEM_TYPE = 'application/x-vid-global';
 /** 工程资产的老载荷：只带资产 id（时间线据此直接落片段，不再走一次 importSource）。 */
 export const VID_ASSET_TYPE = 'application/x-vid-asset';
+/** 工程卡载荷：拖到生成器首/末帧卡上 = 把这份 .cud 的合成图绑成那一帧。 */
+export const CUD_ITEM_TYPE = 'application/x-vid-cud';
 
-/** 四档：公用库 / 这份文档的 Layer 段 / 这份文档的 image 工作面 / 乐器库。
- *  前三是"字节在哪"，第四档不是字节 —— 它跟这份文档无关，内容只由 MIDI 设置里那条库路径决定。 */
-export type Scope = 'library' | 'video' | 'image' | 'instruments';
+/** 五档：加载过的工程 / 公用库 / 这份文档的 Layer 段 / 这份文档的 image 工作面 / 乐器库。
+ *  前四是"字节在哪"（工程档只留链接），最后一档不是字节 —— 它跟这份文档无关，
+ *  内容只由 MIDI 设置里那条库路径决定。 */
+export type Scope = 'project' | 'library' | 'video' | 'image' | 'instruments';
+
+/** 工程卡片要标出的内容类型。视频优先预览，音频/图像各自角标。 */
+export type CardContent = 'video' | 'audio' | 'image';
 
 /** 仓库里的一件货（/api/global_assets 的响应项；A0 加了 hash / inLibrary / thumb 三个字段）。
  *  老服务没有这三个字段 —— 读的时候按"是库成员、没有 hash"兜底，窗不会白屏。 */
@@ -99,6 +105,36 @@ const rowBtn: React.CSSProperties = {
 // ── 全局资产（旧类型名，保留导出免得老代码引用断掉）─────────────────────────────────────────
 export type GlobalAsset = StoreAsset;
 
+/** Project 档的一行：`/api/cud_projects` 的响应项。路径是唯一身份，内容标记是后端读
+ *  .cud 头现算的（文件不在了后端已经把它从链接表里清掉，不会出现在这里）。 */
+export type CudProject = {
+  path: string;
+  name: string;
+  dir?: string;
+  ok?: boolean;
+  error?: string;
+  w?: number;
+  h?: number;
+  duration?: number;
+  size?: number;
+  mtime?: number;
+  at?: number;
+  hasVideo?: boolean;
+  hasAudio?: boolean;
+  hasImage?: boolean;
+  /** 第一段视频的可播地址（有视频时卡片直接播它）。 */
+  video?: string | null;
+  videoCount?: number;
+  audioCount?: number;
+  imageCount?: number;
+  /** 合成图缩略图（/api/cud_frame_thumb）。 */
+  thumb?: string;
+};
+
+/** 工程卡片的缩略图地址：后端给的 thumb 已经是带当前 mtime 的缓存键。 */
+const projectThumb = (p: CudProject, w: number): string =>
+  p.thumb || ('/api/cud_frame_thumb?path=' + encodeURIComponent(p.path) + '&w=' + w);
+
 /** 地球：Library 那一档的记号 —— 一圈经线 + 一条赤道，选中时点亮。 */
 const GlobeIcon: React.FC<{ size?: number }> = ({ size = 14 }) => (
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor"
@@ -140,6 +176,10 @@ type CardMedia = {
   duration: number;
   /** 有没有音轨。`null` = 不知道（探不到 / 图片）→ 不画 AUD 角标。 */
   hasAudio: boolean | null;
+  /** 强制列出的内容角标（工程档：VID / AUD / IMG 可以同时出现）。不给就按 kind 推。 */
+  content?: CardContent[];
+  /** 工程卡片里有视频：不悬停也让它静音循环播放。 */
+  autoplay?: boolean;
 };
 
 /** 悬停扫片：视频卡片上**不点、只左右滑** —— 指针在这块上的横向位置 = 片中时刻，卡片当场
@@ -221,11 +261,18 @@ const badge: React.CSSProperties = {
 
 /** 缩略图那一块：海报帧（或悬停扫到的那一格）+ 角标 + 扫片进度线。
  *  `height` 有值 = 统一高度的流式卡片（宽度由调用方按宽高比算好）；不给就沿用 16:9 的格子。 */
+const CONTENT_BADGE: Record<CardContent, { tag: string; color: string; title: string }> = {
+  video: { tag: 'VID', color: '#64d2ff', title: 'This project contains video' },
+  audio: { tag: 'AUD', color: '#30d158', title: 'This project contains audio' },
+  image: { tag: 'IMG', color: '#ffd60a', title: 'This project contains images' },
+};
+
 const Thumb: React.FC<{ m: CardMedia; poster: string | null; height?: number }> = ({ m, poster, height }) => {
   const scrub = useHoverScrub(m);
-  const color = m.kind === 'audio' ? '#30d158' : m.kind === 'image' ? '#ffd60a' : '#64d2ff';
   const glyph = m.kind === 'audio' ? '♪' : m.kind === 'image' ? '▧' : '▣';
-  const tag = m.kind === 'audio' ? 'AUD' : m.kind === 'image' ? 'IMG' : 'VID';
+  const tags: CardContent[] = m.content && m.content.length ? m.content : [m.kind];
+  // 视频带音轨时补一颗 AUD（内容角标里已经说了就不重复）。
+  if (m.kind === 'video' && m.hasAudio && !tags.includes('audio')) tags.push('audio');
   return (
     <div
       data-vid-thumb=""
@@ -248,6 +295,22 @@ const Thumb: React.FC<{ m: CardMedia; poster: string | null; height?: number }> 
           onError={e => { e.currentTarget.style.display = 'none'; }}
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block', pointerEvents: 'none' }} />
       )}
+      {/* 工程卡片：里面有视频就让它自己静音循环播放（不挡海报，播不出来时海报还在）。 */}
+      {m.autoplay && m.kind === 'video' && m.src && (
+        <video
+          src={m.src}
+          muted
+          loop
+          autoPlay
+          playsInline
+          preload="metadata"
+          onError={e => { e.currentTarget.style.display = 'none'; }}
+          style={{
+            position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover',
+            display: 'block', pointerEvents: 'none',
+          }}
+        />
+      )}
       {/* 扫片的那一路画面：挂上就加载，能出画面了（onLoadedData）才淡入盖住海报帧。 */}
       {scrub.armed && (
         <video
@@ -263,11 +326,14 @@ const Thumb: React.FC<{ m: CardMedia; poster: string | null; height?: number }> 
           }}
         />
       )}
-      {/* 角标：VID 旁边那颗 AUD = 这件视频**带音轨**（拖上轨道会当场拆一条联动音频段）。
+      {/* 角标：工程档可以同时亮 VID / AUD / IMG；普通卡片仍是一颗主类型 + 视频带音轨时的 AUD。
           `hasAudio` 是 null（不知道）就不画 —— 不画比画错强。 */}
       <span style={{ position: 'absolute', top: 3, left: 3, display: 'flex', gap: 2, pointerEvents: 'none' }}>
-        <span style={{ ...badge, color }}>{tag}</span>
-        {m.kind === 'video' && m.hasAudio && <span style={{ ...badge, color: '#30d158' }}>AUD</span>}
+        {tags.map(t => (
+          <span key={t} title={CONTENT_BADGE[t].title} style={{ ...badge, color: CONTENT_BADGE[t].color }}>
+            {CONTENT_BADGE[t].tag}
+          </span>
+        ))}
       </span>
       {scrub.pos !== null && (
         <span style={{
@@ -295,6 +361,10 @@ export type CardItem = {
   /** 原生像素。流式卡片用它算宽度（高度一致、宽度 = 高度 × 宽高比）；缺了就退回 16:9。 */
   w?: number;
   h?: number;
+  /** 内容角标：工程卡用它同时标出视频/音频/图像（不给就按 kind 推）。 */
+  content?: CardContent[];
+  /** 视频内容自动静音循环播放（工程卡）。 */
+  autoplay?: boolean;
   /** 字节在哪：`store` 只在仓库；`doc` 某份文档里也内嵌了一份（A4 之后才可能出现）；
    *  `ref` 文档只是**引用**它（.cud 里记哈希与 URL，字节留在仓库 —— 视频/音频走这一档）；
    *  `missing` 引用还在、字节没了。 */
@@ -458,7 +528,10 @@ export const Card: React.FC<{
     >
       <div style={{ position: 'relative' }}>
         <Thumb
-          m={{ src: it.src, kind: it.kind, duration: it.duration, hasAudio: it.hasAudio }}
+          m={{
+            src: it.src, kind: it.kind, duration: it.duration, hasAudio: it.hasAudio,
+            content: it.content, autoplay: it.autoplay,
+          }}
           poster={poster}
           height={thumbH}
         />
@@ -542,6 +615,8 @@ const fileToDataURL = (f: File) => new Promise<string | null>(res => {
 });
 
 const SCOPES: { id: Scope; label: string; title: string }[] = [
+  // 工程档：只记链接，不复制数据。文件被移走/删除时后端把它从清单里清掉。
+  { id: 'project', label: 'Projects', title: 'Every .cud project loaded on this machine — links only, never a copy. A link whose file is gone is dropped automatically' },
   { id: 'library', label: 'Library', title: 'Shared library — bytes in data/assets, visible to every document' },
   { id: 'video', label: 'Video', title: "This document's own assets, as used by video mode: media referenced by the timeline (hash only) + images on Layer segments (embedded)" },
   { id: 'image', label: 'Image', title: "This document's own images, as used by layers / guidances / staging (embedded in the .cud)" },
@@ -825,7 +900,19 @@ const InstrumentList: React.FC<{ q: string; midi: MidiCtl }> = ({ q, midi }) => 
   );
 };
 
-export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: string | null; onSel?: (s: InspectSel | null) => void; onActivate?: () => void }> = ({ vid, midi, sel, onSel, onActivate }) => {
+export const VidAssets: React.FC<{
+  vid: VidController;
+  midi: MidiCtl;
+  sel?: string | null;
+  onSel?: (s: InspectSel | null) => void;
+  onActivate?: () => void;
+  /** 有没有打开的文档。Project 档不依赖它，Library / Instruments 也不依赖。 */
+  hasDoc?: boolean;
+  /** 本次会话开着的 .cud 路径（用来标 OPEN，并在文档集合变化时重拉清单）。 */
+  openPaths?: string[];
+  /** 双击工程卡 = 打开/切到那份 .cud。 */
+  onOpenProject?: (path: string) => void;
+}> = ({ vid, midi, sel, onSel, onActivate, hasDoc = true, openPaths = [], onOpenProject }) => {
   const { project: p } = vid;
   // 这份文档内嵌的图（Video / Image 两档的唯一数据源）。页面按整份清单播报，这里按活跃文档取桶 ——
   // 切 tab 那一瞬读到的就是目标文档自己那份，不必等页面重播。
@@ -838,12 +925,21 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   const [gridW, setGridW] = useState(0);
   const [over, setOver] = useState(false);
   // 起手看文档自己的模式：image 落地自己那套工作面，video 落 Layer 段，midi 落乐器库。
-  // 之后跟着用户的手 —— 切文档不把人从自己选的档上拽走。
-  const [scope, setScope] = useState<Scope>(() => (p.mode === 'video' ? 'video' : p.mode === 'midi' ? 'instruments' : 'image'));
+  // 没有打开的文档时落在 Project 档（那一档不依赖文档）。之后跟着用户的手 ——
+  // 切文档不把人从自己选的档上拽走。
+  const [scope, setScope] = useState<Scope>(() =>
+    (!hasDoc ? 'project'
+      : p.mode === 'video' ? 'video' : p.mode === 'midi' ? 'instruments' : 'image'));
+  // 文档关光时，停在 Video / Image 两档就只剩空壳 —— 退回永远有东西可看的 Project 档。
+  useEffect(() => {
+    if (!hasDoc && (scope === 'video' || scope === 'image')) setScope('project');
+  }, [hasDoc, scope]);
   /** 这一档说的是"文档内嵌的图"（字节在 .cud 里，不是仓库里的一堆）。 */
   const docScope = scope === 'video' || scope === 'image';
   /** 乐器库那一档：不属文档，内容由 Settings → MIDI 里那条路径决定。 */
   const isInstruments = scope === 'instruments';
+  /** 工程档：所有加载过的 .cud，只留链接；卡片按内容标视/音/图并播视频。 */
+  const isProject = scope === 'project';
   const instrLib = useInstrumentLibrary();
   const midiSettings = useMidiSettings();
   const [kind, setKind] = useState<'all' | 'image' | 'video' | 'audio'>('all');
@@ -860,6 +956,36 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   const [extTick, setExtTick] = useState(assetsTick());
   useEffect(() => subscribeAssets(() => setExtTick(assetsTick())), []);
   const fileRef = useRef<HTMLInputElement | null>(null);
+
+  // ── Project 档：所有加载过的 .cud（后端只存链接）──────────────────────────────────────────
+  // 清单随"开着的文档集合"重拉（保存/另存/新开都会改这份集合），切到这一档时也重拉
+  // （文档播报与 `/api/open_cuds` 落盘是两条请求，抢在前面的那次可能还没读到新链接），
+  // 另外可以手动刷新。文件被移走/删除时后端在列清单那一趟顺手清掉，所以这里不需要自己判 MISSING。
+  const [projects, setProjects] = useState<CudProject[] | null>(null);
+  const [projBusy, setProjBusy] = useState(false);
+  const [projErr, setProjErr] = useState<string | null>(null);
+  const [projTick, setProjTick] = useState(0);
+  const openKey = useMemo(() => openPaths.slice().sort().join('\n'), [openPaths]);
+  useEffect(() => {
+    let alive = true;
+    setProjBusy(true);
+    setProjErr(null);
+    fetch('/api/cud_projects')
+      .then(r => r.json())
+      .then(d => {
+        if (!alive) return;
+        setProjects(Array.isArray(d?.projects) ? d.projects : []);
+        if (d?.ok === false) setProjErr(d?.error || 'project list failed');
+      })
+      .catch(e => { if (alive) { setProjects([]); setProjErr(String(e)); } })
+      .finally(() => { if (alive) setProjBusy(false); });
+    return () => { alive = false; };
+  }, [projTick, openKey, isProject]);
+  const openPathSet = useMemo(
+    () => new Set(openPaths.map(p => p.replace(/\\/g, '/').toLowerCase())),
+    [openPaths],
+  );
+  const isOpenProject = (path: string) => openPathSet.has(path.replace(/\\/g, '/').toLowerCase());
 
   // ── 多选(本窗本地的选择集;Inspector 仍只吃主选那一份载荷)──
   // 点 = 只选这张(照旧报 Inspector);Ctrl/Cmd+点 = 增减;Shift+点 = 从锚点连选到这张;
@@ -897,15 +1023,16 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
     if (!sel) return;
     // Inspector 是共用的：Eagle（`e:`）等别的窗喂进来的选中不归 Assets 管，
     // 不能因为"这一窗里找不到这张卡"就把它撤掉。
-    if (!/^(?:s:|c:|d:)/.test(sel)) return;
+    if (!/^(?:s:|c:|d:|p:)/.test(sel)) return;
     const keys = new Set<string>([
       ...(store ?? []).map(s => 's:' + (s.hash || s.name)),
       ...clipAliveKeys,
       ...doc.image.map(a => 'd:' + a.hash),
       ...doc.video.map(a => 'd:' + a.hash),
+      ...(projects ?? []).map(p => 'p:' + p.path),
     ]);
     if (!keys.has(sel)) onSel?.(null);
-  }, [sel, store, doc, clipAliveKeys, onSel]);
+  }, [sel, store, doc, clipAliveKeys, projects, onSel]);
 
   // 多选集里指向已消失条目(删除 / 仓库清单刷新 / 换文档)的键,静默清掉 —— 与上面主选的守卫同一口径。
   useEffect(() => {
@@ -916,11 +1043,12 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
         ...clipAliveKeys,
         ...doc.image.map(a => 'd:' + a.hash),
         ...doc.video.map(a => 'd:' + a.hash),
+        ...(projects ?? []).map(p => 'p:' + p.path),
       ]);
       const next = new Set([...prev].filter(k => alive.has(k)));
       return next.size === prev.size ? prev : next;
     });
-  }, [store, doc, clipAliveKeys]);
+  }, [store, doc, clipAliveKeys, projects]);
 
   // ── 链接资产（右键菜单）────────────────────────────────────────────────────────────────────
   // 引用件只是"指着"仓库里的字节，指着的那份可能没了（MISSING），也可能当初就链错了（换成另一份）。
@@ -1010,6 +1138,10 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   const hits = (name: string, extra?: string) =>
     !needle || name.toLowerCase().includes(needle) || (extra || '').toLowerCase().includes(needle);
 
+  // Project 档：后端返回的全部链接按名字/路径过滤。没有 kind 过滤 —— 一张卡上已经并排
+  // 标出 VID / AUD / IMG，再按类型筛反而会把"有视频也有图"的工程拆没。
+  const projectItems = !isProject ? [] : (projects || []).filter(p => hits(p.name, p.path));
+
   // Library 档只列**库成员**：仓库里剩下的那些（run / processor 的中间图、别人文档带进来的图）
   // 不再占一档 —— 它们不是"我的东西"，跨文档也认不出来。
   const storeItems = scope !== 'library' ? [] : (store || []).filter(s => {
@@ -1050,7 +1182,7 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   for (const a of p.assets) { if (a.asset) coveredHashes.add(a.asset); if (a.play) coveredHashes.add(a.play); }
   const orphanMissing = scope !== 'library' || kind === 'image' ? []
     : [...vid.missing].filter(h => !coveredHashes.has(h));
-  const total = storeItems.length + docItems.length + clipItems.length + orphanMissing.length;
+  const total = projectItems.length + storeItems.length + docItems.length + clipItems.length + orphanMissing.length;
 
   // 收进本工程（视频/音频才有片段可落；图片不是可播素材）。
   const claimStore = (s: StoreAsset) => {
@@ -1067,6 +1199,7 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
 
   // 渲染序的全量键表(Shift 连选按它取范围)。库档只有库条目 + 孤儿缺失;文档两档 = 引用件 + 内嵌图。
   const visibleKeys = [
+    ...projectItems.map(p => 'p:' + p.path),
     ...storeItems.map(s => 's:' + (s.hash || s.name)),
     ...orphanMissing.map(h => 'm:' + h),
     ...clipItems.map(c => c.key),
@@ -1095,7 +1228,8 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   // Del:只对**库条目**生效（字节真删，整批一次确认）。文档那两档里的图删不得 —— 它们是文件的
   // 一部分，删一行库表只是把文档的缓存抹掉，画面该缺还是缺。孤儿缺失键不可选,天然走不到。
   const deleteSelected = async () => {
-    if (docScope || isInstruments) return;
+    // Project 档删的不是字节，链接只在文件丢失时由后端清掉；Del 不动它。
+    if (docScope || isInstruments || isProject) return;
     const sKeys = [...multiSel].filter(k => k.startsWith('s:')).map(k => k.slice(2));
     if (sKeys.length) {
       const items = sKeys
@@ -1205,9 +1339,10 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setOver(false);
-    // 乐器库那一档收不了东西：它列的是"盘上哪儿有一件乐器"，不是可入库的字节。文件拖进来
-    // 在这里落不进任何地方 —— 但 preventDefault 还是要做，否则浏览器会拿它当"打开这个文件"。
-    if (isInstruments) return;
+    // 乐器库 / 工程档都收不了东西：一个列的是盘上的乐器，一个列的是 .cud 链接。
+    // 文件拖进来在这里落不进任何地方 —— 但 preventDefault 还是要做，否则浏览器会拿它当
+    // "打开这个文件"。
+    if (isInstruments || isProject) return;
     const sid = e.dataTransfer.getData(STAGING_ITEM_TYPE);
     if (sid) {
       const item = vid.staging.find(s => s.id === sid);
@@ -1247,6 +1382,60 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   type CardSpec = { key: string; ratio: number; render: (h: number, w: number) => React.ReactNode };
   const cardSpecs: CardSpec[] = [];
   if (!isInstruments) {
+    // Project 档：一张卡 = 一份加载过的 .cud。顺序照后端给的"最近加载在前"。
+    for (const pr of projectItems) {
+      const key = 'p:' + pr.path;
+      const thumb = projectThumb(pr, 192);
+      const open = isOpenProject(pr.path);
+      const content: CardContent[] = [];
+      if (pr.hasVideo) content.push('video');
+      if (pr.hasAudio) content.push('audio');
+      if (pr.hasImage) content.push('image');
+      // 预览按内容选：有视频就播视频；只有音频/图像时用合成图当海报。
+      const previewKind: 'video' | 'audio' | 'image' =
+        pr.hasVideo ? 'video' : pr.hasAudio ? 'audio' : 'image';
+      const videoSrc = pr.hasVideo ? (pr.video || '') : '';
+      // Inspector：有视频就让它直接播；只有图像就放大合成图；纯音频没有可看的画面，留空。
+      const inspectKind: 'video' | 'audio' | 'image' =
+        pr.hasVideo ? 'video' : pr.hasImage ? 'image' : 'audio';
+      const payload: InspectSel = {
+        key, name: pr.name, kind: inspectKind,
+        src: pr.hasVideo ? videoSrc : pr.hasImage ? thumb : '',
+        duration: pr.duration || 0, hasAudio: pr.hasAudio ?? null,
+        origin: 'project', hash: undefined,
+      };
+      const when = pr.mtime ? new Date(pr.mtime * 1000).toLocaleDateString() : '';
+      const origin = [open ? 'open' : 'project', when].filter(Boolean).join(' · ');
+      cardSpecs.push({
+        key,
+        ratio: aspectOf(pr.w, pr.h, previewKind === 'audio' ? 1.6 : 16 / 9),
+        render: (ch, cw) => (
+          <Card
+            key={key}
+            cardH={ch}
+            cardW={cw}
+            selected={multiSel.has(key) || (multiSel.size === 0 && sel === key)}
+            onClick={e => cardClick(e, key, payload)}
+            onDoubleClick={() => onOpenProject?.(pr.path)}
+            it={{
+              name: pr.name, kind: previewKind, src: videoSrc,
+              duration: pr.duration || 0, hasAudio: pr.hasAudio ?? null,
+              w: pr.w, h: pr.h,
+              poster: thumb,
+              origin,
+              usedBy: open ? 'open' : (pr.ok === false ? 'unreadable' : undefined),
+              content: content.length ? content : undefined,
+              autoplay: !!videoSrc,
+              // 拖到生成器段的首/末帧卡上 = 绑这份工程的合成图当那一帧（不用先打开工程）。
+              drag: pr.ok === false ? undefined : {
+                [CUD_ITEM_TYPE]: JSON.stringify({ path: pr.path, name: pr.name }),
+              },
+            }}
+          />
+        ),
+      });
+    }
+
     for (const c of clipItems) {
       const payload: InspectSel = {
         key: c.key, name: c.name, kind: c.kind, src: c.missing ? '' : c.url,
@@ -1421,9 +1610,9 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
   return (
     <div
       onDragOver={e => {
-        // 乐器档收不了东西 —— 不 preventDefault，浏览器自己给"不可放下"的光标，
+        // 乐器 / 工程档收不了东西 —— 不 preventDefault，浏览器自己给"不可放下"的光标，
         // 比先亮一个蓝框再什么都不做诚实。
-        if (isInstruments) return;
+        if (isInstruments || isProject) return;
         const ts = e.dataTransfer.types; if (ts.includes(STAGING_ITEM_TYPE) || ts.includes(ASSET_ITEM_TYPE) || Array.from(ts).includes('Files')) { e.preventDefault(); setOver(true); } }}
       onDragLeave={() => setOver(o => (o ? false : o))}
       onDrop={onDrop}
@@ -1497,6 +1686,16 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
         )}
         {/* 卡片尺度：只改"多大一张"，不改每张卡自己的宽高比。乐器档是列表，不用它。 */}
         {!isInstruments && <CardScaleControl kind="assets" />}
+        {isProject && (
+          <button
+            title="Read the project list again — a .cud whose file is gone is dropped at that moment"
+            onClick={() => setProjTick(t => t + 1)}
+            style={{
+              ...rowBtn, width: 18, height: 18, border: '0.5px solid rgba(255,255,255,0.12)',
+              borderRadius: 4, color: 'rgba(255,255,255,0.55)',
+            }}
+          >↻</button>
+        )}
         {/* 链接资产的文件入口：引用件右键菜单那一项、以及卡上那颗回形针，都点它
             （同一时刻只为一条引用挑文件）。 */}
         <input
@@ -1557,11 +1756,16 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
 
         {!isInstruments && total === 0 && (
           <div style={{ width: '100%', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8, whiteSpace: 'pre-line' }}>
-            {docPending ? 'Reading this document…'
-              : docScope && scope === 'video' ? 'Nothing in this document yet.\nMedia you drop on the timeline shows up here as a reference;\nimages on Layer segments are embedded.'
-                : docScope ? 'This document has no images yet.\nLayers, guidances and the staging pool show up here.'
-                  : busy ? 'Loading…'
-                    : 'The library is empty.\nDrop files here or use ＋ to import images.'}
+            {isProject
+              ? (projBusy ? 'Reading the project list…'
+                : needle ? 'No project matches "' + q.trim() + '".'
+                  : 'No projects yet.\nLoad a .cud and its link shows up here — only the link, never a copy.')
+              : !hasDoc ? 'No project open — open a .cud to see its assets.'
+                : docPending ? 'Reading this document…'
+                  : docScope && scope === 'video' ? 'Nothing in this document yet.\nMedia you drop on the timeline shows up here as a reference;\nimages on Layer segments are embedded.'
+                    : docScope ? 'This document has no images yet.\nLayers, guidances and the staging pool show up here.'
+                      : busy ? 'Loading…'
+                        : 'The library is empty.\nDrop files here or use ＋ to import images.'}
           </div>
         )}
 
@@ -1579,18 +1783,24 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
         borderTop: '0.5px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.015)',
       }}>
         <span
-          title={isInstruments ? (instrLib.lib?.root || undefined) : ((err || listErr) || undefined)}
+          title={isInstruments ? (instrLib.lib?.root || undefined)
+            : isProject ? (projErr || undefined)
+              : ((err || listErr) || undefined)}
           style={{
-            fontSize: 9.5, color: (instrBroken || (!isInstruments && (err || listErr))) ? '#ff8a80' : 'rgba(255,255,255,0.32)',
+            fontSize: 9.5, color: (instrBroken || (!isInstruments && (isProject ? !!projErr : !!(err || listErr))))
+              ? '#ff8a80' : 'rgba(255,255,255,0.32)',
             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
           }}>
           {isInstruments ? instrLine
-            : busy && !docScope ? 'loading…' : err ? err : listErr ? listErr
-              : `${total} ${total === 1 ? 'item' : 'items'} · ${scope === 'library' ? 'library' : 'in this document'}`}
+            : isProject ? (projErr ? projErr : projBusy && !projects ? 'reading…'
+              : `${total} ${total === 1 ? 'project' : 'projects'} · links only`)
+              : busy && !docScope ? 'loading…' : err ? err : listErr ? listErr
+                : `${total} ${total === 1 ? 'item' : 'items'} · ${scope === 'library' ? 'library' : 'in this document'}`}
         </span>
         {multiSel.size > 0 && (
           <span style={{ fontSize: 9, color: '#3b9dff', flexShrink: 0, whiteSpace: 'nowrap' }}>
-            {docScope ? `${multiSel.size} selected` : `${multiSel.size} selected · Del to delete from the library`}
+            {isProject ? `${multiSel.size} selected`
+              : docScope ? `${multiSel.size} selected` : `${multiSel.size} selected · Del to delete from the library`}
           </span>
         )}
         <span style={{ flex: 1 }} />
@@ -1613,6 +1823,13 @@ export const VidAssets: React.FC<{ vid: VidController; midi: MidiCtl; sel?: stri
               }}
             >Rescan</button>
           </>
+        ) : isProject ? (
+          <span
+            style={{ fontSize: 9, color: 'rgba(255,255,255,0.26)', flexShrink: 0, whiteSpace: 'nowrap' }}
+            title="Links are stored in data/sampler/cud_projects.json — the .cud bytes are never copied"
+          >
+            {projectItems.filter(pr => isOpenProject(pr.path)).length} open
+          </span>
         ) : docScope ? (
           <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.26)', flexShrink: 0, whiteSpace: 'nowrap' }}
             title={scope === 'video'

@@ -33,7 +33,7 @@ import { MidiWorkspace } from '../midi/Workspace';
 import { patchMidiSettings, useMidiSettings, type LibraryState } from '../midi/settings';
 import { reloadInstruments, useInstrumentLibrary } from '../midi/library';
 import { unitIcon } from '../workbench/icons';
-import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VgenFrameSpec, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, clipAtSolo, createSeekCoalescer, createVidTransport, defaultVidProject, detectSlotBusy, detectTrackMergePlan, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeDetectPlaceholders, placeDetectOutput, placeDetectTrack, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, saveVidProject, setMaskTrack, setVideoGenRefImageTrack, setVideoGenRefTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, shareDetectTrackSource, vgenChainPrevOf, vgenChainTo, vgenRefFramePlan, vgenRefPlan, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
+import { type AssetIdentity, type ProcFrameWindow, type VidAsset, type VidController, type VidClip, type VidFrameNeed, type VgenFrameSpec, type VidGenFrameRef, type VidGenTrackCfg, type VidKfSnapshot, type VidProject, type VidTrackKind, applyProcSettings, clampFps, clipAtSolo, createSeekCoalescer, createVidTransport, defaultVidProject, detectSlotBusy, detectTrackMergePlan, detectTrackSharedSrc, importToTrack, isAudioName, isVideoName, kfChangedValues, kfFirstPassValues, kfRecord, kfU, kfSnapshotMeta, kfSnapshotValues, loadVidProject, normalizeVidProject, outputClipOf, placeDetectPlaceholders, placeDetectOutput, placeDetectTrack, placeProcAssets, placeProcOutput, placeProcPlaceholders, placeVideoGenOutput, placeVideoGenSegment, procSlotBusy, pruneVgenChains, rebindAsset, restoreDetectMergeSources, restoreDetectOutputs, saveVidProject, setMaskTrack, setVideoGenRefImageTrack, setVideoGenRefTrack, setVideoGenTrackCfg, setVideoGenTrackPreset, shareDetectTrackSource, unshareDetectTrackSource, vgenChainPrevOf, vgenChainTo, vgenRefFramePlan, vgenRefPlan, vidAssetRefs, vgenDurationOf, vgenFpsOf, vgenResolutionOf } from '../workbench/video/model';
 import { compositePlanAt } from '../workbench/video/composite';
 import PlaceholderSettingsModal from '../workbench/video/PlaceholderSettingsModal';
 // Prompt 窗与 sampler 页不同 origin：拖拽载荷走 postMessage，target 在这里登记。
@@ -55,13 +55,19 @@ import { bumpAssets } from '../workbench/video/assetsTick';
 import { markRender } from '../workbench/video/perf';
 import { beginVidProcRun, clearProcFill, clearProcQueue, dequeueProcClip, endVidProcRun, getProcFill, isProcQueued, setProcFill, setProcQueue, setVidProcRun, setVidStagingOverlay } from '../workbench/video/procRun';
 import { VidTimeline } from '../workbench/video/Timeline';
-import { VidAssets, Card, type StoreAsset } from '../workbench/video/Assets';
+import { VidAssets } from '../workbench/video/Assets';
 import { VidEagleAssets } from '../workbench/video/EagleAssets';
 import { VidInspector, type InspectSel } from '../workbench/video/Inspector';
 import { VidAudioMonitor } from '../workbench/video/AudioMonitor';
+import { VidFader } from '../workbench/video/Fader';
+import { VidAudioBus } from '../workbench/video/AudioBusPanel';
+import { VidAudioInterface } from '../workbench/video/AudioInterfacePanel';
+import { VidAudioObject } from '../workbench/video/AudioObjectPanel';
+import { AudioEventsLane } from '../workbench/video/AudioEventsLane';
 import { VidKeyframes } from '../workbench/video/Keyframes';
 import { VidPlayer } from '../workbench/video/Player';
 import { useTimelineAudio } from '../workbench/video/timelineAudio';
+import { useAudioEventPlayback } from '../workbench/video/audioEventPlayback';
 import { AgentPanel } from '../agent/AgentPanel';
 import type { AgentCtx } from '../agent/tools';
 
@@ -96,7 +102,7 @@ const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'presets', '
 // MIDI 模式**不占任何 dock 窗**：它是模式主窗（文档窗）的正文，一整块铺在那里面
 // （卷帘在上、Transport 横贯底部）。乐器/轨道/片段都在 Tracks 窗里选 ——
 // 乐器挂在轨道头上，MIDI 段与音频段是同一条时间线上的兄弟。窗一多，编曲就变成窗口管理。
-const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, 'promptManager', 'prompt', ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'veagle', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'];
+const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, 'promptManager', 'prompt', ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets', 'veagle', 'vinspector', 'vkf', 'vaudio', 'vfader', 'vbus', 'viface', 'vobj', 'log', 'debug', 'probe', 'agent'];
 // 工具窗的标识色:Log / Debug / Probe 三扇"看现场"的窗,图标与 tab 名同穿一件颜色的衣服,
 // 与内容窗(素色)一眼分开。icon 的着色与 titleColor 都从这里来 —— 一处定色,两处生效。
 const UNIT_COLORS: Partial<Record<string, string>> = {
@@ -110,6 +116,10 @@ const UNIT_TITLES: Record<string, string> = {
   toolbar: 'File', context: 'Context', pipeline: 'Pipeline', presets: 'Pipeline Presets',
   blocks: 'Pipeline Graph', promptManager: 'Prompt Manager', prompt: 'Prompt', vtracks: 'Tracks', vassets: 'Assets', veagle: 'Eagle', vinspector: 'Inspector', vkf: 'Keyframes',
   vaudio: 'Audio Monitor',
+  vfader: 'Fader',
+  vbus: 'Audio Bus',
+  viface: 'Audio Interface',
+  vobj: 'Audio Object',
   log: 'Log', debug: 'Debug', probe: 'Probe', agent: 'Agent',
   ...WORKBENCH_TITLES,
 };
@@ -204,13 +214,13 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDocUnit(id),
-    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'context' || id === 'prompt' || id === 'promptManager' || id === 'vtracks' || id === 'vassets' || id === 'veagle' || id === 'vinspector' || id === 'vkf' || id === 'vaudio' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent' || id === 'blocks',
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'context' || id === 'prompt' || id === 'promptManager' || id === 'vtracks' || id === 'vassets' || id === 'veagle' || id === 'vinspector' || id === 'vkf' || id === 'vaudio' || id === 'vfader' || id === 'vbus' || id === 'viface' || id === 'vobj' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent' || id === 'blocks',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
     // 时间线与资产库同理：两份会一直长的列表。
     // Context 也进 grows:预览图要吃满窗的余量(图片 fit dock window),左列里它是那个"看图"的窗,
     // 与 Inspector 同一待遇;Pipeline/Presets 照旧按内容定高。
-    grows: (id: UnitId) => isDocUnit(id) || id === 'prompt' || id === 'promptManager' || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'veagle' || id === 'vinspector' || id === 'vkf' || id === 'context' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent',
+    grows: (id: UnitId) => isDocUnit(id) || id === 'prompt' || id === 'promptManager' || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets' || id === 'veagle' || id === 'vinspector' || id === 'vkf' || id === 'vbus' || id === 'viface' || id === 'vobj' || id === 'context' || id === 'log' || id === 'debug' || id === 'probe' || id === 'agent',
     top: 'toolbar',
     // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
     // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
@@ -219,7 +229,7 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
     columnW: COLUMN_W,
     // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里，Assets / Tracks 是普通成员
     // （默认窗，不靠任何切换逻辑出现）。
-    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'veagle', 'vtracks', 'vinspector', 'vkf', 'vaudio', 'log', 'debug', 'probe', 'agent'],
+    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'veagle', 'vtracks', 'vinspector', 'vkf', 'vaudio', 'vfader', 'vbus', 'viface', 'vobj', 'log', 'debug', 'probe', 'agent'],
     rightW: RIGHT_W,
     // Prompt 不是右栏里的一张卡：它是画布右边独立的一列（默认布局就在这儿），宽 380。
     afterWork: { ids: ['promptManager', 'prompt'], w: PROMPT_W },
@@ -235,6 +245,10 @@ const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>)
       if (id === 'vinspector') return axis === 'v' ? 300 : 460;
       if (id === 'vkf') return axis === 'v' ? 360 : 900;
       if (id === 'vaudio') return axis === 'v' ? 240 : 200;
+      if (id === 'vfader') return axis === 'v' ? 300 : 260;
+      if (id === 'vbus') return axis === 'v' ? 420 : 640;
+      if (id === 'viface') return axis === 'v' ? 520 : 760;
+      if (id === 'vobj') return axis === 'v' ? 460 : 680;
       if (id === 'log') return axis === 'v' ? 240 : 320;
       if (id === 'debug') return axis === 'v' ? 380 : 460;
       if (id === 'probe') return axis === 'v' ? 420 : 540;
@@ -1345,6 +1359,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 公共时钟上（见 timelineAudio.ts）。**不能挂在 Player 上**：Player 只在 Video 模式里存在，
   // 切到 MIDI 模式音频轨就哑了 —— 而这三样是全模式共用的。
   useTimelineAudio(vidProject, soloAudio, mute);
+  // Keyframe 上的 Audio Event 点：同一个共享时钟，只有归属窗在播放时向前越点才触发（见
+  // audioEventPlayback.ts）。声音同样交给原生引擎，走 pcmClips 的一次性通道。
+  useAudioEventPlayback(vidProject);
   // ── 换 .cud 的唯一入口 ────────────────────────────────────────────────────────────────
   // 从前每一扇窗各自 `useEffect(..., [activeUid])`：谁漏一手，谁就把上一份的读数带到下一份上
   // （时间线选中了不存在的段、Inspector 对着别人的资产说话、预览桶里还挂着上一份的图……）。
@@ -2288,8 +2305,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     }
   }, [interfaces, execVgenClip]);
 
-  // 段的首/末帧绑定：挑一张图片资产，或磁盘上一份 .cud 工程（后端读它的合成图）。
-  const [vgenFramePick, setVgenFramePick] = useState<{ clipId: string; which: 'first_frame' | 'last_frame' } | null>(null);
   // 生成器轨的设置（轨头齿轮）：宽高 / from canvas / scale / fps —— 轨上所有段共享。
   const [vgenTrackSettingsId, setVgenTrackSettingsId] = useState<string | null>(null);
   // 生成器轨的轨级提示词（轨头 prompt 图标）：prompt block 同一套编辑弹窗。
@@ -2648,24 +2663,53 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 逐段独立的 1/6 秒小文件在播放时每段都要换一只 <video> 镜像，永远追不上画面；整轨一条源
   // 之后，取帧时刻回到与画面同一时间轴（offset = 段起点 − 轨起点），逐帧对齐。
   // 未跑完（还有占位段没落位）或段间有空隙时不动 —— 有洞的整轨会让后面所有段错位。
-  // 单段重跑后同样会再拼一次：那一段用自己的新文件，其余段按 offset 从整轨里切。
-  const mergeDetectTrack = useCallback(async (trackId: string) => {
-    const pl = detectTrackMergePlan(vidProjectRef.current, trackId);
-    if (!pl.ok) return;
-    // 已经合并过（各段同一条源、同一个源长）就什么都不做 —— 这里每拍都会被叫到，必须幂等。
-    const own = vidProjectRef.current.clips
-      .filter(c => c.trackId === trackId && !c.pending && c.src && c.duration > 0);
-    if (own.length > 1 && own.every(c => c.src === own[0].src
-      && Math.abs(c.srcDuration - own[0].srcDuration) < 1e-3)) return;
+  // 重拼只用各段的**原文件**（段上留着 mergedFrom），不做任何按秒裁切 —— 整文件流拷贝才逐帧安全。
+  // 同一条轨同一时刻只允许一个请求在飞（每次 clips 变化都会叫到它，不能并发写同一个整轨）。
+  const mergeBusy = useRef<Set<string>>(new Set());
+  // 媒体 URL 还在不在：取 1 字节探一次（服务端只认 GET + Range，HEAD 不可靠）。
+  const vidSrcAlive = async (src: string): Promise<boolean> => {
     try {
+      const r = await fetch(src, { headers: { Range: 'bytes=0-1' }, cache: 'no-store' });
+      return r.ok || r.status === 206;
+    } catch {
+      return false;
+    }
+  };
+  const mergeDetectTrack = useCallback(async (trackId: string) => {
+    if (mergeBusy.current.has(trackId)) return;
+    mergeBusy.current.add(trackId);
+    try {
+      // 段没了但占位段与产物文件都在（合并缓存被清后坏段被删）：先把缺的段补回轨上。
+      const refilled = restoreDetectOutputs(vidProjectRef.current, trackId);
+      if (refilled !== vidProjectRef.current) vidUpdate(p => restoreDetectOutputs(p, trackId));
+      // 老工程：段上没留原文件地址（合并是三十几个版本前做的），先从资产库把各段的原文件认回来 ——
+      // 认不出来也继续往下走，最多是拼不了。
+      const restored = restoreDetectMergeSources(refilled, trackId);
+      let live = restored;
+      if (restored !== vidProjectRef.current) vidUpdate(p => restoreDetectMergeSources(p, trackId));
+      let pl = detectTrackMergePlan(live, trackId);
+      // 整轨那条源是**派生缓存**，可能早被清掉了（缓存目录被收拾 / 换机器）。这时段上还写着那条
+      // 404 的整轨，plan 会一直判"已经合并"—— 画面上的 mask 却全是旧的。先探一次，没了就退回原文件重拼。
+      if (!pl.ok && pl.reason === 'track already merged') {
+        const shared = detectTrackSharedSrc(live, trackId);
+        if (!shared || (await vidSrcAlive(shared))) return;
+        const back = unshareDetectTrackSource(live, trackId);
+        if (back === live) return;
+        live = back;
+        vidUpdate(p => unshareDetectTrackSource(p, trackId));
+        pl = detectTrackMergePlan(live, trackId);
+      }
+      if (!pl.ok) return;
+      // 整轨合并是一次性长任务：给它一个上限，别让一个卡住的请求永远挂在页面上。
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 180000);
       const r = await fetch('/api/vid_merge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          parts: pl.parts, name: 'Detect mask', exact: true,
-          fps: clampFps(vidProjectRef.current.fps),
-        }),
+        body: JSON.stringify({ parts: pl.parts, name: 'Detect mask' }),
+        signal: ac.signal,
       });
+      clearTimeout(timer);
       const res = await r.json().catch(() => null) as
         { ok?: boolean; src?: string; duration?: number } | null;
       if (!res || !res.ok || !res.src || !(res.duration && res.duration > 0)) return;
@@ -2674,14 +2718,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       autoSaveCud();
     } catch {
       // 合并失败（ffmpeg 被清理 / 文件不在）：保持逐段引用，画面照旧能出，只是播放对不齐。
+    } finally {
+      mergeBusy.current.delete(trackId);
     }
   }, [vidUpdate, autoSaveCud]);
 
   // 打开工程 / 每次编辑落定后都试一次：老工程里的 Detect 轨还是"一段一个小文件"，自动拼成
-  // 整轨一次（已合并时上面幂等直接返回，不发请求）。没跑完 / 有缺口时同样直接返回。
+  // 整轨一次（已合并 / 未跑完 / 有缺口时 plan 直接拒绝，不发请求）。
   useEffect(() => {
-    const mt = vidProject.maskTrackId;
-    if (mt) void mergeDetectTrack(mt);
+    const ids = new Set<string>();
+    if (vidProject.maskTrackId) ids.add(vidProject.maskTrackId);
+    for (const c of vidProject.clips) {
+      const t = c.pending?.detect?.outTrackId;
+      if (t) ids.add(t);
+    }
+    for (const id of ids) void mergeDetectTrack(id);
   }, [vidProject.maskTrackId, vidProject.clips, mergeDetectTrack]);
 
   // 跑一个 Detect 占位段：按段里的快照重放**这一段**，产物落到 Detect 轨的对应位置。
@@ -4657,7 +4708,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 ? <div style={styles.vidVoid}>No project open — Tracks belong to a document.</div>
                 : <VidTimeline vid={vidCtl} midi={midiHost.ctl} mode={vidMode} onSettingsPlaceholders={setProcSettingsIds}
                     onRunVGen={id => { void runVideoGenSegment(id); }}
-                    onPickVGenFrame={(id, which) => setVgenFramePick({ clipId: id, which })}
+                    onBindVGenFrame={setVgenFrame}
                     onVGenTrackSettings={setVgenTrackSettingsId}
                     onVGenTrackPrompt={openVgenTrackPrompt}
                     onVGenPrompt={id => { void openVgenSegPrompt(id); }}
@@ -4665,9 +4716,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     onVGenRefTrack={setVgenRefTrack}
                     onVGenRefImageTrack={setVgenRefImageTrack}
                     onVGenCudOpen={path => { void openVgenCud(path); }} />,
-              vassets: blendDocs.activeUid === null
-                ? <div style={styles.vidVoid}>No project open — Assets belong to a document.</div>
-                : <VidAssets vid={vidCtl} midi={midiHost.ctl} sel={vidInspect?.key ?? null} onSel={setVidInspect}
+              // Assets 窗自己有 Project 档（所有加载过的 .cud 链接）和 Library / Instruments
+              // 两档，都不依赖打开的文档 —— 所以不再整扇挂文档闸；Video / Image 两档的空态
+              // 由窗内自己说（见 VidAssets 的 hasDoc）。
+              vassets: <VidAssets vid={vidCtl} midi={midiHost.ctl} sel={vidInspect?.key ?? null} onSel={setVidInspect}
+                    hasDoc={blendDocs.activeUid !== null}
+                    openPaths={blendDocs.docs.map(d => d.path).filter((p): p is string => !!p)}
+                    onOpenProject={path => { void openVgenCud(path); }}
                     onActivate={() => revealPanel('vinspector')} />,
               // Eagle：用户自己的外部素材库。**不挂文档闸** —— 它就是拿来翻素材的，没有工程也该能看；
               // 拖进工程 / 收进工程那两颗动作才需要工程（canClaim）。
@@ -4678,11 +4733,35 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               vinspector: <VidInspector sel={vidInspect} />,
               // Keyframes:Dopesheet —— 选中的那枚 Layer 段里,一行一个参数,右侧泳道按段内秒摊开
               // 关键帧菱形,一根播放头贯穿两列。与 Tracks 同一道文档闸 —— 关键帧住在段上,没有工程就没有段。
+              // 顶部多一条**项目全局**的 Audio Events 泳道(绝对秒):它不依赖选中哪一段,所以没有段也照常可用。
               vkf: blendDocs.activeUid === null
                 ? <div style={styles.vidVoid}>No project open — keyframes live on Layer segments.</div>
-                : <VidKeyframes vid={vidCtl} />,
+                : (
+                  <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                    <AudioEventsLane vid={vidCtl} />
+                    <div style={{ flex: '1 1 0', minHeight: 0 }}>
+                      <VidKeyframes vid={vidCtl} />
+                    </div>
+                  </div>
+                ),
               // Audio Monitor:谁持着全局独占音频槽就画谁(audioFocus 仲裁,页面级、不属于文档)。
               vaudio: <VidAudioMonitor />,
+              // Fader:每条音频轨一根推子(改工程的 audioGain,播放混音时由 pcmClips 落给引擎)。
+              // 与 Audio Monitor 同一道闸:没有工程就没有轨可混。
+              vfader: blendDocs.activeUid === null
+                ? <div style={styles.vidVoid}>No project open — faders mix the audio tracks of a project.</div>
+                : <VidFader vid={vidCtl} />,
+              // 音频定义三扇窗:Bus(可嵌套的串联增益链) / Interface(事件 + 参数 + 曲线) /
+              // Object(接口实例 + 事件槽位里的音频)。都随 .cud 走,没工程就没有定义可编辑。
+              vbus: blendDocs.activeUid === null
+                ? <div style={styles.vidVoid}>No project open — audio buses live in the project.</div>
+                : <VidAudioBus vid={vidCtl} />,
+              viface: blendDocs.activeUid === null
+                ? <div style={styles.vidVoid}>No project open — audio interfaces live in the project.</div>
+                : <VidAudioInterface vid={vidCtl} />,
+              vobj: blendDocs.activeUid === null
+                ? <div style={styles.vidVoid}>No project open — audio objects live in the project.</div>
+                : <VidAudioObject vid={vidCtl} />,
               // 工具窗三扇:Log(行为流水)/ Debug(上次 Run 快照)/ Probe(界面巡检)。
               // 彩色图标与彩色 tab 名来自 UNIT_COLORS。
               log: <LogPanel entries={actionLog} />,
@@ -5362,24 +5441,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           />
         );
       })()}
-      {/* video generator 段的首/末帧绑定：图片资产（按哈希直读仓库字节）或磁盘上一份 .cud
-          工程（后端读它的合成图当这一帧）。 */}
-      {vgenFramePick && (() => {
-        const clip = vidProject.clips.find(c => c.id === vgenFramePick.clipId);
-        if (!clip?.vgen) return null;
-        return (
-          <VideoGenFrameModal
-            which={vgenFramePick.which}
-            ifaceName={clip.vgen.iface}
-            current={vgenFramePick.which === 'first_frame' ? clip.vgen.first_frame : clip.vgen.last_frame}
-            onPick={ref => {
-              setVgenFrame(clip.id, vgenFramePick.which, ref);
-              setVgenFramePick(null);
-            }}
-            onClose={() => setVgenFramePick(null)}
-          />
-        );
-      })()}
+      {/* 首/末帧的绑定入口在时间线上：把 Assets / Eagle 的图片卡或 .cud 工程卡拖到帧卡上；
+          右上角的 × 解绑。这一页不再开挑图弹窗。 */}
     </div>
   );
 };
@@ -5530,133 +5593,6 @@ const VideoGenTrackModal: React.FC<{
               fromCanvas, scale: scaleOk ? s : 1,
               ...(fps !== '' && fpsOk ? { fps: Number(fps) } : {}),
             })}>Apply</button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-/** 段的首/末帧：从仓库挑一张图（**Assets 窗同款卡片**，同一套缩略/角标/名字长相），
- *  或磁盘上一份 .cud 工程（当前绑定也画成一张卡，缩略走同一接口）。 */
-const VideoGenFrameModal: React.FC<{
-  which: 'first_frame' | 'last_frame';
-  ifaceName: string;
-  current?: VidGenFrameRef | null;
-  onPick: (ref: VidGenFrameRef | null) => void;
-  onClose: () => void;
-}> = ({ which, ifaceName, current, onPick, onClose }) => {
-  const [rows, setRows] = useState<StoreAsset[]>([]);
-  const [q, setQ] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-  useEffect(() => {
-    let alive = true;
-    void fetch('/api/global_assets').then(r => r.json()).then((d: { assets?: StoreAsset[] } | StoreAsset[]) => {
-      if (!alive) return;
-      const list = Array.isArray(d) ? d : (d?.assets || []);
-      // 挑帧只用图：带 kind 的按 kind 过滤；老服务没有 kind 的行保留（宁可多显示）。
-      setRows(list.filter(a => a && (a.hash || a.name) && (!a.kind || a.kind === 'image')));
-    }).catch(() => { if (alive) setErr('The asset store did not answer.'); });
-    return () => { alive = false; };
-  }, []);
-  const label = which === 'first_frame' ? 'First frame' : 'Last frame';
-  // 磁盘上的 .cud：走后端那扇原生对话框（浏览器拿不到真实路径），挑中后**只记路径** ——
-  // 字节在跑的那一刻才由后端读（它认得 .cud 里那一幅合成图）。
-  const pickCud = async () => {
-    setBusy(true); setErr('');
-    try {
-      const r = await fetch('/api/io_pick', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'open', kind: 'cud' }),
-      }).then(r => r.json());
-      const picks: { token?: string; name?: string; path?: string }[] = r?.picks || [];
-      const first = picks.find(p => p && (p.path || p.token));
-      if (!first) { setBusy(false); return; }       // 取消
-      onPick({ kind: 'cud', path: String(first.path || first.token || ''),
-        name: first.name || String(first.path || '').split(/[\\/]/).pop() });
-    } catch (e: unknown) {
-      setErr(e instanceof Error ? e.message : String(e));
-      setBusy(false);
-    }
-  };
-  const needle = q.trim().toLowerCase();
-  const shown = rows.filter(a => !needle
-    || (a.displayName || a.name || '').toLowerCase().includes(needle)
-    || (a.hash || '').toLowerCase().includes(needle));
-  // 当前绑的 .cud 也占一张卡：缩略与时间线帧卡同一条 /api/cud_frame_thumb。点它 = 再开一次
-  // 对话框换一份 .cud（换绑定仍然只有一个入口）。
-  const cudPath = current?.kind === 'cud' ? current.path : '';
-  return (
-    <div style={styles.overlay} onClick={onClose}>
-      <div data-vid-frame-modal=""
-        style={{ ...styles.dialog, width: 640, maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}
-        onClick={e => e.stopPropagation()}>
-        <div style={styles.dialogTitle}>{label}</div>
-        <div style={styles.dialogSubtitle}>
-          「{ifaceName}」 — bind an image asset, or a .cud project (its composite is read as this frame).
-        </div>
-        <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexShrink: 0, alignItems: 'center' }}>
-          <button style={{ ...styles.cancelBtn, opacity: busy ? 0.5 : 1 }}
-            disabled={busy} onClick={() => { void pickCud(); }}>Open a .cud…</button>
-          {current && (
-            <button style={styles.cancelBtn} onClick={() => onPick(null)}>Unbind</button>
-          )}
-          <span style={{ flex: 1 }} />
-          <input
-            value={q}
-            onChange={e => setQ(e.target.value)}
-            placeholder="Search…"
-            spellCheck={false}
-            style={{
-              width: 150, height: 20, fontSize: 10, color: 'rgba(255,255,255,0.75)',
-              background: '#1b1b1e', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 4,
-              padding: '0 5px', outline: 'none',
-            }}
-          />
-        </div>
-        {err && <div style={{ fontSize: 11, color: '#ff9f0a', marginBottom: 8 }}>{err}</div>}
-        <div style={{
-          flex: 1, minHeight: 140, overflowY: 'auto', scrollbarWidth: 'thin',
-          padding: 2, display: 'grid', gap: 6, alignContent: 'start',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))',
-        }}>
-          {cudPath && (
-            <Card
-              it={{
-                name: current?.name || cudPath.split(/[\\/]/).pop() || cudPath,
-                kind: 'image', src: '', duration: 0, hasAudio: null,
-                poster: `/api/cud_frame_thumb?path=${encodeURIComponent(cudPath)}&w=160`,
-                origin: '.cud project',
-              }}
-              selected
-              onClick={() => { void pickCud(); }}
-            />
-          )}
-          {shown.map(s => {
-            const id = s.hash || s.name;
-            const on = !!current && current.kind === 'asset' && current.hash === id;
-            return (
-              <Card
-                key={'s:' + id}
-                it={{
-                  name: s.displayName || s.name,
-                  kind: 'image', src: s.url || '', duration: 0, hasAudio: null,
-                  poster: s.thumb || s.url || null,
-                  byteFrom: 'store', origin: s.origin || 'library',
-                }}
-                selected={on}
-                onClick={() => onPick({ kind: 'asset', hash: id, name: s.displayName || s.name })}
-              />
-            );
-          })}
-          {!cudPath && shown.length === 0 && (
-            <div style={{ gridColumn: '1 / -1', padding: 16, fontSize: 11, color: 'rgba(255,255,255,0.35)', textAlign: 'center', lineHeight: 1.8 }}>
-              {err ? '' : 'The asset store has no images yet — import one in Assets, or open a .cud.'}
-            </div>
-          )}
-        </div>
-        <div style={styles.dialogActions}>
-          <button style={styles.cancelBtn} onClick={onClose}>Close</button>
         </div>
       </div>
     </div>

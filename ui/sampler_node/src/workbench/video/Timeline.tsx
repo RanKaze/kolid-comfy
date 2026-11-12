@@ -5,6 +5,7 @@ import {
   type VidClip, type VidClipClipboard, type VidController, type VgenFrameSpec, type VidPasteResult, type VidTrack, type VidMergeProbe,
   addLayerClip, addMidiClip, addTrack, clipAtSolo, copyVidClips, detectSlotBusy, fmtTime, importToTrack, isAudioName, isVideoName, kfLocalTimes, kfRemapLayerIds, mergeVidClips, midiClipWindow, midiNotesInClip, moveClip, moveClips, moveTrack, musicOf, newVidId, outputClipOf, pasteVidClips, placeAsset, probeVidMerge, procSlotBusy, removeClip, removeTrack, renameTrack, replaceVidClipsWithMerged, rulerStep, splitClip, toggleVgenChain, trackOf, trimClip, unlinkGroup, vidDuration, vidMergeStructure,
   vgenChainPrevOf, vgenRefFramePlan, vgenSeamsOf, vgenWithDuration,
+  type VidGenFrameRef,
 } from './model';
 import { nativeEngine } from '../../midi/engine';
 import type { MidiCtl } from '../../midi/types';
@@ -15,7 +16,7 @@ import { getActiveBlendUid, subscribeBlendActive } from '../store';
 import { useCudScope, useCudState } from '../cudScope';
 import { probeMedia } from './audio';
 import { ingestFile } from './ingest';
-import { GLOBAL_ITEM_TYPE } from './Assets';
+import { CUD_ITEM_TYPE, GLOBAL_ITEM_TYPE } from './Assets';
 import { CUT_CURSOR, disarmCut, getCut, pressCutKey, releaseCutKey, setHover, useCut } from '../cutStore';
 import { setVidSelection } from './selection';
 import { markRender } from './perf';
@@ -60,6 +61,102 @@ const instrumentLabel = (path: string, name?: string): string => {
 
 const STAGING_ITEM_TYPE = 'application/x-blend-staging';
 const ASSET_ITEM_TYPE = 'application/x-vid-asset';
+/** 生成器帧卡吃下的拖拽：Assets / Eagle 的图片卡、图池条目、.cud 工程卡，以及磁盘上的图片文件。
+ *  帧只要一张静帧 —— 视频 / 音频卡到落点时才拒（dragenter 阶段读不到完整载荷）。 */
+const FRAME_DROP_TYPES = [CUD_ITEM_TYPE, 'application/x-asset', GLOBAL_ITEM_TYPE, STAGING_ITEM_TYPE];
+const frameDropHover = (dt: DataTransfer | null): boolean => {
+  if (!dt) return false;
+  const ts = Array.from(dt.types);
+  return ts.some(t => FRAME_DROP_TYPES.includes(t)) || ts.includes('Files');
+};
+
+const blobDataUrl = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => (typeof fr.result === 'string' ? resolve(fr.result) : reject(new Error('could not read the image')));
+    fr.onerror = () => reject(fr.error || new Error('could not read the image'));
+    fr.readAsDataURL(blob);
+  });
+
+/** 把一张**只有 URL** 的图（Eagle / 图池 / 磁盘文件）收进仓库，拿内容哈希来绑帧。
+ *  仓库按字节寻址：同一张图重复收也是同一份，不会长第二份。`library: false` = 不塞进用户的库。 */
+const importFrameImage = async (src: string | Blob, name: string): Promise<string> => {
+  const blob = typeof src === 'string'
+    ? await fetch(src).then(r => {
+      if (!r.ok) throw new Error('image fetch failed');
+      return r.blob();
+    })
+    : src;
+  const dataUrl = await blobDataUrl(blob);
+  const j = await fetch('/api/asset_import', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ images: [dataUrl], names: [name || 'frame'], library: false, origin: 'frame bind' }),
+  }).then(r => r.json()).catch(() => null) as { ok?: boolean; added?: { id?: string }[]; error?: string } | null;
+  const hash = j?.added?.[0]?.id;
+  if (!j?.ok || !hash) throw new Error(j?.error || 'import failed');
+  return hash;
+};
+
+/** 帧卡落点：把拖来的卡解析成 `VidGenFrameRef`。图片卡优先按**仓库哈希**绑（零拷贝）；
+ *  Eagle / 图池 / 本地文件没有哈希的，先收进仓库再绑。`.cud` 只记路径，跑的时候后端读它的合成图。 */
+const bindFrameFromDrop = (
+  e: React.DragEvent,
+  onBind: (ref: VidGenFrameRef) => void,
+  onError: (msg: string) => void,
+  staging: { id: string; name: string; src: string; asset?: string | null }[],
+): void => {
+  e.preventDefault();
+  e.stopPropagation();
+  const dt = e.dataTransfer;
+  const fail = (err: unknown) => onError('Frame bind failed: ' + (err instanceof Error ? err.message : String(err)));
+  // .cud 工程卡：后端自己读工程的合成图，工程不用先打开。
+  const cudRaw = dt.getData(CUD_ITEM_TYPE);
+  if (cudRaw) {
+    try {
+      const o = JSON.parse(cudRaw) as { path?: string; name?: string };
+      if (o?.path) { onBind({ kind: 'cud', path: o.path, name: o.name }); return; }
+    } catch { /* 不是我们写的那份：继续看后面 */ }
+  }
+  // Assets / Eagle 的图片卡。带哈希的直接绑；Eagle 只有 URL，收进仓库再绑。
+  const assetRaw = dt.getData('application/x-asset') || dt.getData(GLOBAL_ITEM_TYPE);
+  if (assetRaw) {
+    try {
+      const a = JSON.parse(assetRaw) as { id?: string; url?: string; name?: string; kind?: string; asset?: string };
+      if (a?.kind && a.kind !== 'image') {
+        onError(`Frames take a still image or a .cud project — not ${a.kind}.`);
+        return;
+      }
+      const hash = String(a?.asset || a?.id || '').trim();
+      if (hash) { onBind({ kind: 'asset', hash, name: a.name }); return; }
+      if (a?.url) {
+        void importFrameImage(a.url, a.name || 'frame')
+          .then(hash => onBind({ kind: 'asset', hash, name: a.name }))
+          .catch(fail);
+        return;
+      }
+      onError('This card has no image bytes to bind.');
+      return;
+    } catch { /* 不是我们写的那份：继续看后面 */ }
+  }
+  // 图池里画布派生的在途图：有仓库哈希就用哈希，没有就收一份新的。
+  const stagingId = dt.getData(STAGING_ITEM_TYPE);
+  if (stagingId) {
+    const item = staging.find(s => s.id === stagingId);
+    if (item?.asset) { onBind({ kind: 'asset', hash: item.asset, name: item.name }); return; }
+    if (item?.src) {
+      void importFrameImage(item.src, item.name || 'staging').then(hash => onBind({ kind: 'asset', hash, name: item.name })).catch(fail);
+      return;
+    }
+  }
+  // 磁盘上直接拖进来的图片文件。
+  const file = Array.from(dt.files || []).find(f => /^image\//.test(f.type)
+    || /\.(png|jpe?g|webp|bmp|gif|avif|tiff?)$/i.test(f.name));
+  if (file) {
+    void importFrameImage(file, file.name).then(hash => onBind({ kind: 'asset', hash, name: file.name })).catch(fail);
+    return;
+  }
+  onError('Drop an image card, a .cud project card, or an image file onto a frame — video / audio cards can’t be a frame.');
+};
 // 标尺 34px，**纵向分三段**：上 10 = 范围边界线顶端的楔形，中 14 = 刻度，下 10 = 播放头三角。
 // 播放头和范围标记只会在同一列上"上下相遇"，永远不会占同一块命中区 —— 这就是不让它们抢手势的办法。
 const RULER_H = 34;
@@ -72,6 +169,13 @@ const TICK_BOTTOM = PLAY_H;          // 10：刻度带的下沿（给底部三�
 // 范围边界线 / 顶端楔形共用同一个颜色：两者要读成同一条线，不能一个深蓝一个浅蓝。
 const RANGE_LINE_COLOR = 'rgba(120,200,255,0.75)';
 const HEADER_W = 140;
+// 帧口径的刻度阶梯（单位 = 帧）：取第一个"一格至少 64px"的档，与时间口径的 rulerStep 同一取舍。
+// 档位尽量落在整秒/半秒的倍数上（30/60/120…），缩放时数字不会变成 37、91 这种怪值。
+const RULER_FRAME_STEPS = [1, 2, 3, 5, 10, 15, 20, 30, 60, 90, 120, 180, 240, 480, 900, 1800, 3600, 9000];
+const frameStep = (pps: number, fps: number): number => {
+  const per = pps / Math.max(1, fps);          // 一帧多少像素
+  return RULER_FRAME_STEPS.find(s => s * per >= 64) ?? RULER_FRAME_STEPS[RULER_FRAME_STEPS.length - 1];
+};
 // 底部横向滚动条：条子（thumb）最窄 28px —— 两端各要放一颗圆把手，再窄就挤成一团。
 // 圆把手直径 11px，骑在 thumb 的左右边缘上（半颗在外），拖它 = 改 thumb 宽。
 const SB_THUMB_MIN = 28;
@@ -277,8 +381,9 @@ export const VidTimeline: React.FC<{
   onSettingsPlaceholders?: (clipIds: string[]) => void;
   /** video generator 段的 ▶：按段上那份配置把这台生成器跑一遍。 */
   onRunVGen?: (clipId: string) => void;
-  /** video generator 段的首/末帧卡片：挑一张图片资产或磁盘上的 .cud 工程。 */
-  onPickVGenFrame?: (clipId: string, which: 'first_frame' | 'last_frame') => void;
+  /** video generator 段的首/末帧：把 Assets / Eagle 的图片卡或 .cud 工程卡拖到帧卡上绑定；
+   *  `ref = null` = 解绑（帧卡右上角的 ×）。 */
+  onBindVGenFrame?: (clipId: string, which: 'first_frame' | 'last_frame', ref: VidGenFrameRef | null) => void;
   /** video generator 轨头上的齿轮（轨设置：宽高 / from canvas / scale / fps —— 轨上所有段共享）。 */
   onVGenTrackSettings?: (trackId: string) => void;
   /** video generator 轨头上的 prompt 图标（轨级提示词：prompt 弹窗，段提示词在 Segment 之外）。 */
@@ -297,7 +402,7 @@ export const VidTimeline: React.FC<{
    *  那是卷帘的键（删音符），不能被"删掉选中的段"抢走。Cut（C）不受它限制 —— 那一条
    *  按鼠标在哪一面分派，指针停在时间线上就该剪段。 */
   mode: 'image' | 'video' | 'midi';
-}> = ({ vid, midi, onSettingsPlaceholders, onRunVGen, onPickVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, vgenRefTracks, onVGenRefTrack, onVGenRefImageTrack, onVGenCudOpen, mode }) => {
+}> = ({ vid, midi, onSettingsPlaceholders, onRunVGen, onBindVGenFrame, onVGenTrackSettings, onVGenTrackPrompt, onVGenPrompt, vgenRefTracks, onVGenRefTrack, onVGenRefImageTrack, onVGenCudOpen, mode }) => {
   const hostDoc = useDockDocument();
   const hostWin = useDockWindow();
   const { project: p, transport, pps } = vid;
@@ -311,6 +416,17 @@ export const VidTimeline: React.FC<{
   const procQueue = useSyncExternalStore(subscribeProcQueue, getProcQueue);
   markRender('VidTimeline');
   const dur = vidDuration(p);
+  // ── 标尺口径 ── 帧（默认）/ 时间（秒）。左上角那颗 toggle 切换，只换**刻度与时长浮签的读法**，
+  // 不动工程数据：时间线内部仍是秒 + 整数帧网格，所以两种读法都能回到同一个位置。
+  const [rulerFrames, setRulerFrames] = useState<boolean>(() => {
+    try { return localStorage.getItem('sampler.vidRulerFrames') !== '0'; } catch { return true; }
+  });
+  const setRulerMode = (frames: boolean) => {
+    setRulerFrames(frames);
+    try { localStorage.setItem('sampler.vidRulerFrames', frames ? '1' : '0'); } catch { /* 存不下就算了 */ }
+  };
+  const fps = Math.max(1, Math.round(p.fps || 30));
+
   // 铺满口径的"全长"：片段尽头之外还要盖住 range 出点 —— 出点可以比最后一枚片段更靠右
   // （片段删掉/改短之后 range 仍留着）。内容宽、Fit、缩放下限都按它算，底部滚动手柄才
   // 缩得到"range 两头都看得见"。
@@ -356,6 +472,14 @@ export const VidTimeline: React.FC<{
     noteTimer.current = window.setTimeout(() => setActNote(''), 2600);
   }, []);
   useEffect(() => () => { if (noteTimer.current) window.clearTimeout(noteTimer.current); }, []);
+  // 生成器首/末帧卡：拖来的图片 / .cud 工程在这里解析成绑定写回；× 解绑。
+  // 失败（视频卡、取不到字节）不静默 —— 在时间线左下角的动作播报里说一句。
+  const frameDrop = useCallback((e: React.DragEvent, clipId: string, which: 'first_frame' | 'last_frame') => {
+    bindFrameFromDrop(e, ref => onBindVGenFrame?.(clipId, which, ref), flash, vid.staging);
+  }, [vid.staging, onBindVGenFrame, flash]);
+  const frameUnbind = useCallback((clipId: string, which: 'first_frame' | 'last_frame') => {
+    onBindVGenFrame?.(clipId, which, null);
+  }, [onBindVGenFrame]);
   const doCopy = useCallback(() => {
     if (!selIds.size) { flash('Copy: nothing selected — click a segment first'); return; }
     const cb = copyVidClips(p, [...selIds]);
@@ -1330,27 +1454,32 @@ export const VidTimeline: React.FC<{
   };
   const onSbUp = () => { sbDrag.current = null; };
 
-  // ── 标尺刻度 ── 选一个 ≥64px 的步长。
-  const step = rulerStep(pps);
+  // ── 标尺刻度 ── 帧口径（默认）：一格 = N 帧，数字就是帧号；时间口径：老规矩（≥64px 的秒档）。
+  // 两种口径只在"单位"上不同：帧口径的 1 单位 = 1/fps 秒，所以像素坐标与吸附口径完全一致。
+  const unit = rulerFrames ? 1 / fps : 1;                 // 一个刻度单位 = 多少秒
+  const unitPx = pps * unit;                              // 一个刻度单位 = 多少像素
+  const stepUnits = rulerFrames ? frameStep(pps, fps) : rulerStep(pps);
+  const fmtUnits = (u: number): string =>
+    rulerFrames ? `${Math.round(u)}` : fmtTime(u);
   const ticks: React.ReactNode[] = [];
   // 刻度画到**内容宽**为止（contentW 已含可视区）：短工程也不会在右边留一段没有刻度的空带。
   // 刻度文字从刻度线往右写，末尾必须给它留出宽度 —— 一旦刻度撑出 contentW，内容层的
   // scrollWidth 就会大于 contentW：底部自定义滚动条的 thumb 按 contentW 算行程，浏览器却按
   // scrollWidth 滚 —— 滚到尽头、或者刷新时浏览器恢复了更靠右的 scrollLeft，thumb 就会被
   // 顶出轨道（"指示范围"失真），点一下滚动条才被夹回轨道内。
-  const tickEnd = Math.max(0, (contentW - HEADER_W) / pps);
-  const TICK_LABEL_W = 40;   // 刻度文字（m:ss.s，9px 字号）的最大宽
-  for (let t = 0; HEADER_W + t * pps + TICK_LABEL_W <= contentW; t += step) {
+  const tickEndUnits = Math.max(0, (contentW - HEADER_W) / unitPx);
+  const TICK_LABEL_W = 40;   // 刻度文字（m:ss.s / 帧号，9px 字号）的最大宽
+  for (let u = 0; HEADER_W + u * unitPx + TICK_LABEL_W <= contentW; u += stepUnits) {
     ticks.push(
-      <div key={t} style={{ position: 'absolute', left: HEADER_W + t * pps, top: TICK_TOP, bottom: TICK_BOTTOM, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', pointerEvents: 'none' }}>
+      <div key={u} style={{ position: 'absolute', left: HEADER_W + u * unitPx, top: TICK_TOP, bottom: TICK_BOTTOM, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', pointerEvents: 'none' }}>
         <div style={{ width: 1, height: 5, background: 'rgba(255,255,255,0.42)' }} />
-        <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.45)', padding: '1px 0 0 3px', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', letterSpacing: 0.2 }}>{fmtTime(t)}</span>
+        <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.45)', padding: '1px 0 0 3px', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', letterSpacing: 0.2 }}>{fmtUnits(u)}</span>
       </div>,
     );
     // 半步细刻度：只给眼睛一个"这一格有多宽"的参照，不写数字 —— 密到写不下时会糊。
-    if (t + step / 2 <= tickEnd) {
+    if (u + stepUnits / 2 <= tickEndUnits) {
       ticks.push(
-        <div key={'m' + t} style={{ position: 'absolute', left: HEADER_W + (t + step / 2) * pps, top: TICK_TOP, width: 1, height: 4, background: 'rgba(255,255,255,0.16)', pointerEvents: 'none' }} />,
+        <div key={'m' + u} style={{ position: 'absolute', left: HEADER_W + (u + stepUnits / 2) * unitPx, top: TICK_TOP, width: 1, height: 4, background: 'rgba(255,255,255,0.16)', pointerEvents: 'none' }} />,
       );
     }
   }
@@ -1452,8 +1581,25 @@ export const VidTimeline: React.FC<{
               onPointerDown={onRulerDown} onPointerMove={onRulerMove} onPointerUp={onRulerUp} onPointerCancel={onRulerUp}
               style={{ position: 'relative', height: RULER_H, borderBottom: '0.5px solid rgba(255,255,255,0.10)', cursor: 'ew-resize', userSelect: 'none' }}
             >
-              {/* 角格：与轨道头同宽同色，横向滚动时钉在左上，刻度从它右边才开始。 */}
-              <div style={{ position: 'sticky', left: 0, width: HEADER_W, height: '100%', zIndex: 7, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)' }} />
+              {/* 角格：与轨道头同宽同色，横向滚动时钉在左上，刻度从它右边才开始。
+                  左上角这颗 toggle 换标尺口径：帧（默认）/ 时间 —— 只是读法，时间线内部不变。 */}
+              <div
+                onPointerDown={e => e.stopPropagation()}
+                style={{ position: 'sticky', left: 0, width: HEADER_W, height: '100%', zIndex: 7, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)', display: 'flex', alignItems: 'center', paddingLeft: 6 }}>
+                <div role="group" aria-label="Ruler units" style={{ display: 'flex', gap: 2, padding: 2, borderRadius: 6, background: 'rgba(255,255,255,0.06)' }}>
+                  {([{ k: true, label: 'Frames' }, { k: false, label: 'Time' }]).map(o => (
+                    <button key={o.label} type="button" data-vid-ruler-unit={o.k ? 'frame' : 'time'}
+                      onClick={() => setRulerMode(o.k)}
+                      title={o.k ? 'Ruler in frames — one unit = one frame' : 'Ruler in seconds (m:ss.s)'}
+                      style={{
+                        cursor: 'pointer', border: 0, borderRadius: 4, height: 16, padding: '0 6px',
+                        fontSize: 9.5, fontWeight: 700, letterSpacing: 0.2,
+                        background: rulerFrames === o.k ? 'rgba(10,132,255,0.85)' : 'transparent',
+                        color: rulerFrames === o.k ? '#fff' : 'rgba(255,255,255,0.5)',
+                      }}>{o.label}</button>
+                  ))}
+                </div>
+              </div>
               {ticks}
               {/* 范围覆盖：**整条标尺**（原来那种观感）。纯视觉，不吃手势。
                   两端的边界线**单独画**（left: pos - 0.5，与轨道区那两条长线同一公式）——
@@ -1793,7 +1939,8 @@ export const VidTimeline: React.FC<{
                         onSettingsPlaceholders(ids.length ? ids : [id]);
                       } : undefined}
                       onVGenRun={onRunVGen}
-                      onVGenFrame={onPickVGenFrame}
+                      onVGenFrameDrop={onBindVGenFrame ? frameDrop : undefined}
+                      onVGenFrameUnbind={onBindVGenFrame ? frameUnbind : undefined}
                       onVGenPrompt={onVGenPrompt}
                       onOpenVGenRef={onVGenRefTrack
                         ? (id, e) => setRefMenu({ clipId: id, kind: 'video', x: e.clientX + 8, y: e.clientY + 8 })
@@ -1812,8 +1959,7 @@ export const VidTimeline: React.FC<{
                 {/* Layer 段上的关键帧菱形：画在**泳道坐标**里（不是片段内部）—— 片段是 overflow:hidden，
                     贴着两头的菱形会被裁掉或被挤进来，位置就不准了。这里中心严格落在「段起点 + 段内秒」
                     上：与 Tracks 的标尺、吸附靶子、Keyframes 窗用同一个时刻口径。 */}
-                {tr.kind === 'layer' && p.clips.filter(c => c.trackId === tr.id && c.keyframes && c.duration * pps >= 6).map(c => (
-                  <div key={'kfm' + c.id} data-vid-kf-lane={c.id}
+                {p.clips.filter(c => c.trackId === tr.id && c.keyframes && c.duration * pps >= 6).map(c => (                  <div key={'kfm' + c.id} data-vid-kf-lane={c.id}
                     style={{ position: 'absolute', left: c.start * pps, top: 0, height: '100%',
                       width: Math.max(8, c.duration * pps), pointerEvents: 'none', zIndex: 3 }}>
                     {kfLocalTimes(c, p.fps).map(t => (
@@ -1838,6 +1984,38 @@ export const VidTimeline: React.FC<{
                     ))}
                   </div>
                 ))}
+                {/* 段上的音频事件点：小三角，画在泳道坐标里（段内秒 → 绝对位置），
+                    随段移动/裁剪。点它 = 选中这一段并把播放头挪到那颗点的绝对时刻。 */}
+                {p.clips.filter(c => c.trackId === tr.id).map(c => {
+                  const pts = (p.audioEventPoints ?? []).filter(pt => pt.clipId === c.id && pt.t <= c.duration + 1e-6);
+                  if (!pts.length) return null;
+                  return (
+                    <div key={'aep' + c.id}
+                      style={{ position: 'absolute', left: c.start * pps, top: 0, height: '100%',
+                        width: Math.max(4, c.duration * pps), pointerEvents: 'none', zIndex: 3 }}>
+                      {pts.map(pt => (
+                        <button key={pt.id} type="button" data-vid-aep-mark=""
+                          title={`Audio event ${pt.t.toFixed(3)}s into this segment (timeline ${fmtTime(c.start + pt.t)}) — click to put the playhead there. Edit it in the Keyframes window.`}
+                          onPointerDown={e => e.stopPropagation()}
+                          onClick={e => {
+                            e.stopPropagation();
+                            selectOnly(c.id);
+                            vid.seek(c.start + pt.t);
+                          }}
+                          style={{
+                            position: 'absolute', left: pt.t * pps - 4, top: 14,
+                            width: 8, height: 8, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'auto',
+                          }}
+                        >
+                          <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden>
+                            <path d="M4 0.6 7.6 7.4H0.4Z" fill="#8ad6ff" stroke="rgba(0,0,0,0.6)" strokeWidth="0.8" />
+                          </svg>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
                 {/* 生成器段的接缝：Ctrl+左键连接/断开。已连着的常驻一颗链标；没连的只在
                     Ctrl 按住时显形（平时这块地方属于两侧的裁剪把手）。z 在片段之上。 */}
                 {seams.filter(s => s.prev.trackId === tr.id).map(s => (
@@ -2160,7 +2338,7 @@ export const VidTimeline: React.FC<{
             fontVariantNumeric: 'tabular-nums', color: '#241c00',
             background: 'rgba(255,214,10,0.94)', border: '0.5px solid rgba(0,0,0,0.25)',
             boxShadow: '0 3px 10px rgba(0,0,0,0.45)',
-          }}>{fmtTime(c.duration)}</div>,
+          }}>{rulerFrames ? `${Math.round(c.duration * fps)}f` : fmtTime(c.duration)}</div>,
           hostDoc.body,
         );
       })()}
@@ -2234,8 +2412,10 @@ const Clip: React.FC<{
   missing?: boolean;
   /** video generator 段的 ▶（按段上那份配置跑这台生成器）；undefined = 宿主没接（按钮不画）。 */
   onVGenRun?: (clipId: string) => void;
-  /** video generator 段的首/末帧卡片：点一下挑图（图片资产或磁盘上的 .cud 工程）。 */
-  onVGenFrame?: (clipId: string, which: 'first_frame' | 'last_frame') => void;
+  /** video generator 段的首/末帧卡片：把图片卡 / .cud 工程卡拖到这里绑定（事件已经在 Clip 里止住）。 */
+  onVGenFrameDrop?: (e: React.DragEvent, clipId: string, which: 'first_frame' | 'last_frame') => void;
+  /** 帧卡右上角的 ×：解绑那一头。 */
+  onVGenFrameUnbind?: (clipId: string, which: 'first_frame' | 'last_frame') => void;
   /** video generator 段的 prompt 图标（段自己的提示词：prompt 弹窗）。 */
   onVGenPrompt?: (clipId: string) => void;
   /** 生成器段的参考通道：点 REF 键时把菜单位置交回时间线（null/undefined = 不画这颗键）。 */
@@ -2254,8 +2434,10 @@ const Clip: React.FC<{
   chainOut?: VidClip | null;
   /** 工程速度（BPM）—— MIDI 段的窗口与音符缩略图按它把拍换成段内比例。 */
   tempo?: number;
-}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrame, onVGenPrompt, onOpenVGenRef, onOpenVGenRefImage, refTracks, refFrames, onVGenCudOpen, chainPrev, chainOut, tempo }) => {
+}> = ({ clip: c, pps, selected, blade, muted, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onContextMenu, onUnlink, touchesLeft, continueBlocked, queued, onDequeue, onStop, onContinue, onSettings, missing, onVGenRun, onVGenFrameDrop, onVGenFrameUnbind, onVGenPrompt, onOpenVGenRef, onOpenVGenRefImage, refTracks, refFrames, onVGenCudOpen, chainPrev, chainOut, tempo }) => {
   const isAudio = c.kind === 'audio';
+  // 生成器帧卡的拖拽高亮：拖图片/工程卡悬停在哪一头，哪一头亮蓝。
+  const [frameOver, setFrameOver] = useState<'first_frame' | 'last_frame' | null>(null);
   // MIDI 段：没有源文件，画面/波形都没有；段面画的是"这一窗里有哪些音符"。
   const isMidi = c.kind === 'midi';
   // 缺失：只有"真有来源"的段才可能缺（Layer 段、占位段、生成器段、MIDI 段都没有仓库来源）。
@@ -2391,7 +2573,7 @@ const Clip: React.FC<{
       onClick={e => e.stopPropagation()}
       onDoubleClick={e => e.stopPropagation()}
       title={isVGen && c.vgen
-        ? `${c.name} — video generator segment for 「${c.vgen.iface}」 (${fmtTime(c.duration)}${c.vgen.fixed_fps ? ', fixed fps' : ''}). ${chainPrev ? `Linked to 「${chainPrev.name}」 — its last frame is this segment's first frame (Ctrl-click the seam to disconnect). ` : ''}${c.vgen.ports.first_frame ? 'The left frame card binds the first frame; ' : ''}${c.vgen.ports.last_frame ? 'the right frame card binds the last frame; ' : ''}${c.vgen.ports.reference ? (c.vgen.ref_track ? `the REF key picks the reference channel (now 「${refTracks?.find(t => t.id === c.vgen!.ref_track)?.name || 'missing'}」); ` : 'the REF key picks the reference channel (none picked); ') : ''}${c.vgen.ref_frame_track ? `the IMG key picks the reference image (now 「${refTracks?.find(t => t.id === c.vgen!.ref_frame_track)?.name || 'missing'}」) for unbound first / last frames; ` : ''}Width / height / fps are the track settings (the gear on the track header) and the track prompt is the speech bubble next to it; ▶ sends the segment's values into the interface and the finished video lands on the output track above at this position. The segment stays, so it can be run again.`
+        ? `${c.name} — video generator segment for 「${c.vgen.iface}」 (${fmtTime(c.duration)}${c.vgen.fixed_fps ? ', fixed fps' : ''}). ${chainPrev ? `Linked to 「${chainPrev.name}」 — its last frame is this segment's first frame (Ctrl-click the seam to disconnect). ` : ''}${c.vgen.ports.first_frame ? 'The left frame card binds the first frame (drop an image or .cud project card on it); ' : ''}${c.vgen.ports.last_frame ? 'the right frame card binds the last frame (same drop); ' : ''}${c.vgen.ports.reference ? (c.vgen.ref_track ? `the REF key picks the reference channel (now 「${refTracks?.find(t => t.id === c.vgen!.ref_track)?.name || 'missing'}」); ` : 'the REF key picks the reference channel (none picked); ') : ''}${c.vgen.ref_frame_track ? `the IMG key picks the reference image (now 「${refTracks?.find(t => t.id === c.vgen!.ref_frame_track)?.name || 'missing'}」) for unbound first / last frames; ` : ''}Width / height / fps are the track settings (the gear on the track header) and the track prompt is the speech bubble next to it; ▶ sends the segment's values into the interface and the finished video lands on the output track above at this position. The segment stays, so it can be run again.`
         : isMidi
         ? `${c.name} — MIDI segment, ${midiShown.length} note${midiShown.length === 1 ? '' : 's'} in view (${fmtTime(c.duration)}). Its notes are edited in the MIDI window — select this segment and switch to MIDI. Trimming only hides the notes outside the segment; they stay on it. The instrument, MIDI channel and track velocity live on the track header. Drag / trim / split / copy like any clip.`
         : isPending && c.pending
@@ -2595,14 +2777,17 @@ const Clip: React.FC<{
           // 当分隔（左卡留右、右卡留左），上下和贴边那侧都不画。四边逐条写死宽度 ——
           // 简写碰到 undefined 会被 React 拆成 longhand，掉回浏览器默认的 medium。
           const divider = `1px dashed ${ref || linked || fallback ? 'rgba(255,255,255,0.55)' : PK.edge}`;
+          const frameBindTip = which === 'first_frame'
+            ? 'First frame — drag an image card from Assets / Eagle, a .cud project card, or an image file onto this card to bind it (a .cud’s canvas is read as the frame). The value feeds the port this generator declared; the × on the preview unbinds it.'
+            : 'Last frame — drag an image card from Assets / Eagle, a .cud project card, or an image file onto this card to bind it (a .cud’s canvas is read as the frame). The value feeds the port this generator declared; the × on the preview unbinds it.';
           const fallbackTip = fallback
-            ? `${which === 'first_frame' ? 'First' : 'Last'} frame — taken from the reference image channel at ${(fallback.f0 / fallback.fps).toFixed(2)}s (not bound). Click to bind an explicit image or .cud; an explicit binding or a chain link overrides this.`
+            ? `${which === 'first_frame' ? 'First' : 'Last'} frame — taken from the reference image channel at ${(fallback.f0 / fallback.fps).toFixed(2)}s (not bound). Drop an image or .cud project card here to bind it explicitly; an explicit binding or a chain link overrides this.`
             : null;
           // 参考图选了、这一头也确实轮到它，但轨上没有对应帧：把"这一头保持空"说清楚。
           const refMissing = !!v.ref_frame_track && !fallback
             && (which === 'first_frame' ? refNeedFirst : refNeedLast);
           const refMissingTip = refMissing
-            ? `${which === 'first_frame' ? 'First' : 'Last'} frame — the reference image channel 「${refImgName || v.ref_frame_track}」 has no corresponding frame at this segment's ${which === 'first_frame' ? 'start' : 'last frame time'}, so this end stays empty. Click to bind an explicit image or .cud.`
+            ? `${which === 'first_frame' ? 'First' : 'Last'} frame — the reference image channel 「${refImgName || v.ref_frame_track}」 has no corresponding frame at this segment's ${which === 'first_frame' ? 'start' : 'last frame time'}, so this end stays empty. Drop an image or .cud project card here to bind it explicitly.`
             : null;
           const chainTip = linked
             ? (chainPrev!.vgen?.last_frame
@@ -2616,24 +2801,44 @@ const Clip: React.FC<{
               data-vid-vgen-frame={which}
               data-vid-vgen-chain={linked ? '1' : '0'}
               data-vid-vgen-frame-ref={fallback ? '1' : '0'}
-              title={chainTip ?? fallbackTip ?? refMissingTip ?? (which === 'first_frame'
-                ? 'First frame — bind an image asset or a .cud project (its canvas is read as the first frame). Click to pick; the value feeds the port this generator declared.' + (ref?.kind === 'cud' ? ' The ⤴ badge on the preview opens that project in the blend editor.' : '')
-                : 'Last frame — bind an image asset or a .cud project (its canvas is read as the last frame). Click to pick; the value feeds the port this generator declared.' + (ref?.kind === 'cud' ? ' The ⤴ badge on the preview opens that project in the blend editor.' : ''))}
+              data-vid-vgen-frame-over={frameOver === which ? '1' : '0'}
+              title={chainTip ?? fallbackTip ?? refMissingTip ?? (frameBindTip + (ref?.kind === 'cud' ? ' The ⤴ badge on the preview opens that project in the blend editor.' : ''))}
               onPointerDown={e => e.stopPropagation()}
-              onClick={e => {
+              // 拖放绑定：图片卡 / 图池条目 / .cud 工程卡落到这一头。链优先时这张卡显示的是
+              // 前一段的末帧 —— 先 Ctrl-click 接缝断链，否则绑定会被盖住，所以干脆不收。
+              onDragEnter={onVGenFrameDrop && !linked ? e => {
+                if (!frameDropHover(e.dataTransfer)) return;
+                e.preventDefault();
                 e.stopPropagation();
-                if (linked) return;   // 链优先：这张卡显示的是前一段的末帧，要换绑定先断链
-                onVGenFrame?.(c.id, which);
-              }}
+                setFrameOver(which);
+              } : undefined}
+              onDragOver={onVGenFrameDrop && !linked ? e => {
+                if (!frameDropHover(e.dataTransfer)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = 'copy';
+                if (frameOver !== which) setFrameOver(which);
+              } : undefined}
+              onDragLeave={onVGenFrameDrop && !linked ? e => {
+                e.stopPropagation();
+                setFrameOver(cur => (cur === which ? null : cur));
+              } : undefined}
+              onDrop={onVGenFrameDrop && !linked ? e => {
+                setFrameOver(null);
+                onVGenFrameDrop(e, c.id, which);
+              } : undefined}
               style={{
                 flexShrink: 0, width: cardW, height: '100%',
                 padding: 0, borderRadius: 0, position: 'relative', overflow: 'hidden',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: preview ? 'none' : 'rgba(0,0,0,0.28)',
+                background: frameOver === which ? 'rgba(100,210,255,0.18)'
+                  : preview ? 'none' : 'rgba(0,0,0,0.28)',
                 borderTop: 'none', borderBottom: 'none',
                 borderLeft: !preview && which === 'last_frame' ? divider : 'none',
                 borderRight: !preview && which === 'first_frame' ? divider : 'none',
-                color: PK.fg, cursor: linked ? 'default' : 'pointer', fontSize: 7.5, fontWeight: 800, lineHeight: 1,
+                boxShadow: frameOver === which ? 'inset 0 0 0 1.5px #64d2ff' : undefined,
+                color: PK.fg, cursor: linked ? 'default' : onVGenFrameDrop ? 'copy' : 'default',
+                fontSize: 7.5, fontWeight: 800, lineHeight: 1,
               }}
             >
               {/* 占位文字垫在底下：预览图加载失败时它露出来，卡片不会变成一块空白。 */}
@@ -2646,7 +2851,7 @@ const Clip: React.FC<{
               )}
               {/* 参考图兜底帧：去抖后再请求（见 RefFrameImage）。 */}
               {!thumb && fallback && <RefFrameImage spec={fallback} onFail={hideImg} />}
-              {/* 参考图兜底的标记：右下角一枚小 R —— 与显式绑定一眼区分开（点卡片仍是绑显式图）。 */}
+              {/* 参考图兜底的标记：右下角一枚小 R —— 与显式绑定一眼区分开（把图拖上来即显式绑定）。 */}
               {fallback && (
                 <span title="Taken from the reference image channel (not bound)"
                   style={{ position: 'absolute', right: 1.5, bottom: 1.5, width: 12, height: 12,
@@ -2659,7 +2864,23 @@ const Clip: React.FC<{
                   borderRadius: 999, background: 'rgba(12,12,14,0.82)', border: '0.5px solid rgba(255,255,255,0.55)',
                   color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><IconLink /></span>
               )}
-              {/* .cud 绑定的跳转徽章：预览右上（链徽章占了右上的链卡挪到左上，两枚都在）。
+              {/* 显式绑定的解绑 ×：右上角。链卡不画（链优先，要换绑定先 Ctrl-click 接缝断链）。
+                  两侧各有一条 7px 宽的裁剪把手盖在段缘上 —— 徽章退到把手内侧（right: 9），整枚都可点。 */}
+              {!linked && ref && onVGenFrameUnbind && (
+                <span
+                  data-vid-vgen-frame-unbind={which}
+                  role="button"
+                  title={`Unbind this ${which === 'first_frame' ? 'first' : 'last'} frame — the frame card goes back to empty / reference-image fallback.`}
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); onVGenFrameUnbind(c.id, which); }}
+                  style={{ position: 'absolute', right: 9, top: 1.5, zIndex: 2,
+                    width: 12, height: 12, borderRadius: 999,
+                    background: 'rgba(12,12,14,0.82)', border: '0.5px solid rgba(255,69,58,0.7)',
+                    color: '#ff6961', fontSize: 10, lineHeight: 1, fontWeight: 700,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+                >×</span>
+              )}
+              {/* .cud 绑定的跳转徽章：预览右下（不与右上的 × / 链徽章抢位置；有兜底 R 时不会同时出现）。
                   点它 = 把这份工程送进 blend 编辑器（已开着就切换），不当成"重挑绑定"。
                   两侧各有一条 7px 宽的裁剪把手盖在段缘上 —— 徽章退到把手内侧，整枚都可点。 */}
               {ref?.kind === 'cud' && onVGenCudOpen && (
@@ -2668,7 +2889,7 @@ const Clip: React.FC<{
                   title={`Open 「${ref.name || ref.path}」 in the blend editor to edit it — if it is already open, this just switches to that window. The frame binding stays as it is.`}
                   onPointerDown={e => e.stopPropagation()}
                   onClick={e => { e.stopPropagation(); onVGenCudOpen(ref.path, ref.name); }}
-                  style={{ position: 'absolute', right: linked ? undefined : 9, left: linked ? 9 : undefined, top: 1.5,
+                  style={{ position: 'absolute', right: 9, bottom: 1.5,
                     width: 12, height: 12, borderRadius: 999,
                     background: 'rgba(12,12,14,0.82)', border: '0.5px solid rgba(255,255,255,0.55)',
                     color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}

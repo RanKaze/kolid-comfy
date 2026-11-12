@@ -189,12 +189,13 @@ function fxStructuralChange(l, label) {
     pushHistory(null, label);
 }
 
-// 链里某一步的启用开关：写状态、让折叠缓存知道结果变了、记一步历史。DOM 那颗 checkbox 和宿主 dock
-// 发回来的动作键走的都是这一句；chip 的类名与 tooltip 是画它的人自己的事，不住在这里。
+// 链里某一步的启用开关：写状态、让折叠缓存知道结果变了、**重算行模型**、记一步历史。DOM 那颗
+// checkbox 和宿主 dock 发回来的动作键走的都是这一句；chip 的类名与 tooltip 是画它的人自己的事，不住在这里。
+// 必须走 fxStructuralChange（而不是 fxLiveUpdate）：宿主 Layers 面板那颗 toggle 读的是行描述符里的
+// `enabled`，不重算 rows 的话快照里还是旧值，勾选状态会被下一帧按回去 —— 画面却已经真的停用了。
 function setFxStepEnabled(l, effect, on) {
     effect.enabled = !!on;
-    fxLiveUpdate(l);
-    pushHistory(null, (on ? 'Enabled ' : 'Disabled ') + ((EFFECT_TYPES[effect.type] || {}).label || 'Effect') + ' step');
+    fxStructuralChange(l, (on ? 'Enabled ' : 'Disabled ') + ((EFFECT_TYPES[effect.type] || {}).label || 'Effect') + ' step');
 }
 
 // 从这条链里摘掉一步。开着的参数面板 (fxOpenId) 指的是这一步自己时得跟着收起来，否则下一次重画会把
